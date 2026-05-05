@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-05
+
+### Fixed
+
+- Fixed first-run installed environments so bundled agents and skills are seeded
+  from packaged wheel data, preventing fallback system-prompt mode.
+- Fixed the installer `uv` path to install a persistent `kollab` tool instead
+  of only running the command ephemerally.
+- Added Docker smoke coverage for first-run bundled agent prompt seeding.
+
 ## [1.0.0] - 2026-05-05
 
 ### Added

@@ -4,16 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-engine"
-version = "1.0.0"
+version = "1.0.1"
 description = "Kollab AI engine - HTTP/SSE server wrapping kollabor-ai and kollabor-agent"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 dependencies = [
-    "kollabor-ai>=1.0.0",
-    "kollabor-agent>=1.0.0",
-    "kollabor-events>=1.0.0",
-    "kollabor-config>=1.0.0",
+    "kollabor-ai>=1.0.1",
+    "kollabor-agent>=1.0.1",
+    "kollabor-events>=1.0.1",
+    "kollabor-config>=1.0.1",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "sse-starlette>=2.1.0",

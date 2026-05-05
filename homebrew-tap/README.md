@@ -25,5 +25,5 @@ curl -s https://pypi.org/pypi/kollab/json | jq -r '.urls | .[] | select(.package
 Or use the helper script:
 
 ```bash
-./update-formula.sh 1.0.0
+./update-formula.sh 1.0.1
 ```

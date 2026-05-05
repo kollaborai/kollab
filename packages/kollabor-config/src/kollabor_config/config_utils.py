@@ -586,6 +586,30 @@ def _copy_missing_tree_contents(source_dir: Path, target_dir: Path) -> tuple[int
     return copied, preserved
 
 
+def _get_bundled_dir(name: str) -> Optional[Path]:
+    """Resolve a top-level bundled asset directory.
+
+    Editable installs keep ``bundles/`` at the repository root, while wheels
+    install it as a top-level package next to ``kollabor_config`` in
+    site-packages. Walk upward from this module and also check the current
+    working tree so both layouts can seed first-run user files.
+    """
+    relative = Path("bundles") / name
+    module_path = Path(__file__).resolve()
+    candidates = [parent / relative for parent in module_path.parents]
+    candidates.append(Path.cwd() / relative)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+    return None
+
+
 def _copy_seed_agents_to_global(
     global_agents_dir: Path, old_global_prompt_dir: Path
 ) -> None:
@@ -595,15 +619,9 @@ def _copy_seed_agents_to_global(
         global_agents_dir: Target global agents directory (~/.kollab/agents/)
         old_global_prompt_dir: Old system_prompt dir for migration
     """
-    # Find bundled seed agents folder
-    package_dir = Path(__file__).parent.parent.parent
-    seed_agents_dir = package_dir / "bundles" / "agents"
+    seed_agents_dir = _get_bundled_dir("agents")
 
-    if not seed_agents_dir.exists():
-        # Fallback for development mode
-        seed_agents_dir = Path.cwd() / "bundles" / "agents"
-
-    if not seed_agents_dir.exists():
+    if seed_agents_dir is None:
         logger.warning("No seed agents folder found")
         # Try migration from old location
         old_global_default = old_global_prompt_dir / "default.md"
@@ -635,14 +653,9 @@ def _copy_seed_skills_to_global(global_skills_dir: Path) -> None:
     Args:
         global_skills_dir: Target global skills directory (~/.kollab/skills/)
     """
-    # Find bundled seed skills folder
-    package_dir = Path(__file__).parent.parent.parent
-    seed_skills_dir = package_dir / "bundles" / "skills"
+    seed_skills_dir = _get_bundled_dir("skills")
 
-    if not seed_skills_dir.exists():
-        seed_skills_dir = Path.cwd() / "bundles" / "skills"
-
-    if not seed_skills_dir.exists():
+    if seed_skills_dir is None:
         logger.debug("No seed skills folder found")
         return
 
@@ -703,17 +716,10 @@ def _create_agent_from_defaults(agent_dir: Path) -> None:
     """
     agent_name = agent_dir.name  # e.g., "default"
 
-    # Find bundled seed agents folder
-    package_dir = Path(
-        __file__
-    ).parent.parent.parent  # Go up from core/utils/ to package root
-    seed_agent_dir = package_dir / "bundles" / "agents" / agent_name
+    seed_agents_dir = _get_bundled_dir("agents")
+    seed_agent_dir = seed_agents_dir / agent_name if seed_agents_dir else None
 
-    if not seed_agent_dir.exists():
-        # Fallback for development mode
-        seed_agent_dir = Path.cwd() / "bundles" / "agents" / agent_name
-
-    if seed_agent_dir.exists() and seed_agent_dir.is_dir():
+    if seed_agent_dir and seed_agent_dir.exists() and seed_agent_dir.is_dir():
         # Copy entire agent directory from seed
         agent_dir.mkdir(parents=True, exist_ok=True)
         for item in seed_agent_dir.iterdir():
@@ -722,6 +728,9 @@ def _create_agent_from_defaults(agent_dir: Path) -> None:
                 if item.is_file():
                     shutil.copy2(item, target)
                     logger.debug(f"Copied seed file: {item.name}")
+                elif item.is_dir():
+                    shutil.copytree(item, target)
+                    logger.debug(f"Copied seed directory: {item.name}")
         logger.info(f"Created agent from seed: {agent_dir}")
     else:
         # Fallback: create minimal agent

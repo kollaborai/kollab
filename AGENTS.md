@@ -6,7 +6,7 @@ Use it as an execution guide before making changes.
 ## project snapshot
 
 - name: `kollab`
-- version: `1.0.0`
+- version: `1.0.1`
 - python: `>=3.12`
 - type: terminal AI chat + plugin system + agent runtime
 - architecture: monorepo with extracted workspace packages under `packages/*`

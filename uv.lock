@@ -493,7 +493,7 @@ wheels = [
 
 [[package]]
 name = "kollab"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -567,7 +567,7 @@ dev = [
 
 [[package]]
 name = "kollabor-agent"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-agent" }
 dependencies = [
     { name = "kollabor-ai" },
@@ -586,7 +586,7 @@ requires-dist = [
 
 [[package]]
 name = "kollabor-ai"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-ai" }
 dependencies = [
     { name = "aiohttp" },
@@ -605,7 +605,7 @@ requires-dist = [
 
 [[package]]
 name = "kollabor-config"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-config" }
 dependencies = [
     { name = "kollabor-events" },
@@ -616,7 +616,7 @@ requires-dist = [{ name = "kollabor-events", editable = "packages/kollabor-event
 
 [[package]]
 name = "kollabor-engine"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-engine" }
 dependencies = [
     { name = "fastapi" },
@@ -652,12 +652,12 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "kollabor-events"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-events" }
 
 [[package]]
 name = "kollabor-plugins"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-plugins" }
 dependencies = [
     { name = "kollabor-events" },
@@ -668,12 +668,12 @@ requires-dist = [{ name = "kollabor-events", editable = "packages/kollabor-event
 
 [[package]]
 name = "kollabor-rpc"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-rpc" }
 
 [[package]]
 name = "kollabor-tui"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-tui" }
 dependencies = [
     { name = "kollabor-events" },
@@ -684,7 +684,7 @@ requires-dist = [{ name = "kollabor-events", editable = "packages/kollabor-event
 
 [[package]]
 name = "kollabor-webui"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/kollabor-webui" }
 dependencies = [
     { name = "fastapi" },

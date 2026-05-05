@@ -107,6 +107,28 @@ print('  minimum floor 256 tokens: OK')
         fi
     done
 
+    # --- First-run bundled agent seed ---
+    echo ''
+    echo '--- first-run seed files ---'
+    rm -rf /root/.kollab
+    python3 -c \"
+from pathlib import Path
+from kollabor_config.config_utils import initialize_config, initialize_system_prompt
+
+initialize_config()
+initialize_system_prompt()
+
+prompt = Path.home() / '.kollab' / 'agents' / 'default' / 'system_prompt.md'
+section = Path.home() / '.kollab' / 'agents' / 'default' / 'sections' / '00-header.md'
+assert prompt.exists(), f'missing default agent prompt: {prompt}'
+assert section.exists(), f'missing default agent sections: {section}'
+text = prompt.read_text(encoding='utf-8')
+assert 'SYSTEM PROMPT LOAD FAILURE' not in text
+print(f'  default agent prompt: {prompt}')
+print(f'  default agent section: {section}')
+\"
+    test_check 'first-run agent seed files' \$?
+
     # --- Summary ---
     echo ''
     echo '========================================'
