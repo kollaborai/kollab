@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Kollab Installer
-# Auto-detects best installation method: uvx > pipx > pip
+# Auto-detects best installation method: uv tool > pipx > pip
 
 set -euo pipefail
 
 REPO_URL="https://github.com/kollaborai/kollab"
 PKG_NAME="kollab"
 CMD_NAME="kollab"
+LOCAL_BIN_ADDED_TO_PATH=0
 
 # Colors
 RED='\033[0;31m'
@@ -25,28 +26,26 @@ command_exists() {
     command -v "$1" &>/dev/null
 }
 
-# Try uvx (fastest, most modern)
-try_uvx() {
-    if ! command_exists uvx && ! command_exists uv; then
+prepend_local_bin_to_path() {
+    local local_bin="$HOME/.local/bin"
+    if [[ -d "$local_bin" ]]; then
+        if [[ ":$PATH:" != *":$local_bin:"* ]]; then
+            LOCAL_BIN_ADDED_TO_PATH=1
+        fi
+        export PATH="$local_bin:$PATH"
+    fi
+}
+
+# Try uv tool (fastest, most modern)
+try_uv() {
+    if ! command_exists uv; then
         return 1
     fi
 
-    info "Installing with uvx (recommended - fastest, isolated)..."
+    info "Installing with uv tool (recommended - fastest, isolated)..."
 
-    if command_exists uvx; then
-        uvx --from "$PKG_NAME" "$CMD_NAME" --version 2>/dev/null && return 0
-    elif command_exists uv; then
-        uv tool run "$PKG_NAME" "$CMD_NAME" --version 2>/dev/null && return 0
-    fi
-
-    warn "uvx available but package not found. Installing to uv tool cache..."
-    if command_exists uvx; then
-        uvx --from "$PKG_NAME" "$CMD_NAME" --version 2>/dev/null && return 0
-    elif command_exists uv; then
-        uv tool install "$PKG_NAME" && return 0
-    fi
-
-    return 1
+    uv tool install --force "$PKG_NAME"
+    prepend_local_bin_to_path
 }
 
 # Try pipx (isolated, clean)
@@ -63,6 +62,7 @@ try_pipx() {
     else
         pipx install "$PKG_NAME"
     fi
+    prepend_local_bin_to_path
 }
 
 # Try pip (standard)
@@ -82,6 +82,7 @@ try_pip() {
         if ! "$pip_cmd" install "$PKG_NAME" 2>/dev/null; then
             warn "Trying with --user flag..."
             "$pip_cmd" install --user "$PKG_NAME"
+            prepend_local_bin_to_path
         fi
     else
         "$pip_cmd" install "$PKG_NAME"
@@ -90,8 +91,18 @@ try_pip() {
 
 # Verify installation
 verify_install() {
+    if ! command_exists "$CMD_NAME" && [[ -x "$HOME/.local/bin/$CMD_NAME" ]]; then
+        prepend_local_bin_to_path
+    fi
+
     if command_exists "$CMD_NAME"; then
-        success "Installation verified! '$CMD_NAME' is available."
+        if [[ "$LOCAL_BIN_ADDED_TO_PATH" == "1" ]]; then
+            success "Installation verified at $HOME/.local/bin/$CMD_NAME."
+            warn "$HOME/.local/bin was not in PATH when the installer started."
+            info "Run: export PATH=\"\$HOME/.local/bin:\$PATH\""
+        else
+            success "Installation verified! '$CMD_NAME' is available."
+        fi
         echo
         info "Run '$CMD_NAME' to start using Kollab."
         info "For configuration, see: $REPO_URL"
@@ -118,7 +129,7 @@ main() {
     echo
 
     # Try methods in order of preference
-    if try_uvx; then
+    if try_uv; then
         verify_install
         exit 0
     fi
