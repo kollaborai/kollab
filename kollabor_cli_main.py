@@ -7,10 +7,25 @@ from the correct location, avoiding conflicts with other 'core' packages.
 import sys
 from pathlib import Path
 
-# Add the current directory to sys.path to ensure we import from the right place
 package_dir = Path(__file__).parent.absolute()
-if str(package_dir) not in sys.path:
-    sys.path.insert(0, str(package_dir))
+
+
+def _prepend_dev_workspace_paths(repo_root: Path = package_dir) -> None:
+    """Prefer this checkout's workspace packages when running from source."""
+    paths = [repo_root]
+    packages_dir = repo_root / "packages"
+    if packages_dir.exists():
+        paths.extend(sorted(packages_dir.glob("kollabor-*/src")))
+
+    for path in reversed(paths):
+        if path.exists():
+            path_str = str(path)
+            if path_str in sys.path:
+                sys.path.remove(path_str)
+            sys.path.insert(0, path_str)
+
+
+_prepend_dev_workspace_paths()
 
 # Now import from our local core package
 from kollabor.cli import cli_main  # noqa: E402

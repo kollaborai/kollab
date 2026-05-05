@@ -31,8 +31,9 @@ if sys.platform == "win32":
     except Exception:
         pass  # Ignore if this fails
 
-# Import and delegate to the main CLI implementation
-from kollabor.cli import cli_main
+# Import and delegate through the packaged entrypoint so development mode gets
+# the same workspace-package import setup as the installed CLI shim.
+from kollabor_cli_main import cli_main
 
 if __name__ == "__main__":
     cli_main()

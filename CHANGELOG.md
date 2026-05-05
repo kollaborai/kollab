@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-05
+
 ### Added
 - Added an installed-user Docker runtime validation guide and helper script/smoke tests
   for reproducible UI checks.
@@ -24,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forcing unnecessary follow-up turns.
 - Improved `/save` robustness with a fallback path when state services are not yet
   available during startup or attach mode.
+- Fixed development entrypoint imports so `python main.py` prefers the current
+  checkout's workspace packages instead of stale editable installs.
 
 ## [0.5.7] - 2026-04-24
 

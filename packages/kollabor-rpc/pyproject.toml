@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-rpc"
-version = "0.5.7"
+version = "1.0.0"
 description = "RPC transport for Kollabor (StateService foundation)"
 readme = "README.md"
 requires-python = ">=3.12"
