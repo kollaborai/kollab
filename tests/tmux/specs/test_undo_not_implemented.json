@@ -1,0 +1,41 @@
+{
+  "name": "undo-not-implemented",
+  "description": "Verify Ctrl+Z undo is not implemented (advertised in help but does nothing)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Enter navigation mode and check help" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "F1" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ctrl\\+Z", "description": "Help system advertises Ctrl+Z" },
+
+    { "action": "section", "title": "Step 2: Close help and perform toggle action" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 3: Press Ctrl+Z to undo" },
+    { "action": "control", "key": "z" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 4: Verify UI remains stable" },
+    { "action": "assert_contains", "pattern": "Ready|kollabor|NAVIGATE|\\[off\\]|\\[on\\]|\\[auto\\]", "description": "UI remains functional after Ctrl+Z" }
+  ]
+}

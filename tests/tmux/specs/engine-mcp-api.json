@@ -1,0 +1,233 @@
+{
+  "name": "engine-mcp-api",
+  "description": "Test MCP server management API - list, add, remove, update servers and session MCP status",
+  "config": {
+    "command": "python -m kollabor_engine serve",
+    "show_captures": true,
+    "app_init_sleep": 3,
+    "term_width": 100,
+    "term_height": 30,
+    "key_delay": 0.1,
+    "menu_delay": 0.2
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "command": "mkdir -p ~/.kollab/mcp && cp ~/.kollab/mcp/mcp_settings.json ~/.kollab/mcp/mcp_settings.json.backup 2>/dev/null || true",
+      "description": "Backup existing MCP config"
+    },
+    {
+      "action": "shell",
+      "command": "cat > ~/.kollab/mcp/mcp_settings.json << 'EOF'\n{\n  \"servers\": {\n    \"memory\": {\n      \"type\": \"stdio\",\n      \"command\": \"npx -y @modelcontextprotocol/server-memory\",\n      \"enabled\": true,\n      \"description\": \"Persistent memory server\"\n    },\n    \"filesystem\": {\n      \"type\": \"stdio\",\n      \"command\": \"npx -y @modelcontextprotocol/server-filesystem /tmp\",\n      \"enabled\": false,\n      \"description\": \"Filesystem access\"\n    }\n  }\n}\nEOF\n",
+      "description": "Create test MCP config"
+    }
+  ],
+  "steps": [
+    {
+      "action": "section",
+      "title": "Test 1: Start engine server"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Application startup complete|Uvicorn running|Engine started",
+      "description": "Server started successfully"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 2: GET /mcp/servers - list all configured servers"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/mcp/servers | jq .",
+      "description": "List MCP servers"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"servers\"|\"total\"|\"enabled\"",
+      "description": "Response contains servers structure"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"name\"\\s*:\\s*\"memory\"",
+      "description": "Memory server in list"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"total\"\\s*:\\s*2",
+      "description": "Total count is 2"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 3: POST /mcp/servers - add new server"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:7433/mcp/servers -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"test-server\", \"type\": \"stdio\", \"command\": \"npx -y @modelcontextprotocol/server-memory\", \"enabled\": false, \"description\": \"Test server via API\"}' | jq .",
+      "description": "Add new server via API"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"ok\"\\s*:\\s*true",
+      "description": "Success response"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"name\"\\s*:\\s*\"test-server\"",
+      "description": "Server name returned"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 4: POST /mcp/servers - 409 for duplicate name"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X POST http://127.0.0.1:7433/mcp/servers -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"memory\", \"type\": \"stdio\", \"command\": \"test\"}'",
+      "description": "Try to add duplicate server"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "HTTP_STATUS:409",
+      "description": "Returns 409 conflict"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 5: PUT /mcp/servers/{name} - update server"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X PUT http://127.0.0.1:7433/mcp/servers/test-server -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"enabled\": true, \"description\": \"Updated via API\"}' | jq .",
+      "description": "Update test server"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"ok\"\\s*:\\s*true",
+      "description": "Update successful"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"enabled\"\\s*:\\s*true",
+      "description": "Enabled flag updated"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 6: DELETE /mcp/servers/{name} - remove server"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X DELETE http://127.0.0.1:7433/mcp/servers/test-server -H \"Authorization: Bearer $TOKEN\" | jq .",
+      "description": "Delete test server"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"ok\"\\s*:\\s*true",
+      "description": "Delete successful"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"name\"\\s*:\\s*\"test-server\"",
+      "description": "Deleted server name returned"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 7: DELETE /mcp/servers/{name} - 404 for unknown server"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X DELETE http://127.0.0.1:7433/mcp/servers/nonexistent -H \"Authorization: Bearer $TOKEN\"",
+      "description": "Try to delete non-existent server"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "HTTP_STATUS:404",
+      "description": "Returns 404 for unknown server"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 8: POST /sessions - create session with MCP servers"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:7433/sessions -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"profile\": \"default\", \"mcp_servers\": [\"memory\"]}' | jq .",
+      "description": "Create session with memory MCP server"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"session_id\"\\s*:\\s*\"sess_",
+      "description": "Session created"
+    },
+    {
+      "action": "shell",
+      "command": "SESSION_ID=$(TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:7433/sessions -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"profile\": \"default\", \"mcp_servers\": [\"memory\"]}' | jq -r '.session_id') && echo $SESSION_ID",
+      "description": "Capture session ID for subsequent tests"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 9: GET /sessions/{id}/mcp - get session MCP status"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && SESSION_ID=$(curl -s -X POST http://127.0.0.1:7433/sessions -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"profile\": \"default\"}' | jq -r '.session_id') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/sessions/$SESSION_ID/mcp | jq .",
+      "description": "Get session MCP status"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"session_id\"|\"servers\"|\"total_tools\"",
+      "description": "Response has session MCP structure"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 10: GET /sessions/{id}/mcp - 404 for unknown session"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/sessions/sess_nonexistent/mcp",
+      "description": "Get MCP status for non-existent session"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "HTTP_STATUS:404",
+      "description": "Returns 404 for unknown session"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 11: GET /mcp/servers - verify test server removed"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/mcp/servers | jq -r '.total'",
+      "description": "Check server count after deletion"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "2",
+      "description": "Only 2 servers remain (memory, filesystem)"
+    }
+  ],
+  "teardown": [
+    {
+      "action": "shell",
+      "command": "mv ~/.kollab/mcp/mcp_settings.json.backup ~/.kollab/mcp/mcp_settings.json 2>/dev/null || true",
+      "description": "Restore original MCP config"
+    }
+  ]
+}

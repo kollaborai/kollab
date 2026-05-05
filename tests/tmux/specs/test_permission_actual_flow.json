@@ -1,0 +1,44 @@
+{
+  "name": "permission-actual-flow",
+  "description": "Verify permission prompt appears when LLM attempts to execute tools",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 30,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Verify application started" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+|█|▄", "description": "Application started successfully" },
+
+    { "action": "section", "title": "Step 2: Send message that triggers LLM tool execution" },
+    { "action": "send_keys", "keys": "What files are in the current directory?" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 3: Check for thinking/processing indicator" },
+    { "action": "assert_contains", "pattern": "thinking|processing|⠋|⠙|⠹|Ready!", "description": "LLM is processing request" },
+
+    { "action": "section", "title": "Step 4: Wait for permission prompt" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 5: Check for permission prompt or auto-approval" },
+    { "action": "assert_not_contains", "pattern": "Confirmation required but no UI available", "description": "No UI callback error" },
+
+    { "action": "section", "title": "Step 6: Approve permission (if prompt visible)" },
+    { "action": "send_keys", "keys": "y" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 7: Verify tool execution or LLM response" },
+    { "action": "assert_contains", "pattern": "README|\\.py|\\.md|file|directory|contains|total", "description": "Tool executed or LLM responded about files" }
+  ]
+}

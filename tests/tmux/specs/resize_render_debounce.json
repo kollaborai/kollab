@@ -1,0 +1,17 @@
+{
+  "name": "resize-render-debounce",
+  "description": "Verify the app remains responsive across a tmux resize burst and the input UI redraws cleanly afterward without partial frame leakage",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 2,
+    "term_width": 120,
+    "term_height": 35,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Kollab|Type / for commands|profile|model", "description": "initial ui renders" },
+    { "action": "info", "message": "manual companion check: run this spec while resizing the tmux pane rapidly and confirm no long freeze or scrollback pollution" }
+  ]
+}

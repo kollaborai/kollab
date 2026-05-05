@@ -1,0 +1,26 @@
+{
+  "description": "A tech-savvy agent that explores new technologies, keeps up with the latest trends, and helps with research and experimentation.",
+  "tools": [
+    "terminal",
+    "file-read",
+    "file-edit",
+    "file-create",
+    "file-create-overwrite",
+    "file-append",
+    "file-grep",
+    "hub-msg",
+    "hub-status",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "wait-for-user"
+  ],
+  "skills": [
+    "experimentation",
+    "knowledge-management",
+    "learning-roadmap",
+    "tech-research",
+    "trend-tracking"
+  ],
+  "vault_enabled": true
+}

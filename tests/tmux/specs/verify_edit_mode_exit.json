@@ -1,0 +1,49 @@
+{
+  "name": "edit-mode-exit",
+  "description": "Verify edit mode exit bug fix - selection and arrow navigation work after exiting EDIT mode back to STATUS_FOCUS",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE.*move.*act.*edit", "description": "Navigation mode (NAVIGATE) activated" },
+
+    { "action": "section", "title": "Step 2: Enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Step 3: Verify on slot position" },
+    { "action": "capture" },
+    { "action": "info", "msg": "Checking if on slot position (slot 0)" },
+
+    { "action": "section", "title": "Step 4: Exit edit mode back to status focus" },
+    { "action": "escape" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE.*move.*act.*edit", "description": "Back to NAVIGATE mode" },
+
+    { "action": "section", "title": "Step 5: Verify arrow navigation works" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Arrow keys executed without crash" },
+
+    { "action": "section", "title": "Final Verification" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE.*move.*act.*edit", "description": "Still in navigation mode after arrow navigation" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|Ready", "description": "Application is still responsive" }
+  ]
+}

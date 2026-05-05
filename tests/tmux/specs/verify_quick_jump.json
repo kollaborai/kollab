@@ -1,0 +1,52 @@
+{
+  "name": "verify-quick-jump",
+  "description": "Verify 1-9 digit keys jump to widgets in navigation mode, invalid positions handled gracefully",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Test 2: Quick jump to widget 1" },
+    { "action": "send_keys", "keys": "1" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Digit '1' handled - navigation mode still active" },
+
+    { "action": "section", "title": "Test 3: Quick jump to widget 2" },
+    { "action": "send_keys", "keys": "2" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Digit '2' handled - navigation mode still active" },
+
+    { "action": "section", "title": "Test 4: Quick jump to widget 3" },
+    { "action": "send_keys", "keys": "3" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Digit '3' handled - navigation mode still active" },
+
+    { "action": "section", "title": "Test 5: Invalid position (9) handled gracefully" },
+    { "action": "send_keys", "keys": "9" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Digit '9' handled gracefully - navigation mode still active" },
+
+    { "action": "section", "title": "Test 6: Exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "NAVIGATE", "description": "Exited navigation mode successfully" }
+  ]
+}

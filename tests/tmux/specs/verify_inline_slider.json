@@ -1,0 +1,56 @@
+{
+  "name": "inline-slider",
+  "description": "Verify inline slider functionality (Note: Full testing requires custom test widget - use verify_inline_slider.sh for complete verification)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Requirement 1: Navigation mode activation" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|navigate", "description": "Tab enters navigation mode" },
+
+    { "action": "section", "title": "Requirements 2-9: Slider behavior (requires test widget)" },
+    { "action": "info", "msg": "Full slider testing requires custom test widget - use verify_inline_slider.sh" },
+    { "action": "info", "msg": "Testing basic navigation and interaction behavior instead" },
+
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed Enter on widget (may activate inline edit if available)" },
+
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed Left arrow" },
+
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed Right arrow" },
+
+    { "action": "arrow", "direction": "Up" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed Up arrow" },
+
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed Down arrow" },
+
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|navigate|Ready", "description": "Application responsive after interactions" }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "quick-jump-not-implemented",
+  "description": "Verify 1-9 quick jump in navigation mode is not implemented",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 2,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 2: Press '1' for quick jump (not handled)" },
+    { "action": "send_keys", "keys": "1" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "1", "description": "Digit '1' not handled (appears in output - BUG confirmed)" },
+
+    { "action": "section", "title": "Step 3: Press '2' for quick jump (not handled)" },
+    { "action": "send_keys", "keys": "2" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "2", "description": "Digit '2' not handled (appears in output - BUG confirmed)" }
+  ]
+}

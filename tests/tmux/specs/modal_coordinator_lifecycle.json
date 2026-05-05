@@ -1,0 +1,18 @@
+
+{
+  "name": "modal-coordinator-lifecycle",
+  "description": "Verify modal presenter manages its own coordinator lifecycle without double-entry from navigation_manager",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "section", "label": "modal coordinator lifecycle test" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "kollabor|>" },
+    { "action": "section", "label": "test passes if app starts clean with no render state corruption" }
+  ]
+}

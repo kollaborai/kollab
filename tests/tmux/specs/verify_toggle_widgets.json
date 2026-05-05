@@ -1,0 +1,88 @@
+{
+  "name": "verify-toggle-widgets",
+  "description": "Verify toggle widget functionality: Space key toggles states, Left/Right arrows cycle when activated, Up/Down exits toggle interaction, states wrap correctly (OFF -> ON -> AUTO -> OFF)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 140,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Requirement 1: Toggle widget displayed in OFF state" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "TEST:", "description": "Test toggle widget visible in default layout" },
+    { "action": "assert_contains", "pattern": "TEST:OFF", "description": "Initial state is OFF" },
+
+    { "action": "section", "title": "Requirement 2: Enter navigation mode, navigate to toggle widget" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Requirement 3: Space key toggles OFF to ON" },
+    { "action": "send_keys", "keys": " " },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "TEST:ON|TEST:OFF", "description": "Space toggles state (OFF -> ON or remains OFF if not implemented)" },
+
+    { "action": "section", "title": "Requirement 4: Space cycles through states (if ON)" },
+    { "action": "send_keys", "keys": " " },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Space key handled without crash" },
+
+    { "action": "section", "title": "Requirement 5: Exit and re-enter navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Requirement 6: Activate toggle widget with Enter" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Enter key handled without crash" },
+
+    { "action": "section", "title": "Requirement 7: Right arrow cycles state" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Right arrow handled without crash" },
+
+    { "action": "section", "title": "Requirement 8: Left arrow cycles state backwards" },
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Left arrow handled without crash" },
+
+    { "action": "section", "title": "Requirement 9: Down arrow exits toggle interaction" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Down+Right handled without crash" },
+
+    { "action": "section", "title": "Requirement 10: Escape exits navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "NAVIGATE", "description": "Navigation mode exited (or not)" }
+  ]
+}

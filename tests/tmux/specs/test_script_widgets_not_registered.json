@@ -1,0 +1,48 @@
+{
+  "name": "script-widgets-not-registered",
+  "description": "Verify script widget registration (manual test - requires creating widget files)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application started" },
+
+    { "action": "section", "title": "Test 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Enter edit mode" },
+    { "action": "send_keys", "keys": "e" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 4: Edit mode active" },
+    { "action": "assert_contains", "pattern": "EDIT|edit|Edit", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 5: Navigate to slot" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 6: Attempt to open widget picker" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 7: Exit modes" },
+    { "action": "escape" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 }
+  ]
+}

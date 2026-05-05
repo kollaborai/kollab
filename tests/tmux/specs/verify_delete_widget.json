@@ -1,0 +1,70 @@
+{
+  "name": "verify-delete-widget",
+  "description": "Verify delete widget functionality in status widgets: multi-widget deletion (no confirmation), single-widget deletion with confirmation, modal handling",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 2,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Enter navigation and edit mode" },
+    { "action": "nav_mode" },
+    { "action": "capture" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 2: Delete widget in multi-widget row (no confirmation)" },
+    { "action": "send_keys", "keys": "Home" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "CONFIRM DELETE", "description": "No confirmation for multi-widget row" },
+
+    { "action": "section", "title": "Test 3: Navigate to single widget and trigger confirmation" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.8 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "CONFIRM DELETE", "description": "Confirmation shown for last widget" },
+
+    { "action": "section", "title": "Test 4: Cancel deletion with Escape" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "CONFIRM DELETE", "description": "Confirmation cancelled" },
+
+    { "action": "section", "title": "Test 5: Confirm deletion with Enter" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.8 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "CONFIRM DELETE", "description": "Confirmation shown again" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "CONFIRM DELETE", "description": "Widget deleted, confirmation closed" },
+
+    { "action": "section", "title": "Test 6: Exit edit and navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "EDIT|NAV", "description": "Exited both modes" }
+  ]
+}

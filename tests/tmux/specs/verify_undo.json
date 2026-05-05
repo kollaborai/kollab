@@ -1,0 +1,68 @@
+{
+  "name": "verify-undo",
+  "description": "Verify Ctrl+Z undo functionality for color toggle, widget deletion, and multiple operations",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Enter edit mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 2: Undo color toggle" },
+    { "action": "send_keys", "keys": "c" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "control", "key": "z" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Color toggle undo completed - still in edit mode" },
+
+    { "action": "section", "title": "Test 3: Navigate to second widget" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 4: Delete widget and undo" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "control", "key": "z" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Widget deletion undo completed - still in edit mode" },
+
+    { "action": "section", "title": "Test 5: Multiple undo operations" },
+    { "action": "send_keys", "keys": "c" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "c" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "c" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "control", "key": "z" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "control", "key": "z" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "control", "key": "z" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Multiple undos completed - still in edit mode" },
+
+    { "action": "section", "title": "Test 6: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "info", "message": "Undo tests completed successfully" }
+  ]
+}

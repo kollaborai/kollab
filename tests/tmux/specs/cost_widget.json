@@ -1,0 +1,52 @@
+{
+  "name": "cost_widget",
+  "description": "Verifies the stats widget shows $X.XX cost after a turn completes",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 4,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "section",
+      "name": "startup_shows_zero_cost"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\\$0|0 msg"
+    },
+    {
+      "action": "section",
+      "name": "after_turn_cost_rendered"
+    },
+    {
+      "action": "type",
+      "text": "reply with exactly the word DONE and nothing else"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 12
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\\$[0-9]"
+    }
+  ]
+}

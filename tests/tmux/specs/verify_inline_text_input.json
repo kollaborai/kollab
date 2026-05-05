@@ -1,0 +1,66 @@
+{
+  "name": "inline-text-input",
+  "description": "Verify inline text input functionality (Note: Full testing requires test widget - use verify_inline_text_input.sh for complete verification)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Requirement 1: Tab enters navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|navigate", "description": "Navigation mode activates" },
+
+    { "action": "section", "title": "Requirements 2-8: Inline text editing (requires test widget)" },
+    { "action": "info", "msg": "Full inline text testing requires test widget - use verify_inline_text_input.sh" },
+    { "action": "info", "msg": "Testing basic keyboard input behavior instead" },
+
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Navigated with arrow keys" },
+
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed Enter (may activate inline edit if available)" },
+
+    { "action": "send_keys", "keys": "h" },
+    { "action": "sleep", "seconds": 0.1 },
+    { "action": "send_keys", "keys": "e" },
+    { "action": "sleep", "seconds": 0.1 },
+    { "action": "send_keys", "keys": "l" },
+    { "action": "sleep", "seconds": 0.1 },
+    { "action": "send_keys", "keys": "l" },
+    { "action": "sleep", "seconds": 0.1 },
+    { "action": "send_keys", "keys": "o" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Typed characters" },
+
+    { "action": "control", "key": "h" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Sent backspace (Ctrl+H)" },
+
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed Enter to confirm" },
+
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|navigate|Ready", "description": "Application responsive after interactions" }
+  ]
+}

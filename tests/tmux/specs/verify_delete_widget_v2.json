@@ -1,0 +1,71 @@
+{
+  "name": "verify-delete-widget-v2",
+  "description": "Verify delete widget functionality - enter edit mode, navigate to widget, delete with 'd' key, exit and verify deletion",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Enter navigation and edit modes" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 2: Navigate to row 2" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Delete widget with 'd' key" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Delete command handled without crash" },
+
+    { "action": "section", "title": "Test 4: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 5: Re-enter edit mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 6: Navigate to row 3" },
+    { "action": "arrow", "direction": "Up" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 7: Delete widget from row 3" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Second delete handled without crash" },
+
+    { "action": "section", "title": "Test 8: Exit and verify final state" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" }
+  ]
+}

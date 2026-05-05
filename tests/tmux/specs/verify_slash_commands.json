@@ -1,0 +1,50 @@
+{
+  "name": "verify-slash-commands",
+  "description": "Verify slash command menu trigger, /help execution, /version execution",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Check application has input prompt" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ready|Type your message", "description": "Input prompt visible" },
+
+    { "action": "section", "title": "Test 2: Trigger command menu" },
+    { "action": "send_keys", "keys": "/" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "System|mcp|Manage MCP|Conversation", "description": "Command menu appears" },
+
+    { "action": "section", "title": "Test 3: Execute /help command" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "control", "key": "u" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "send_keys", "keys": "/help" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "/help|help", "description": "Command /help in input" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "/mcp|/terminal|/save|/resume", "description": "Help shows commands list" },
+
+    { "action": "section", "title": "Test 4: Close help and execute /version" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "/version" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Kollab CLI|v0\\.|Version:", "description": "Version information displayed" }
+  ]
+}

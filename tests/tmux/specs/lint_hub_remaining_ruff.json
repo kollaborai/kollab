@@ -1,0 +1,19 @@
+{
+  "name": "lint-hub-remaining-ruff",
+  "description": "Verifies the app starts before scoped ruff cleanup for hub org launcher and plugin files",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 1,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": ".*",
+      "description": "App starts before scoped hub ruff verification"
+    }
+  ]
+}

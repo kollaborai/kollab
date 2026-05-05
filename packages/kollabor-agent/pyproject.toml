@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kollabor-agent"
+version = "0.5.7"
+description = "Agent execution toolkit - tool execution, MCP integration, file operations, and shell commands"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+    "kollabor-events>=0.5.7",
+    "kollabor-config>=0.5.7",
+    "kollabor-ai>=0.5.7",
+    "pyyaml>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kollabor_agent"]

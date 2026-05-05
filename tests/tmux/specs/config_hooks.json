@@ -1,0 +1,21 @@
+{
+  "name": "config-hooks",
+  "description": "Verify config hooks system loads without errors during startup",
+  "config": {
+    "command": "bash -c 'mkdir -p .kollab && echo \"{\\\"hooks\\\":{\\\"UserPromptSubmit\\\":[{\\\"hooks\\\":[{\\\"type\\\":\\\"command\\\",\\\"command\\\":\\\"echo ok\\\"}]}]}}\" > .kollab/hooks.json && python main.py; rm -f .kollab/hooks.json'",
+    "app_init_sleep": 5,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 30
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: App starts normally with hooks.json" },
+    { "action": "assert_contains", "pattern": "Ready!|kollabor|>", "description": "App started with config hooks loaded" },
+
+    { "action": "section", "title": "Test 2: No crash or error visible" },
+    { "action": "assert_not_contains", "pattern": "Traceback|Error.*config_hooks|ImportError", "description": "No config hook errors in output" }
+  ]
+}

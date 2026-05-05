@@ -1,0 +1,15 @@
+{
+  "name": "verify-parallel-spawn",
+  "description": "NOTE: This is a Python unit test for parallel agent spawning, not a tmux UI test. Run directly with: bash tests/tmux/verify_parallel_spawn.sh. The JSON test runner is for tmux-based UI testing only.",
+  "config": {
+    "command": "echo 'This test requires direct bash execution'",
+    "show_captures": false,
+    "app_init_sleep": 0,
+    "term_width": 80,
+    "term_height": 24
+  },
+  "steps": [
+    { "action": "section", "title": "NOTE: This is not a tmux test" },
+    { "action": "sleep", "seconds": 0.1 }
+  ]
+}

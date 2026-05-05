@@ -1,0 +1,34 @@
+{
+  "openai": {
+    "gpt-4o":       { "prompt_per_million":  2.50, "completion_per_million": 10.00, "cache_read_per_million": 1.25 },
+    "gpt-4o-mini":  { "prompt_per_million":  0.15, "completion_per_million":  0.60, "cache_read_per_million": 0.075 },
+    "gpt-5.4":      { "prompt_per_million":  2.50, "completion_per_million": 15.00, "cache_read_per_million": 0.25 },
+    "gpt-4-turbo":  { "prompt_per_million": 10.00, "completion_per_million": 30.00, "cache_read_per_million": 5.00 },
+    "o1":           { "prompt_per_million": 15.00, "completion_per_million": 60.00, "cache_read_per_million": 7.50 },
+    "o3-mini":      { "prompt_per_million":  1.10, "completion_per_million":  4.40, "cache_read_per_million": 0.55 }
+  },
+
+  "openai_responses": {
+    "gpt-5.4":      { "prompt_per_million":  2.50, "completion_per_million": 15.00, "cache_read_per_million": 0.25 }
+  },
+
+  "azure_openai": {
+    "gpt-4o":       { "prompt_per_million":  2.50, "completion_per_million": 10.00, "cache_read_per_million": 1.25 }
+  },
+
+  "anthropic": {
+    "claude-sonnet-4-6": { "prompt_per_million":  3.00, "completion_per_million": 15.00, "cache_read_per_million": 0.30 },
+    "claude-opus-4-7":   { "prompt_per_million": 15.00, "completion_per_million": 75.00, "cache_read_per_million": 1.50 },
+    "claude-haiku-4-5":  { "prompt_per_million":  0.80, "completion_per_million":  4.00, "cache_read_per_million": 0.08 }
+  },
+
+  "custom": {
+    "GLM-5.1":      { "prompt_per_million":  0.60, "completion_per_million":  2.20, "cache_read_per_million": 0.11 },
+    "GLM-5":        { "prompt_per_million":  0.60, "completion_per_million":  2.20, "cache_read_per_million": 0.11 },
+    "GLM-5-Turbo":  { "prompt_per_million":  0.11, "completion_per_million":  0.28 },
+    "glm-5.1":      { "prompt_per_million":  0.60, "completion_per_million":  2.20, "cache_read_per_million": 0.11 },
+    "glm-5":        { "prompt_per_million":  0.60, "completion_per_million":  2.20, "cache_read_per_million": 0.11 }
+  },
+
+  "gemini": {}
+}

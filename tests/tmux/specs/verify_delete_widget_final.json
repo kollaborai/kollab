@@ -1,0 +1,64 @@
+{
+  "name": "delete-widget-final",
+  "description": "Verify delete widget functionality in edit mode - 'd' key deletes widgets without appearing in input",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1-3: Enter navigation and edit modes" },
+    { "action": "nav_mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Step 4: Navigate to test position" },
+    { "action": "arrow", "direction": "Up" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Still in edit mode after navigation" },
+
+    { "action": "section", "title": "Step 5: Press 'd' to delete widget" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed 'd' for delete - checking if handled correctly" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Edit mode still active after 'd'" },
+
+    { "action": "section", "title": "Step 6-7: Exit and re-enter edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE.*move.*act.*edit", "description": "Back to navigation mode" },
+
+    { "action": "section", "title": "Step 8-9: Re-enter edit mode and test delete again" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "arrow", "direction": "Up" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Delete works again in edit mode" },
+
+    { "action": "section", "title": "Step 10: Exit to normal mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ready|Your message", "description": "Back to normal input mode" }
+  ]
+}

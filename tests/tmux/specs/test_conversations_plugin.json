@@ -1,0 +1,40 @@
+{
+  "name": "conversations-plugin",
+  "description": "Verify /conversations fullscreen plugin loads and displays correctly",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 100,
+    "term_height": 30,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application started" },
+
+    { "action": "section", "title": "Test 2: Execute /conversations command" },
+    { "action": "type", "text": "/conversations" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Sessions list visible" },
+    { "action": "assert_contains", "pattern": "session|Session|Conversations", "description": "Sessions list visible" },
+
+    { "action": "section", "title": "Test 4: Navigation hints visible" },
+    { "action": "assert_contains", "pattern": "tab|Tab|enter|Enter|Esc|ESC|escape|Escape|navigate|Navigate", "description": "Navigation hints visible" },
+
+    { "action": "section", "title": "Test 5: Exit fullscreen plugin" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 6: Returned to normal mode" },
+    { "action": "assert_contains", "pattern": "Ready!|User:|You:|❯|Type your message", "description": "Returned to normal mode" }
+  ]
+}

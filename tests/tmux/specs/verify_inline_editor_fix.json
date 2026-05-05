@@ -1,0 +1,53 @@
+{
+  "name": "verify-inline-editor-fix",
+  "description": "Verify inline editor rendering fix - editor appears at widget position, not at bottom of screen",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 2,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.2,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Application started" },
+    { "action": "sleep", "seconds": 1 },
+
+    { "action": "section", "title": "Step 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Step 3: Navigate to label widget" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 4: Activate inline edit" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Inline editor activated without crash" },
+
+    { "action": "section", "title": "Step 5: Cancel inline edit" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 6: Exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "loop_detection via hub metrics",
+  "description": "Agent triggers loop prevention mechanism, verify via /hub metrics",
+  "config": {
+    "command": "kollab",
+    "app_init_sleep": 4,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "section", "title": "Emit wait_for_user to exercise the path" },
+    { "action": "type", "text": "emit the tag <wait_for_user/> now" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "parked" },
+    { "action": "section", "title": "Check metrics show the waiting state" },
+    { "action": "slash_command", "command": "hub", "subcommand": "metrics" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "waiting|metric" }
+  ]
+}

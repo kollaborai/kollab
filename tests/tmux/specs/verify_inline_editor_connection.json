@@ -1,0 +1,70 @@
+{
+  "name": "verify-inline-editor-connection",
+  "description": "Verify inline editor connection: enters navigation mode, navigates to widgets, activates inline edit, verifies no crashes occur (current behavior: editor may not appear but should not crash)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.1,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Application started successfully" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "No startup errors" },
+
+    { "action": "section", "title": "Test 2: Entering navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Test 3: Navigate through widgets" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Test 4: Activate inline edit (press Enter)" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Enter key handled without crash" },
+
+    { "action": "section", "title": "Test 5: Test keyboard interaction" },
+    { "action": "type", "text": "Test" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Keyboard input handled without crash" },
+
+    { "action": "section", "title": "Test 6: Close editor and exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "NAVIGATE", "description": "Navigation mode exited" }
+  ]
+}

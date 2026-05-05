@@ -1,0 +1,57 @@
+{
+  "name": "widget-picker-missing",
+  "description": "Verify widget picker functionality in edit mode",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application started" },
+
+    { "action": "section", "title": "Test 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Navigation mode active" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|NAV|navigation|Navigation", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Test 4: Enter edit mode" },
+    { "action": "send_keys", "keys": "e" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 5: Edit mode active" },
+    { "action": "assert_contains", "pattern": "EDIT|edit|Edit", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 6: Navigate to slot" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 7: Open widget picker" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 8: Check for picker modal (documents current behavior)" },
+    { "action": "assert_contains", "pattern": "navigate|Enter|Esc|select|close|☐", "description": "Picker UI elements visible (may be file picker, not widget picker)" },
+
+    { "action": "section", "title": "Test 9: Exit widget picker" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Test 10: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 }
+  ]
+}

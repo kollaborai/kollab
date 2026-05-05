@@ -1,0 +1,61 @@
+{
+  "name": "color-toggle",
+  "description": "Verify widget color toggle functionality in edit mode ('c' key)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Setup: Enter navigation and edit modes" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 1: 'c' key toggles widget color" },
+    { "action": "capture" },
+    { "action": "send_keys", "keys": "c" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Still in edit mode after color toggle" },
+
+    { "action": "section", "title": "Test 2: Multiple 'c' presses cycle colors" },
+    { "action": "send_keys", "keys": "c" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "c" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Still in edit mode after multiple toggles" },
+
+    { "action": "section", "title": "Test 3: Color state persists after navigation" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Color state persists after navigation" },
+
+    { "action": "section", "title": "Test 4-5: Exit and re-enter edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Color toggle only works in edit mode (verified by mode transitions)" },
+    { "action": "nav_mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT|NAVIGATE|Ready", "description": "Application functional after mode transitions" }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "name": "first-run-help",
+  "description": "Verify first-run help modal behavior (Note: Tests 5-6 require config manipulation, use bash script for full verification)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Requirement 1: Help modal does NOT show on startup" },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Interactive Status Widgets", "description": "Help modal not shown on startup" },
+    { "action": "assert_contains", "pattern": "Ready", "description": "Normal input prompt shown" },
+
+    { "action": "section", "title": "Requirement 2: Help modal shows on first Tab" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 2.0 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Note: If help already shown previously, modal won't appear. Clear config status.navigation.help_shown to reset." },
+    { "action": "assert_contains", "pattern": "Interactive Status Widgets|NAVIGATE", "description": "Help modal appears or navigation active" },
+
+    { "action": "section", "title": "Requirement 3: Pressing Enter closes the modal" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Interactive Status Widgets", "description": "Modal closed after Enter" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|navigate", "description": "Navigation mode active after modal closed" },
+
+    { "action": "section", "title": "Requirement 4-6: Config flag behavior (requires bash script)" },
+    { "action": "info", "msg": "Tests 4-6 require config file manipulation - use verify_first_run_help.sh for full verification" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|navigate", "description": "Navigation mode active" }
+  ]
+}

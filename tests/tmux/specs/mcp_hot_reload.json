@@ -1,0 +1,54 @@
+{
+  "name": "mcp-hot-reload",
+  "description": "Test MCP server hot-reload when enabling/disabling without restart",
+  "config": {
+    "command": "python main.py",
+    "show_captures": true,
+    "app_init_sleep": 4,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+    { "action": "info", "message": "App started, checking initial MCP state" },
+
+    { "action": "section", "title": "Test 1: Verify memory server initially connected" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "show" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "memory|1/1|connected", "description": "Memory server initially connected" },
+
+    { "action": "section", "title": "Test 2: Disable memory server" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "type", "text": "/mcp disable memory" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 4 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "disabled|disconnected|Server.*disabled", "description": "Memory server disabled" },
+
+    { "action": "section", "title": "Test 3: Verify server is actually disconnected" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "slash_command", "command": "mcp", "subcommand": "tools" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "add_observations|create_entities", "description": "Memory tools not available" },
+
+    { "action": "section", "title": "Test 4: Re-enable memory server (hot reload)" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "type", "text": "/mcp enable memory" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "enabled|connecting|connected|now connecting", "description": "Memory server re-enabled" },
+
+    { "action": "section", "title": "Test 5: Verify server is reconnected without restart" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "slash_command", "command": "mcp", "subcommand": "tools" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "create_entities|add_observations|memory", "description": "Memory tools available again" }
+  ]
+}

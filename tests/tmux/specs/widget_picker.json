@@ -1,0 +1,70 @@
+{
+  "name": "widget-picker",
+  "description": "Verify widget picker modal: opens in Edit mode, displays widgets, search/filter works",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Enter Navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|NAV|navigation|Navigation", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Test 2: Enter Edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT|edit|Edit", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 3: Verify slot selection" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "\\[\\+\\]|\\+", "description": "Slot marker visible (edit mode starts at slot 0)" },
+
+    { "action": "section", "title": "Test 4: Open widget picker" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Arrows.*Navigate.*Enter.*Select|Description:|\\[C\\]|\\[P\\]", "description": "Widget picker modal opens" },
+
+    { "action": "section", "title": "Test 5: Verify widget list" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "profile|Profile", "description": "Profile widget displayed" },
+    { "action": "assert_contains", "pattern": "cwd|current.*dir|Current", "description": "CWD widget displayed" },
+    { "action": "assert_contains", "pattern": "model|Model", "description": "Model widget displayed" },
+
+    { "action": "section", "title": "Test 6: Search filter" },
+    { "action": "type", "text": "model" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "model|Model", "description": "Search filter working" },
+
+    { "action": "section", "title": "Test 7: Navigation" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": ">", "description": "Selection indicator visible" },
+
+    { "action": "section", "title": "Test 8: Clear search with Ctrl+U" },
+    { "action": "clear_input" },
+    { "action": "sleep", "seconds": 0.3 },
+
+    { "action": "section", "title": "Test 9: Category filter" },
+    { "action": "type", "text": "2" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Arrows.*Nav|Description:", "description": "Picker responsive after category filter" },
+
+    { "action": "section", "title": "Test 10: Close picker" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Returned to Edit mode after closing picker" }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "coordinator breakthrough via /hub wake",
+  "description": "Agent enters waiting, /hub wake breaks through",
+  "config": {
+    "command": "kollab",
+    "app_init_sleep": 4,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "section", "title": "Enter waiting state" },
+    { "action": "type", "text": "emit <wait_for_user/> now" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "parked" },
+    { "action": "section", "title": "Wake the agent via /hub wake" },
+    { "action": "slash_command", "command": "hub", "subcommand": "wake default" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "woke|active|not in waiting" }
+  ]
+}

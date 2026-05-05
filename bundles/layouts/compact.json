@@ -1,0 +1,41 @@
+{
+    "version": 1,
+    "description": "Compact single-row layout with essentials",
+    "rows": [
+        {
+            "id": 1,
+            "visible": true,
+            "widgets": [
+                {"id": "cwd", "width": {"type": "auto"}},
+                {"id": "profile", "width": {"type": "auto"}},
+                {"id": "model", "width": {"type": "auto"}},
+                {"id": "session", "width": {"type": "auto"}}
+            ]
+        },
+        {
+            "id": 2,
+            "visible": false,
+            "widgets": []
+        },
+        {
+            "id": 3,
+            "visible": false,
+            "widgets": []
+        },
+        {
+            "id": 4,
+            "visible": false,
+            "widgets": []
+        },
+        {
+            "id": 5,
+            "visible": false,
+            "widgets": []
+        },
+        {
+            "id": 6,
+            "visible": false,
+            "widgets": []
+        }
+    ]
+}

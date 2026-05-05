@@ -1,0 +1,56 @@
+{
+  "name": "delete-widget",
+  "description": "Verify delete widget functionality: multi-widget no confirmation, single-widget with confirmation",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+
+    { "action": "section", "title": "Test 1: Enter navigation/edit mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 2: Delete widget from multi-widget row (no confirmation)" },
+    { "action": "send_keys", "keys": "Home" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "CONFIRM DELETE", "description": "No confirmation for multi-widget row" },
+
+    { "action": "section", "title": "Test 3: Navigate and test single-widget deletion" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "CONFIRM DELETE|EDIT|Ready", "description": "Confirmation modal or edit mode shown" },
+
+    { "action": "section", "title": "Test 4: Cancel/confirm handling" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "CONFIRM DELETE", "description": "No confirmation after escape" },
+
+    { "action": "section", "title": "Test 5: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" }
+  ]
+}

@@ -1,0 +1,16 @@
+
+{
+  "name": "mypy-hub-optional-fixes",
+  "description": "Verify plugins/hub/ mypy no-any-return and optional type fixes don't break app startup",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "kollabor" }
+  ]
+}

@@ -1,0 +1,273 @@
+{
+  "name": "engine-profiles-api",
+  "description": "Test profiles API endpoints - list, get, create, update, delete, test",
+  "config": {
+    "command": "python -m kollabor_engine serve",
+    "show_captures": true,
+    "app_init_sleep": 3,
+    "term_width": 100,
+    "term_height": 30,
+    "key_delay": 0.1,
+    "menu_delay": 0.2
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "command": "rm -f ~/.kollab/config.json.backup 2>/dev/null; cp ~/.kollab/config.json ~/.kollab/config.json.backup 2>/dev/null || true",
+      "description": "Backup existing config"
+    },
+    {
+      "action": "shell",
+      "command": "cat > /tmp/test-profiles-config.json << 'EOF'\n{\n  \"kollabor\": {\n    \"llm\": {\n      \"active_profile\": \"default\",\n      \"default_profile\": \"default\",\n      \"profiles\": {\n        \"test-profile\": {\n          \"provider\": \"custom\",\n          \"base_url\": \"http://localhost:9999/v1\",\n          \"model\": \"test-model\",\n          \"description\": \"Test profile for API\"\n        }\n      }\n    }\n  }\n}\nEOF\n",
+      "description": "Create test config"
+    }
+  ],
+  "steps": [
+    {
+      "action": "section",
+      "title": "Test 1: Start engine server"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Application startup complete|Uvicorn running|Engine started",
+      "description": "Server started successfully"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 2: GET /profiles - list all profiles"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/profiles | jq .",
+      "description": "List all profiles"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "profiles|count|active",
+      "description": "Response contains profiles array"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"name\":\\s*\"(default|fast|claude|openai|test-profile)\"",
+      "description": "Response includes known profiles"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 3: GET /profiles/{name} - get specific profile"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/profiles/default | jq .",
+      "description": "Get default profile"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"name\":\\s*\"default\"",
+      "description": "Response contains profile name"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "provider|model",
+      "description": "Response contains provider/model"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 4: GET /profiles/{name} - 404 for unknown profile"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/profiles/unknown-profile-xyz",
+      "description": "Request unknown profile"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "HTTP_STATUS:404",
+      "description": "Returns 404 status"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "not found",
+      "description": "Error message indicates not found"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 5: POST /profiles - create new profile"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:7433/profiles -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"api-test-profile\", \"provider\": \"custom\", \"model\": \"test-model\", \"base_url\": \"http://localhost:9999/v1\", \"description\": \"Created via API\"}' | jq .",
+      "description": "Create new profile via API"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"name\":\\s*\"api-test-profile\"",
+      "description": "Response contains new profile name"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"created\":\\s*true",
+      "description": "Response indicates created=true"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 6: POST /profiles - 400 for duplicate name"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X POST http://127.0.0.1:7433/profiles -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"api-test-profile\", \"provider\": \"custom\", \"model\": \"test-model\"}'",
+      "description": "Try to create duplicate profile"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "HTTP_STATUS:400",
+      "description": "Returns 400 for duplicate"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "already exists",
+      "description": "Error message indicates duplicate"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 7: PUT /profiles/{name} - update profile"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X PUT http://127.0.0.1:7433/profiles/api-test-profile -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"description\": \"Updated via API\", \"temperature\": 0.5}' | jq .",
+      "description": "Update profile description and temperature"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"description\":\\s*\"Updated via API\"",
+      "description": "Description was updated"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"temperature\":\\s*0.5",
+      "description": "Temperature was updated"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"updated\":\\s*true",
+      "description": "Response indicates updated=true"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 8: PUT /profiles/{name} - rename profile"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X PUT http://127.0.0.1:7433/profiles/api-test-profile -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"new_name\": \"renamed-api-profile\"}' | jq .",
+      "description": "Rename profile"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"name\":\\s*\"renamed-api-profile\"",
+      "description": "Profile was renamed"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 9: DELETE /profiles/{name} - delete profile"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X DELETE http://127.0.0.1:7433/profiles/renamed-api-profile -H \"Authorization: Bearer $TOKEN\" | jq .",
+      "description": "Delete profile"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\"deleted\":\\s*true",
+      "description": "Response indicates deleted=true"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 10: DELETE /profiles/{name} - 400 for built-in profile"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X DELETE http://127.0.0.1:7433/profiles/default -H \"Authorization: Bearer $TOKEN\"",
+      "description": "Try to delete built-in profile"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "HTTP_STATUS:400",
+      "description": "Returns 400 for built-in"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "built-in|Cannot delete",
+      "description": "Error message explains restriction"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 11: POST /profiles/{name}/test - test profile endpoint exists"
+    },
+    {
+      "action": "shell",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:7433/profiles/default/test -H \"Authorization: Bearer $TOKEN\" | jq .",
+      "description": "Test default profile"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "success|error|profile",
+      "description": "Response has test result structure"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 12: Auth required - 401 without token"
+    },
+    {
+      "action": "shell",
+      "command": "curl -s -w \"\\nHTTP_STATUS:%{http_code}\" http://127.0.0.1:7433/profiles",
+      "description": "Request without auth token"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "HTTP_STATUS:401",
+      "description": "Returns 401 without auth"
+    },
+
+    {
+      "action": "section",
+      "title": "Test 13: Health endpoint works without auth"
+    },
+    {
+      "action": "shell",
+      "command": "curl -s http://127.0.0.1:7433/health | jq .",
+      "description": "Check health endpoint"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "status|healthy",
+      "description": "Health endpoint accessible"
+    }
+  ],
+  "teardown": [
+    {
+      "action": "shell",
+      "command": "mv ~/.kollab/config.json.backup ~/.kollab/config.json 2>/dev/null || true",
+      "description": "Restore original config"
+    }
+  ]
+}

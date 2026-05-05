@@ -1,0 +1,13 @@
+# Core dependencies for APICommunicationService
+# Updated to 3.10.11+ to address security vulnerabilities:
+# - GHSA-8495-4g3g-x7pr, GHSA-27mf-ghqm-j3j8, GHSA-9548-qrrj-x5pj
+aiohttp>=3.10.11
+
+# Standard library imports (included with Python 3.8+)
+# asyncio
+# json
+# logging
+# time
+# datetime
+# typing
+# pathlib

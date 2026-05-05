@@ -1,0 +1,32 @@
+{
+  "name": "toggle-state-not-persisted",
+  "description": "Verify toggle widget state persistence (manual test - requires app restart)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application started" },
+
+    { "action": "section", "title": "Test 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Navigation mode active" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|NAV|navigation|Navigation", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Test 4: Exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 }
+  ]
+}

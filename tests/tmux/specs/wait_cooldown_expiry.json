@@ -1,0 +1,29 @@
+{
+  "name": "wait cooldown status display",
+  "description": "Verify waiting state and cooldown countdown in /hub status",
+  "config": {
+    "command": "kollab",
+    "app_init_sleep": 4,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "section", "title": "Enter waiting state" },
+    { "action": "type", "text": "emit <wait_for_user/> now" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "parked" },
+    { "action": "section", "title": "Check status shows cooldown countdown" },
+    { "action": "slash_command", "command": "hub", "subcommand": "status" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "cooldown" },
+    { "action": "section", "title": "Wait for cooldown to expire (60s)" },
+    { "action": "sleep", "seconds": 62 },
+    { "action": "slash_command", "command": "hub", "subcommand": "status" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "expired" }
+  ]
+}

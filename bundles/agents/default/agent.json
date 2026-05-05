@@ -1,0 +1,34 @@
+{
+  "description": "Specialized agent for fixing linting errors and code quality issues",
+  "tools": [
+    "terminal",
+    "file-read",
+    "file-edit",
+    "file-create",
+    "file-create-overwrite",
+    "file-delete",
+    "file-append",
+    "file-insert-after",
+    "file-insert-before",
+    "file-move",
+    "file-copy",
+    "file-grep",
+    "directory",
+    "directory-remove",
+    "git",
+    "hub-msg",
+    "hub-status",
+    "hub-agents",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "task-checkpoint",
+    "task-complete",
+    "wait-for-user"
+  ],
+  "skills": [
+    "dead-code",
+    "explore-agent-system"
+  ],
+  "vault_enabled": true
+}

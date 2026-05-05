@@ -1,0 +1,67 @@
+{
+  "name": "verify-label-edit-reactivation",
+  "description": "Verify label widget can be edited multiple times without toggling edit mode - tests interaction_active state is properly cleared after editing",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.2,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode active" },
+
+    { "action": "section", "title": "Step 2: Enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Step 3: Search for label widget (navigate Down)" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+
+    { "action": "section", "title": "Step 4: First inline edit activation" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "First inline edit activated without crash" },
+
+    { "action": "section", "title": "Step 5: Exit inline edit" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 6: Second inline edit activation" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Second inline edit activated (state properly cleared)" },
+
+    { "action": "section", "title": "Step 7: Exit inline edit again" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 8: Third inline edit activation" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Third inline edit activated (state consistently cleared)" }
+  ]
+}

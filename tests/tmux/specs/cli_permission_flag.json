@@ -1,0 +1,30 @@
+{
+  "name": "cli-permission-flag",
+  "description": "Verify --permission CLI flag sets permission mode correctly",
+  "config": {
+    "command": "python main.py --permission trust --stay",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "section", "name": "Test --permission trust --stay CLI flag" },
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "Permission mode set to TRUST_ALL",
+      "description": "Trust mode confirmation message shown"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "❯.*trust",
+      "description": "trust arg not sent to LLM (not in input box)"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Ready!",
+      "description": "App entered interactive mode (--stay worked)"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "wait_for_user basic",
+  "description": "Agent emits <wait_for_user/>, enters waiting state",
+  "config": {
+    "command": "kollab",
+    "app_init_sleep": 8,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "type", "text": "emit <wait_for_user/> and nothing else" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "\\[wait_for_user\\] parked"
+    },
+    { "action": "slash_command", "command": "hub", "subcommand": "status" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "waiting" }
+  ]
+}

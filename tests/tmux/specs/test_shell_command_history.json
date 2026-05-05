@@ -1,0 +1,35 @@
+{
+  "name": "shell-command-history",
+  "description": "Verify shell commands (!) are added to history and re-execute correctly",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.05,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Attempt shell command !ls (character by character)" },
+    { "action": "type", "text": "!ls", "delay": 0.05 },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 2: Verify shell command recalled from history" },
+    { "action": "send_keys", "keys": "Up" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "!\\s*ls|!ls", "description": "Shell command recalled from history" },
+
+    { "action": "section", "title": "Step 3: Attempt re-execution from history" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Processing\\.\\.\\.", "description": "Command should not be sent to LLM (BUG: currently sent to LLM)" }
+  ]
+}

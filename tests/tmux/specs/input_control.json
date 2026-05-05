@@ -1,0 +1,49 @@
+{
+  "name": "input-control",
+  "description": "Test input control actions: clear_input, control keys",
+  "config": {
+    "command": "python main.py",
+    "show_captures": true,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Type text then clear with Ctrl+U" },
+    { "action": "send_keys", "keys": "hello world this is some text" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Pasted|hello", "description": "Text appears in input (or paste indicator)" },
+
+    { "action": "clear_input" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "hello world", "description": "Text cleared after Ctrl+U" },
+
+    { "action": "section", "title": "Test 2: Generic control key (Ctrl+U)" },
+    { "action": "send_keys", "keys": "more text to clear" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Pasted|more", "description": "New text appears (or paste indicator)" },
+
+    { "action": "control", "key": "u" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "more text", "description": "Text cleared via control action" },
+
+    { "action": "section", "title": "Test 3: Clear between slash commands" },
+    { "action": "send_keys", "keys": "/hel" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "info", "message": "Partial slash command typed" },
+
+    { "action": "clear_input" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "slash_command", "command": "help" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "help|command|available", "description": "Help command works after clear" }
+  ]
+}

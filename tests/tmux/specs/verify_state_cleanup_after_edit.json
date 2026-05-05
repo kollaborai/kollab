@@ -1,0 +1,69 @@
+{
+  "name": "verify-state-cleanup-after-edit",
+  "description": "Verify widget interaction state is properly cleared after inline editing - simplified test (full widget picker test requires manual verification)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.2,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Step 2: Enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Step 3: Navigate widgets" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Up" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 4: Try Tab to find slot" },
+    { "action": "send_keys", "keys": "Tab" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Tab key handled without crash" },
+
+    { "action": "section", "title": "Step 5: Try Enter to activate (may open picker or inline editor)" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Enter key handled without crash" },
+
+    { "action": "section", "title": "Step 6: Cancel with Esc" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 7: Try Enter again (testing state cleanup)" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Second Enter handled without crash (state was cleaned)" },
+
+    { "action": "section", "title": "Step 8: Cancel with Esc" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 9: Try Enter third time (confirming consistent state cleanup)" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Third Enter handled without crash (state cleanup consistent)" },
+
+    { "action": "section", "title": "Step 10: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "dynamic-width-80pct",
+  "description": "Verify UI elements render at 80% of terminal width",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Send test message to trigger UI rendering" },
+    { "action": "send_keys", "keys": "hello" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 2: Verify UI elements rendered" },
+    { "action": "assert_contains", "pattern": "▀|▄", "description": "UI box borders visible" },
+    { "action": "assert_contains", "pattern": "Ready|kollabor", "description": "UI content visible" }
+  ]
+}

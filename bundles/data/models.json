@@ -1,0 +1,320 @@
+{
+  "_meta": {
+    "description": "Frontier model registry for kollab",
+    "updated": "2026-04-13",
+    "notes": "User overrides: ~/.kollab/models.json (merged on top)"
+  },
+  "models": {
+    "gpt-5.4": {
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 2.50,
+      "pricing_out": 15.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-03-05"
+    },
+    "gpt-5.4-pro": {
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 30.00,
+      "pricing_out": 180.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-03-05"
+    },
+    "gpt-5.4-mini": {
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 0.75,
+      "pricing_out": 4.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-03-05"
+    },
+    "gpt-5.4-nano": {
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 0.20,
+      "pricing_out": 1.25,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-03-05"
+    },
+    "gpt-4.1": {
+      "provider": "openai",
+      "context_window": 1047576,
+      "max_output": 32768,
+      "default_output": 32768,
+      "pricing_in": 2.00,
+      "pricing_out": 8.00,
+      "supports_tools": true,
+      "supports_thinking": false,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "retired": true
+    },
+    "claude-opus-4-6": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 5.00,
+      "pricing_out": 25.00,
+      "pricing_cached_in": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-03-15"
+    },
+    "claude-sonnet-4-6": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 64000,
+      "default_output": 64000,
+      "pricing_in": 3.00,
+      "pricing_out": 15.00,
+      "pricing_cached_in": 0.30,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-03-15"
+    },
+    "claude-haiku-4-5": {
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output": 64000,
+      "default_output": 64000,
+      "pricing_in": 1.00,
+      "pricing_out": 5.00,
+      "pricing_cached_in": 0.10,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2025-10-01"
+    },
+    "gemini-3.1-pro": {
+      "provider": "gemini",
+      "context_window": 1000000,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 2.00,
+      "pricing_out": 12.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-02-19",
+      "notes": "default maxOutputTokens is 8192, must set explicitly for 65K"
+    },
+    "gemini-3.1-flash-lite": {
+      "provider": "gemini",
+      "context_window": 1000000,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 0.25,
+      "pricing_out": 1.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-02-19"
+    },
+    "gemini-2.5-pro": {
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 1.25,
+      "pricing_out": 10.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true
+    },
+    "gemini-2.5-flash": {
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 0.15,
+      "pricing_out": 0.60,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true
+    },
+    "glm-5.1": {
+      "provider": "custom",
+      "context_window": 202752,
+      "max_output": 65535,
+      "default_output": 65535,
+      "pricing_in": 1.00,
+      "pricing_out": 4.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "754B MoE, 40B active. open-weight"
+    },
+    "glm-5-turbo": {
+      "provider": "custom",
+      "context_window": 202752,
+      "max_output": 131072,
+      "default_output": 131072,
+      "pricing_in": 0.50,
+      "pricing_out": 2.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false
+    },
+    "grok-4": {
+      "provider": "custom",
+      "context_window": 2000000,
+      "max_output": null,
+      "default_output": null,
+      "pricing_in": 2.00,
+      "pricing_out": 6.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "released": "2026-03-31",
+      "notes": "output limit not documented, bounded by context window"
+    },
+    "llama-4-scout": {
+      "provider": "custom",
+      "context_window": 10000000,
+      "max_output": null,
+      "default_output": 4096,
+      "pricing_in": 0.15,
+      "pricing_out": 0.50,
+      "supports_tools": true,
+      "supports_thinking": false,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "notes": "open-weight, pricing varies by host"
+    },
+    "llama-4-maverick": {
+      "provider": "custom",
+      "context_window": 512000,
+      "max_output": null,
+      "default_output": 4096,
+      "pricing_in": 0.22,
+      "pricing_out": 0.85,
+      "supports_tools": true,
+      "supports_thinking": false,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "notes": "open-weight, on-demand capped 4K output, dedicated uncapped"
+    },
+    "deepseek-chat": {
+      "provider": "custom",
+      "context_window": 128000,
+      "max_output": 8000,
+      "default_output": 4096,
+      "pricing_in": 0.30,
+      "pricing_out": 0.50,
+      "supports_tools": true,
+      "supports_thinking": false,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "DeepSeek V3.2 non-reasoning"
+    },
+    "deepseek-reasoner": {
+      "provider": "custom",
+      "context_window": 128000,
+      "max_output": 64000,
+      "default_output": 32000,
+      "pricing_in": 0.30,
+      "pricing_out": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "DeepSeek V3.2 reasoning mode"
+    },
+    "mistral-large-3": {
+      "provider": "custom",
+      "context_window": 262000,
+      "max_output": null,
+      "default_output": null,
+      "pricing_in": 2.00,
+      "pricing_out": 6.00,
+      "supports_tools": true,
+      "supports_thinking": false,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "675B total, 41B active (MoE)"
+    },
+    "mistral-small-4": {
+      "provider": "custom",
+      "context_window": 128000,
+      "max_output": null,
+      "default_output": null,
+      "pricing_in": 0.10,
+      "pricing_out": 0.30,
+      "supports_tools": true,
+      "supports_thinking": false,
+      "supports_streaming": true,
+      "supports_vision": false
+    }
+  },
+  "provider_defaults": {
+    "openai": {
+      "context_window": 128000,
+      "supports_tools": true,
+      "supports_streaming": true
+    },
+    "anthropic": {
+      "context_window": 200000,
+      "supports_tools": true,
+      "supports_streaming": true
+    },
+    "gemini": {
+      "context_window": 1000000,
+      "supports_tools": true,
+      "supports_streaming": true
+    },
+    "openrouter": {
+      "context_window": 128000,
+      "supports_tools": true,
+      "supports_streaming": true
+    },
+    "azure_openai": {
+      "context_window": 128000,
+      "supports_tools": true,
+      "supports_streaming": true
+    },
+    "openai_responses": {
+      "context_window": 128000,
+      "supports_tools": true,
+      "supports_streaming": true
+    },
+    "custom": {
+      "context_window": 128000,
+      "supports_tools": true,
+      "supports_streaming": true
+    }
+  }
+}

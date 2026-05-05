@@ -1,0 +1,61 @@
+{
+  "name": "help-overlay",
+  "description": "Verify F1/? help overlay: shows shortcuts, displays current mode, closes with Esc, works from both INPUT and NAVIGATION modes",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 4,
+    "term_width": 120,
+    "term_height": 45,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Requirement 1: F1 key shows help overlay from INPUT mode" },
+    { "action": "send_keys", "keys": "F1" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Interactive Status Widgets - Help", "description": "F1 shows help overlay title" },
+    { "action": "assert_contains", "pattern": "Navigation", "description": "F1 shows navigation section" },
+
+    { "action": "section", "title": "Requirement 2: Help overlay shows keyboard shortcuts" },
+    { "action": "assert_contains", "pattern": "Tab", "description": "Shows Tab shortcut" },
+    { "action": "assert_contains", "pattern": "Move between", "description": "Shows arrow key shortcuts" },
+    { "action": "assert_contains", "pattern": "Activate", "description": "Shows Enter shortcut" },
+    { "action": "assert_contains", "pattern": "Return to Input", "description": "Shows Esc shortcut" },
+    { "action": "assert_contains", "pattern": "Show this help", "description": "Shows F1 shortcut" },
+    { "action": "assert_contains", "pattern": "Undo", "description": "Shows Ctrl+Z shortcut" },
+    { "action": "assert_contains", "pattern": "Quick jump", "description": "Shows 1-9 shortcut" },
+    { "action": "assert_contains", "pattern": "Quick toggle", "description": "Shows Space shortcut" },
+
+    { "action": "section", "title": "Requirement 3: Help overlay shows current mode at bottom" },
+    { "action": "assert_contains", "pattern": "Status", "description": "Shows current mode indicator" },
+    { "action": "assert_contains", "pattern": "INPUT", "description": "Shows INPUT mode" },
+
+    { "action": "section", "title": "Requirement 4: Esc key closes help overlay" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Interactive Status Widgets - Help", "description": "Esc closes help overlay" },
+
+    { "action": "section", "title": "Requirement 5: ? key shows help overlay (buffer empty)" },
+    { "action": "send_keys", "keys": "?" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Interactive Status Widgets - Help", "description": "? shows help overlay title" },
+    { "action": "assert_contains", "pattern": "Shortcuts", "description": "? shows shortcuts section" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+
+    { "action": "section", "title": "Requirement 6: F1 works from NAVIGATION mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "F1" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Interactive Status Widgets - Help", "description": "F1 from NAVIGATION mode shows help" },
+    { "action": "assert_contains", "pattern": "NAVIGATION", "description": "Shows NAVIGATION mode at bottom" }
+  ]
+}

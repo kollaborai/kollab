@@ -1,0 +1,76 @@
+{
+  "name": "intent-command",
+  "description": "Verifies /intent command: set/clear/show session goal, and that post-tool suggestions display after a tool fires when an intent is active. Intent is session-only (not persisted). Suggestions are display hints only (not injected into LLM context).",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 4,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    {
+      "action": "section",
+      "label": "set intent"
+    },
+    {
+      "action": "slash_command",
+      "command": "intent",
+      "subcommand": "understand the context service ledger"
+    },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "intent set"
+    },
+
+    {
+      "action": "section",
+      "label": "show intent"
+    },
+    {
+      "action": "slash_command",
+      "command": "intent",
+      "subcommand": "show"
+    },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "understand the context service ledger"
+    },
+
+    {
+      "action": "section",
+      "label": "clear intent"
+    },
+    {
+      "action": "slash_command",
+      "command": "intent",
+      "subcommand": "clear"
+    },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "intent cleared"
+    },
+
+    {
+      "action": "section",
+      "label": "show with no intent"
+    },
+    {
+      "action": "slash_command",
+      "command": "intent",
+      "subcommand": "show"
+    },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "no intent set"
+    }
+  ]
+}

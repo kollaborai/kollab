@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kollabor-engine"
+version = "0.5.7"
+description = "Kollab AI engine - HTTP/SSE server wrapping kollabor-ai and kollabor-agent"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+    "kollabor-ai>=0.5.7",
+    "kollabor-agent>=0.5.7",
+    "kollabor-events>=0.5.7",
+    "kollabor-config>=0.5.7",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sse-starlette>=2.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kollabor_engine"]

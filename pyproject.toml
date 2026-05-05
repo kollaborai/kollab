@@ -1,0 +1,161 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-p no:warnings"
+
+[project]
+name = "kollab"
+version = "0.5.7"
+description = "Terminal AI workspace with hooks, plugins, providers, and multi-agent collaboration"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "kollabor.ai Contributors"}
+]
+keywords = [
+    "llm",
+    "cli",
+    "chat",
+    "terminal",
+    "ai",
+    "chatbot",
+    "assistant",
+    "kollab",
+    "kollabor",
+    "plugin-system",
+    "event-driven"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Terminals",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Unix",
+]
+
+dependencies = [
+    "aiohttp>=3.10.11",
+    "httpx>=0.27.0",
+    "kollabor-agent>=0.5.7",
+    "kollabor-ai>=0.5.7",
+    "kollabor-config>=0.5.7",
+    "kollabor-events>=0.5.7",
+    "kollabor-plugins>=0.5.7",
+    "kollabor-engine>=0.5.7",
+    "kollabor-rpc>=0.5.7",
+    "kollabor-tui>=0.5.7",
+    "kollabor-webui>=0.5.7",
+    "pyyaml>=6.0",
+    "psutil>=5.9.0",
+    "packaging>=23.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.7.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kollaborai/kollab"
+Repository = "https://github.com/kollaborai/kollab"
+Documentation = "https://github.com/kollaborai/kollab/blob/main/docs/"
+"Bug Tracker" = "https://github.com/kollaborai/kollab/issues"
+"Homebrew Tap" = "https://github.com/kollaborai/homebrew-tap"
+
+[project.scripts]
+kollab = "kollabor_cli_main:cli_main"
+
+[tool.setuptools]
+py-modules = ["kollabor_cli_main"]
+packages = {find = {where = [".", "packages/kollabor-ai/src", "packages/kollabor-tui/src", "packages/kollabor-events/src", "packages/kollabor-config/src", "packages/kollabor-agent/src", "packages/kollabor-plugins/src", "packages/kollabor-engine/src", "packages/kollabor-rpc/src"], include = ["kollabor*", "plugins*", "bundles*", "fonts*"]}}
+include-package-data = true
+
+[tool.setuptools.package-data]
+kollabor = ["py.typed"]
+plugins = ["**/*.json", "**/*.yaml", "**/*.yml"]
+bundles = ["**/*.md", "**/*.json", "**/*.sh"]
+fonts = ["*.ttf", "*.otf", "LICENSE", "README.md"]
+
+[tool.uv]
+dev-dependencies = [
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.7.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.uv.sources]
+kollabor-agent = { workspace = true }
+kollabor-ai = { workspace = true }
+kollabor-config = { workspace = true }
+kollabor-engine = { workspace = true }
+kollabor-events = { workspace = true }
+kollabor-plugins = { workspace = true }
+kollabor-rpc = { workspace = true }
+kollabor-tui = { workspace = true }
+kollabor-webui = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/kollabor-*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E203"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
+"tests/**/*.py" = ["E402"]
+# String annotations for forward references (local dataclasses, return types)
+"packages/kollabor-tui/src/kollabor_tui/terminal_renderer.py" = ["F821"]
+"packages/kollabor-tui/src/kollabor_tui/fullscreen/plugin.py" = ["F821"]
+"plugins/agent_orchestrator/plugin.py" = ["F821"]
+"plugins/terminal_plugin.py" = ["F821"]
+"plugins/modern_input_plugin.py" = ["F821"]
+"bundles/**/*.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kollabor", "kollabor_ai", "kollabor_tui", "kollabor_events", "kollabor_config", "kollabor_plugins", "kollabor_agent", "kollabor_rpc", "kollabor_cli_main"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+exclude = [
+    'bundles/',
+    'docs/',
+    '.claude/',
+    '.archive/',
+    'dist/',
+    'build/',
+    '\\.egg-info$',
+    'scripts/',
+    'tests/visual/',
+]

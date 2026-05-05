@@ -1,0 +1,39 @@
+{
+  "name": "phase_d_hub_bridge_disabled",
+  "description": "Verifies phase D is wired but disabled by default — app boots with hub plugin loaded, hub_ask_ctx tag is parseable, no crashes when the bridge isn't attached.",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    {
+      "action": "section",
+      "name": "app_boots_with_phase_d_code_loaded"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback|hub_bridge.*error|HubBridge.*error"
+    },
+    {
+      "action": "type",
+      "text": "/config"
+    },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    {
+      "action": "section",
+      "name": "config_modal_shows_hub_broadcast_toggle"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Hub Broadcast|hub_broadcast|phase D"
+    },
+    { "action": "send_keys", "keys": "Escape" },
+    { "action": "sleep", "seconds": 1 }
+  ]
+}

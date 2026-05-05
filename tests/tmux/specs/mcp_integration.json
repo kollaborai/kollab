@@ -1,0 +1,41 @@
+{
+  "name": "mcp-integration",
+  "description": "Verify MCP integration: status view, slash commands",
+  "config": {
+    "command": "python main.py",
+    "show_captures": true,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 55,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: MCP Status View" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "show" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP", "description": "MCP status view displays" },
+
+    { "action": "section", "title": "Test 2: /mcp servers" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "slash_command", "command": "mcp", "subcommand": "servers" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP|not available|server|configured", "description": "/mcp servers executes" },
+
+    { "action": "section", "title": "Test 3: /mcp list" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "list" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP|not available|server|tool|configured", "description": "/mcp list works" },
+
+    { "action": "section", "title": "Test 4: /mcp tools" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "tools" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP|not available|tool|Tools", "description": "/mcp tools works" }
+  ]
+}

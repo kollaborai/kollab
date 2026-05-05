@@ -1,0 +1,57 @@
+
+{
+  "name": "context_extensibility",
+  "description": "Verifies that plugins can register custom triggers and loaders via ContextService",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "type",
+      "text": "Tell me about the github repo"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "github|repo|kollab"
+    },
+    {
+      "action": "section",
+      "name": "test_api_docs_trigger"
+    },
+    {
+      "action": "type",
+      "text": "Show me the api docs"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "api.*docs|ContextService|plugin.*api"
+    }
+  ]
+}

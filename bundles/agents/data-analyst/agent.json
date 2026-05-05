@@ -1,0 +1,28 @@
+{
+  "description": "Data analysis and visualization specialist for Python pandas, matplotlib, and SQL",
+  "tools": [
+    "terminal",
+    "file-read",
+    "file-edit",
+    "file-create",
+    "file-create-overwrite",
+    "file-append",
+    "file-grep",
+    "hub-msg",
+    "hub-status",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "task-checkpoint",
+    "task-complete",
+    "wait-for-user"
+  ],
+  "skills": [
+    "data-visualization",
+    "exploratory-data-analysis",
+    "pandas-data-manipulation",
+    "sql-query-optimization",
+    "statistical-analysis"
+  ],
+  "vault_enabled": true
+}

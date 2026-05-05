@@ -1,0 +1,35 @@
+{
+  "name": "ready-message-stats",
+  "description": "Verify ready message displays stats from core and plugins",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 30,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Ready message appears" },
+    { "action": "assert_contains", "pattern": "Ready!", "description": "Ready message found" },
+
+    { "action": "section", "title": "Test 2: Stats displayed in parentheses" },
+    { "action": "assert_contains", "pattern": "Ready!.*\\(", "description": "Stats parentheses found" },
+
+    { "action": "section", "title": "Test 3: System prompt modules stat" },
+    { "action": "assert_contains", "pattern": "system prompt|module", "description": "System prompt modules stat" },
+
+    { "action": "section", "title": "Test 4: Hooks stat" },
+    { "action": "assert_contains", "pattern": "hook", "description": "Hooks stat" },
+
+    { "action": "section", "title": "Test 5: Plugins stat" },
+    { "action": "assert_contains", "pattern": "plugin", "description": "Plugins stat" },
+
+    { "action": "section", "title": "Test 6: Numeric counts present" },
+    { "action": "assert_contains", "pattern": "[0-9]+.*hook|[0-9]+.*plugin", "description": "Numeric counts found" }
+  ]
+}

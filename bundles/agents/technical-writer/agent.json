@@ -1,0 +1,30 @@
+{
+  "description": "Technical documentation agent - READMEs, API docs, guides",
+  "tools": [
+    "terminal",
+    "file-read",
+    "file-edit",
+    "file-create",
+    "file-create-overwrite",
+    "file-delete",
+    "file-append",
+    "file-grep",
+    "directory",
+    "hub-msg",
+    "hub-status",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "task-checkpoint",
+    "task-complete",
+    "wait-for-user"
+  ],
+  "skills": [
+    "api-documentation",
+    "changelog-management",
+    "readme-writing",
+    "style-guide",
+    "tutorial-creation"
+  ],
+  "vault_enabled": true
+}

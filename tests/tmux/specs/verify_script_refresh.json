@@ -1,0 +1,45 @@
+{
+  "name": "verify-script-refresh",
+  "description": "Verify script widget refresh scheduler UI - PARTIAL TEST (log file verification requires manual checking)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.5,
+    "menu_delay": 1.0
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Application started without errors" },
+
+    { "action": "section", "title": "Test 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode active" },
+
+    { "action": "section", "title": "Test 3: Enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode active" },
+
+    { "action": "section", "title": "Test 4: Open widget picker" },
+    { "action": "send_keys", "keys": "a" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Widget picker opened without crash" },
+
+    { "action": "section", "title": "Test 5: Wait for potential refresh" },
+    { "action": "sleep", "seconds": 2 },
+
+    { "action": "section", "title": "Note: Log file verification manual" },
+    { "action": "sleep", "seconds": 0.1 }
+  ]
+}

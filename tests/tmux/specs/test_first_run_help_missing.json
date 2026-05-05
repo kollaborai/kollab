@@ -1,0 +1,39 @@
+{
+  "name": "first-run-help-missing",
+  "description": "Verify first-run help modal behavior on navigation mode entry",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Verify application started" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+|█|▄|Ready", "description": "Application started" },
+
+    { "action": "section", "title": "Step 2: Press Tab to enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 3: Check navigation mode activated" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|Status.*Focus", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Step 4: Check for first-run help modal (BUG: not shown)" },
+    { "action": "assert_not_contains", "pattern": "NEW: Interactive Status Widgets|Welcome to Interactive Status|Press Enter to close|Got it!", "description": "First-run help modal should NOT appear (BUG confirmed)" },
+
+    { "action": "section", "title": "Step 5: Test F1 help overlay" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "F1" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Navigation|Shortcuts|Tab.*Enter Navigation", "description": "F1 help overlay should work" }
+  ]
+}

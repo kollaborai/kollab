@@ -1,0 +1,53 @@
+{
+  "name": "quick-jump-edit-mode",
+  "description": "Verify 1-9 quick jump functionality in EDIT mode - digit keys jump to slots and keep edit mode active",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Setup: Enter navigation and edit modes" },
+    { "action": "nav_mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 1: Digit '1' jumps to first slot" },
+    { "action": "send_keys", "keys": "1" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Digit '1' handled - still in edit mode" },
+
+    { "action": "section", "title": "Test 2: Digit '2' jumps to second slot" },
+    { "action": "send_keys", "keys": "2" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Digit '2' handled - still in edit mode" },
+
+    { "action": "section", "title": "Test 3: Digit '3' jumps to third slot" },
+    { "action": "send_keys", "keys": "3" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Digit '3' handled - still in edit mode" },
+
+    { "action": "section", "title": "Test 4: Digit '9' handles gracefully (no such slot)" },
+    { "action": "send_keys", "keys": "9" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Digit '9' handled gracefully - still in edit mode" },
+
+    { "action": "section", "title": "Final: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE.*move.*act.*edit", "description": "Exited to STATUS_FOCUS mode successfully" }
+  ]
+}

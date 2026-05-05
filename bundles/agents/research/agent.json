@@ -1,0 +1,29 @@
+{
+  "description": "Deep investigation agent - explores codebases without making changes",
+  "tools": [
+    "terminal",
+    "file-read",
+    "file-grep",
+    "hub-msg",
+    "hub-status",
+    "hub-agents",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "scratchpad-clear",
+    "task-checkpoint",
+    "task-complete",
+    "wait-for-user",
+    "curate",
+    "context-query",
+    "evict"
+  ],
+  "skills": [
+    "architecture-mapping",
+    "codebase-analysis",
+    "dependency-audit",
+    "performance-profiling",
+    "security-review"
+  ],
+  "vault_enabled": true
+}

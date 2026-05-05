@@ -1,0 +1,57 @@
+{
+    "version": 1,
+    "description": "Default status layout for Kollab",
+    "rows": [
+        {
+            "id": 1,
+            "visible": true,
+            "widgets": [
+                {"id": "cwd", "width": {"type": "auto"}},
+                {"id": "git-branch", "width": {"type": "auto"}},
+                {"id": "git-status", "width": {"type": "auto"}}
+            ]
+        },
+        {
+            "id": 2,
+            "visible": true,
+            "widgets": [
+                {"id": "profile", "width": {"type": "auto"}},
+                {"id": "model", "width": {"type": "auto"}},
+                {"id": "status", "width": {"type": "auto"}},
+                {"id": "stats", "width": {"type": "auto"}}
+            ]
+        },
+        {
+            "id": 3,
+            "visible": true,
+            "widgets": [
+                {"id": "agent", "width": {"type": "auto"}},
+                {"id": "skills", "width": {"type": "auto"}},
+                {"id": "session", "width": {"type": "auto"}},
+                {"id": "mcp", "width": {"type": "auto"}}
+            ]
+        },
+        {
+            "id": 4,
+            "visible": true,
+            "widgets": [
+                {"id": "tasks", "width": {"type": "auto"}},
+                {"id": "tmux", "width": {"type": "auto"}},
+                {"id": "bg-tasks", "width": {"type": "auto"}},
+                {"id": "altview", "width": {"type": "auto"}},
+                {"id": "token-io", "width": {"type": "auto"}},
+                {"id": "sysmon", "width": {"type": "auto"}}
+            ]
+        },
+        {
+            "id": 5,
+            "visible": false,
+            "widgets": []
+        },
+        {
+            "id": 6,
+            "visible": false,
+            "widgets": []
+        }
+    ]
+}

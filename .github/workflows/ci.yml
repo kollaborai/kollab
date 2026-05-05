@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ci/tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      - name: Run focused unit tests
+        run: |
+          uv run python -m pytest \
+            tests/unit/test_openai_streaming_finish_reason.py \
+            tests/unit/test_turn_runner_tool_loop.py \
+            tests/unit/test_hub_project_scope.py \
+            tests/unit/test_provider_models.py \
+            tests/unit/test_provider_security.py \
+            tests/unit/test_gemini_provider.py
+
+  standards-check:
+    name: ci/standards-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      - name: Check syntax-critical lint rules
+        run: uv run python -m ruff check --select E9,F63,F7,F82 kollabor packages plugins tests
+
+      - name: Compile public entry points
+        run: uv run python -m py_compile kollabor/cli.py kollabor_cli_main.py plugins/hub/plugin.py
+
+  security-scan:
+    name: ci/security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

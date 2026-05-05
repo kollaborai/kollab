@@ -1,0 +1,49 @@
+{
+  "name": "verify-persistence",
+  "description": "Verify widget layout persistence - PARTIAL TEST (manual verification required for full persistence testing across app restarts)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Phase 1: Enter edit mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Phase 2: Navigate to different row" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Still in edit mode after navigation" },
+
+    { "action": "section", "title": "Phase 3: Attempt to add widget (manual verification needed)" },
+    { "action": "send_keys", "keys": "a" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Add widget command handled without crash" },
+
+    { "action": "section", "title": "Phase 4: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "No crashes when exiting edit mode" },
+
+    { "action": "section", "title": "Note: Full persistence test requires manual verification" },
+    { "action": "sleep", "seconds": 0.1 }
+  ]
+}

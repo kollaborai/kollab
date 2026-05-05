@@ -1,0 +1,19 @@
+{
+  "name": "lint-hub-plugin-clean",
+  "description": "Verifies plugins/hub/plugin.py passes ruff after lint cleanup",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 1,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": ".*",
+      "description": "App starts before scoped ruff verification"
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "name": "test-gemini-provider",
+  "description": "Verify Gemini provider works end-to-end with API key configuration",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "name": "Check initial profile"
+    },
+    {
+      "action": "slash_command",
+      "command": "profile"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Profile",
+      "description": "Should show current profile"
+    },
+    {
+      "action": "section",
+      "name": "Test Gemini provider detection"
+    },
+    {
+      "action": "slash_command",
+      "command": "profile",
+      "subcommand": "set gemini"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "gemini|Gemini",
+      "description": "Should show Gemini profile or prompt to configure"
+    },
+    {
+      "action": "section",
+      "name": "Test basic completion"
+    },
+    {
+      "action": "type",
+      "text": "Say hello in one word"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 10
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hello|Hello|Hi|hi",
+      "description": "Should receive a greeting response"
+    }
+  ]
+}

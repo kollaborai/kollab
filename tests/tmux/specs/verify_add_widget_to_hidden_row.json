@@ -1,0 +1,68 @@
+{
+  "name": "verify-add-widget-to-hidden-row",
+  "description": "Verify adding widget to hidden row (row 4) makes it visible - enter edit mode, navigate to row 4, add widget, verify row becomes visible",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Application started" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ready|cwd|api.z.ai", "description": "Application started" },
+
+    { "action": "section", "title": "Step 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode entered" },
+
+    { "action": "section", "title": "Step 3: Enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Step 4: Navigate to row 4 (hidden row)" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 5: Add widget at slot" },
+    { "action": "send_keys", "keys": "a" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Add widget command handled" },
+
+    { "action": "section", "title": "Step 6: Select widget" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 7: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 8: Re-enter edit mode to verify widget" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+
+    { "action": "section", "title": "Step 9: Navigate to row 4 again" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "empty row 4", "description": "Row 4 has widget (not showing as empty)" }
+  ]
+}

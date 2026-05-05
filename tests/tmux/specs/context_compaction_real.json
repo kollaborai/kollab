@@ -1,0 +1,125 @@
+{
+  "name": "context-compaction-real",
+  "description": "Real end-to-end compaction test: 16+ interactions, verify JSONL log",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 8,
+    "term_width": 140,
+    "term_height": 40,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: App starts" },
+    { "action": "assert_contains", "pattern": "Ready!", "description": "App started" },
+
+    { "action": "section", "title": "Interaction 1" },
+    { "action": "type", "text": "what is 2 plus 2" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 2" },
+    { "action": "type", "text": "name three colors" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 3" },
+    { "action": "type", "text": "what is the capital of France" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 4" },
+    { "action": "type", "text": "name three programming languages" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 5" },
+    { "action": "type", "text": "what year was python created" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 6" },
+    { "action": "type", "text": "name 3 planets in our solar system" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 7" },
+    { "action": "type", "text": "what is the speed of light" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 8" },
+    { "action": "type", "text": "name three oceans" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 9" },
+    { "action": "type", "text": "who invented the telephone" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 10" },
+    { "action": "type", "text": "what is the tallest mountain" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 11" },
+    { "action": "type", "text": "name 3 types of trees" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 12" },
+    { "action": "type", "text": "what is the boiling point of water" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 13" },
+    { "action": "type", "text": "name 3 musical instruments" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 14" },
+    { "action": "type", "text": "what are 3 primary colors" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 15" },
+    { "action": "type", "text": "how many continents are there" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 12 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 16 - triggers compaction" },
+    { "action": "type", "text": "what is the largest ocean" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 20 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Interaction 17 - compaction applies on this turn" },
+    { "action": "type", "text": "what was the first thing I asked you" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 15 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Verify: compaction round shown in status" },
+    { "action": "assert_contains", "pattern": "ctx:", "description": "Context widget still visible" }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "trust-mode-outside-project-file-read",
+  "description": "Verify trust mode allows reading files outside the project folder",
+  "config": {
+    "command": "python main.py --permission trust --stay",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+    {
+      "action": "type",
+      "text": "read ../pyproject.toml with the file_read tool and print the first line only",
+      "delay": 0.02
+    },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Absolute paths not allowed|Path traversal detected|permission denied",
+      "description": "Should not reject outside-project read in trust mode"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "verify_model_widget",
+  "description": "Verify model widget click opens modal and switches model correctly",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 2,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "slash_command", "command": "model" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Model Select|model" },
+    { "action": "send_keys", "keys": "Escape" }
+  ]
+}

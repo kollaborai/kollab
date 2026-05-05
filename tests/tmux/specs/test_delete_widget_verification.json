@@ -1,0 +1,39 @@
+{
+  "name": "delete-widget-verification",
+  "description": "Verify 'd' key in Edit Mode handles widget deletion",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Enter Navigation Mode" },
+    { "action": "nav_mode" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Step 2: Enter Edit Mode" },
+    { "action": "edit_mode" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Step 3: Attempt widget navigation" },
+    { "action": "send_keys", "keys": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 4: Press 'd' to delete widget" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 5: Verify UI remains stable" },
+    { "action": "assert_contains", "pattern": "EDIT|Ready|kollabor", "description": "UI remains functional after delete attempt" }
+  ]
+}

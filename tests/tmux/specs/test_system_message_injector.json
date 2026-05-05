@@ -1,0 +1,37 @@
+{
+  "name": "system-message-injector",
+  "description": "Verify keyword detection triggers without displaying full system message",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Keyword detection with 'sub agents'" },
+    { "action": "send_keys", "keys": "Tell me about sub agents" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "You can spawn parallel sub-agents", "description": "Full system message should NOT be displayed" },
+
+    { "action": "section", "title": "Test 2: No false positives on normal message" },
+    { "action": "send_keys", "keys": "Hello, how are you?" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "You can spawn parallel sub-agents", "description": "No system message on normal input" },
+
+    { "action": "section", "title": "Test 3: Keyword 'spawn agent'" },
+    { "action": "send_keys", "keys": "Can you spawn an agent?" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "You can spawn parallel sub-agents", "description": "Full system message should NOT be displayed" }
+  ]
+}

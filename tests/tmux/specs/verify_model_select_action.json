@@ -1,0 +1,32 @@
+{
+  "name": "verify_model_select_action",
+  "description": "Verify selecting a model from modal triggers select_model action correctly",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Open model selector modal" },
+    { "action": "slash_command", "command": "model" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Model Selector|Available Models", "description": "Model modal opened" },
+
+    { "action": "section", "title": "Step 2: Navigate to first model and select" },
+    { "action": "send_keys", "keys": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+
+    { "action": "section", "title": "Step 3: Verify model switched" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Switched to model|ok|Model:", "description": "Success message should appear" }
+  ]
+}

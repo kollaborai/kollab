@@ -1,0 +1,22 @@
+
+{
+  "name": "event-driven-render-loop",
+  "description": "Verify the event-driven render loop integration works correctly",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 5,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 4 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ready!" },
+    { "action": "type", "text": "Hello, event-driven render loop!" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 8 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Hello, event-driven render loop!" },
+    { "action": "section" }
+  ]
+}

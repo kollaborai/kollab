@@ -1,0 +1,36 @@
+{
+  "name": "phase-4-5-mcp-local",
+  "description": "Verify /mcp show/list/tools route through state_service in local mode (phase 4.5 step 7)",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "/mcp show" },
+    { "action": "type", "text": "/mcp show" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP SERVERS|servers|tools|No MCP servers configured", "description": "/mcp show reads via state_service" },
+
+    { "action": "section", "title": "/mcp list (alias for show)" },
+    { "action": "type", "text": "/mcp list" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP SERVERS|servers|tools|No MCP servers configured", "description": "/mcp list alias works" },
+
+    { "action": "section", "title": "/mcp tools" },
+    { "action": "type", "text": "/mcp tools" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP Tools|No MCP tools available", "description": "/mcp tools reads via state_service" }
+  ]
+}

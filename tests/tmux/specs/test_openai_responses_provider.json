@@ -1,0 +1,107 @@
+{
+  "name": "test-openai-responses-provider",
+  "description": "Verify OpenAI Responses API provider integration. Tests provider detection, initialization, and basic conversation flow.",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "name": "Verify provider registered"
+    },
+    {
+      "action": "slash_command",
+      "command": "profile",
+      "subcommand": "list"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "profile|Profile",
+      "description": "Profile list command should show available profiles"
+    },
+    {
+      "action": "section",
+      "name": "Test OpenAI Responses API with explicit provider"
+    },
+    {
+      "action": "type",
+      "text": "You are using the OpenAI Responses API. Say 'Responses API works!' in your response."
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Responses API works!|responses api works",
+      "description": "LLM should acknowledge the Responses API"
+    },
+    {
+      "action": "section",
+      "name": "Verify streaming works"
+    },
+    {
+      "action": "type",
+      "text": "Count from 1 to 5 slowly"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "[1-5]",
+      "description": "Response should contain numbers"
+    },
+    {
+      "action": "section",
+      "name": "Test system message extraction to instructions"
+    },
+    {
+      "action": "type",
+      "text": "If you received instructions as a separate parameter (not as a system message), reply with 'PARAMETER_OK'. Otherwise just say hello."
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "PARAMETER_OK|hello|Hello",
+      "description": "Should handle instructions parameter correctly"
+    }
+  ]
+}

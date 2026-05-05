@@ -1,0 +1,30 @@
+{
+  "name": "permission-ui-callback",
+  "description": "Verify permission UI callback is wired and prompts are displayed (not silently denied)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 2,
+    "term_width": 120,
+    "term_height": 30,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Verify application started" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+|█|▄", "description": "Application started successfully (banner visible)" },
+
+    { "action": "section", "title": "Step 2: Trigger tool execution requiring permission" },
+    { "action": "send_keys", "keys": "list files in current directory" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 3: Verify permission UI callback is wired" },
+    { "action": "assert_not_contains", "pattern": "Confirmation required but no UI available", "description": "Should not see UI callback error" },
+    { "action": "assert_not_contains", "pattern": "Layout manager not available", "description": "Should not see layout manager warning" }
+  ]
+}

@@ -1,0 +1,36 @@
+# Include documentation
+include README.md
+include LICENSE
+include CLAUDE.md
+include requirements.txt
+
+# Include all markdown files in docs
+recursive-include docs *.md
+recursive-include docs *.rst
+
+# Include plugin configuration files
+recursive-include plugins *.json
+recursive-include plugins *.yaml
+recursive-include plugins *.yml
+
+# Include bundled assets (agents, themes, widgets, layouts)
+recursive-include bundles *.json
+recursive-include bundles *.md
+recursive-include bundles *.sh
+
+# Include type stubs
+recursive-include kollabor *.pyi
+recursive-include plugins *.pyi
+
+# Exclude common unwanted files
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *$py.class
+global-exclude *.so
+global-exclude .DS_Store
+global-exclude *.egg-info
+global-exclude .git*
+global-exclude .pytest_cache
+global-exclude .mypy_cache
+global-exclude .coverage
+global-exclude htmlcov

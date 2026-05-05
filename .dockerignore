@@ -1,0 +1,43 @@
+.git
+.gitignore
+
+# Local Python/build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+wheels/
+.venv/
+venv/
+env/
+
+# Local runtime state and secrets
+.env
+.env.*
+!.env.example
+.kollab/
+.beads/.beads-credential-key
+.dolt/
+*.db
+*.log
+convp/
+
+# Local/editor clutter
+.DS_Store
+.idea/
+.vscode/
+.trash/
+.archive/
+.dead-code-analysis/
+.kdex/
+.claude/
+backups/
+code_audit/
+codemon/
+tools/

@@ -1,0 +1,61 @@
+{
+  "name": "delete-widget-row-index-fix",
+  "description": "Verify delete widget row index fix - delete works correctly without row index errors (Note: Log checking requires bash script)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1-3: Enter navigation and edit modes" },
+    { "action": "nav_mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Step 4: Navigate down to test row bounds" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Still in edit mode after navigating down" },
+
+    { "action": "section", "title": "Step 5-6: Navigate up and to a widget" },
+    { "action": "arrow", "direction": "Up" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Still in edit mode after navigation" },
+
+    { "action": "section", "title": "Step 7: Press 'd' to delete widget" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 0.8 },
+    { "action": "capture" },
+    { "action": "info", "msg": "Pressed 'd' for delete - checking if handled" },
+    { "action": "assert_contains", "pattern": "EDIT.*nav.*add.*exit", "description": "Delete handled - still in edit mode" },
+
+    { "action": "section", "title": "Step 8: Check for errors (requires bash script)" },
+    { "action": "info", "msg": "Row index error checking requires log file access - use bash script for full verification" },
+
+    { "action": "section", "title": "Step 9: Exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ready|Your message", "description": "Back to input mode" }
+  ]
+}

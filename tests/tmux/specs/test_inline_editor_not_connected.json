@@ -1,0 +1,47 @@
+{
+  "name": "inline-editor-not-connected",
+  "description": "Verify inline editor behavior when activating widgets (documents known issue)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application started" },
+
+    { "action": "section", "title": "Test 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Navigation mode active" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|NAV|navigation|Navigation", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Test 4: Navigate through widgets" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 5: Attempt to activate widget" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 6: Verify navigation still active (no editor overlay)" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|NAV|Ready!", "description": "Navigation mode or normal mode (no inline editor UI)" },
+
+    { "action": "section", "title": "Test 7: Exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 }
+  ]
+}

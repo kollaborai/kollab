@@ -1,0 +1,23 @@
+{
+  "name": "oauth-login-command",
+  "description": "Verify /login command registration and basic functionality",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 4,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "section", "label": "Verify /login command registered" },
+    { "action": "slash_command", "command": "login", "subcommand": "status" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "oauth status|not authenticated" },
+
+    { "action": "section", "label": "Verify /login help" },
+    { "action": "slash_command", "command": "login" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "openai|status|logout" }
+  ]
+}

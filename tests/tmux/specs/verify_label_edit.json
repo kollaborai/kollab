@@ -1,0 +1,58 @@
+{
+  "name": "verify-label-edit",
+  "description": "Verify label widget editing - PARTIAL TEST (config persistence requires manual verification via Python script)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 30,
+    "key_delay": 0.2,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Application started" },
+    { "action": "sleep", "seconds": 1 },
+
+    { "action": "section", "title": "Step 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Step 3: Navigate to row 3 (where label might be)" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 4: Enter to activate widget" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Enter handled without crash" },
+
+    { "action": "section", "title": "Step 5: Type test text" },
+    { "action": "type", "text": "MyCustomLabel" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Typing handled without crash" },
+
+    { "action": "section", "title": "Step 6: Save with Enter" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Save handled without crash" },
+
+    { "action": "section", "title": "Step 7: Exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Note: Config persistence requires manual Python script verification" },
+    { "action": "sleep", "seconds": 0.1 }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "name": "verify-input-box-hiding",
+  "description": "Verify input box is HIDDEN (not just blurred) when entering navigation mode, and reappears when returning to input mode",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Verify input box is visible in INPUT mode" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "⠠⠵", "description": "Input box visible (found prompt '⠠⠵')" },
+    { "action": "assert_contains", "pattern": "▄▄▄", "description": "Input box has top border" },
+
+    { "action": "section", "title": "Step 2: Press Tab to enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE.*move.*act.*edit.*exit", "description": "Navigation mode activated (found 'NAVIGATE' navigation hint)" },
+
+    { "action": "section", "title": "Step 3: Verify input box is HIDDEN (critical requirement)" },
+    { "action": "assert_not_contains", "pattern": "⠠⠵", "description": "Input box prompt gone (no '⠠⠵' found)" },
+    { "action": "assert_contains", "pattern": "NAVIGATE.*move.*act.*edit.*exit", "description": "Navigation hint visible (NAVIGATE line present)" },
+
+    { "action": "section", "title": "Step 4: Press Esc to return to INPUT mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 5: Verify input box reappears after Esc" },
+    { "action": "assert_contains", "pattern": "⠠⠵", "description": "Input box reappeared (found prompt '⠠⠵')" },
+    { "action": "assert_contains", "pattern": "▄▄▄", "description": "Input box borders restored" },
+
+    { "action": "section", "title": "Final Verification" },
+    { "action": "assert_contains", "pattern": "⠠⠵", "description": "Input box visible in INPUT mode" },
+    { "action": "assert_not_contains", "pattern": "NAVIGATE.*move.*act.*edit.*exit", "description": "Navigation mode exited" }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "phase-4-5-status-local",
+  "description": "Verify /status modal reads from state_service in local mode (phase 4.5 step 7)",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Open /status modal" },
+    { "action": "slash_command", "command": "status" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+
+    { "action": "assert_contains", "pattern": "System Status", "description": "/status modal opens" },
+    { "action": "assert_contains", "pattern": "Commands|Registered", "description": "Commands section rendered from snapshot" },
+    { "action": "assert_contains", "pattern": "Plugins|Active", "description": "Plugins section rendered from snapshot" },
+    { "action": "assert_contains", "pattern": "Python", "description": "Python version rendered from daemon-side snapshot" },
+    { "action": "assert_contains", "pattern": "Platform", "description": "Platform rendered from daemon-side snapshot" },
+    { "action": "assert_contains", "pattern": "Architecture", "description": "Architecture rendered from daemon-side snapshot" },
+    { "action": "assert_contains", "pattern": "Daemon PID", "description": "Daemon PID rendered (phase 4.5 step 7 addition)" },
+    { "action": "assert_contains", "pattern": "Working Directory", "description": "CWD rendered (phase 4.5 step 7 addition)" },
+
+    { "action": "section", "title": "Close modal" },
+    { "action": "send_keys", "keys": "Escape" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" }
+  ]
+}

@@ -1,0 +1,37 @@
+
+{
+  "name": "notification-channel",
+  "description": "Verify hub notification channel system loads and configures correctly",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 55,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: App boots with notification code loaded (default disabled)" },
+    { "action": "assert_not_contains", "pattern": "notification loop started", "description": "Notifier loop does NOT start when notify_enabled=false (default)" },
+    { "action": "assert_not_contains", "pattern": "Error|Traceback|ImportError", "description": "No import or startup errors from notifier module" },
+
+    { "action": "section", "title": "Test 2: /config shows notification settings in hub widget list" },
+    { "action": "slash_command", "command": "config" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Hub|Agent Mesh", "description": "Config menu shows Hub section" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Notification|otify", "description": "Hub config page includes notification settings" },
+
+    { "action": "section", "title": "Test 3: Verify notification config fields are present" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Webhook|notify|Notify|Channel", "description": "Webhook URL and channel config widgets visible" }
+  ]
+}

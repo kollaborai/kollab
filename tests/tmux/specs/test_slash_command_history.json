@@ -1,0 +1,32 @@
+{
+  "name": "slash-command-history",
+  "description": "Verify slash commands execute properly when recovered from history with Up arrow",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Execute /version command first time" },
+    { "action": "slash_command", "command": "version" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+", "description": "Version displayed on first execution" },
+
+    { "action": "section", "title": "Step 2: Recover command from history with Up arrow" },
+    { "action": "send_keys", "keys": "Up" },
+    { "action": "sleep", "seconds": 0.3 },
+
+    { "action": "section", "title": "Step 3: Execute recovered command" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+", "description": "Version displayed again (history execution works)" }
+  ]
+}

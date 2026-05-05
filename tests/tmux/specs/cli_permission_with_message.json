@@ -1,0 +1,30 @@
+{
+  "name": "cli-permission-with-message",
+  "description": "Verify --permission flag with message in various arg orders",
+  "config": {
+    "command": "python main.py --permissions trust --stay hello",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "section", "name": "Test: kollab --permissions trust --stay hello" },
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "Permission mode set to TRUST_ALL",
+      "description": "Trust mode set correctly (not 'Unknown subcommand: hello')"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Unknown subcommand",
+      "description": "No subcommand error"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hello",
+      "description": "Message 'hello' sent to LLM (visible in input/thinking)"
+    }
+  ]
+}

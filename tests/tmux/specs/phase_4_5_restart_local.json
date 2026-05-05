@@ -1,0 +1,22 @@
+{
+  "name": "phase-4-5-restart-local",
+  "description": "Verify /restart clears conversation via state.restart_session (phase 4.5 step 7)",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "/restart with no messages" },
+    { "action": "slash_command", "command": "restart" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Session restarted|Cleared", "description": "/restart success message from state_service" },
+    { "action": "assert_contains", "pattern": "Agent:", "description": "restart shows agent name from snapshot" }
+  ]
+}

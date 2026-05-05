@@ -1,0 +1,37 @@
+{
+  "name": "mcp-local-server-connection",
+  "description": "Verify local MCP servers are discovered and connected (requires MCP servers to be configured in ~/.kollab/mcp/)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "section", "title": "Setup: Note about test requirements" },
+    { "action": "info", "msg": "This test requires MCP servers to be pre-configured in ~/.kollab/mcp/" },
+    { "action": "info", "msg": "For local server testing, use tests/tmux/mock_mcp_server.sh" },
+
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Requirement 1-2: MCP server discovery and connection" },
+    { "action": "info", "msg": "Discovery/connection messages are in logs, checking UI instead" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ready", "description": "Application initialized" },
+
+    { "action": "section", "title": "Requirement 3: Tools from local server registered" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "tools" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "tool|Tool|add_observations|create_entities", "description": "MCP tools registered" },
+
+    { "action": "section", "title": "Final Verification" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "show" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "MCP SERVERS|servers|Connected", "description": "MCP status shows connected servers" }
+  ]
+}

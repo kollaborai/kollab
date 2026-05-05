@@ -1,0 +1,32 @@
+{
+  "name": "config-modal-width",
+  "description": "Verify /config modal shows width settings",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Initialize app with message" },
+    { "action": "send_keys", "keys": "hello" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 3 },
+
+    { "action": "section", "title": "Step 2: Open /config modal" },
+    { "action": "send_keys", "keys": "/config" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 3: Verify width settings present" },
+    { "action": "assert_contains", "pattern": "UI Width Mode|Width Mode", "description": "UI Width Mode setting found" },
+    { "action": "assert_contains", "pattern": "Min Width|Minimum", "description": "Min Width setting found" },
+    { "action": "assert_contains", "pattern": "Max Width|Maximum", "description": "Max Width setting found" }
+  ]
+}

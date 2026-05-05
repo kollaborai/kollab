@@ -1,0 +1,33 @@
+{
+  "description": "Native function calling agent - uses API tool calls instead of XML tags",
+  "tools": [
+    "terminal",
+    "file-read",
+    "file-edit",
+    "file-create",
+    "file-create-overwrite",
+    "file-delete",
+    "file-append",
+    "file-insert-after",
+    "file-insert-before",
+    "file-move",
+    "file-copy",
+    "file-grep",
+    "directory",
+    "directory-remove",
+    "git",
+    "hub-msg",
+    "hub-status",
+    "hub-agents",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "task-checkpoint",
+    "task-complete",
+    "wait-for-user"
+  ],
+  "skills": [
+    "scan-project"
+  ],
+  "vault_enabled": true
+}

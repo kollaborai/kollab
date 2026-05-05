@@ -1,0 +1,35 @@
+{
+  "name": "agent-create",
+  "description": "Verify /agent command navigation to Create Agent form",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 55,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 1 },
+
+    { "action": "section", "title": "Test 1: Open /agent command menu" },
+    { "action": "slash_command", "command": "agent" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "List|Create|Delete|Edit|agent|Agent", "description": "Agent menu appears" },
+
+    { "action": "section", "title": "Test 2: Navigate to Create option" },
+    { "action": "send_keys", "keys": "Up" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Create|selected|>", "description": "Create option selected" },
+
+    { "action": "section", "title": "Test 3: Open Create Agent form" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "AI will generate system prompt|Create Agent|Agent Name|Description", "description": "Create Agent form appears" }
+  ]
+}

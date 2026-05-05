@@ -1,0 +1,76 @@
+{
+  "name": "verify-label-widget-inline-edit",
+  "description": "Verify label widget inline editing functionality - enter edit mode, navigate to widget, activate inline editor, test text input",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 2,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.1,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Application started" },
+    { "action": "sleep", "seconds": 1 },
+
+    { "action": "section", "title": "Step 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode active" },
+
+    { "action": "section", "title": "Step 3: Enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode active" },
+
+    { "action": "section", "title": "Step 4: Check for label widgets" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "No errors checking for widgets" },
+
+    { "action": "section", "title": "Step 5: Navigate through widgets" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+
+    { "action": "section", "title": "Step 6: Activate inline editor" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Inline editor activated without crash" },
+
+    { "action": "section", "title": "Step 7: Test text input" },
+    { "action": "type", "text": "Test" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Text input handled without crash" },
+
+    { "action": "section", "title": "Step 8: Cancel inline edit" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+
+    { "action": "section", "title": "Step 9: Exit edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Step 10: Exit navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 }
+  ]
+}

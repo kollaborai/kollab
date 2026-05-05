@@ -1,0 +1,60 @@
+{
+  "name": "slot-navigation",
+  "description": "Verify slot navigation in edit mode: slots visible, arrows navigate, selection highlights, Enter works, slots disappear on exit",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Setup: Enter edit mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated" },
+
+    { "action": "section", "title": "Test 1: Slots (+) visible in edit mode" },
+    { "action": "assert_contains", "pattern": "\\+", "description": "Slot indicators (+) found" },
+
+    { "action": "section", "title": "Test 2: Arrow keys navigate to slots" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Navigation works - still in edit mode" },
+
+    { "action": "section", "title": "Test 3: Multiple navigation steps" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Multiple navigation steps work" },
+
+    { "action": "section", "title": "Test 4: Selection highlighting" },
+    { "action": "assert_contains", "pattern": "▄|▀|\\[|\\*|>|\\^", "description": "Selection indicators found" },
+
+    { "action": "section", "title": "Test 5: Enter key accepted" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|ERROR|exception|Exception|traceback", "description": "Enter key accepted without error" },
+
+    { "action": "section", "title": "Test 6: Slots disappear when exiting edit mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Returned to navigation mode (edit mode exited)" }
+  ]
+}

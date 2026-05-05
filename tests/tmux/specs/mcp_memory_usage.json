@@ -1,0 +1,47 @@
+{
+  "name": "mcp-memory-usage",
+  "description": "Test memory MCP server connection and LLM tool usage",
+  "config": {
+    "command": "python main.py",
+    "show_captures": true,
+    "app_init_sleep": 4,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+    { "action": "info", "message": "App started, checking MCP status" },
+
+    { "action": "section", "title": "Test 1: Verify memory server connected" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "show" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "memory|connected|online", "description": "Memory server connected" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Test 2: Check available memory tools" },
+    { "action": "slash_command", "command": "mcp", "subcommand": "tools" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "create_entities|create_entity|search|memory", "description": "Memory tools available" },
+    { "action": "sleep", "seconds": 0.5 },
+
+    { "action": "section", "title": "Test 3: LLM uses memory tool to store information" },
+    { "action": "type", "text": "Remember that my favorite color is blue" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture", "show": true },
+    { "action": "assert_contains", "pattern": "tool|memory|create|entity|favorite.*color", "description": "LLM uses memory tool" },
+    { "action": "sleep", "seconds": 2 },
+
+    { "action": "section", "title": "Test 4: LLM retrieves stored information from memory" },
+    { "action": "type", "text": "What is my favorite color?" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture", "show": true },
+    { "action": "assert_contains", "pattern": "blue|memory|retrieved|remember", "description": "LLM retrieves from memory" }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "agent-skill-spawn",
+  "description": "Verify agent orchestrator with agent-type and skills support",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": true,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: /sub list command" },
+    { "action": "slash_command", "command": "sub", "subcommand": "list" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "No active agents|Active Agents|agents", "description": "/sub list works" },
+
+    { "action": "section", "title": "Test 2: /sub status command" },
+    { "action": "slash_command", "command": "sub", "subcommand": "status" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "No active agents|Agent Status|Status", "description": "/sub status works" },
+
+    { "action": "section", "title": "Test 3: /sub help command" },
+    { "action": "slash_command", "command": "sub", "subcommand": "help" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "list|status|create|capture|stop|message", "description": "/sub help shows subcommands" }
+  ]
+}

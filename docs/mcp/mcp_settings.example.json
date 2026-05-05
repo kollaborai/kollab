@@ -1,0 +1,109 @@
+{
+  "_comment": "Example MCP configuration for Kollab",
+  "_documentation": "See docs/mcp/MCP_SETUP.md for complete setup guide",
+
+  "servers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-filesystem /Users/$(whoami)",
+      "enabled": false,
+      "description": "File system operations (read, write, list files)"
+    },
+
+    "git": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-git --repository .",
+      "enabled": false,
+      "description": "Git operations (status, log, diff, commit)"
+    },
+
+    "github": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-github",
+      "enabled": false,
+      "description": "GitHub API integration (issues, PRs, repositories)",
+      "env": {
+        "GITHUB_TOKEN": "your-github-token-here"
+      }
+    },
+
+    "brave-search": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-brave-search",
+      "enabled": false,
+      "description": "Web search using Brave Search API",
+      "env": {
+        "BRAVE_API_KEY": "your-brave-api-key-here"
+      }
+    },
+
+    "sqlite": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-sqlite --db-path ./database.db",
+      "enabled": false,
+      "description": "SQLite database operations"
+    },
+
+    "postgres": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-postgres --connection-string postgresql://user:password@localhost:5432/dbname",
+      "enabled": false,
+      "description": "PostgreSQL database operations"
+    },
+
+    "fetch": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-fetch",
+      "enabled": false,
+      "description": "HTTP fetch operations for making web requests"
+    },
+
+    "memory": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-memory",
+      "enabled": false,
+      "description": "Persistent memory storage for conversation context"
+    },
+
+    "puppeteer": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-puppeteer",
+      "enabled": false,
+      "description": "Web browser automation and scraping"
+    },
+
+    "exa": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-exa",
+      "enabled": false,
+      "description": "Exa AI-powered search (requires API key)",
+      "env": {
+        "EXA_API_KEY": "your-exa-api-key-here"
+      }
+    },
+
+    "memory": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-memory",
+      "enabled": false,
+      "description": "Persistent memory storage for conversation context"
+    },
+
+    "sequential-thinking": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-sequential-thinking",
+      "enabled": false,
+      "description": "Advanced reasoning and step-by-step thinking"
+    },
+
+    "google-maps": {
+      "type": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-google-maps",
+      "enabled": false,
+      "description": "Google Maps integration (places, directions, geocoding)",
+      "env": {
+        "GOOGLE_MAPS_API_KEY": "your-google-maps-api-key"
+      }
+    }
+  }
+}

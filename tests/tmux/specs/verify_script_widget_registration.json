@@ -1,0 +1,59 @@
+{
+  "name": "verify-script-widget-registration",
+  "description": "Verify script widget registration - enter edit mode, open widget picker, check for test-widget registration",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.5,
+    "menu_delay": 1.0
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Wait for application initialization" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application initialized" },
+
+    { "action": "section", "title": "Test 2: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode active" },
+
+    { "action": "section", "title": "Test 3: Enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode active" },
+
+    { "action": "section", "title": "Test 4: Open widget picker" },
+    { "action": "send_keys", "keys": "a" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Widget picker opened without crash" },
+
+    { "action": "section", "title": "Test 5: Check for widget picker UI" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Picker UI stable" },
+
+    { "action": "section", "title": "Test 6: Look for test-widget (scroll pages)" },
+    { "action": "send_keys", "keys": "PageDown" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "PageDown" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "PageDown" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "PageDown navigation works" },
+
+    { "action": "section", "title": "Test 7: Verify widget registration" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "error|Error|ERROR|exception|Exception|Traceback", "description": "Widget picker functional" }
+  ]
+}

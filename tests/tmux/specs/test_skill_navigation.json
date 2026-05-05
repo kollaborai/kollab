@@ -1,0 +1,45 @@
+{
+  "name": "skill-navigation",
+  "description": "Verify /skill modal opens and displays skill list with Create New Skill option",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 55,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 1 },
+
+    { "action": "section", "title": "Test 1: Load default agent" },
+    { "action": "send_keys", "keys": "/agent default" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Switched to agent|default|Agent loaded", "description": "Agent loads successfully" },
+
+    { "action": "section", "title": "Test 2: Open skills modal" },
+    { "action": "send_keys", "keys": "/skill" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Skills|Available Skills|Management|Create New Skill", "description": "Skills modal opens with skill list" },
+
+    { "action": "section", "title": "Test 3: Navigate within modal" },
+    { "action": "send_keys", "keys": "Down" },
+    { "action": "send_keys", "keys": "Down" },
+    { "action": "send_keys", "keys": "Down" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Skills|Available|skill", "description": "Navigation works in skills modal" },
+
+    { "action": "section", "title": "Test 4: Close modal" },
+    { "action": "send_keys", "keys": "Escape" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Skills - default|Create New Skill", "description": "Modal closes on Escape" }
+  ]
+}

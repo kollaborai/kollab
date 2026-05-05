@@ -1,0 +1,36 @@
+{
+  "name": "profile-edit-key",
+  "description": "Verify pressing 'e' on a selected profile opens the edit modal",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Open profile modal" },
+    { "action": "slash_command", "command": "profile" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "LLM Profiles|Profile", "description": "Profile modal opened" },
+
+    { "action": "section", "title": "Step 2: Navigate to a profile" },
+    { "action": "send_keys", "keys": "Down" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 3: Press 'e' to edit profile" },
+    { "action": "send_keys", "keys": "e" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 4: Verify edit modal opened" },
+    { "action": "assert_contains", "pattern": "Edit Profile|Name|Base URL|Model", "description": "Edit modal should open with form fields" },
+    { "action": "assert_not_contains", "pattern": "Available Profiles", "description": "Should not be on profile list anymore" }
+  ]
+}

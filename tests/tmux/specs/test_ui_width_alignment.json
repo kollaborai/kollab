@@ -1,0 +1,35 @@
+{
+  "name": "ui-width-alignment",
+  "description": "Verify UI elements render consistently (message boxes, input bars, status bars)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application started" },
+
+    { "action": "section", "title": "Test 2: Send message to trigger UI rendering" },
+    { "action": "type", "text": "hello" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Response received" },
+    { "action": "assert_contains", "pattern": "hello|Hello|Hi", "description": "LLM response received" },
+
+    { "action": "section", "title": "Test 4: UI box characters present" },
+    { "action": "assert_contains", "pattern": "▄|▀|█|■", "description": "UI box rendering characters visible" },
+
+    { "action": "section", "title": "Test 5: Status bar present" },
+    { "action": "assert_contains", "pattern": "cwd|msg|tok|sess:", "description": "Status bar elements visible" }
+  ]
+}

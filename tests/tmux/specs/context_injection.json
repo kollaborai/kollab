@@ -1,0 +1,56 @@
+{
+  "name": "context_injection",
+  "description": "Verifies that context is auto-injected when trigger keywords are detected in user input",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "type",
+      "text": "Tell me about the book roots"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "context_inject|book.*roots|the.*roots"
+    },
+    {
+      "action": "section",
+      "name": "test_kollabor_trigger"
+    },
+    {
+      "action": "type",
+      "text": "Help fix the lint issues"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "context_inject|kollabor.*cli|project.*context"
+    }
+  ]
+}

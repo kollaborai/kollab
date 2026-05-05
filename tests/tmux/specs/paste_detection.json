@@ -1,0 +1,35 @@
+{
+  "name": "paste-detection",
+  "description": "Test paste detection: bulk send triggers paste, char-by-char does not",
+  "config": {
+    "command": "python main.py",
+    "show_captures": true,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Bulk send triggers paste detection" },
+    { "action": "send_keys", "keys": "this is pasted text" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Pasted", "description": "Paste indicator shown for bulk send" },
+    { "action": "clear_input" },
+
+    { "action": "section", "title": "Test 2: Char-by-char typing shows literal text" },
+    { "action": "type", "text": "hello world" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "hello world", "description": "Literal text shown for typed input" },
+    { "action": "assert_not_contains", "pattern": "Pasted", "description": "No paste indicator for typed input" },
+    { "action": "clear_input" },
+
+    { "action": "section", "title": "Test 3: Paste multi-line content" },
+    { "action": "send_keys", "keys": "line one\nline two\nline three" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Pasted.*3 lines", "description": "Multi-line paste shows line count" }
+  ]
+}

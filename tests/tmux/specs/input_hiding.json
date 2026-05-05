@@ -1,0 +1,52 @@
+{
+  "name": "input-hiding",
+  "description": "Verify input box visibility: visible in input mode, hidden in navigation/edit mode, toggles correctly with Tab/Esc",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Test 1: Application started successfully" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Kollab|v0\\.", "description": "Application banner visible" },
+
+    { "action": "section", "title": "Test 2: Tab enters navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Ready!|cwd", "description": "Status bar visible (navigation mode active)" },
+
+    { "action": "section", "title": "Test 3: Esc returns to input mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Type your message", "description": "Back to input mode (prompt visible)" },
+
+    { "action": "section", "title": "Test 4: Multiple Tab/Esc cycles work correctly" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Type your message", "description": "Multiple cycles work - back to input mode" },
+
+    { "action": "section", "title": "Test 5: Input box remains hidden in edit mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode active (input box remains hidden)" }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "cli-modes",
+  "description": "Verify CLI mode detection - interactive mode stays open after processing messages",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Interactive mode - app starts" },
+    { "action": "assert_contains", "pattern": "Ready!", "description": "App started in interactive mode" },
+
+    { "action": "section", "title": "Test 2: Interactive mode - input prompt visible" },
+    { "action": "assert_contains", "pattern": "Type.*message|press Enter|Ready!", "description": "Input prompt visible" },
+
+    { "action": "section", "title": "Test 3: Interactive mode - message processed and stays open" },
+    { "action": "type", "text": "hi" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Hi|Hello|Hey", "description": "LLM response received" },
+    { "action": "assert_contains", "pattern": "❯|Ready", "description": "Input prompt shown - app stays in interactive mode" }
+  ]
+}

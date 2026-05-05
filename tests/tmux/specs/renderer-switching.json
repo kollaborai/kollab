@@ -1,0 +1,27 @@
+{
+  "name": "renderer-switching",
+  "description": "Verify pluggable renderer system: modern (default), clean, and simple renderers",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 30,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: App starts with default modern renderer" },
+    { "action": "assert_contains", "pattern": "Ready!", "description": "App started" },
+
+    { "action": "section", "title": "Test 2: Send message and verify modern renderer output" },
+    { "action": "type", "text": "say hello" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 8 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "hello|Hello|hi|Hi", "description": "Got response from LLM" }
+  ]
+}

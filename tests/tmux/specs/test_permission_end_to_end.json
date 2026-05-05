@@ -1,0 +1,37 @@
+{
+  "name": "permission-end-to-end",
+  "description": "Verify permission system end-to-end - prompt appears, accepts input, tool executes",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: Application started" },
+    { "action": "assert_contains", "pattern": "Kollab|Ready!", "description": "Application started" },
+
+    { "action": "section", "title": "Test 2: Send message that triggers tool execution" },
+    { "action": "type", "text": "What files are in the current directory?" },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 8 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 3: Permission prompt appears" },
+    { "action": "assert_contains", "pattern": "Approve|Permission|Confirm.*tool|Deny|\\(y/n\\)|\\(Y/n\\)|\\(a/d\\)", "description": "Permission prompt visible" },
+
+    { "action": "section", "title": "Test 4: Approve permission" },
+    { "action": "type", "text": "a" },
+    { "action": "sleep", "seconds": 5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 5: Tool executed" },
+    { "action": "assert_contains", "pattern": "✔.*terminal|Read.*lines|thinking", "description": "Tool executed successfully" }
+  ]
+}

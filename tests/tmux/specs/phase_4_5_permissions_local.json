@@ -1,0 +1,50 @@
+{
+  "name": "phase-4-5-permissions-local",
+  "description": "Verify /permissions show/stats/clear/project route through state_service (phase 4.5 step 7)",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "/permissions show" },
+    { "action": "type", "text": "/permissions show" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Permission Settings|Mode", "description": "/permissions show renders mode + stats" },
+
+    { "action": "section", "title": "/permissions stats" },
+    { "action": "type", "text": "/permissions stats" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Permission Statistics|Total checks", "description": "/permissions stats renders" },
+
+    { "action": "section", "title": "/permissions project" },
+    { "action": "type", "text": "/permissions project" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Project Approvals|No project approvals", "description": "/permissions project reads via state_service" },
+
+    { "action": "section", "title": "/permissions clear" },
+    { "action": "type", "text": "/permissions clear" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Session approvals cleared", "description": "/permissions clear writes via state_service" },
+
+    { "action": "section", "title": "/permissions clear-project" },
+    { "action": "type", "text": "/permissions clear-project" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Project approvals cleared", "description": "/permissions clear-project writes via state_service" }
+  ]
+}

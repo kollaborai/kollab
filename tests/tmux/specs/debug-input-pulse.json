@@ -1,0 +1,20 @@
+{
+  "name": "debug-input-pulse",
+  "description": "Test if input box pulses/animates on startup",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 2,
+    "show_captures": true
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture", "name": "initial" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "capture", "name": "after_200ms" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "capture", "name": "after_400ms" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "capture", "name": "after_600ms" }
+  ]
+}

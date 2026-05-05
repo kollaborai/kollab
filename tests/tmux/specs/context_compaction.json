@@ -1,0 +1,29 @@
+{
+  "name": "context-compaction",
+  "description": "Verify context compaction plugin loads, registers widget, shows status",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 30,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: App starts successfully" },
+    { "action": "assert_contains", "pattern": "Ready!", "description": "App started" },
+
+    { "action": "section", "title": "Test 2: Hooks registered" },
+    { "action": "assert_contains", "pattern": "hooks active", "description": "Hooks system active" },
+
+    { "action": "section", "title": "Test 3: Plugins loaded" },
+    { "action": "assert_contains", "pattern": "plugins active", "description": "Plugin system active" },
+
+    { "action": "section", "title": "Test 4: Context widget visible in status area" },
+    { "action": "assert_contains", "pattern": "ctx:", "description": "Context compaction widget rendered" }
+  ]
+}

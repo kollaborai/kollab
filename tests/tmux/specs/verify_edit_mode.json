@@ -1,0 +1,54 @@
+{
+  "name": "verify-edit-mode",
+  "description": "Verify edit mode functionality: 'e' enters edit mode, mode indicator shows, slots visible, arrows work, Esc exits to navigation mode, can re-enter edit mode",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Setup: Enter navigation mode" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Navigation mode activated" },
+
+    { "action": "section", "title": "Test 1: 'e' key enters edit mode from navigation" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Edit mode activated - mode indicator shows 'EDIT'" },
+
+    { "action": "section", "title": "Test 2: Slots (+) appear between widgets" },
+    { "action": "assert_contains", "pattern": "\\+", "description": "Slot indicators (+) visible in edit mode" },
+
+    { "action": "section", "title": "Test 3: Empty rows become visible" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Multiple rows visible (status area has multiple lines)" },
+
+    { "action": "section", "title": "Test 4: Arrow keys work in edit mode" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "arrow", "direction": "Left" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Arrow navigation works - still in edit mode" },
+
+    { "action": "section", "title": "Test 5: Esc returns to navigation mode" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE", "description": "Returned to navigation mode - mode indicator shows 'NAVIGATE'" },
+
+    { "action": "section", "title": "Test 6: Can re-enter edit mode" },
+    { "action": "edit_mode" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "EDIT", "description": "Can re-enter edit mode from navigation" }
+  ]
+}
