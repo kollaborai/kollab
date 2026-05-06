@@ -11,16 +11,17 @@ vault hydrated into their system prompt. They remember everything.
 Vault scoping (project-aware):
   stream.jsonl and working_memory are scoped per-project via get_hub_dir()
   so agents working in different repositories don't bleed context.
-  Crystallized knowledge and meta are GLOBAL — stored at the shared
-  ~/.kollab/hub/vaults/ location for cross-project learning.
+  Crystallized knowledge and meta are shared within the current project
+  by default. Set KOLLAB_HUB_GLOBAL_VAULTS=1 to use the legacy
+  cross-project ~/.kollab/hub/vaults/ location.
 
   Layout (project-scoped hub, e.g. ~/.kollab/projects/<enc>/hub/):
     vaults/{identity}/
       stream.jsonl             project-scoped event log
       working_memory.md        project-scoped rolling context
 
-  Layout (global, always at ~/.kollab/hub/):
-    vaults/{identity}/
+  Layout (project-scoped shared vault):
+    vaults/_shared/{identity}/
       crystallized.md          global long-term wisdom
       meta.json                global metadata
 
@@ -31,6 +32,7 @@ Vault scoping (project-aware):
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -54,14 +56,26 @@ def get_vaults_dir() -> Path:
 
 
 def get_global_vaults_dir() -> Path:
-    """Get the global vaults directory (cross-project).
+    """Get the shared vaults directory.
 
-    Always at ~/.kollab/hub/vaults/ regardless of project scoping.
-    Used for crystallized.md and meta.json (cross-project knowledge).
+    Project-scoped hub mode keeps shared crystals inside the project hub
+    tree by default so startup does not create ~/.kollab/hub. Set
+    KOLLAB_HUB_GLOBAL_VAULTS=1 to use the legacy cross-project location.
     """
-    from kollabor_config.config_utils import get_config_directory
+    from .project_scope import is_project_scoped
 
-    d = get_config_directory() / "hub" / "vaults"
+    global_vaults = os.environ.get("KOLLAB_HUB_GLOBAL_VAULTS", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if is_project_scoped() and not global_vaults:
+        d = get_vaults_dir() / "_shared"
+    else:
+        from kollabor_config.config_utils import get_config_directory
+
+        d = get_config_directory() / "hub" / "vaults"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -125,7 +139,7 @@ class AgentVault:
 
     Stream and working memory are scoped per-project so agents
     don't bleed context between repositories. Crystallized knowledge
-    and metadata remain global for cross-project learning.
+    and metadata remain shared within the project by default.
     """
 
     def __init__(self, identity: str, project_fingerprint: Optional[str] = None):
@@ -135,11 +149,11 @@ class AgentVault:
         self._vault_dir = get_vaults_dir() / identity
         self._vault_dir.mkdir(parents=True, exist_ok=True)
 
-        # Global vault dir (crystallized + meta — cross-project learning)
+        # Shared vault dir (crystallized + meta)
         self._global_vault_dir = get_global_vaults_dir() / identity
         self._global_vault_dir.mkdir(parents=True, exist_ok=True)
 
-        # Crystallized knowledge and meta are GLOBAL (cross-project)
+        # Crystallized knowledge and meta are shared
         self._crystal_path = self._global_vault_dir / "crystallized.md"
         self._meta_path = self._global_vault_dir / "meta.json"
 

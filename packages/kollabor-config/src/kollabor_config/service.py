@@ -128,6 +128,8 @@ class ConfigService:
                 self.config_manager.config = complete_config
                 self._cached_config = complete_config.copy()
                 self._config_error = None
+                self._migrate_config_if_needed()
+                self._cached_config = self.config_manager.config.copy()
                 logger.info("Loaded and merged existing configuration")
             else:
                 # Create new config with defaults and plugin configs
@@ -135,6 +137,8 @@ class ConfigService:
                 self.config_manager.config = complete_config
                 self._cached_config = complete_config.copy()
                 self.config_loader.save_merged_config(complete_config)
+                self._migrate_config_if_needed()
+                self._cached_config = self.config_manager.config.copy()
                 self._config_error = None
                 logger.info("Created new configuration file")
         except Exception as e:
@@ -149,6 +153,76 @@ class ConfigService:
                 self.config_manager.config = base_config
                 self._cached_config = base_config.copy()
                 logger.warning("Using base configuration as fallback")
+
+    def _migrate_config_if_needed(self) -> None:
+        """Fill missing config keys for the current app version.
+
+        Migrations are additive only: an explicit user value, including
+        ``False``, is preserved. The stored config version tracks the app
+        version so new releases can add missing keys without rewriting a
+        user's chosen settings.
+        """
+        import json
+
+        from kollabor_events.dict_utils import safe_get, safe_set
+
+        try:
+            from kollabor.version import __version__ as app_version
+        except Exception:
+            app_version = "unknown"
+
+        missing = object()
+        save_path = get_global_config_path()
+        try:
+            if save_path.exists():
+                raw = json.loads(save_path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raw = {}
+            else:
+                raw = {}
+        except Exception as e:
+            logger.warning("Could not read config for migration: %s", e)
+            raw = {}
+
+        additive_defaults = {
+            "plugins.hub.enabled": True,
+            "plugins.hub.project_scoped": True,
+            "plugins.context_service.hub_broadcast_enabled": True,
+            "kollabor.llm.default_agent": {
+                "name": "koordinator",
+                "level": "global",
+            },
+        }
+
+        changed = False
+        for key_path, default_value in additive_defaults.items():
+            if safe_get(raw, key_path, missing) is missing:
+                safe_set(raw, key_path, default_value)
+                safe_set(self.config_manager.config, key_path, default_value)
+                changed = True
+
+        if safe_get(raw, "config_version", None) != app_version:
+            safe_set(raw, "config_version", app_version)
+            safe_set(self.config_manager.config, "config_version", app_version)
+            changed = True
+        if safe_get(raw, "last_app_version", None) != app_version:
+            safe_set(raw, "last_app_version", app_version)
+            safe_set(self.config_manager.config, "last_app_version", app_version)
+            changed = True
+
+        if not changed:
+            return
+
+        try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            self._last_self_write = time.time()
+            save_path.write_text(
+                json.dumps(raw, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            logger.info("Migrated config defaults for app version %s", app_version)
+        except Exception as e:
+            logger.error("Failed to write migrated config: %s", e)
 
     def get(self, key_path: str, default: Any = None) -> Any:
         """Get a configuration value using dot notation.

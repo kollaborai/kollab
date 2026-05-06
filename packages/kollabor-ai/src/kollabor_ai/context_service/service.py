@@ -57,7 +57,7 @@ class ContextService:
         # Captured running loop for scheduling bridge broadcasts (set in set_event_bus)
         self._loop: Any = None
 
-        # Phase D: hub bridge for cross-agent metadata sharing
+        # Hub bridge for cross-agent metadata sharing
         self._hub_bridge: Any = None
         # Divergent-hash warnings pending inline injection (fallback
         # path until the agent notification system lands)
@@ -110,7 +110,7 @@ class ContextService:
         logger.debug(f"register_loader shim: {context_type} (no-op)")
 
     # ------------------------------------------------------------------
-    # Phase D: hub bridge integration
+    # Hub bridge integration
     # ------------------------------------------------------------------
 
     def set_hub_bridge(self, bridge: Any) -> None:
@@ -824,7 +824,7 @@ class ContextService:
                 },
                 {
                     "type": "checkbox",
-                    "label": "Hub Broadcast (phase D)",
+                    "label": "Hub Broadcast",
                     "config_path": (
                         "plugins.context_service.hub_broadcast_enabled"
                     ),

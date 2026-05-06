@@ -657,10 +657,12 @@ class TerminalLLMChat:
             from kollabor_config.config_utils import get_existing_global_config_path
 
             cfg_path = get_existing_global_config_path()
-            if cfg_path.exists():
-                cfg = _json.loads(cfg_path.read_text())
-                if cfg.get("plugins", {}).get("hub", {}).get("project_scoped"):
-                    os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1"
+            if not cfg_path.exists():
+                os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1"
+                return
+            cfg = _json.loads(cfg_path.read_text())
+            scoped = cfg.get("plugins", {}).get("hub", {}).get("project_scoped", True)
+            os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1" if scoped else "0"
         except Exception:
             pass
 

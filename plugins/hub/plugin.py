@@ -299,7 +299,7 @@ class HubPlugin(BasePlugin):
                     "require_auth": False,
                     "authority": "kollabor.ai",
                     "wait_cooldown_seconds": 60,
-                    "project_scoped": False,
+                    "project_scoped": True,
                 }
             }
         }
@@ -317,11 +317,11 @@ class HubPlugin(BasePlugin):
                 },
                 {
                     "type": "checkbox",
-                    "label": "Project Scoped",
+                    "label": "Per-project Hub",
                     "config_path": "plugins.hub.project_scoped",
                     "help": (
-                        "Silo hub state per project (presence, vaults, "
-                        "sockets). Agents in other projects become invisible. "
+                        "Keep hub state per project (presence, vaults, "
+                        "sockets). Agents in other projects stay invisible. "
                         "Requires restart."
                     ),
                 },
@@ -546,16 +546,13 @@ class HubPlugin(BasePlugin):
         # touches hub paths. Propagates to detached-daemon subprocess spawns
         # because env vars inherit. See plugins/hub/project_scope.py.
         try:
-            scoped = bool(self.config.get("plugins.hub.project_scoped", False))
+            scoped = bool(self.config.get("plugins.hub.project_scoped", True))
 
             # Wire loop detection threshold from config to nudge engine
             if self._nudge_engine and self.config:
                 threshold = self.config.get("plugins.hub.loop_detection_threshold", 3)
                 self._nudge_engine._loop_threshold = threshold
-            if scoped:
-                os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1"
-            # if the flag is off we don't unset — lets a test or CLI flag
-            # set it explicitly before plugin init and have it stick
+            os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1" if scoped else "0"
         except Exception:
             pass
 
@@ -1501,7 +1498,7 @@ class HubPlugin(BasePlugin):
             "wait_for_user", self._handle_wait_for_user_tool
         )
 
-        # --- hub_ask_ctx (phase D) ---
+        # --- hub_ask_ctx ---
         # <hub_ask_ctx peer="lapis" />
         # <hub_ask_ctx peer="lapis" filter="file:kollabor/" />
         ask_ctx_pat = _re.compile(
@@ -1668,7 +1665,7 @@ class HubPlugin(BasePlugin):
     async def _broadcast_context_ledger_update(
         self, payload: Dict[str, Any]
     ) -> None:
-        """Control-plane broadcaster for phase D ledger updates.
+        """Control-plane broadcaster for context ledger updates.
 
         Uses action="context_ledger_update" so peers dispatch it
         without rendering as user-visible chat or vault stream entries.
@@ -1702,7 +1699,7 @@ class HubPlugin(BasePlugin):
                     e,
                 )
 
-    def _wire_phase_d_bridge(self) -> None:
+    def _wire_context_hub_bridge(self) -> None:
         """Instantiate HubBridge and attach it to the context service.
 
         No-op when plugins.context_service.hub_broadcast_enabled is
@@ -1712,7 +1709,7 @@ class HubPlugin(BasePlugin):
             return
         enabled = bool(
             self.config.get(
-                "plugins.context_service.hub_broadcast_enabled", False
+                "plugins.context_service.hub_broadcast_enabled", True
             )
         )
         if not enabled:
@@ -1746,7 +1743,7 @@ class HubPlugin(BasePlugin):
             is_waiting=_is_waiting,
         )
         context_svc.set_hub_bridge(bridge)
-        logger.info("Phase D hub bridge wired")
+        logger.info("Context hub bridge wired")
 
     async def _handle_wait_for_user_tool(self, tool_data: dict[str, Any]):
         """Handle <wait_for_user/> tag — put agent into waiting state."""
@@ -1975,7 +1972,7 @@ class HubPlugin(BasePlugin):
             )
 
     async def _handle_global_vault_write_tool(self, tool_data: dict[str, Any]):
-        """Execute a global_vault_write tool -- save cross-project insight."""
+        """Execute a global_vault_write tool -- save shared insight."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
         content = tool_data.get("content", "").strip()
@@ -2004,14 +2001,14 @@ class HubPlugin(BasePlugin):
             if self._vault and self._identity:
                 self._vault.append_stream(
                     "global_vault_write",
-                    f"saved global crystal {entry.id}: {entry.summary[:80]}",
+                    f"saved shared crystal {entry.id}: {entry.summary[:80]}",
                     from_agent=self._identity.identity,
                 )
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="global_vault_write",
                 success=True,
-                output=f"saved to global vault as {entry.id}: {entry.summary[:80]}",
+                output=f"saved to shared vault as {entry.id}: {entry.summary[:80]}",
             )
         except Exception as e:
             return ToolExecutionResult(
@@ -3957,10 +3954,10 @@ class HubPlugin(BasePlugin):
                 f"{len(existing)} peers online"
             )
 
-            # Phase D: wire context-service bridge now that identity is resolved
+            # Wire context-service bridge now that identity is resolved
             # and all plugins are initialized. Deferred from initialize() to avoid
             # the race where context_service_plugin hadn't registered yet.
-            self._wire_phase_d_bridge()
+            self._wire_context_hub_bridge()
 
             # NOTE: hub trender tags (hub_identity, hub_roster, hub_work_queue)
             # render empty on first boot because the hub isn't ready yet.
@@ -4856,7 +4853,7 @@ class HubPlugin(BasePlugin):
             while len(self._seen_messages) > 1000:
                 self._seen_messages.popitem(last=False)
 
-        # Phase D: control-plane traffic — dispatch without vault/display
+        # Context control-plane traffic — dispatch without vault/display
         if message.action == "context_ledger_update":
             context_svc = self._get_context_service()
             bridge = (
@@ -8140,7 +8137,7 @@ class HubPlugin(BasePlugin):
             source = f" ({org['source']})" if org.get("source") == "user" else ""
             lines.append(f"  {org['name']}{source}: {org['description']}")
         lines.append("\nusage: /hub org <name> [mission]")
-        lines.append("custom: create JSON in ~/.kollab/hub/organizations/")
+        lines.append("custom: create JSON in the user hub organizations directory")
         return "\n".join(lines)
 
     async def _handle_feed_command(self) -> str:

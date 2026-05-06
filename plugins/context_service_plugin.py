@@ -75,7 +75,7 @@ class ContextServicePlugin(BasePlugin):
                     "curator_throttle_turns": 2,
                     "file_dedup_mode": "stale_hit",
                     "default_decision": "summary",
-                    "hub_broadcast_enabled": False,
+                    "hub_broadcast_enabled": True,
                 }
             }
         }

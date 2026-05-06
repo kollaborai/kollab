@@ -293,6 +293,7 @@ class StatusLayoutManager:
                 WidgetConfig(id="cwd", width=WidgetWidth.auto()),
                 WidgetConfig(id="git-branch", width=WidgetWidth.auto()),
                 WidgetConfig(id="git-status", width=WidgetWidth.auto()),
+                WidgetConfig(id="context-compaction", width=WidgetWidth.auto()),
             ],
         )
 
@@ -313,7 +314,6 @@ class StatusLayoutManager:
             id=3,
             visible=True,
             widgets=[
-                WidgetConfig(id="hub", width=WidgetWidth.auto()),
                 WidgetConfig(id="agent", width=WidgetWidth.auto()),
                 WidgetConfig(id="skills", width=WidgetWidth.auto()),
                 WidgetConfig(id="session", width=WidgetWidth.auto()),
@@ -327,17 +327,20 @@ class StatusLayoutManager:
             visible=True,
             widgets=[
                 WidgetConfig(id="tasks", width=WidgetWidth.auto()),
-                WidgetConfig(id="tmux", width=WidgetWidth.auto()),
                 WidgetConfig(id="bg-tasks", width=WidgetWidth.auto()),
-                WidgetConfig(id="deep-thought", width=WidgetWidth.auto()),
                 WidgetConfig(id="altview", width=WidgetWidth.auto()),
+                WidgetConfig(id="deep-thought", width=WidgetWidth.auto()),
                 WidgetConfig(id="token-io", width=WidgetWidth.auto()),
                 WidgetConfig(id="sysmon", width=WidgetWidth.auto()),
             ],
         )
 
-        # Default row 5: empty (hidden) - available for user customization
-        row5 = RowConfig(id=5, visible=False, widgets=[])
+        # Default row 5: hub status
+        row5 = RowConfig(
+            id=5,
+            visible=True,
+            widgets=[WidgetConfig(id="hub", width=WidgetWidth.auto())],
+        )
 
         # Default row 6: empty (hidden) - available for user customization
         row6 = RowConfig(id=6, visible=False, widgets=[])

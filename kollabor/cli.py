@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import difflib
 import logging
 import re
 import shlex
@@ -166,6 +167,34 @@ def print_full_help(
         print(f"\n({elapsed:.0f}ms)")
 
 
+def _unknown_command_error(cmd_name: str, available: list[str]) -> str:
+    """Format an unknown CLI command error with a close-match hint."""
+    known_cli_flags = {
+        "hub",
+        "org",
+        "attach",
+        "detached",
+        "daemon",
+        "agent",
+        "profile",
+        "project",
+        "context",
+        "update",
+        "reset-config",
+    }
+    candidates = sorted(set(available) | known_cli_flags)
+    available_flags = [f"--{c}" for c in candidates[:10]]
+    message = f"Unknown command: --{cmd_name}\n"
+    matches = difflib.get_close_matches(cmd_name, candidates, n=1, cutoff=0.6)
+    if matches:
+        message += f"Did you mean --{matches[0]}?\n"
+    message += (
+        f"Available commands: {', '.join(available_flags)}\n"
+        f"Run 'kollab -h' to see all"
+    )
+    return message
+
+
 def discover_plugin_args() -> tuple:
     """Discover plugins and collect their CLI arg registrations.
 
@@ -272,8 +301,10 @@ Examples:
   kollab --agent myagent --skill coding    # Agent with skill (long form)
   kollab --agent coder --as lapis          # Run coder bundle under hub identity 'lapis'
   kollab --agent coder --as lapis --detached  # Same, detached (backgrounded agent)
+  kollab -d                                # Short form for --detached
   kollab --attach lapis                     # Attach to agent 'lapis' and see its output
   kollab --reset-config                    # Reset configs to defaults with updated profiles
+  kollab --update                          # Update this source checkout from Git
   kollab --sub list                         # Execute /sub list and exit
   kollab --sub list --stay                  # Execute /sub list, then interactive mode
 
@@ -443,6 +474,7 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "-d",
         "--detached",
         action="store_true",
         default=False,
@@ -483,6 +515,12 @@ Telegram bridge setup (run inside interactive mode):
         "--reset-config",
         action="store_true",
         help="Reset global and local config.json to defaults with updated profiles",
+    )
+
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Update this source checkout from Git and refresh the editable install",
     )
 
     parser.add_argument(
@@ -633,12 +671,7 @@ Telegram bridge setup (run inside interactive mode):
                         for c in command_registry.get_all_commands()
                         if not c.cli_hidden
                     ]
-                    available_flags = [f"--{c}" for c in sorted(available[:10])]
-                    parser.error(
-                        f"Unknown command: --{cmd_name}\n"
-                        f"Available commands: {', '.join(available_flags)}\n"
-                        f"Run 'kollab -h' to see all"
-                    )
+                    parser.error(_unknown_command_error(cmd_name, available))
             else:
                 # No registry yet - store for later processing in application.py
                 args._unknown_args = unknown
@@ -690,12 +723,7 @@ def process_cli_command(
         available = [
             c.name for c in command_registry.get_all_commands() if not c.cli_hidden
         ]
-        available_flags = [f"--{c}" for c in sorted(available[:10])]
-        raise ValueError(
-            f"Unknown command: --{cmd_name}\n"
-            f"Available commands: {', '.join(available_flags)}\n"
-            f"Run 'kollab -h' to see all"
-        )
+        raise ValueError(_unknown_command_error(cmd_name, available))
 
     if cmd_def.cli_hidden:
         raise ValueError(
@@ -792,6 +820,15 @@ async def async_main() -> None:
         print("Configuration reset complete!")
         print(f"  - Global config: {global_config}")
         print(f"  - Local config:  {local_config}")
+        return
+
+    if args.update:
+        from .updates.git_update import run_source_update
+
+        result = run_source_update()
+        print(result.message)
+        if not result.success:
+            sys.exit(1)
         return
 
     # Handle --font-dir: print font directory and exit
@@ -1000,10 +1037,12 @@ def _apply_hub_project_scope_from_config() -> None:
         from kollabor_config.config_utils import get_existing_global_config_path
 
         cfg_path = get_existing_global_config_path()
-        if cfg_path.exists():
-            cfg = _json.loads(cfg_path.read_text())
-            if cfg.get("plugins", {}).get("hub", {}).get("project_scoped"):
-                _os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1"
+        if not cfg_path.exists():
+            _os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1"
+            return
+        cfg = _json.loads(cfg_path.read_text())
+        scoped = cfg.get("plugins", {}).get("hub", {}).get("project_scoped", True)
+        _os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1" if scoped else "0"
     except Exception:
         pass
 
@@ -1623,11 +1662,12 @@ def _should_use_daemon() -> bool:
     Daemon mode only for normal interactive sessions. Skip for:
     - explicit flags (--detached, --attach, --no-daemon, --hub)
     - pipe mode (stdin not a tty, or -p flag)
-    - info flags (-h, --help, --version, --reset-config, --font-dir, --login)
+    - info flags (-h, --help, --version, --reset-config, --update, --font-dir, --login)
     """
     args = sys.argv[1:]
     skip_flags = {
         "--detached",
+        "-d",
         "--attach",
         "--no-daemon",
         "--hub",
@@ -1636,10 +1676,29 @@ def _should_use_daemon() -> bool:
         "--help",
         "--version",
         "--reset-config",
+        "--update",
         "--font-dir",
         "--login",
         "-p",
         "--pipe",
+    }
+    daemon_launch_flags = {
+        "--agent",
+        "-a",
+        "--as",
+        "--profile",
+        "--project",
+        "--context",
+        "--system-prompt",
+        "--skill",
+        "-s",
+        "--timeout",
+    }
+    daemon_launch_switches = {
+        "--daemon",
+        "--simple",
+        "--save",
+        "--local",
     }
     for arg in args:
         if arg in skip_flags:
@@ -1647,6 +1706,13 @@ def _should_use_daemon() -> bool:
         # --attach=value or --hub=value style
         for flag in ("--attach=", "--hub=", "--org="):
             if arg.startswith(flag):
+                return False
+        if arg.startswith("--"):
+            flag_name = arg.split("=", 1)[0]
+            if (
+                flag_name not in daemon_launch_flags
+                and flag_name not in daemon_launch_switches
+            ):
                 return False
 
     # Skip if stdin is piped (non-interactive)
@@ -1663,7 +1729,7 @@ def cli_main() -> None:
     # processes that touch the TTY (SIGTTOU). Instead, we fork,
     # create a new session (setsid), redirect all fds, and let
     # the parent exit immediately. The child runs headless.
-    if "--detached" in sys.argv:
+    if "--detached" in sys.argv or "-d" in sys.argv:
         import os
 
         pid = os.fork()

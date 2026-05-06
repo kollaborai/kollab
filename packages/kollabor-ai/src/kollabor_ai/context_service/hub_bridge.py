@@ -1,10 +1,10 @@
-"""Phase D: Hub bridge for cross-agent context metadata sharing.
+"""Hub bridge for cross-agent context metadata sharing.
 
 Broadcasts ledger events to hub peers and processes incoming
 broadcasts from other agents. Never shares file content — only
 metadata (hash, size, decision, file version).
 
-MVP scope (see docs/architecture/rfcs/RFC-2026-04-13-context-service-phase-d-hub-bridge.md):
+Scope:
   - outgoing ledger broadcasts via hub plugin
   - incoming broadcast storage + divergence detection
   - divergent-hash warnings queued on the context service for inline
@@ -13,9 +13,9 @@ MVP scope (see docs/architecture/rfcs/RFC-2026-04-13-context-service-phase-d-hub
   - <hub_ask_ctx peer="X" filter="..." /> query handler
   - <context filter="peer:X" /> extension to the ledger snapshot
 
-Feature-flagged off by default via
-plugins.context_service.hub_broadcast_enabled. When the flag is
-false, HubBridge is not instantiated and no traffic is emitted.
+Enabled by default via plugins.context_service.hub_broadcast_enabled.
+When the flag is false, HubBridge is not instantiated and no traffic
+is emitted.
 """
 
 from __future__ import annotations

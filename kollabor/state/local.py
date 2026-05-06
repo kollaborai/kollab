@@ -1430,7 +1430,7 @@ class LocalStateService(StateService):
 
         Called by the hub plugin after it assigns a gem name, so the
         context registry uses a stable per-daemon filename
-        (``~/.kollab/hub/contexts/jarvis.json``) instead of the
+        (for example, ``contexts/jarvis.json`` under the active hub dir) instead of the
         pid-based fallback. Safe to call multiple times -- only the
         FIRST call that arrives before the registry is created has
         an effect. After the registry exists, changing identity

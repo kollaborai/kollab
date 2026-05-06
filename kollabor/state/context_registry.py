@@ -25,9 +25,9 @@ QueueProcessor is holding references and mid-iteration state.
 Phase 4.5 enforces quiescence by refusing swaps when is_processing is
 True -- callers get a ValueError.
 
-Persistence: registries serialize to a JSON file per-daemon at
-~/.kollab/hub/contexts/{daemon_identity}.json. Loaded on startup,
-saved after every write operation.
+Persistence: registries serialize to a JSON file per-daemon under the
+active hub contexts directory. Loaded on startup, saved after every
+write operation.
 """
 
 from __future__ import annotations

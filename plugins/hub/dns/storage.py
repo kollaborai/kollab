@@ -247,7 +247,7 @@ class DNSStorage:
     def write_well_known(self, record: "AgentRecord") -> Optional[Path]:
         """Write /.well-known/agent-keys JSON for AID compliance.
 
-        Writes to ~/.kollab/hub/dns/well-known/agent-keys.json.
+        Writes to the active hub dns/well-known/agent-keys.json.
         Serve this file via nginx at /.well-known/agent-keys on your domain.
 
         Format follows AID spec: public key + AID + supported protocols.
@@ -296,7 +296,7 @@ class DNSStorage:
         """Rsync well-known file to arch server if configured.
 
         Reads KOLLAB_WELL_KNOWN_RSYNC env var:
-          almazan@192.168.68.172:~/.kollab/hub/dns/well-known/
+          almazan@192.168.68.172:<active-hub-dir>/dns/well-known/
         Fires and forgets — failure is non-fatal, just logged.
         """
         import subprocess

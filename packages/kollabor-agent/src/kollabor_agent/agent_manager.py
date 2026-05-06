@@ -1562,7 +1562,7 @@ You are a specialized assistant.
         1. CLI agent name (highest, one-time override)
         2. Project default (.kollab/config.json)
         3. Global default (~/.kollab/config.json)
-        4. Fallback to "kollabor" agent
+        4. Fallback to "koordinator" agent
 
         Args:
             cli_agent_name: Agent name from CLI --agent argument
@@ -1604,10 +1604,10 @@ You are a specialized assistant.
                     f"Global default agent '{global_agent}' not found, trying fallback"
                 )
 
-        # Priority 4: Fallback to "kollabor" agent
-        if self.set_active_agent("kollabor", load_defaults=True):
+        # Priority 4: Fallback to "koordinator" agent
+        if self.set_active_agent("koordinator", load_defaults=True):
             logger.info("Loaded fallback default agent")
-            return "kollabor"
+            return "koordinator"
 
         logger.error("Failed to load any agent")
         return None

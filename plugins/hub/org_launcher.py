@@ -22,10 +22,11 @@ def get_orgs_dir() -> Path:
     return Path(__file__).parent / "organizations"
 
 
-def get_user_orgs_dir() -> Path:
+def get_user_orgs_dir(create: bool = False) -> Path:
     """Get user's custom organizations directory."""
     d = get_config_directory() / "hub" / "organizations"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -54,7 +55,7 @@ def list_organizations() -> List[Dict[str, str]]:
     # User orgs (override bundled if same name)
     user = get_user_orgs_dir()
     bundled_names = {o["name"] for o in orgs}
-    for f in sorted(user.glob("*.json")):
+    for f in sorted(user.glob("*.json")) if user.exists() else []:
         try:
             with open(f) as fh:
                 data = json.load(fh)
@@ -251,7 +252,9 @@ class OrgLauncher:
     ) -> None:
         """Launch a single kollab agent as a subprocess."""
         # Write the system prompt to a temp file
-        prompt_dir = get_config_directory() / "hub" / "org-prompts"
+        from .presence import get_hub_dir
+
+        prompt_dir = get_hub_dir() / "org-prompts"
         prompt_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = prompt_dir / f"{identity}.md"
         prompt_file.write_text(system_prompt)

@@ -497,6 +497,7 @@ class ProfileManager:
     PROVIDER_ENV_MAP: List[Dict[str, Any]] = [
         {
             "env_var": "ANTHROPIC_API_KEY",
+            "model_env": "ANTHROPIC_MODEL",
             "provider": "anthropic",
             "model": "claude-sonnet-4-6",
             "profile_name": "anthropic-auto",
@@ -505,6 +506,7 @@ class ProfileManager:
         },
         {
             "env_var": "OPENAI_API_KEY",
+            "model_env": "OPENAI_MODEL",
             "provider": "openai",
             "model": "gpt-5.4",
             "profile_name": "openai-auto",
@@ -512,6 +514,7 @@ class ProfileManager:
         },
         {
             "env_var": "AZURE_OPENAI_API_KEY",
+            "model_env": "AZURE_OPENAI_MODEL",
             "provider": "azure_openai",
             "model": "gpt-5.4",
             "profile_name": "azure-auto",
@@ -520,6 +523,7 @@ class ProfileManager:
         },
         {
             "env_var": "GEMINI_API_KEY",
+            "model_env": "GEMINI_MODEL",
             "provider": "gemini",
             "model": "gemini-3.1-pro-preview",
             "profile_name": "gemini-auto",
@@ -527,13 +531,15 @@ class ProfileManager:
         },
         {
             "env_var": "OPENROUTER_API_KEY",
+            "model_env": "OPENROUTER_MODEL",
             "provider": "openrouter",
-            "model": "anthropic/claude-sonnet-4-6",
+            "model": "deepseek/deepseek-v3.2",
             "profile_name": "openrouter-auto",
             "description": "Auto-detected from OPENROUTER_API_KEY",
         },
         {
             "env_var": "XAI_API_KEY",
+            "model_env": "XAI_MODEL",
             "provider": "custom",
             "model": "grok-4-1-fast-reasoning",
             "base_url": "https://api.x.ai/v1",
@@ -542,6 +548,7 @@ class ProfileManager:
         },
         {
             "env_var": "ZAI_API_KEY",
+            "model_env": "ZAI_MODEL",
             "provider": "custom",
             "model": "glm-5",
             "base_url": "https://api.z.ai/api/paas/v4",
@@ -550,6 +557,7 @@ class ProfileManager:
         },
         {
             "env_var": "MOONSHOT_API_KEY",
+            "model_env": "MOONSHOT_MODEL",
             "provider": "custom",
             "model": "kimi-k2.5",
             "base_url": "https://api.moonshot.ai/v1",
@@ -716,9 +724,15 @@ class ProfileManager:
 
             # Build auto-profile
             profile_name = provider_info["profile_name"]
+            model_env = provider_info.get("model_env", "")
+            model = (
+                os.environ.get(model_env, "").strip()
+                if model_env
+                else ""
+            ) or provider_info["model"]
             profile_data = {
                 "provider": provider_info["provider"],
-                "model": provider_info["model"],
+                "model": model,
                 "api_key": api_key,
                 "description": provider_info["description"],
             }
@@ -747,9 +761,12 @@ class ProfileManager:
             # user-defined profile with the same name already exists --
             # their config wins.
             if profile_name in self._profiles:
+                if first_registered is None:
+                    first_registered = profile_name
+                    first_registered_env = env_var
                 logger.debug(
                     f"Auto-detect: {profile_name} already in registry, "
-                    f"skipping ephemeral registration"
+                    f"using existing profile as env-detected candidate"
                 )
                 continue
 
@@ -757,7 +774,7 @@ class ProfileManager:
             self._profiles[profile_name] = profile
             logger.info(
                 f"Registered auto-profile from {env_var}: "
-                f"{profile_name} ({provider_info['model']})"
+                f"{profile_name} ({model})"
             )
 
             if first_registered is None:
@@ -768,8 +785,10 @@ class ProfileManager:
             logger.debug("Auto-detect: no provider env vars found")
             return
 
-        # Only auto-activate when the user hasn't made a selection
-        # (CLI flag or persisted active_profile).
+        # Only auto-activate when the user hasn't made a real selection
+        # (CLI flag or persisted non-default active_profile). A persisted
+        # "default" profile still means provider=auto and should respect
+        # provider env vars such as OPENROUTER_API_KEY.
         if self._profile_explicitly_set:
             logger.debug(
                 "Auto-detect: registered profiles but skipping activation "
@@ -927,6 +946,14 @@ class ProfileManager:
             env_api_key = os.environ.get(provider_info["env_var"], "").strip()
             if env_api_key:
                 loaded.api_key = env_api_key
+
+            model_env = provider_info.get("model_env")
+            if model_env:
+                env_model = os.environ.get(model_env, "").strip()
+                if env_model:
+                    loaded.model = env_model
+                elif env_api_key:
+                    loaded.model = provider_info["model"]
 
             base_url_env = provider_info.get("base_url_env")
             if base_url_env:

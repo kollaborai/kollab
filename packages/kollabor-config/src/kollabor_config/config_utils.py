@@ -809,6 +809,12 @@ def initialize_config(force: bool = False) -> None:
 
             # Build default config structure with profiles
             default_config = _get_minimal_default_config()
+            try:
+                from kollabor.version import __version__ as _app_version
+            except Exception:
+                _app_version = "unknown"
+            default_config["config_version"] = _app_version
+            default_config["last_app_version"] = _app_version
             default_config["kollabor"] = default_config.get("kollabor", {})
             default_config["kollabor"]["llm"] = default_config["kollabor"].get(
                 "llm", {}
@@ -818,6 +824,16 @@ def initialize_config(force: bool = False) -> None:
             ] = True  # Enable provider system by default
             default_config["kollabor"]["llm"]["profiles"] = DEFAULT_LLM_PROFILES.copy()
             default_config["kollabor"]["llm"]["active_profile"] = "default"
+            default_config["kollabor"]["llm"]["default_agent"] = {
+                "name": "koordinator",
+                "level": "global",
+            }
+            default_config["plugins"] = default_config.get("plugins", {})
+            default_config["plugins"]["hub"] = default_config["plugins"].get(
+                "hub", {}
+            )
+            default_config["plugins"]["hub"]["enabled"] = True
+            default_config["plugins"]["hub"]["project_scoped"] = True
 
             global_config_path.write_text(
                 json.dumps(default_config, indent=2, ensure_ascii=False),

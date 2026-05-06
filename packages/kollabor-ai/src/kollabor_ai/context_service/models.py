@@ -82,7 +82,7 @@ class LedgerEntry:
     prior_ctx_id: Optional[str] = None
     """For diff entries, the ctx_id of the previous version."""
 
-    # Hub sharing (phase D)
+    # Hub sharing
     hub_shared: bool = False
     """If True, this entry has been broadcast to hub peers."""
 

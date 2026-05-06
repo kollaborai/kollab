@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 def get_hub_dir() -> Path:
     """Get the hub directory, creating if needed.
 
-    When KOLLAB_HUB_PROJECT_SCOPED is set, state siloes under
+    By default, state siloes under
     ~/.kollab/projects/<encoded>/hub/ so agents launched from
-    different repos stay invisible to each other. Default is global
-    at ~/.kollab/hub/ for backward compatibility with any agent
-    process that was running before this flag existed.
+    different repos stay invisible to each other. Setting
+    KOLLAB_HUB_PROJECT_SCOPED to an explicit false value uses the
+    legacy global directory at ~/.kollab/hub/.
     """
     from .project_scope import get_project_hub_dir, is_project_scoped
     from kollabor_config.config_utils import get_config_directory

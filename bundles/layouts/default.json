@@ -6,47 +6,50 @@
             "id": 1,
             "visible": true,
             "widgets": [
-                {"id": "cwd", "width": {"type": "auto"}},
-                {"id": "git-branch", "width": {"type": "auto"}},
-                {"id": "git-status", "width": {"type": "auto"}}
+                {"id": "cwd", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "git-branch", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "git-status", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "context-compaction", "width": {"type": "auto"}, "color": "none", "effect": "none"}
             ]
         },
         {
             "id": 2,
             "visible": true,
             "widgets": [
-                {"id": "profile", "width": {"type": "auto"}},
-                {"id": "model", "width": {"type": "auto"}},
-                {"id": "status", "width": {"type": "auto"}},
-                {"id": "stats", "width": {"type": "auto"}}
+                {"id": "profile", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "model", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "status", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "stats", "width": {"type": "auto"}, "color": "none", "effect": "none"}
             ]
         },
         {
             "id": 3,
             "visible": true,
             "widgets": [
-                {"id": "agent", "width": {"type": "auto"}},
-                {"id": "skills", "width": {"type": "auto"}},
-                {"id": "session", "width": {"type": "auto"}},
-                {"id": "mcp", "width": {"type": "auto"}}
+                {"id": "agent", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "skills", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "session", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "mcp", "width": {"type": "auto"}, "color": "none", "effect": "none"}
             ]
         },
         {
             "id": 4,
             "visible": true,
             "widgets": [
-                {"id": "tasks", "width": {"type": "auto"}},
-                {"id": "tmux", "width": {"type": "auto"}},
-                {"id": "bg-tasks", "width": {"type": "auto"}},
-                {"id": "altview", "width": {"type": "auto"}},
-                {"id": "token-io", "width": {"type": "auto"}},
-                {"id": "sysmon", "width": {"type": "auto"}}
+                {"id": "tasks", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "bg-tasks", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "altview", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "deep-thought", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "token-io", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "sysmon", "width": {"type": "auto"}, "color": "none", "effect": "none"}
             ]
         },
         {
             "id": 5,
-            "visible": false,
-            "widgets": []
+            "visible": true,
+            "widgets": [
+                {"id": "hub", "width": {"type": "auto"}, "color": "none", "effect": "none"}
+            ]
         },
         {
             "id": 6,

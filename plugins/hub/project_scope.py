@@ -1,11 +1,10 @@
 """Project scope resolution for hub siloing.
 
 The hub runs in one of two modes:
-  - GLOBAL (default): all state at ~/.kollab/hub/, all agents on
-    this machine share presence/sockets/vaults regardless of which repo
-    spawned them.
-  - PROJECT-SCOPED: state at ~/.kollab/projects/<encoded>/hub/,
+  - PROJECT-SCOPED (default): state at ~/.kollab/projects/<encoded>/hub/,
     agents only see peers launched from the same project root.
+  - GLOBAL: all state at ~/.kollab/hub/, all agents on this machine
+    share presence/sockets/vaults regardless of which repo spawned them.
 
 Mode is controlled by env var KOLLAB_HUB_PROJECT_SCOPED (set by the
 hub plugin at init from config key plugins.hub.project_scoped). Env var
@@ -37,8 +36,11 @@ logger = logging.getLogger(__name__)
 
 
 def is_project_scoped() -> bool:
-    """True when KOLLAB_HUB_PROJECT_SCOPED is set to a truthy value."""
-    return os.environ.get("KOLLAB_HUB_PROJECT_SCOPED", "").lower() in (
+    """True unless KOLLAB_HUB_PROJECT_SCOPED is explicitly false."""
+    raw = os.environ.get("KOLLAB_HUB_PROJECT_SCOPED")
+    if raw is None or raw == "":
+        return True
+    return raw.lower() in (
         "1",
         "true",
         "yes",

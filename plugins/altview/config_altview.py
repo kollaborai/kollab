@@ -673,14 +673,14 @@ class ConfigAltView(AltView):
 
             saved = 0
             new_profile = None
+            dirty_values: List[tuple[str, Any]] = []
             for ws in self._section_widgets:
                 for w in ws:
                     if hasattr(w, "has_pending_changes") and w.has_pending_changes():
                         if hasattr(w, "config_path") and w.config_path:
                             val = w.get_pending_value()
                             self.config_service.set(w.config_path, val)
-                            # Clear pending state by re-setting the internal value
-                            w._pending_value = None
+                            dirty_values.append((w.config_path, val))
                             saved += 1
                             logger.debug(
                                 "ConfigAltView: set %s = %r", w.config_path, val
@@ -688,11 +688,24 @@ class ConfigAltView(AltView):
                             if w.config_path == "kollabor.llm.active_profile":
                                 new_profile = val
 
-            ok = self.config_service.save_config(save_target=target)
+            ok = True
+            for key_path, val in dirty_values:
+                if not self.config_service.save_key(
+                    key_path, val, save_target=target
+                ):
+                    ok = False
+
             if ok:
                 logger.info("ConfigAltView: saved %d changes to %s", saved, target)
+                for ws in self._section_widgets:
+                    for w in ws:
+                        if (
+                            hasattr(w, "has_pending_changes")
+                            and w.has_pending_changes()
+                        ):
+                            w._pending_value = None
             else:
-                logger.error("ConfigAltView: save_config(%s) returned False", target)
+                logger.error("ConfigAltView: one or more config saves failed")
 
             # If profile changed, switch it at runtime so the running app updates
             if new_profile and self.app:

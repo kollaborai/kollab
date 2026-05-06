@@ -150,6 +150,15 @@ class OpenRouterModelInfo:
         """Get cached pricing for a model. Delegates to PricingRegistry."""
         return PricingRegistry().get_pricing("openrouter", model_id)
 
+    async def list_models(self) -> list[Dict[str, Any]]:
+        """Return available OpenRouter models from the cached metadata."""
+        if self._is_cache_stale():
+            await self._fetch_metadata()
+        return [
+            {"id": model_id, **metadata}
+            for model_id, metadata in sorted(self._cache.items())
+        ]
+
     async def _fetch_metadata(self) -> None:
         """
         Fetch model metadata from OpenRouter API.
@@ -186,6 +195,9 @@ class OpenRouterModelInfo:
                             "context_length": model.get("context_length"),
                             "max_completion_tokens": model.get(
                                 "max_completion_tokens"
+                            ),
+                            "supported_parameters": model.get(
+                                "supported_parameters", []
                             ),
                             "pricing": {
                                 "prompt": pricing_data.get("prompt"),

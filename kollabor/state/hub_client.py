@@ -16,7 +16,7 @@ Usage (from inside an agent's plugin or command):
 
 Discovery:
     Peer agents are looked up by identity string via the hub presence
-    files at ~/.kollab/hub/presence/{agent_id}.json. Each presence
+    files in the active hub presence directory. Each presence
     file contains a socket_path that points to the peer's unix socket
     in /tmp/kollabor-hub. HubStateClient.connect(identity) walks the
     presence directory looking for a file with a matching identity.
@@ -226,7 +226,7 @@ class HubStateClient:
     def discover_peer_socket(peer_identity: str) -> Path | None:
         """Find the unix socket for an agent by hub identity.
 
-        Walks the presence directory (~/.kollab/hub/presence/)
+        Walks the active hub presence directory
         and returns the first presence file whose "identity" field
         matches ``peer_identity``. Returns the socket path as a
         pathlib.Path or None if no matching agent is found.
@@ -299,7 +299,7 @@ class HubStateClient:
         if socket_path is None:
             raise HubStateClientError(
                 f"no peer with identity {peer_identity!r} "
-                f"found in ~/.kollab/hub/presence/"
+                "found in the active hub presence directory"
             )
         if not socket_path.exists():
             raise HubStateClientError(

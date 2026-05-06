@@ -1,7 +1,7 @@
 """Queue processing for Kollab LLM service.
 
 Handles message queue management, overflow strategies, and LLM turn execution.
-Extracted from LLMService as part of the llm_service.py decomposition (Phase D).
+Extracted from LLMService as part of the llm_service.py decomposition.
 """
 
 import asyncio
