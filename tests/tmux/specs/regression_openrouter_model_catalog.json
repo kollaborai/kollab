@@ -7,6 +7,37 @@
   "steps": [
     {
       "action": "shell",
+      "command": "\"$PWD/.venv/bin/python\" - <<'PY'\nimport asyncio\nfrom kollabor.commands.system_commands.handlers.model import ModelCommandHandler\nfrom kollabor_ai.providers import openrouter_model_info\n\nclass Profile:\n    name = 'openrouter-auto'\n    def get_provider(self): return 'openrouter'\n    def get_model(self): return 'deepseek/deepseek-v3.2'\n    def get_supports_tools(self): return True\n\nclass ProfileManager:\n    def get_active_profile(self): return Profile()\n    def list_profiles(self): return [Profile()]\n\nasync def explode_if_called(self):\n    raise AssertionError('plain /model must not fetch OpenRouter catalog')\n\nopenrouter_model_info.OpenRouterModelInfo.list_models = explode_if_called\nhandler = ModelCommandHandler(command_registry=None, event_bus=None, profile_manager=ProfileManager())\nmodal = asyncio.run(handler._get_models_modal_definition())\ncommands = modal['sections'][0]['commands']\nprint('title', modal['sections'][0]['title'])\nprint('footer', modal['footer'])\nprint('count', len(commands))\nfor command in commands:\n    print('model', command['model_name'])\n    print('description', command['description'])\n\nclass Command:\n    args = ['list', 'all']\n\nresult = asyncio.run(handler.handle_model(Command()))\nprint('list_all_success', result.success)\nprint('list_all_message', result.message)\nPY",
+      "description": "Plain OpenRouter /model uses curated shortlist and does not fetch full catalog"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "title\\s+Recommended OpenRouter Models",
+      "description": "Plain modal is a recommended shortlist"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "footer.*model search <query>",
+      "description": "Footer points users to search instead of dumping catalog"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "count\\s+1",
+      "description": "Plain modal stays small"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "list_all_success\\s+False",
+      "description": "/model list all is blocked for OpenRouter"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "OpenRouter has a very large model catalog",
+      "description": "List-all path explains why search is required"
+    },
+
+    {
+      "action": "shell",
       "command": "\"$PWD/.venv/bin/python\" - <<'PY'\nimport asyncio\nfrom kollabor.commands.system_commands.handlers.model import ModelCommandHandler\nfrom kollabor_ai.providers import openrouter_model_info\n\nasync def fake_models(self):\n    return [\n        {'id': 'deepseek/deepseek-v3.2', 'name': 'DeepSeek V3.2', 'context_length': 163840, 'supported_parameters': ['tools', 'tool_choice']},\n        {'id': 'openai/gpt-example', 'name': 'Other Model', 'context_length': 8192, 'supported_parameters': []},\n    ]\n\nopenrouter_model_info.OpenRouterModelInfo.list_models = fake_models\nhandler = ModelCommandHandler(command_registry=None, event_bus=None)\ncommands = asyncio.run(handler._get_openrouter_model_commands(None, 'deepseek'))\nfor command in commands:\n    print('model', command['model_name'])\n    print('description', command['description'])\n    print('supports_tools', command['supports_tools'])\nprint('count', len(commands))\nPY",
       "description": "Exercise OpenRouter catalog command builder with fake provider data"
     },

@@ -25,6 +25,7 @@ class ModelCommandHandler(BaseCommandHandler):
     """Handles /model command - quick model selector."""
 
     MODAL_ACTIONS = {"select_model"}
+    OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-v3.2"
 
     def __init__(
         self,
@@ -107,9 +108,15 @@ class ModelCommandHandler(BaseCommandHandler):
                 # Show model selection modal
                 return await self._show_models_modal()
             elif args[0] in ("list", "ls"):
+                if len(args) >= 2 and args[1].lower() in ("all", "*"):
+                    active_profile = profile_manager.get_active_profile()
+                    if active_profile and active_profile.get_provider() == "openrouter":
+                        return self._openrouter_catalog_hint_result()
                 query = " ".join(args[1:]).strip() or None
                 return await self._show_models_modal(query)
-            elif args[0] in ("search", "find") and len(args) >= 2:
+            elif args[0] in ("search", "find"):
+                if len(args) < 2 or not " ".join(args[1:]).strip():
+                    return self._openrouter_catalog_hint_result()
                 query = " ".join(args[1:]).strip()
                 return await self._show_models_modal(query)
             elif args[0] == "set" and len(args) >= 2:
@@ -146,16 +153,23 @@ class ModelCommandHandler(BaseCommandHandler):
         active_provider = active_profile.get_provider() if active_profile else ""
 
         if active_provider == "openrouter":
-            commands = await self._get_openrouter_model_commands(
-                active_model, filter_query
-            )
+            if filter_query:
+                commands = await self._get_openrouter_model_commands(
+                    active_model, filter_query
+                )
+                title = f"OpenRouter Models matching '{filter_query}'"
+            else:
+                commands = self._get_openrouter_recommended_model_commands(
+                    active_model, profile_manager.list_profiles()
+                )
+                title = "Recommended OpenRouter Models"
             if commands:
-                title = "OpenRouter Available Models"
-                if filter_query:
-                    title += f" matching '{filter_query}'"
                 return {
                     "title": "OpenRouter Models",
-                    "footer": "↑↓ navigate • Enter select • Esc close",
+                    "footer": (
+                        "↑↓ navigate • Enter select • "
+                        "/model search <query> for full catalog • Esc close"
+                    ),
                     "sections": [
                         {
                             "title": (
@@ -225,10 +239,74 @@ class ModelCommandHandler(BaseCommandHandler):
             ],
         }
 
+    def _get_openrouter_recommended_model_commands(
+        self, active_model: str | None, profiles: list[Any]
+    ) -> list[Dict[str, Any]]:
+        """Return a small OpenRouter shortlist without fetching the full catalog."""
+        commands: list[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_model(
+            model_id: str | None,
+            description: str,
+            supports_tools: bool | None = None,
+        ) -> None:
+            if not model_id or model_id in seen:
+                return
+            seen.add(model_id)
+            commands.append(
+                {
+                    "name": f"{'[*] ' if model_id == active_model else '    '}{model_id}",
+                    "description": description,
+                    "model_name": model_id,
+                    "provider_catalog": "openrouter",
+                    "supports_tools": supports_tools,
+                    "action": "select_model",
+                }
+            )
+
+        for profile in profiles:
+            if profile.get_provider() != "openrouter":
+                continue
+            model = profile.get_model()
+            if model == active_model:
+                supports_tools = (
+                    profile.get_supports_tools()
+                    if hasattr(profile, "get_supports_tools")
+                    else None
+                )
+                tools_note = (
+                    "tools" if supports_tools else "no tools"
+                    if supports_tools is not None
+                    else "profile"
+                )
+                add_model(model, f"current • via {profile.name} • {tools_note}", supports_tools)
+
+        add_model(
+            self.OPENROUTER_DEFAULT_MODEL,
+            "default • balanced coding/chat • tools",
+            True,
+        )
+
+        for profile in profiles:
+            if profile.get_provider() != "openrouter":
+                continue
+            model = profile.get_model()
+            supports_tools = (
+                profile.get_supports_tools()
+                if hasattr(profile, "get_supports_tools")
+                else None
+            )
+            add_model(model, f"saved profile • via {profile.name}", supports_tools)
+
+        return commands
+
     async def _get_openrouter_model_commands(
         self, active_model: str | None, filter_query: str | None = None
     ) -> list[Dict[str, Any]]:
         """Fetch OpenRouter's live model catalog for the active profile."""
+        if not filter_query:
+            return []
         try:
             from kollabor_ai.providers.openrouter_model_info import OpenRouterModelInfo
 
@@ -274,6 +352,20 @@ class ModelCommandHandler(BaseCommandHandler):
                 }
             )
         return commands
+
+    def _openrouter_catalog_hint_result(self) -> CommandResult:
+        """Return a non-spammy hint for OpenRouter's large catalog."""
+        return CommandResult(
+            success=False,
+            message=(
+                "OpenRouter has a very large model catalog.\n"
+                "Use `/model` for the recommended shortlist, or search directly:\n"
+                "  /model search deepseek\n"
+                "  /model search qwen\n"
+                "  /model search claude"
+            ),
+            display_type="info",
+        )
 
     async def _show_models_modal(
         self, filter_query: str | None = None
