@@ -38,6 +38,9 @@ from .application import TerminalLLMChat
 from .logging import setup_bootstrap_logging
 from .version import __version__
 
+STOP_GRACE_SECONDS = 1.5
+STOP_TERM_SECONDS = 1.0
+
 
 def parse_timeout(timeout_str: str) -> int:
     """Parse timeout string into seconds.
@@ -1034,6 +1037,7 @@ def _apply_hub_project_scope_from_config() -> None:
         return
     try:
         import json as _json
+
         from kollabor_config.config_utils import get_existing_global_config_path
 
         cfg_path = get_existing_global_config_path()
@@ -1172,6 +1176,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
     """
     import json
     import os
+    from pathlib import Path
     from typing import List, Optional
 
     _apply_hub_project_scope_from_config()
@@ -1234,6 +1239,85 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 return a
         return None
 
+    def _pid_alive(pid: int) -> bool:
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+    async def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
+        import time as _time
+
+        if not pid:
+            return True
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            if not _pid_alive(pid):
+                return True
+            await asyncio.sleep(0.1)
+        return not _pid_alive(pid)
+
+    def _cleanup_presence_for_pid(pid: int) -> None:
+        if not pid:
+            return
+        for f in presence_dir.glob("*.json"):
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+                if d.get("pid") == pid:
+                    socket_path = d.get("socket_path", "")
+                    f.unlink(missing_ok=True)
+                    if socket_path:
+                        try:
+                            Path(socket_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    break
+            except Exception:
+                pass
+
+    async def _stop_agent_record(agent: dict, reason: str) -> tuple[bool, str]:
+        desig = agent.get("identity", "?")
+        sock = agent.get("socket_path", "")
+        pid = int(agent.get("pid") or 0)
+
+        shutdown_acked = False
+        if sock:
+            shutdown_acked = await AgentMessenger.signal_shutdown(sock, reason=reason)
+
+        if shutdown_acked:
+            if await _wait_for_pid_exit(pid, timeout=STOP_GRACE_SECONDS):
+                _cleanup_presence_for_pid(pid)
+                return True, f"stopped {desig}"
+
+            try:
+                os.kill(pid, 15)  # SIGTERM
+            except (OSError, ProcessLookupError):
+                _cleanup_presence_for_pid(pid)
+                return True, f"stopped {desig}"
+
+            if await _wait_for_pid_exit(pid, timeout=STOP_TERM_SECONDS):
+                _cleanup_presence_for_pid(pid)
+                return True, f"stopped {desig} (SIGTERM after graceful timeout)"
+
+            return False, f"failed to stop {desig} (pid still alive)"
+
+        if pid:
+            try:
+                os.kill(pid, 15)  # SIGTERM
+            except (OSError, ProcessLookupError):
+                _cleanup_presence_for_pid(pid)
+                return True, f"stopped {desig}"
+
+            if await _wait_for_pid_exit(pid, timeout=STOP_TERM_SECONDS):
+                _cleanup_presence_for_pid(pid)
+                return True, f"stopped {desig} (SIGTERM fallback)"
+
+        return False, f"failed to stop {desig}"
+
     # --- config helpers for on/off/user ---
     from kollabor_config.config_utils import get_existing_global_config_path
 
@@ -1295,37 +1379,16 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 print("no agents online")
                 return
             stopped = 0
-            for a in agents:
-                desig = a.get("identity", "?")
-                sock = a.get("socket_path", "")
-                pid = a.get("pid", 0)
-                ok = False
-                if sock:
-                    ok = await AgentMessenger.signal_shutdown(
-                        sock, reason="stopped via CLI (all)"
-                    )
-                if not ok and pid:
-                    # Socket dead or missing -- kill the process directly
-                    try:
-                        os.kill(pid, 15)  # SIGTERM
-                        ok = True
-                    except (OSError, ProcessLookupError):
-                        pass
-                    # Clean up stale presence file regardless
-                    for f in presence_dir.glob("*.json"):
-                        try:
-                            with open(f) as fh:
-                                d = json.load(fh)
-                            if d.get("pid") == pid:
-                                f.unlink(missing_ok=True)
-                                break
-                        except Exception:
-                            pass
+            results = await asyncio.gather(
+                *[
+                    _stop_agent_record(a, reason="stopped via CLI (all)")
+                    for a in agents
+                ]
+            )
+            for ok, message in results:
+                print(f"  {message}")
                 if ok:
-                    print(f"  stopped {desig}")
                     stopped += 1
-                else:
-                    print(f"  failed to stop {desig}")
             print(f"\n{stopped}/{len(agents)} agent(s) stopped")
         else:
             agent = _find_agent(target)
@@ -1336,33 +1399,11 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 if available:
                     print(f"online: {', '.join(sorted(available))}")
                 sys.exit(1)
-            socket_path = agent.get("socket_path", "")
-            pid = agent.get("pid", 0)
-            success = False
-            if socket_path:
-                success = await AgentMessenger.signal_shutdown(
-                    socket_path, reason="stopped via CLI"
-                )
-            if not success and pid:
-                # Socket dead -- kill directly and clean up presence
-                try:
-                    os.kill(pid, 15)  # SIGTERM
-                    success = True
-                except (OSError, ProcessLookupError):
-                    pass
-                for f in presence_dir.glob("*.json"):
-                    try:
-                        with open(f) as fh:
-                            d = json.load(fh)
-                        if d.get("pid") == pid:
-                            f.unlink(missing_ok=True)
-                            break
-                    except Exception:
-                        pass
+            success, message = await _stop_agent_record(agent, reason="stopped via CLI")
             if success:
-                print(f"stopped '{target}'")
+                print(message)
             else:
-                print(f"failed to stop '{target}'")
+                print(message)
                 sys.exit(1)
 
     elif subcmd == "capture":

@@ -70,6 +70,10 @@ except ImportError as _dns_import_err:
 
 logger = logging.getLogger(__name__)
 
+STOP_GRACE_SECONDS = 1.5
+STOP_TERM_SECONDS = 1.0
+REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
+
 
 def _get_loop():
     """Return the running event loop, or create one if none is running."""
@@ -6928,33 +6932,20 @@ class HubPlugin(BasePlugin):
                 return "no peers to stop"
 
             results = []
-            for agent in peers:
-                if agent.agent_id == self._identity.agent_id:
-                    continue
-                if not agent.socket_path:
-                    results.append(f"  {agent.identity}: no socket")
-                    self._presence.cleanup_agent(agent)
-                    continue
-                try:
-                    success = await AgentMessenger.signal_shutdown(
-                        agent.socket_path,
+            stop_targets = [
+                agent for agent in peers if agent.agent_id != self._identity.agent_id
+            ]
+            stop_results = await asyncio.gather(
+                *[
+                    self._stop_peer_agent(
+                        agent,
                         reason=f"stopped by {self._identity.identity}",
-                        timeout=3.0,
                     )
-                    if success:
-                        results.append(f"  {agent.identity}: shutdown sent")
-                    else:
-                        # Socket dead or no ack -- fall back to SIGTERM
-                        killed = self._force_kill_agent(agent)
-                        if killed:
-                            results.append(f"  {agent.identity}: killed (SIGTERM)")
-                        else:
-                            results.append(f"  {agent.identity}: already dead, cleaned up")
-                        self._presence.cleanup_agent(agent)
-                except Exception as e:
-                    results.append(f"  {agent.identity}: error ({e})")
-                    self._force_kill_agent(agent)
-                    self._presence.cleanup_agent(agent)
+                    for agent in stop_targets
+                ]
+            )
+            for agent, result in zip(stop_targets, stop_results):
+                results.append(f"  {agent.identity}: {result}")
 
             if not results:
                 return "no peers to stop (only you on mesh)"
@@ -7004,25 +6995,82 @@ class HubPlugin(BasePlugin):
                 self._presence.cleanup_agent(agent)
                 return f"agent '{target}' has no socket path, cleaned up"
 
-            try:
-                success = await AgentMessenger.signal_shutdown(
-                    agent.socket_path,
-                    reason=f"stopped by {self._identity.identity}",
-                    timeout=3.0,
-                )
-                if success:
-                    return f"shutdown sent to '{target}'"
-                else:
-                    # Socket dead -- fall back to SIGTERM
-                    killed = self._force_kill_agent(agent)
-                    self._presence.cleanup_agent(agent)
-                    if killed:
-                        return f"'{target}' killed (SIGTERM fallback)"
-                    return f"'{target}' already dead, cleaned up presence"
-            except Exception as e:
-                self._force_kill_agent(agent)
+            result = await self._stop_peer_agent(
+                agent,
+                reason=f"stopped by {self._identity.identity}",
+            )
+            return f"'{target}' {result}"
+
+    async def _stop_peer_agent(self, agent, reason: str) -> str:
+        """Stop a peer and only report success after the pid exits.
+
+        A socket shutdown ack means "request received", not "process is gone".
+        Wait briefly for graceful exit, then fall back to SIGTERM and verify
+        that exit too. This avoids the first-run lie where status still sees
+        the agent online and a second stop is needed.
+        """
+        if not self._presence:
+            return "hub not active"
+
+        if not getattr(agent, "socket_path", ""):
+            self._presence.cleanup_agent(agent)
+            return "no socket, cleaned up"
+
+        try:
+            success = await AgentMessenger.signal_shutdown(
+                agent.socket_path,
+                reason=reason,
+                timeout=3.0,
+            )
+        except Exception as e:
+            success = False
+            logger.debug(f"shutdown signal failed for {agent.identity}: {e}")
+
+        if success:
+            if await self._wait_for_agent_exit(agent, timeout=STOP_GRACE_SECONDS):
                 self._presence.cleanup_agent(agent)
-                return f"stop error: {e} (killed process as fallback)"
+                return "stopped"
+
+            killed = self._force_kill_agent(agent)
+            if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
+                self._presence.cleanup_agent(agent)
+                return "killed (SIGTERM after graceful timeout)"
+            return "stop timed out (pid still alive)"
+
+        killed = self._force_kill_agent(agent)
+        if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
+            self._presence.cleanup_agent(agent)
+            return "killed (SIGTERM fallback)"
+
+        if not self._agent_pid_alive(getattr(agent, "pid", 0)):
+            self._presence.cleanup_agent(agent)
+            return "already dead, cleaned up"
+
+        return "failed (pid still alive)"
+
+    async def _wait_for_agent_exit(self, agent, timeout: float = 5.0) -> bool:
+        """Wait until an agent pid is no longer alive."""
+        pid = getattr(agent, "pid", 0)
+        if not pid:
+            return True
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self._agent_pid_alive(pid):
+                return True
+            await asyncio.sleep(0.1)
+        return not self._agent_pid_alive(pid)
+
+    @staticmethod
+    def _agent_pid_alive(pid: int) -> bool:
+        """Return True when pid exists and can be signaled."""
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
 
     def _force_kill_agent(self, agent) -> bool:
         """Send SIGTERM to an agent process as last resort.
@@ -8289,6 +8337,21 @@ class HubPlugin(BasePlugin):
         """
         logger.info(f"Remote shutdown received: {reason}")
         try:
+            self._self_stop_requested = True
+
+            async def _remote_stop_watchdog() -> None:
+                try:
+                    await asyncio.sleep(REMOTE_SHUTDOWN_WATCHDOG_SECONDS)
+                except asyncio.CancelledError:
+                    return
+                logger.warning(
+                    "%s: remote-stop watchdog fired, forcing os._exit",
+                    self._identity.identity if self._identity else "agent",
+                )
+                os._exit(0)
+
+            asyncio.ensure_future(_remote_stop_watchdog())
+
             app = self.event_bus.get_service("app") if self.event_bus else None
             if app and hasattr(app, "running"):
                 app.running = False
@@ -8301,12 +8364,11 @@ class HubPlugin(BasePlugin):
                     if not task.done():
                         task.cancel()
 
-            # For detached/daemon agents the input handler may be
-            # blocking on stdin.  Nudge it with SIGINT so the
-            # KeyboardInterrupt path fires (which also runs cleanup).
-            import signal
-
-            os.kill(os.getpid(), signal.SIGINT)
+            # Use the same terminal path as self-stop: run hub cleanup,
+            # remove presence/socket, then os._exit at the end. Detached
+            # agents may be blocked on stdin, so waiting for the app loop to
+            # wander into cleanup makes stop feel hung.
+            asyncio.ensure_future(self.shutdown())
         except Exception as e:
             logger.error(f"Failed to trigger shutdown: {e}")
 
