@@ -356,9 +356,19 @@ class LayoutManager:
         self._permission_view: Optional[Any] = None
         self._permission_response_event: Optional[Any] = None
         self._permission_response: Optional[Any] = None
+        self._render_loop: Optional[Any] = None
 
         # Initialize standard areas
         self._initialize_standard_areas()
+
+    def set_render_loop(self, render_loop: Any) -> None:
+        """Set the render loop used for immediate layout redraws."""
+        self._render_loop = render_loop
+
+    def _request_render(self) -> None:
+        """Request a render loop frame when available."""
+        if self._render_loop and hasattr(self._render_loop, "request_render"):
+            self._render_loop.request_render()
 
     def _initialize_standard_areas(self) -> None:
         """Initialize standard layout areas (status, input, thinking)."""
@@ -782,6 +792,7 @@ class LayoutManager:
 
         # Trigger layout dirty flag
         self._dirty = True
+        self._request_render()
 
         # CRITICAL: Yield to event loop to allow render loop to display the prompt
         # Without this, we block before the UI can render, causing a deadlock
@@ -794,6 +805,7 @@ class LayoutManager:
         self._permission_view = None
         self.update_area_content("thinking", [])
         self._dirty = True
+        self._request_render()
 
         return self._permission_response
 
@@ -829,3 +841,4 @@ class LayoutManager:
             self._permission_view = None
             self.update_area_content("thinking", [])
             self._dirty = True
+            self._request_render()

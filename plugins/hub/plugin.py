@@ -604,6 +604,8 @@ class HubPlugin(BasePlugin):
         from kollabor_tui.display_tap import DisplayTap
 
         self._display_tap = DisplayTap(history_size=200)
+        if self.event_bus:
+            self.event_bus.register_service("display_tap", self._display_tap)
 
         # Socket server is created in _start_hub() AFTER identity
         # assignment so the socket file is named by identity
@@ -3626,6 +3628,8 @@ class HubPlugin(BasePlugin):
 
                 self._rpc_server = RpcServer()
                 self._socket_server._rpc_server = self._rpc_server  # type: ignore[assignment]
+                if self.event_bus:
+                    self.event_bus.register_service("rpc_server", self._rpc_server)
 
                 async def _rpc_ping(params: dict) -> dict:
                     """Phase 1 proof-of-life handler."""

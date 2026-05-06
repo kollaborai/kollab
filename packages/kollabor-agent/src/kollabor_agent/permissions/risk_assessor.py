@@ -65,6 +65,15 @@ class RiskAssessor:
             if result:
                 return result
 
+        tool_definition = self._find_tool_definition(tool_type, tool_name)
+        if tool_definition:
+            return RiskAssessmentResult(
+                level=self._tool_definition_risk(tool_definition.risk_level),
+                reason=f"Tool definition risk for '{tool_definition.name}'",
+                tool_type=tool_type,
+                requires_confirmation=tool_definition.requires_permission,
+            )
+
         # Fall back to tool type default
         default_level = self._rules.tool_type_risks.get(
             tool_type, ToolRiskLevel.UNKNOWN
@@ -107,3 +116,46 @@ class RiskAssessor:
                 )
 
         return None
+
+    def _find_tool_definition(self, tool_type: str, tool_name: str):
+        """Find tool metadata by canonical, native, or XML tool names."""
+        try:
+            from kollabor_agent.tool_registry import get_registry
+
+            registry = get_registry()
+        except Exception as e:
+            logger.debug(f"Unable to load tool registry for risk assessment: {e}")
+            return None
+
+        candidates = []
+        for value in (tool_name, tool_type):
+            if not value or value in candidates:
+                continue
+            candidates.append(value)
+            dashed = value.replace("_", "-")
+            if dashed not in candidates:
+                candidates.append(dashed)
+            underscored = value.replace("-", "_")
+            if underscored not in candidates:
+                candidates.append(underscored)
+
+        for candidate in candidates:
+            tool_definition = (
+                registry.get(candidate)
+                or registry.get_by_native_name(candidate)
+                or registry.get_by_xml_tag(candidate)
+            )
+            if tool_definition:
+                return tool_definition
+
+        return None
+
+    def _tool_definition_risk(self, risk_level: str) -> ToolRiskLevel:
+        """Convert ToolDefinition risk metadata into permission risk enum."""
+        risk_map = {
+            "low": ToolRiskLevel.LOW,
+            "medium": ToolRiskLevel.MEDIUM,
+            "high": ToolRiskLevel.HIGH,
+            "unknown": ToolRiskLevel.UNKNOWN,
+        }
+        return risk_map.get(str(risk_level).lower(), ToolRiskLevel.UNKNOWN)

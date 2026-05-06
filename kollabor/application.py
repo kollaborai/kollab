@@ -24,6 +24,7 @@ from kollabor_tui.terminal_renderer import TerminalRenderer
 from kollabor_tui.visual_effects import VisualEffects
 
 from .llm import LLMService
+from .llm.permissions.attach_bridge import AttachPermissionBridge
 from .logging import setup_from_config
 from .updates import VersionCheckService
 from .version import __version__
@@ -116,6 +117,7 @@ class TerminalLLMChat:
         # Attach mode: proxy to a remote agent instead of local LLM
         self._attach_to = attach_to
         self._attach_socket: str | None = None
+        self._attach_permission_bridge = AttachPermissionBridge()
         if attach_to:
             self._attach_socket = self._resolve_attach_socket(attach_to)
             if not self._attach_socket:
@@ -458,10 +460,15 @@ class TerminalLLMChat:
 
             # Create wrapper that converts ConfirmationResponse to PermissionDecision
             async def confirmation_callback_wrapper(details):
-                # Show prompt and get user response
-                response = await self.renderer.layout_manager.show_permission_prompt(
-                    details
-                )
+                # Show prompt and get user response. In daemon/attach mode,
+                # the visible TUI lives in a separate client process, so route
+                # the prompt across the attach socket instead of waiting on the
+                # daemon's hidden stdin.
+                response = await self._try_attach_permission_prompt(details)
+                if response is None:
+                    response = await self.renderer.layout_manager.show_permission_prompt(
+                        details
+                    )
                 # Convert to PermissionDecision using response handler
                 return await handle_confirmation_response(
                     self.permission_manager, details, response
@@ -764,6 +771,10 @@ class TerminalLLMChat:
 
             # Wire render loop to renderer for script widget refresh triggers
             self.renderer.render_loop = self.render_loop
+            if hasattr(self.renderer, "layout_manager") and hasattr(
+                self.renderer.layout_manager, "set_render_loop"
+            ):
+                self.renderer.layout_manager.set_render_loop(self.render_loop)
 
             # Register render loop as event bus service so AltViewStackManager
             # can resolve it lazily for hibernate/thaw
@@ -1669,6 +1680,24 @@ class TerminalLLMChat:
                     if hasattr(self, "_widget_context"):
                         self._widget_context.remote_state = event
 
+                elif etype == "permission_request":
+                    if self._rpc_client is not None:
+                        await self._attach_permission_bridge.handle_client_event(
+                            rpc_client=self._rpc_client,
+                            layout_manager=self.renderer.layout_manager,
+                            event=event,
+                        )
+                    else:
+                        coordinator.display_message_sequence(
+                            [
+                                (
+                                    "error",
+                                    "permission prompt received before rpc client was ready",
+                                    {},
+                                ),
+                            ]
+                        )
+
                 elif etype == "heartbeat":
                     pass
 
@@ -1781,6 +1810,26 @@ class TerminalLLMChat:
                 self._drain_attach_pending_flags(),
                 "attach_drain_pending_flags",
             )
+
+    async def _try_attach_permission_prompt(self, details: Dict[str, Any]):
+        """Route daemon permission prompts to the visible attach client."""
+        if not self.event_bus:
+            return None
+
+        display_tap = self.event_bus.get_service("display_tap")
+        rpc_server = self.event_bus.get_service("rpc_server")
+        if not display_tap or not rpc_server:
+            return None
+
+        if not self._attach_permission_bridge.has_visible_attach_client(display_tap):
+            return None
+
+        return await self._attach_permission_bridge.request_confirmation(
+            display_tap=display_tap,
+            rpc_server=rpc_server,
+            details=dict(details),
+            timeout=300,
+        )
 
     async def _drain_attach_pending_flags(self) -> None:
         """Apply launch flags to the daemon via RPC in attach mode.

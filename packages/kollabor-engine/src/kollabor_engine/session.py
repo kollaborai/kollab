@@ -36,6 +36,7 @@ _APPROVAL_MODE_MAP = {
 }
 
 _DATA_DIR = get_config_directory()
+_PERMISSION_CONFIRMATION_HOOK_TIMEOUT_SECONDS = 300
 
 
 class EngineSession:
@@ -189,6 +190,9 @@ class EngineSession:
             callback=_handle_tool_pre,
             priority=HookPriority.SECURITY.value,
             enabled=True,
+            timeout=_PERMISSION_CONFIRMATION_HOOK_TIMEOUT_SECONDS,
+            retry_attempts=0,
+            error_action="stop",
         )
         await self.event_bus.register_hook(hook)
         logger.debug(f"Session {self.session_id}: permission hook registered")

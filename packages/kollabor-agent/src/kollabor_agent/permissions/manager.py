@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from kollabor_agent.file_operations_executor import PathAccessMode
+from kollabor_events.dict_utils import safe_get
 from kollabor_events.models import EventType
 from kollabor_events.permissions_models import (
     ApprovalMode,
@@ -90,11 +91,11 @@ class PermissionManager:
         # Use config_service (dot-notation aware) if available, fall back to raw dict
         if self._config_service:
             mode_str = self._config_service.get(
-                "kollabor.permissions.approval_mode", "confirm_all"
+                "kollabor.permissions.approval_mode", "default"
             )
         else:
-            mode_str = self._config.get(
-                "kollabor.permissions.approval_mode", "confirm_all"
+            mode_str = safe_get(
+                self._config, "kollabor.permissions.approval_mode", "default"
             )
         mode_map = {
             "default": ApprovalMode.DEFAULT,
@@ -208,7 +209,9 @@ class PermissionManager:
         )
 
         # Step 0: Check if permission system is enabled
-        permission_enabled = self._config.get("kollabor.permissions.enabled", True)
+        permission_enabled = safe_get(
+            self._config, "kollabor.permissions.enabled", True
+        )
         if not permission_enabled:
             self._stats["auto_approved"] += 1
             # Emit PERMISSION_CHECK with risk info

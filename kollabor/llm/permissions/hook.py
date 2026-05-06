@@ -7,6 +7,8 @@ from kollabor_agent.permissions import PermissionManager
 
 logger = logging.getLogger(__name__)
 
+PERMISSION_CONFIRMATION_HOOK_TIMEOUT_SECONDS = 300
+
 
 class PermissionHook:
     """
@@ -41,6 +43,9 @@ class PermissionHook:
             callback=self._handle_tool_pre,
             priority=HookPriority.SECURITY.value,
             enabled=True,
+            timeout=PERMISSION_CONFIRMATION_HOOK_TIMEOUT_SECONDS,
+            retry_attempts=0,
+            error_action="stop",
         )
 
         await event_bus.register_hook(hook)
