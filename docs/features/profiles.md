@@ -433,7 +433,7 @@ When provider env vars are set, ephemeral auto-profiles are created:
 | `OPENAI_API_KEY` | openai-auto | openai | gpt-5.4 |
 | `AZURE_OPENAI_API_KEY` | azure-auto | azure_openai | gpt-5.4 |
 | `GEMINI_API_KEY` | gemini-auto | gemini | gemini-3.1-pro-preview |
-| `OPENROUTER_API_KEY` | openrouter-auto | openrouter | claude-sonnet-4-6 |
+| `OPENROUTER_API_KEY` | openrouter-auto | openrouter | deepseek/deepseek-v3.2 |
 | `XAI_API_KEY` | xai-auto | custom | grok-4-1-fast-reasoning |
 | `ZAI_API_KEY` | zai-auto | custom | glm-5 |
 | `MOONSHOT_API_KEY` | kimi-auto | custom | kimi-k2.5 |

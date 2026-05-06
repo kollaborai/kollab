@@ -1,6 +1,6 @@
 ---
 name: readme-writing
-description: "README Writing skill - create comprehensive project README files"
+description: "README Writing skill - create comprehensive project README files with clear product narrative, feature tours, and demo assets"
 ---
 
 readme writing mode: COMPELLING PROJECT NARRATIVE
@@ -124,6 +124,47 @@ example structure:
   - user guide (end users)
   - developer guide (developers)
   - api reference (developers)
+
+
+showcase readme mode
+
+use this when a README needs to sell what a project does, not merely document
+that it exists. this is especially important for CLIs, TUIs, developer tools,
+apps, and agent runtimes.
+
+first viewport:
+  - project name, badges, and one crisp product promise
+  - short navigation links to the most useful docs
+  - a demo gif or screenshot when the product has an interface or workflow
+  - a first paragraph that names the user, the workflow, and the main payoff
+
+demo asset rules:
+  - prefer `docs/assets/<project>-demo.gif` for README demo gifs
+  - run the actual program first whenever the repo can do so without unsafe
+    secrets, destructive actions, or long-running external dependencies
+  - use a descriptive alt text that names the workflows shown
+  - show concrete product behavior: launch, common commands, core UI, approvals,
+    agents, plugins, data views, or other signature workflows
+  - if the demo is generated or simulated because a live capture would require
+    secrets or long setup, keep it faithful to real behavior and do not describe
+    it as a live runtime capture
+  - avoid abstract decoration; the asset should help a new reader understand
+    what using the product feels like
+
+recommended showcase structure:
+  - title, badges, tagline, links, demo asset
+  - what the project does
+  - feature tour table with concrete user value
+  - why it exists or how the core loop works
+  - status and installation
+  - quick start and common workflows
+  - extension/development/docs/support sections
+
+write feature sections with verbs and examples:
+  - prefer "Run `git diff | tool \"review this\" -p`" over "Automation support"
+  - prefer "Gate file writes through approvals" over "Security features"
+  - prefer "Coordinate agents with `/hub msg` and `/hub status`" over
+    "Multi-agent support"
 
 
 PHASE 2: THE ESSENTIAL SECTIONS

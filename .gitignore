@@ -171,6 +171,7 @@ kollab.log
 
 # Demo and test files
 demo_thinking_effects.py
+/docs/assets/
 
 # Temporary files
 *.tmp

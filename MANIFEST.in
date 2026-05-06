@@ -7,6 +7,7 @@ include requirements.txt
 # Include all markdown files in docs
 recursive-include docs *.md
 recursive-include docs *.rst
+recursive-include docs/assets *.gif *.png *.svg *.webp
 
 # Include plugin configuration files
 recursive-include plugins *.json

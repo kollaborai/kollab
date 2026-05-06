@@ -14,7 +14,7 @@ Complete reference for all commands, XML tags, CLI flags, and keyboard shortcuts
 Run agents as headless daemons and attach to them from any terminal.
 
 start a detached agent:
-  kollab --detached                          default agent (kollabor)
+  kollab --detached                          default agent (koordinator)
   kollab --detached --as sapphire            custom hub identity
   kollab --detached -a lint-editor           custom agent bundle
   kollab --detached -a coder --as ruby       both (coder bundle, ruby identity)

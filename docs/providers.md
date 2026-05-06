@@ -215,6 +215,8 @@ Unified gateway to 100+ models from multiple providers.
 
 ```bash
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
+export OPENROUTER_MODEL="deepseek/deepseek-v3.2"
+kollab
 ```
 
 ### Configuration

@@ -85,14 +85,14 @@ Path is encoded the same way as `~/.kollab/projects/<encoded-path>/`.
 ### KOLLAB_HUB_PROJECT_SCOPED
 
 Silo hub state (presence, vaults, sockets) under the current project
-instead of the global `~/.kollab/hub/`.
+instead of the global `~/.kollab/hub/`. This is enabled by default.
 
 ```bash
 KOLLAB_HUB_PROJECT_SCOPED=1 kollab --agent coder --as lapis
 ```
 
 Typically set automatically when running inside a project directory. Set
-manually only to override default behavior.
+manually only when debugging or forcing behavior in a script.
 
 Values: `1`, `true`, `yes`, `on` (truthy)
 
@@ -170,6 +170,27 @@ Some providers have legacy env var names that still work:
 
 - `KOLLAB_CLAUDE_API_KEY`, `KOLLAB_CLAUDE_TOKEN` — Anthropic key
 - `KOLLAB_API_KEY` — generic fallback
+
+Auto-detected provider profiles can also read provider-native model overrides:
+
+| API key env var | Model env var |
+|-----------------|---------------|
+| `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
+| `OPENAI_API_KEY` | `OPENAI_MODEL` |
+| `AZURE_OPENAI_API_KEY` | `AZURE_OPENAI_MODEL` |
+| `GEMINI_API_KEY` | `GEMINI_MODEL` |
+| `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` |
+| `XAI_API_KEY` | `XAI_MODEL` |
+| `ZAI_API_KEY` | `ZAI_MODEL` |
+| `MOONSHOT_API_KEY` | `MOONSHOT_MODEL` |
+
+Example:
+
+```bash
+export OPENROUTER_API_KEY="<your-openrouter-api-key>"
+export OPENROUTER_MODEL="deepseek/deepseek-v3.2"
+kollab
+```
 
 Check `docs/providers/` for each provider's full env var list.
 
