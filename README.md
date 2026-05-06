@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/kollab-demo.gif" alt="Kollab terminal demo showing the real CLI help, pipe-mode examples, agent controls, hub commands, and hub status output" width="760">
+  <img src="docs/assets/kollab-demo.gif" alt="Kollab terminal demo showing koordinator coordinating with lapis and sapphire through the local agent hub" width="760">
 </p>
 
 Kollab is a terminal-native AI workspace for developers who want more than a
