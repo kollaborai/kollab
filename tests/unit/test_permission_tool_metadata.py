@@ -3,9 +3,10 @@
 import asyncio
 from types import SimpleNamespace
 
+from kollabor_engine.session import EngineSession
+
 from kollabor.llm.permissions.hook import PermissionHook
 from kollabor_agent.permissions.risk_assessor import RiskAssessor
-from kollabor_engine.session import EngineSession
 from kollabor_events.dict_utils import deep_merge, safe_get
 from kollabor_events.permissions_config import PERMISSION_CONFIG_DEFAULTS
 from kollabor_events.permissions_models import (

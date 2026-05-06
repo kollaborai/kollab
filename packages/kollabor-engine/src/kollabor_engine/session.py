@@ -15,6 +15,7 @@ from kollabor_ai import (
     APICommunicationService,
     LLMProfile,
 )
+from kollabor_config.config_utils import get_config_directory
 from kollabor_events.bus import EventBus
 from kollabor_events.permissions_models import (
     ApprovalMode,
@@ -22,7 +23,6 @@ from kollabor_events.permissions_models import (
     RiskAssessmentRules,
     ToolRiskLevel,
 )
-from kollabor_config.config_utils import get_config_directory
 
 from . import sse
 

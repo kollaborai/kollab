@@ -71,8 +71,8 @@ class TerminalLLMChat:
         # Get configuration directory using standard resolution
         from kollabor_config.config_utils import (
             ensure_config_directory,
-            get_existing_global_config_path,
             get_conversations_dir,
+            get_existing_global_config_path,
             get_project_data_dir,
             initialize_config,
             initialize_system_prompt,
