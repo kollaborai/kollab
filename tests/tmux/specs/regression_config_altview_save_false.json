@@ -1,0 +1,34 @@
+{
+  "name": "regression-config-altview-save-false",
+  "description": "Verify ConfigAltView Ctrl-S save path persists explicit false values to config.json.",
+  "config": {
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "command": "tmp=$(mktemp -d); HOME=\"$tmp\" \"$PWD/.venv/bin/python\" - <<'PY'\nfrom pathlib import Path\nimport json\nfrom kollabor_config.service import ConfigService\nfrom plugins.altview.config_altview import ConfigAltView\n\nclass DirtyWidget:\n    def __init__(self, config_path, value):\n        self.config_path = config_path\n        self._pending_value = value\n    def has_pending_changes(self):\n        return self._pending_value is not None\n    def get_pending_value(self):\n        return self._pending_value\n\npath = Path.home() / '.kollab' / 'config.json'\nsvc = ConfigService(path, fast_mode=True)\nwidgets = [\n    DirtyWidget('plugins.hub.enabled', False),\n    DirtyWidget('plugins.hub.project_scoped', False),\n    DirtyWidget('plugins.context_service.hub_broadcast_enabled', False),\n]\nview = ConfigAltView()\nview.config_service = svc\nview._section_widgets = [widgets]\nview._do_save('global')\ndata = json.loads(path.read_text())\nprint('hub_enabled', data['plugins']['hub']['enabled'])\nprint('project_scoped', data['plugins']['hub']['project_scoped'])\nprint('hub_broadcast', data['plugins']['context_service']['hub_broadcast_enabled'])\nprint('pending_cleared', all(w._pending_value is None for w in widgets))\nPY\nrm -rf \"$tmp\"",
+      "description": "Save false values through ConfigAltView"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hub_enabled\\s+False",
+      "description": "Hub enabled false persisted"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "project_scoped\\s+False",
+      "description": "Project scoped false persisted"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hub_broadcast\\s+False",
+      "description": "Hub broadcast false persisted"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "pending_cleared\\s+True",
+      "description": "Pending widget values clear after successful save"
+    }
+  ]
+}

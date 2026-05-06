@@ -1,0 +1,108 @@
+{
+  "name": "regression-cli-daemon-preflight",
+  "description": "Verify unknown CLI flags do not launch the daemon, hub CLI commands route, -d is registered, and --update refuses dirty trees safely.",
+  "config": {
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "section",
+      "title": "Unknown command should not run daemon preflight"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" kollab --hun status 2>&1 || true",
+      "description": "Run typo command"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Unknown command: --hun",
+      "description": "Unknown command is reported"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Did you mean --hub",
+      "description": "Typo hint suggests --hub"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "daemon startup failed|falling back to single-process mode",
+      "description": "Unknown command does not launch daemon first"
+    },
+
+    {
+      "action": "section",
+      "title": "Hub CLI command should be recognized"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" timeout 20 kollab --hub status 2>&1 || true",
+      "description": "Run hub status"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Unknown command|daemon startup failed",
+      "description": "Hub status is recognized without daemon preflight failure"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hub|agent|online|presence|no agents|identity",
+      "description": "Hub status returns hub output"
+    },
+
+    {
+      "action": "section",
+      "title": "-d alias and explicit update command are registered"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" kollab -h 2>&1 | sed -n '1,120p'",
+      "description": "Show help"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "-d, --detached|--detached",
+      "description": "-d detached alias appears in help"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--update",
+      "description": "--update appears in help"
+    },
+
+    {
+      "action": "section",
+      "title": "-d should behave like --detached"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" bash -lc 'kollab --hub stop all >/dev/null 2>&1 || true; kollab -d 2>&1; sleep 4; kollab --hub status 2>&1; kollab --hub stop all >/dev/null 2>&1 || true'",
+      "description": "Launch detached via short alias and inspect hub status"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Unknown command|daemon startup failed",
+      "description": "-d launches without command or daemon errors"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "koordinator|lapis|sapphire|agent|online|presence",
+      "description": "-d produces hub-visible agents"
+    },
+
+    {
+      "action": "section",
+      "title": "--update refuses dirty working trees"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" kollab --update 2>&1 || true",
+      "description": "Run update in dirty checkout"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Refusing to update because the working tree has local changes",
+      "description": "Update command is safe by default"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "name": "regression-config-migration-defaults",
+  "description": "Verify config migration adds new defaults, tracks app version, and preserves explicit false values.",
+  "config": {
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "command": "tmp=$(mktemp -d); HOME=\"$tmp\" \"$PWD/.venv/bin/python\" - <<'PY'\nfrom pathlib import Path\nimport json\nfrom kollabor_config.service import ConfigService\npath = Path.home() / '.kollab' / 'config.json'\nsvc = ConfigService(path, fast_mode=True)\ndata = json.loads(path.read_text())\nprint('config_version', data.get('config_version'))\nprint('last_app_version', data.get('last_app_version'))\nprint('hub_enabled', data['plugins']['hub']['enabled'])\nprint('project_scoped', data['plugins']['hub']['project_scoped'])\nprint('hub_broadcast', data['plugins']['context_service']['hub_broadcast_enabled'])\nprint('default_agent', data['kollabor']['llm']['default_agent']['name'])\ndata['plugins']['hub']['enabled'] = False\ndata['plugins']['hub']['project_scoped'] = False\ndata['plugins']['context_service']['hub_broadcast_enabled'] = False\npath.write_text(json.dumps(data))\nsvc = ConfigService(path, fast_mode=True)\ndata = json.loads(path.read_text())\nprint('explicit_false', data['plugins']['hub']['enabled'], data['plugins']['hub']['project_scoped'], data['plugins']['context_service']['hub_broadcast_enabled'])\nPY\nrm -rf \"$tmp\"",
+      "description": "Create and migrate isolated config"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "config_version\\s+1\\.0\\.1",
+      "description": "Config version matches app version"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "last_app_version\\s+1\\.0\\.1",
+      "description": "Last app version is tracked"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hub_enabled\\s+True",
+      "description": "Hub enabled default is added"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "project_scoped\\s+True",
+      "description": "Per-project hub default is added"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hub_broadcast\\s+True",
+      "description": "Hub broadcast default is added"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "default_agent\\s+koordinator",
+      "description": "Koordinator is default agent"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "explicit_false\\s+False\\s+False\\s+False",
+      "description": "Explicit false values survive migration"
+    }
+  ]
+}

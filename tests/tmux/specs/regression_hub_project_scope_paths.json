@@ -1,0 +1,34 @@
+{
+  "name": "regression-hub-project-scope-paths",
+  "description": "Verify hub path helpers default to project-scoped storage and do not create root ~/.kollab/hub in the default path.",
+  "config": {
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "command": "tmp=$(mktemp -d); unset KOLLAB_HUB_PROJECT_SCOPED; HOME=\"$tmp\" KOLLAB_PROJECT_ROOT=\"$PWD\" \"$PWD/.venv/bin/python\" - <<'PY'\nfrom pathlib import Path\nfrom plugins.hub.project_scope import is_project_scoped\nfrom plugins.hub.presence import get_hub_dir\nfrom plugins.hub.vault import get_global_vaults_dir\nprint('project_scoped', is_project_scoped())\nhub_dir = get_hub_dir()\nprint('hub_dir', hub_dir)\nshared_dir = get_global_vaults_dir()\nprint('shared_dir', shared_dir)\nprint('root_hub_exists', (Path.home() / '.kollab' / 'hub').exists())\nPY\nrm -rf \"$tmp\"",
+      "description": "Resolve hub paths with isolated HOME"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "project_scoped\\s+True",
+      "description": "Project-scoped mode defaults on"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hub_dir.*\\.kollab/projects/.*/hub",
+      "description": "Hub dir is under project data"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "shared_dir.*\\.kollab/projects/.*/hub/vaults/_shared",
+      "description": "Shared vault defaults under project hub"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "root_hub_exists\\s+False",
+      "description": "Default path does not create root ~/.kollab/hub"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "regression-openrouter-model-catalog",
+  "description": "Verify /model OpenRouter catalog filtering surfaces provider model ids and tool support metadata.",
+  "config": {
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "command": "\"$PWD/.venv/bin/python\" - <<'PY'\nimport asyncio\nfrom kollabor.commands.system_commands.handlers.model import ModelCommandHandler\nfrom kollabor_ai.providers import openrouter_model_info\n\nasync def fake_models(self):\n    return [\n        {'id': 'deepseek/deepseek-v3.2', 'name': 'DeepSeek V3.2', 'context_length': 163840, 'supported_parameters': ['tools', 'tool_choice']},\n        {'id': 'openai/gpt-example', 'name': 'Other Model', 'context_length': 8192, 'supported_parameters': []},\n    ]\n\nopenrouter_model_info.OpenRouterModelInfo.list_models = fake_models\nhandler = ModelCommandHandler(command_registry=None, event_bus=None)\ncommands = asyncio.run(handler._get_openrouter_model_commands(None, 'deepseek'))\nfor command in commands:\n    print('model', command['model_name'])\n    print('description', command['description'])\n    print('supports_tools', command['supports_tools'])\nprint('count', len(commands))\nPY",
+      "description": "Exercise OpenRouter catalog command builder with fake provider data"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "model\\s+deepseek/deepseek-v3\\.2",
+      "description": "Filtered catalog includes DeepSeek model id"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "description.*163,840 ctx.*tools",
+      "description": "Description includes context length and tool support"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "supports_tools\\s+True",
+      "description": "Tool support metadata is true"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "count\\s+1",
+      "description": "Search filter narrows provider catalog"
+    }
+  ]
+}
