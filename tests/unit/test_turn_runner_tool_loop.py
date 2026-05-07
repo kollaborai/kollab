@@ -42,7 +42,11 @@ class FakeAPIService:
 
 
 class FakeToolExecutor:
+    def __init__(self):
+        self.calls = []
+
     async def execute_tool(self, tool_call):
+        self.calls.append(tool_call)
         return SimpleNamespace(
             success=True,
             output='{"page":{"pathname":"/dashboard","ageSec":938}}',
@@ -92,3 +96,49 @@ async def test_tool_calls_always_continue_to_model_even_when_stop_reason_is_stop
     )
     assert events[-1]["type"] == "turn_complete"
     assert events[-1]["stop_reason"] == "end_turn"
+
+
+class FakeBuiltInToolAPIService(FakeAPIService):
+    async def call_llm(self, conversation_history, streaming_callback, tools):
+        self.calls += 1
+        self.last_thinking_content = None
+        self.last_token_usage = {"prompt_tokens": 1, "completion_tokens": 1}
+
+        if self.calls == 1:
+            self.last_stop_reason = "tool_use"
+            self.last_tool_calls = [
+                {
+                    "id": "call_file",
+                    "type": "tool_use",
+                    "name": "file_read",
+                    "input": {"file": "README.md", "limit": 5},
+                }
+            ]
+            return ""
+
+        self.last_stop_reason = "end_turn"
+        self.last_tool_calls = []
+        await streaming_callback("read it")
+        return "read it"
+
+
+class FakeBuiltInToolSession(FakeSession):
+    def __init__(self):
+        super().__init__()
+        self.api_service = FakeBuiltInToolAPIService()
+        self.mcp_integration = SimpleNamespace(tool_registry={})
+
+
+@pytest.mark.asyncio
+async def test_builtin_native_tool_calls_route_to_builtin_executor_type():
+    session = FakeBuiltInToolSession()
+    events = [event async for event in TurnRunner().run(session, "read README")]
+
+    assert session.tool_executor.calls
+    tool_call = session.tool_executor.calls[0]
+    assert tool_call["type"] == "file_read"
+    assert tool_call["name"] == "file_read"
+    assert tool_call["file"] == "README.md"
+    assert tool_call["limit"] == 5
+    assert tool_call["arguments"] == {"file": "README.md", "limit": 5}
+    assert any(event["type"] == "tool_start" for event in events)

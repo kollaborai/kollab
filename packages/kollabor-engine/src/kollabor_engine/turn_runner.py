@@ -97,29 +97,14 @@ class TurnRunner:
                 # Get available tools
                 tools = await session.get_tools()
 
-                # Debug: log what we're about to send to LLM
-                import sys
-
-                print("[ENGINE-DEBUG] Calling LLM with:", file=sys.stderr)
-                print(
-                    f"[ENGINE-DEBUG]   profile.provider={session.profile.provider}",
-                    file=sys.stderr,
-                )
-                print(
-                    f"[ENGINE-DEBUG]   profile.model={session.profile.get_model()}",
-                    file=sys.stderr,
-                )
-                print(
-                    f"[ENGINE-DEBUG]   profile.base_url={session.profile.base_url or '(empty)'}",
-                    file=sys.stderr,
-                )
-                print(
-                    f"[ENGINE-DEBUG]   history_length={len(session.history)}",
-                    file=sys.stderr,
-                )
-                print(
-                    f"[ENGINE-DEBUG]   tools_count={len(tools) if tools else 0}",
-                    file=sys.stderr,
+                logger.debug(
+                    "Session %s: calling LLM (provider=%s model=%s "
+                    "history=%s tools=%s)",
+                    session.session_id,
+                    session.profile.provider,
+                    session.profile.get_model(),
+                    len(session.history),
+                    len(tools) if tools else 0,
                 )
 
                 # Call LLM (streaming)
@@ -150,10 +135,19 @@ class TurnRunner:
 
                 # Normalise tool_calls to dicts once so all downstream code is safe.
                 # Also resolve the executor tool_type: the tool_executor routes based
-                # on "type" being "mcp_tool", "terminal", "file_*", etc. — not the
-                # LLM's "tool_use". Look up the tool name in the MCP registry to pick
-                # the right type; default to "mcp_tool" for anything registered there.
+                # on "type" being "mcp_tool", "terminal", "file_*", etc. - not the
+                # LLM's "tool_use". MCP names route to MCP; built-in registry native
+                # names route to their native executor type (file_read, terminal, etc.).
                 mcp_tool_names = set(session.mcp_integration.tool_registry.keys())
+                registry_native_names: set[str] = set()
+                try:
+                    from kollabor_agent.tool_registry import get_registry
+
+                    registry_native_names = {
+                        tool.native_name for tool in get_registry().list()
+                    }
+                except Exception:
+                    logger.debug("Tool registry unavailable during tool normalisation")
 
                 def _normalise_tc(tc: Any) -> dict:
                     if isinstance(tc, dict):
@@ -167,24 +161,28 @@ class TurnRunner:
                     # Resolve executor type
                     if name in mcp_tool_names:
                         resolved_type = "mcp_tool"
+                    elif name in registry_native_names:
+                        resolved_type = name
                     elif raw_type not in ("tool_use",):
                         resolved_type = raw_type  # already classified (terminal, file_*, etc.)
                     else:
                         resolved_type = "mcp_tool"  # default: treat as MCP tool
-                    if isinstance(tc, dict):
-                        return {
-                            **tc,
-                            "type": resolved_type,
-                            "input": input_val,
-                            "arguments": input_val,
-                        }
-                    return {
+
+                    base = {
                         "type": resolved_type,
-                        "id": getattr(tc, "id", ""),
+                        "id": _tc_get(tc, "id", ""),
                         "name": name,
                         "input": input_val,
                         "arguments": input_val,
                     }
+                    if resolved_type != "mcp_tool" and isinstance(input_val, dict):
+                        base.update(input_val)
+                    if isinstance(tc, dict):
+                        return {
+                            **tc,
+                            **base,
+                        }
+                    return base
 
                 tool_calls = [_normalise_tc(tc) for tc in tool_calls]
 

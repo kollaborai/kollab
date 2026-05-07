@@ -3,7 +3,32 @@
 import argparse
 import asyncio
 import logging
+from datetime import datetime
+from pathlib import Path
 import sys
+
+
+def _build_engine_log_path(now: datetime | None = None) -> Path:
+    """Return the per-session engine log path for the current project."""
+    from kollabor_config.config_utils import get_logs_dir
+
+    timestamp = (now or datetime.now()).strftime("%Y%m%d-%H%M")
+    return get_logs_dir() / f"kollab-engine-{timestamp}.log"
+
+
+def _configure_logging(log_level: str, log_path: Path) -> None:
+    """Send engine logging and stderr prints to the timestamped log file."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    level = getattr(logging, log_level.upper())
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=[logging.FileHandler(log_path, encoding="utf-8")],
+        force=True,
+    )
+    sys.stderr = open(log_path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+    logging.getLogger(__name__).info("Engine logging to %s", log_path)
 
 
 def main():
@@ -31,10 +56,7 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    _configure_logging(args.log_level, _build_engine_log_path())
 
     import uvicorn  # type: ignore[import-not-found]
 
@@ -56,6 +78,7 @@ def main():
             host=host,
             port=port,
             log_level=log_level,
+            log_config=None,
             access_log=False,
         )
         server = uvicorn.Server(config)
