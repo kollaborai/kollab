@@ -6,7 +6,9 @@ import hashlib
 import logging
 import os
 import shlex
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -241,7 +243,7 @@ class AgentOrchestrator:
         extra_args: str = "",
     ) -> str:
         """Build kollab command with optional flags."""
-        cmd = "kollab --detached --permissions trust "
+        cmd = shlex.join(self._find_kollab_command()) + " --detached --permissions trust "
         agent_flag = agent_type or getattr(self, "agent_name", "")
         if agent_flag:
             cmd += f" --agent {shlex.quote(agent_flag)}"
@@ -250,6 +252,27 @@ class AgentOrchestrator:
         if extra_args:
             cmd += f" {extra_args}"
         return cmd
+
+    def _find_kollab_command(self) -> List[str]:
+        """Find the command used to launch child kollab agents.
+
+        Child agents run in the user's current project directory, so the
+        command cannot be a relative ``python main.py``. That only works while
+        cwd is the Kollab source repo and silently kills spawns elsewhere.
+        """
+        source_main = Path(__file__).resolve().parents[2] / "main.py"
+        if source_main.exists():
+            return [sys.executable, str(source_main)]
+
+        same_env_script = Path(sys.executable).parent / "kollab"
+        if same_env_script.exists():
+            return [str(same_env_script)]
+
+        kollab_bin = shutil.which("kollab")
+        if kollab_bin:
+            return [kollab_bin]
+
+        return [sys.executable, "-m", "kollabor_cli_main"]
 
     async def spawn(
         self,
@@ -538,7 +561,8 @@ class AgentOrchestrator:
         env["KOLLAB_AGENT_NAME"] = agent_name
         env["KOLLAB_PARENT_PID"] = str(os.getpid())
 
-        cmd = ["python3", "main.py", "--detached", "--permissions", "trust"]
+        cmd = self._find_kollab_command()
+        cmd.extend(["--detached", "--permissions", "trust"])
 
         # Add agent bundle flag so the spawned agent joins the hub mesh
         agent_flag = agent_type or agent_name

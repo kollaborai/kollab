@@ -32,3 +32,6 @@ from kollabor.cli import cli_main  # noqa: E402
 
 # This is the entry point that setuptools will call
 __all__ = ["cli_main"]
+
+if __name__ == "__main__":
+    cli_main()

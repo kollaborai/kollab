@@ -5350,7 +5350,15 @@ class HubPlugin(BasePlugin):
 
         lines.append("")
         lines.append("agent operations (XML tags parsed from your responses):")
-        lines.append('  <hub_spawn name="agent-name">task description</hub_spawn>')
+        lines.append('  <hub_spawn name="lapis">task description</hub_spawn>')
+        lines.append(
+            '  <hub_spawn name="sapphire" type="research">'
+            "research task</hub_spawn>"
+        )
+        lines.append(
+            "  note: name is a hub identity. to choose an agent bundle, "
+            'use type="coder" or type="research".'
+        )
         lines.append("  <hub_work/>  -- view work queue")
         lines.append("  <hub_queue>task description</hub_queue>  -- add to queue")
         lines.append('  <hub_claim/>  or  <hub_claim id="slot-id"/>  -- claim work')
@@ -6623,6 +6631,27 @@ class HubPlugin(BasePlugin):
                         resolved_identity = gem.name
                         effective_skills = list(gem.skills or [])
                         break
+
+            # If the requested name is a real agent bundle but the pool does
+            # not bind any identity to that type (for example "research"),
+            # use the next free identity and keep the requested bundle type.
+            if not resolved_identity and self.event_bus:
+                try:
+                    agent_mgr = self.event_bus.get_service("agent_manager")
+                    agent_def = agent_mgr.get_agent(agent_name) if agent_mgr else None
+                except Exception:
+                    agent_def = None
+                if agent_def is not None:
+                    for gem in POOL_IDENTITIES:
+                        if gem.name not in online_identities:
+                            resolved_identity = gem.name
+                            effective_skills = list(gem.skills or [])
+                            break
+                    if not resolved_identity:
+                        return (
+                            f"all identities are busy for agent_type '{agent_name}'. "
+                            f"use hub_msg to assign work to an existing one."
+                        )
 
             if not resolved_identity:
                 online_with_type = [

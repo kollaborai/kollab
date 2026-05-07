@@ -33,6 +33,9 @@ sleep 0.4
 tmux send-keys -t "$SESSION" "export KOLLAB_OPENROUTER_AUTO_MODEL=\"$DEMO_MODEL\"" C-m
 sleep 0.4
 
+tmux send-keys -t "$SESSION" "precmd_functions=(); chpwd_functions=(); PROMPT='kdex:%~ %# '; RPROMPT=''" C-m
+sleep 0.4
+
 tmux send-keys -t "$SESSION" "which kollab" C-m
 sleep 0.4
 
@@ -47,18 +50,6 @@ tmux send-keys -t "$SESSION" "print(f'profile: {pm.active_profile_name} provider
 tmux send-keys -t "$SESSION" "PY" C-m
 sleep 0.8
 
-tmux send-keys -t "$SESSION" "asciinema rec --overwrite --cols 110 --rows 34 -i 1 -q '$CAST_PATH'" C-m
-sleep 2
-
-tmux send-keys -t "$SESSION" "unset ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY AZURE_OPENAI_API_KEY XAI_API_KEY" C-m
-sleep 0.4
-
-tmux send-keys -t "$SESSION" "export KOLLAB_OPENROUTER_AUTO_MODEL=\"$DEMO_MODEL\"" C-m
-sleep 0.4
-
-tmux send-keys -t "$SESSION" "which kollab" C-m
-sleep 0.4
-
 tmux send-keys -t "$SESSION" "kollab --hub stop all" C-m
 sleep 1
 
@@ -66,6 +57,9 @@ tmux send-keys -t "$SESSION" "kollab --agent coder --as lapis --detached" C-m
 sleep 2
 
 tmux send-keys -t "$SESSION" "kollab --agent technical-writer --as sapphire --detached" C-m
+sleep 2
+
+tmux send-keys -t "$SESSION" "asciinema rec --overwrite --cols 110 --rows 34 -i 1 -q '$CAST_PATH'" C-m
 sleep 2
 
 tmux send-keys -t "$SESSION" "kollab --hub status" C-m
@@ -112,6 +106,28 @@ import sys
 
 source, target, cutoff_epoch = sys.argv[1], sys.argv[2], float(sys.argv[3])
 
+REPLACEMENTS = {
+    "ℹ": "i",
+    "◆": "*",
+    "\ue0a0": "*",
+    "📦": "pkg",
+    "🐍": "py",
+    "☁": "cloud",
+    "️": "",
+}
+
+
+def sanitize_text(text: str) -> str:
+    chars = []
+    for char in text:
+        codepoint = ord(char)
+        if 0x2800 <= codepoint <= 0x28FF:
+            chars.append("*")
+        else:
+            chars.append(REPLACEMENTS.get(char, char))
+    return "".join(chars)
+
+
 with open(source, "r", encoding="utf-8") as src:
     header = json.loads(src.readline())
     cutoff = max(0.0, cutoff_epoch - float(header.get("timestamp", 0)) - 0.75)
@@ -124,6 +140,8 @@ with open(source, "r", encoding="utf-8") as src:
                 continue
             if float(event[0]) > cutoff:
                 break
+            if len(event) > 2 and isinstance(event[2], str):
+                event[2] = sanitize_text(event[2])
             dst.write(json.dumps(event, separators=(",", ":")) + "\n")
 PY
 
@@ -132,6 +150,8 @@ agg \
   --theme github-dark \
   --cols 110 \
   --rows 34 \
+  --font-dir "$HOME/Library/Fonts" \
+  --font-family "JetBrainsMono NFM,JetBrains Mono,Menlo" \
   --font-size 14 \
   --line-height 1.25 \
   --idle-time-limit 0.4 \

@@ -10,6 +10,7 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -39,6 +40,56 @@ class TestCreateSessionInitialTask(unittest.TestCase):
         proc.stdout = MagicMock()
         proc.stdout.readline = MagicMock(return_value=b"")
         return proc
+
+    def test_find_command_prefers_same_environment_script(self):
+        """Installed tools should not fall through to pyenv/homebrew shims."""
+
+        def fake_exists(path):
+            text = str(path)
+            if text.endswith("/main.py"):
+                return False
+            return text == "/tmp/kollab-tool/bin/kollab"
+
+        with (
+            patch(
+                "plugins.agent_orchestrator.orchestrator.sys.executable",
+                "/tmp/kollab-tool/bin/python",
+            ),
+            patch(
+                "plugins.agent_orchestrator.orchestrator.Path.exists",
+                fake_exists,
+            ),
+        ):
+            self.assertEqual(
+                self.orch._find_kollab_command(),
+                ["/tmp/kollab-tool/bin/kollab"],
+            )
+
+    @patch("plugins.agent_orchestrator.orchestrator.threading.Thread")
+    @patch("plugins.agent_orchestrator.orchestrator.subprocess.Popen")
+    def test_spawn_cmd_uses_real_kollab_entrypoint(self, mock_popen, mock_thread):
+        """Child agents must launch Kollab, not cwd/main.py."""
+        mock_popen.return_value = self._make_proc_mock()
+
+        with TemporaryDirectory() as project_dir:
+            with patch("plugins.agent_orchestrator.orchestrator.Path.cwd") as mock_cwd:
+                mock_cwd.return_value = Path(project_dir)
+                _run(
+                    self.orch._create_session(
+                        full_name="test-proj-lapis",
+                        agent_name="lapis",
+                        agent_type="coder",
+                        identity="lapis",
+                        initial_task="review the project",
+                    )
+                )
+
+        cmd = mock_popen.call_args.args[0]
+        self.assertNotEqual(cmd[:2], ["python3", "main.py"])
+        if len(cmd) > 1 and str(cmd[1]).endswith("main.py"):
+            self.assertTrue(Path(cmd[1]).is_absolute())
+        self.assertIn("--detached", cmd)
+        self.assertEqual(mock_popen.call_args.kwargs["cwd"], project_dir)
 
     @patch("plugins.agent_orchestrator.orchestrator.threading.Thread")
     @patch("plugins.agent_orchestrator.orchestrator.subprocess.Popen")

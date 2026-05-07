@@ -275,7 +275,10 @@ Aliases: /t, /term, /tmux"""
                 pid=proc.pid,
             )
 
-            msg = "tip: use /hub spawn <type> <task> for agent management\n\n"
+            msg = (
+                "tip: use /hub spawn <identity> type=<agent-type> <task> "
+                "for agent management\n\n"
+            )
             msg += f"Created session '{session_name}'"
             if command:
                 msg += f" running: {command}"
