@@ -506,6 +506,8 @@ class ScriptWidgetRefreshScheduler:
             "tool_call": EventType.TOOL_CALL,
             "pre_tool_call": EventType.TOOL_CALL_PRE,
             "post_tool_call": EventType.TOOL_CALL_POST,
+            "post_command": EventType.SLASH_COMMAND_COMPLETE,
+            "pre_llm": EventType.LLM_REQUEST_PRE,
         }
 
         for name in hook_names:
@@ -520,7 +522,7 @@ class ScriptWidgetRefreshScheduler:
             try:
                 event_types.append(EventType[normalized.upper()])
             except KeyError:
-                logger.warning(f"Unknown event type: {name}")
+                logger.debug(f"Unknown event type: {name}")
 
         return event_types
 

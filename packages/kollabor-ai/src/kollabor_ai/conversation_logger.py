@@ -69,6 +69,11 @@ class KollaborConversationLogger:
         self.message_count = 0
         self.current_thread_uuid = None
 
+        # Memory directory (used by _load/_save_conversation_memory)
+        self.memory_dir = self.conversations_dir / "memory"
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self._load_conversation_memory()
+
         # Intelligence features
         self.user_patterns: List[str] = []
         self.project_context: Dict[str, Any] = {}
@@ -97,12 +102,7 @@ class KollaborConversationLogger:
             "timestamp": datetime.now().isoformat(),
         }
 
-        # Memory management (inside conversations/)
-        self.memory_dir = self.conversations_dir / "memory"
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
-        self._load_conversation_memory()
-
-        logger.info(f"Conversation logger initialized: {self.session_id}")
+        logger.debug(f"File interaction recorded: {operation} {file_path}")
 
     async def initialize(self) -> bool:
         """Initialize async resources for conversation logger."""

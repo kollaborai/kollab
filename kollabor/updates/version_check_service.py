@@ -178,7 +178,9 @@ class VersionCheckService:
 
         except Exception as e:
             # Catch-all for unexpected errors
-            logger.warning(f"Unexpected error during update check: {e}")
+            logger.warning(
+                f"Unexpected error during update check for {self.github_repo}: {e}"
+            )
             return None
 
     async def _fetch_latest_release(self) -> Optional[dict]:
@@ -188,7 +190,7 @@ class VersionCheckService:
             Parsed JSON response or None on error
         """
         if not self.session:
-            logger.warning("HTTP session not initialized")
+            logger.debug("HTTP session not initialized - update check disabled")
             return None
 
         url = f"https://api.github.com/repos/{self.github_repo}/releases/latest"
@@ -200,27 +202,43 @@ class VersionCheckService:
                     logger.debug(f"GitHub API returned: {data.get('tag_name')}")
                     return data
                 elif response.status == 404:
-                    logger.warning(f"Repository {self.github_repo} not found")
+                    logger.info(
+                        f"Repository {self.github_repo} not found via GitHub API "
+                        f"(this is normal if the repo is private, "
+                        f"rate-limited, or unreachable)"
+                    )
                     return None
                 elif response.status == 403:
-                    logger.warning("GitHub API rate limit exceeded")
+                    logger.info(
+                        f"GitHub API rate limit exceeded for {self.github_repo} "
+                        f"- update check will retry on next interval"
+                    )
                     return None
                 else:
-                    logger.warning(f"GitHub API returned status {response.status}")
+                    logger.info(
+                        f"GitHub API returned status {response.status} "
+                        f"for {self.github_repo} - skipping update check"
+                    )
                     return None
 
         except asyncio.TimeoutError:
-            logger.warning(
-                f"GitHub API timeout after {self.timeout_seconds}s - using cached data"
+            logger.debug(
+                f"GitHub API timeout after {self.timeout_seconds}s "
+                f"- falling back to cached data"
             )
             return None
 
         except aiohttp.ClientError as e:
-            logger.warning(f"GitHub API error: {e} - using cached data")
+            logger.debug(
+                f"GitHub API connection error: {e} "
+                f"- falling back to cached data"
+            )
             return None
 
         except Exception as e:
-            logger.warning(f"Unexpected error fetching release: {e}")
+            logger.warning(
+                f"Unexpected error fetching release from {self.github_repo}: {e}"
+            )
             return None
 
     def _parse_release_data(self, release_json: dict) -> Optional[ReleaseInfo]:
