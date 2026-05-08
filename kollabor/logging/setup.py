@@ -5,8 +5,12 @@ reading from the config system when available and providing sensible
 defaults during bootstrap.
 """
 
-import logging
-import logging.handlers
+import sys
+import logging as _logging
+from logging.handlers import (
+    RotatingFileHandler,
+    TimedRotatingFileHandler,
+)
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -14,7 +18,7 @@ from typing import Any, Dict, Optional
 from kollabor_config.config_utils import get_logs_dir
 
 
-class CompactFormatter(logging.Formatter):
+class CompactFormatter(_logging.Formatter):
     """Custom formatter that compacts level names and includes file location."""
 
     def format(self, record):
@@ -46,7 +50,7 @@ class LoggingSetup:
         # Setup with hardcoded defaults that match current behavior
         log_file = log_dir / "kollab.log"
 
-        handler = logging.handlers.TimedRotatingFileHandler(
+        handler = _logging.handlers.TimedRotatingFileHandler(
             filename=str(log_file),
             when="D",  # Daily rotation
             interval=1,
@@ -64,9 +68,9 @@ class LoggingSetup:
         handler.setFormatter(formatter)
 
         # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            handlers=[handler, logging.NullHandler()],  # Suppress console output
+        _logging.basicConfig(
+            level=_logging.INFO,
+            handlers=[handler, _logging.NullHandler()],  # Suppress console output
         )
 
         self._configured = True
@@ -95,14 +99,14 @@ class LoggingSetup:
         custom_format = logging_config.get("format", None)
 
         # Convert string level to logging constant
-        numeric_level = getattr(logging, level, logging.INFO)
+        numeric_level = getattr(logging, level, _logging.INFO)
 
         # Ensure log directory exists
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create new handler
-        handler = logging.handlers.TimedRotatingFileHandler(
+        handler = _logging.handlers.TimedRotatingFileHandler(
             filename=str(log_path),
             when="D",
             interval=1,
@@ -115,28 +119,28 @@ class LoggingSetup:
 
         # Choose formatter based on config
         if format_type == "compact":
-            formatter: logging.Formatter = CompactFormatter(
+            formatter: _logging.Formatter = CompactFormatter(
                 "%(asctime)s - %(levelname)-4s - %(message)-100s - %(filename)s:%(lineno)04d"
             )
         elif custom_format:
-            formatter = logging.Formatter(custom_format)
+            formatter = _logging.Formatter(custom_format)
         else:
             # Standard format
-            formatter = logging.Formatter(
+            formatter = _logging.Formatter(
                 "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
             )
 
         handler.setFormatter(formatter)
 
         # Clear existing handlers and setup new one
-        root_logger = logging.getLogger()
+        root_logger = _logging.getLogger()
         for old_handler in root_logger.handlers[:]:
             old_handler.close()  # Close file handles before removing
             root_logger.removeHandler(old_handler)
 
-        logging.basicConfig(
+        _logging.basicConfig(
             level=numeric_level,
-            handlers=[handler, logging.NullHandler()],
+            handlers=[handler, _logging.NullHandler()],
             force=True,  # Force reconfiguration
         )
 
@@ -151,19 +155,19 @@ class LoggingSetup:
         # Apply formatter to all existing loggers
         self._apply_formatter_to_all_loggers(formatter)
 
-        logging.getLogger(__name__).info(
+        _logging.getLogger(__name__).info(
             f"Logging reconfigured - Level: {level}, File: {log_file}, Format: {format_type}"
         )
 
     def _apply_formatter_to_all_loggers(self, formatter):
         """Apply formatter to all existing loggers and handlers."""
         # Apply to root logger handlers
-        for root_handler in logging.getLogger().handlers:
+        for root_handler in _logging.getLogger().handlers:
             root_handler.setFormatter(formatter)
 
         # Apply to all existing logger handlers
-        for logger_name in logging.Logger.manager.loggerDict:
-            existing_logger = logging.getLogger(logger_name)
+        for logger_name in _logging.Logger.manager.loggerDict:
+            existing_logger = _logging.getLogger(logger_name)
             for existing_handler in existing_logger.handlers:
                 existing_handler.setFormatter(formatter)
 
@@ -182,20 +186,20 @@ class LoggingSetup:
             level: Log level string (DEBUG, INFO, WARNING, ERROR)
         """
         level = level.upper()
-        numeric_level = getattr(logging, level, logging.INFO)
+        numeric_level = getattr(logging, level, _logging.INFO)
 
         # Update root logger
-        logging.getLogger().setLevel(numeric_level)
+        _logging.getLogger().setLevel(numeric_level)
 
         # Update all existing loggers
-        for logger_name in logging.Logger.manager.loggerDict:
-            existing_logger = logging.getLogger(logger_name)
+        for logger_name in _logging.Logger.manager.loggerDict:
+            existing_logger = _logging.getLogger(logger_name)
             existing_logger.setLevel(numeric_level)
 
         # Update current config
         self._current_config["level"] = level
 
-        logging.info(f"Logging level changed to {level}")
+        _logging.info(f"Logging level changed to {level}")
 
 
 # Global instance
