@@ -149,6 +149,8 @@ kollab --profile fast
 # Persist the auto-created profile to config
 kollab --profile fast --save              # global
 kollab --profile fast --save --local      # project-local
+kollab --profile fast --default           # set startup default (global)
+kollab --profile fast --default --local   # set startup default (project)
 
 # Multiple fields at once
 KOLLAB_MAX_TOKENS=8192 \

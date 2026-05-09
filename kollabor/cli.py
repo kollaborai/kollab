@@ -470,6 +470,17 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "--default",
+        dest="make_default_profile",
+        action="store_true",
+        default=False,
+        help=(
+            "Set --profile as default for next startups "
+            "(use --local to set project default instead of global)"
+        ),
+    )
+
+    parser.add_argument(
         "--simple",
         action="store_true",
         default=False,
@@ -567,6 +578,10 @@ Telegram bridge setup (run inside interactive mode):
 
     # Parse known args, capture unknown as potential CLI commands
     args, unknown = parser.parse_known_args(argv)
+
+    # Validate profile persistence flags
+    if getattr(args, "make_default_profile", False) and not getattr(args, "profile", None):
+        parser.error("--default requires --profile")
 
     # --project override: propagate to env BEFORE any hub code boots
     # (project_scope.resolve_project_root reads KOLLAB_PROJECT_ROOT).
@@ -973,6 +988,7 @@ async def async_main() -> None:
             profile_name=args.profile,
             save_profile=args.save,
             save_local=args.local,
+            make_default_profile=args.make_default_profile,
             skill_names=args.skill,
             plugin_registry=plugin_registry,
             attach_to=_attach_to,
@@ -1740,6 +1756,7 @@ def _should_use_daemon() -> bool:
         "--simple",
         "--save",
         "--local",
+        "--default",
     }
     for arg in args:
         if arg in skip_flags:

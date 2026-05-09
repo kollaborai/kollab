@@ -77,7 +77,7 @@ were approved, and which hooks or plugins changed the flow.
 | Terminal chat | Streaming responses, command menu, status layout, themes, widgets, conversation history, and resume |
 | Providers and profiles | Anthropic, OpenAI, Google Gemini, Azure OpenAI, OpenRouter, Ollama, LM Studio, and custom OpenAI-compatible endpoints |
 | OpenAI OAuth | `kollab --login openai` for ChatGPT subscription-backed usage without an API key |
-| Pipe mode | `git diff | kollab "review this" -p --timeout 5min` for scripts, CI, shell workflows, and automation |
+| Pipe mode | `git diff \| kollab "review this" -p --timeout 5min` for scripts, CI, shell workflows, and automation |
 | Tool permissions | Approval modes, risk assessment, session/project approvals, blocked tools, trusted tools, and safe wildcard matching |
 | MCP integration | Project and global MCP configs, `/mcp` management, external tools, and approval-aware MCP calls |
 | Agent system | Bundled agents, local `.kollab/agents/`, global `~/.kollab/agents/`, skills, metadata, and dynamic prompt rendering |
@@ -93,8 +93,8 @@ project can discover each other automatically, communicate over local sockets,
 and coordinate through a shared command surface.
 
 ```bash
-kollab --agent coder
-kollab --agent technical-writer
+kollab --agent coder --as lapis
+kollab --agent technical-writer --as sapphire
 kollab --hub status
 kollab --hub msg lapis "review the latest diff"
 kollab --hub capture lapis 100
@@ -103,6 +103,8 @@ kollab --hub capture lapis 100
 Hub features include:
 
 - Zero-config peer discovery for local agents in the same project.
+- Optional fixed identities with `--as` (for example, `--as lapis`) when you
+  want stable names instead of auto-assigned designations.
 - Direct messages, broadcasts, live output capture, and read-only attach mode.
 - Durable task ledgers with `active -> done -> QA review -> closed` workflows.
 - Vault-backed memory with raw streams, rolling working memory, and crystallized long-term notes.
@@ -217,6 +219,44 @@ configuration options, see [docs/configuration.md](docs/configuration.md),
 [docs/providers.md](docs/providers.md), and
 [docs/reference/env-vars.md](docs/reference/env-vars.md).
 
+You can also define profiles directly from environment variables:
+
+```bash
+# Pattern: KOLLAB_{PROFILE}_{FIELD}
+export KOLLAB_WORK_MODEL=claude-sonnet-4-6
+export KOLLAB_WORK_PROVIDER=anthropic
+export KOLLAB_WORK_API_KEY="<your-anthropic-api-key>"
+export KOLLAB_WORK_BASE_URL="https://api.anthropic.com"
+# Optional tuning fields
+export KOLLAB_WORK_MAX_TOKENS=4096
+export KOLLAB_WORK_TEMPERATURE=0.3
+export KOLLAB_WORK_TIMEOUT=30000
+export KOLLAB_WORK_TOP_P=0.95
+export KOLLAB_WORK_STREAMING=true
+export KOLLAB_WORK_SUPPORTS_TOOLS=true
+export KOLLAB_WORK_DESCRIPTION="Claude profile for work tasks"
+# EXTRA_HEADERS must be valid JSON
+export KOLLAB_WORK_EXTRA_HEADERS='{"x-trace-id":"work-session"}'
+kollab --profile work
+# Persist this env-defined profile to config
+kollab --profile work --save
+# Persist and set as startup default profile
+kollab --profile work --default
+# Persist to project-local config instead of global
+kollab --profile work --save --local
+# Set project-local default profile
+kollab --profile work --default --local
+```
+
+Common profile fields:
+`MODEL`, `PROVIDER`, `API_KEY`, `BASE_URL`, `MAX_TOKENS`, `TEMPERATURE`,
+`TIMEOUT`, `TOP_P`, `STREAMING`, `SUPPORTS_TOOLS`, `DESCRIPTION`,
+`EXTRA_HEADERS` (JSON string).
+
+Resolution order is:
+`KOLLAB_{PROFILE}_{FIELD}` -> `KOLLAB_{FIELD}` -> config -> defaults.
+`KOLLAB_{PROFILE}_MODEL` is required to create a profile from env vars.
+
 ## Common Workflows
 
 ### Use ChatGPT OAuth
@@ -240,8 +280,8 @@ git diff | kollab "write a concise commit message" -p --timeout 30s
 ### Launch Agents
 
 ```bash
-kollab --agent coder
-kollab --agent technical-writer --skill readme-writing
+kollab --agent coder --as lapis
+kollab --agent technical-writer --as sapphire --skill readme-writing
 ```
 
 Agents can be bundled with the project, installed globally, or defined inside a
@@ -250,10 +290,12 @@ workspace under `.kollab/agents/`. See [docs/features/agents.md](docs/features/a
 ### Coordinate Agents With The Hub
 
 ```bash
-kollab --agent coder
+kollab --agent coder --as lapis
 kollab --hub status
 kollab --hub msg lapis "review the latest diff"
 kollab --hub capture lapis 100
+kollab --hub org engineering "ship the billing flow"
+kollab --org engineering
 kollab --hub stop lapis
 ```
 

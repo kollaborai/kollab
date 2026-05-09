@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-config"
-version = "0.5.8"
+version = "0.5.9"
 description = "Configuration management for Kollabor"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 dependencies = [
-    "kollabor-events>=0.5.8",
+    "kollabor-events>=0.5.9",
 ]
 
 [tool.hatch.build.targets.wheel]

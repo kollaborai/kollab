@@ -362,6 +362,13 @@ kollab --profile local          # Use local LLM profile
 The `--profile` flag takes highest priority in the resolution order,
 overriding persisted active_profile and all auto-detection.
 
+Use `--default` with `--profile` to set startup default in config:
+
+```bash
+kollab --profile work --default           # set global default profile
+kollab --profile work --default --local   # set project-local default profile
+```
+
 ### Saving Auto-Detected Profiles
 
 Combine `--profile` with `--save` to persist an auto-detected profile:

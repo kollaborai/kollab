@@ -70,6 +70,7 @@ agent and profile (cross attach boundary):
   --profile PROFILE               use specific LLM profile
   --system-prompt FILE            custom system prompt file
   --save                          save auto-created profile to global config
+  --default                       set --profile as startup default profile
   --local                         with --save, save to local project config
   --context NAME                  conversation context (new in 4.5)
 

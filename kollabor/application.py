@@ -47,6 +47,7 @@ class TerminalLLMChat:
         profile_name: str | None = None,
         save_profile: bool = False,
         save_local: bool = False,
+        make_default_profile: bool = False,
         skill_names: list[str] | None = None,
         plugin_registry=None,
         attach_to: str | None = None,
@@ -62,6 +63,7 @@ class TerminalLLMChat:
             profile_name: Optional LLM profile name to use (e.g., "claude")
             save_profile: If True, save auto-created profile to config
             save_local: If True with save_profile, save to local project config
+            make_default_profile: If True with --profile, set it as startup default
             skill_names: Optional list of skill names to load for the agent
             plugin_registry: Pre-initialized plugin registry (for startup optimization)
         """
@@ -201,6 +203,7 @@ class TerminalLLMChat:
                 "profile": profile_name,
                 "save_profile": save_profile,
                 "save_local": save_local,
+                "make_default_profile": make_default_profile,
                 "agent": agent_name,
                 "skills": list(skill_names or []),
                 "system_prompt_file": system_prompt_file,
@@ -214,6 +217,7 @@ class TerminalLLMChat:
             skill_names = None
             save_profile = False
             save_local = False
+            make_default_profile = False
             logger.info(
                 "attach mode: stashed launch flags for post-connect RPC: %s",
                 {k: v for k, v in self._attach_pending_flags.items() if v},
@@ -234,12 +238,25 @@ class TerminalLLMChat:
             # CLI --profile is a one-time override, don't persist active selection
             if not self.profile_manager.set_active_profile(profile_name, persist=False):
                 logger.warning(f"Profile '{profile_name}' not found, using default")
-            elif save_profile:
-                # Save profile to config if --save was used
+            elif save_profile or make_default_profile:
+                # Save profile values to config if --save/--default was used
                 profile = self.profile_manager.get_profile(profile_name)
                 if profile:
                     self.profile_manager.save_profile_values_to_config(profile)
                     logger.info(f"Saved profile '{profile_name}' to config")
+
+                if make_default_profile:
+                    from kollabor_config.config_utils import set_default_profile
+
+                    level = "project" if save_local else "global"
+                    if set_default_profile(profile_name, level):
+                        logger.info(
+                            f"Set default profile '{profile_name}' at {level} level"
+                        )
+                    else:
+                        logger.warning(
+                            f"Failed to set default profile '{profile_name}' at {level} level"
+                        )
 
         # Initialize agent manager (for agent/skill system)
         self.agent_manager = AgentManager(self.config)
@@ -1928,14 +1945,17 @@ class TerminalLLMChat:
         # --- 1. Profile ---
         profile_name = flags.get("profile")
         if profile_name:
-            persist = bool(flags.get("save_profile", False))
+            make_default_profile = bool(flags.get("make_default_profile", False))
+            persist = bool(flags.get("save_profile", False)) or make_default_profile
             persist_local = bool(flags.get("save_local", False))
             try:
                 snap = await state.set_active_profile(
                     profile_name, persist=persist, persist_local=persist_local
                 )
                 save_hint = (
-                    " (saved to "
+                    " (saved"
+                    + (" and set default" if make_default_profile else "")
+                    + " to "
                     + ("local" if persist_local else "global")
                     + " config)"
                     if persist
