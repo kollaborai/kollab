@@ -474,6 +474,7 @@ kollab "query" --timeout 5min # With timeout
 tests/tmux/lib/test_runner.sh tests/tmux/specs/mcp_memory_usage.json  # JSON test
 tests/tmux/run_all_tests.sh    # All tmux tests
 python tests/run_tests.py      # Unit tests
+python scripts/validate_bundled_agent_skills.py  # Bundled Agent Skills layout (agentskills.io)
 python -m unittest tests.unit.llm.test_llm_plugin  # Specific test
 
 # Code quality
@@ -769,8 +770,9 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 │   ├── hub/, altview/, modern_input/, deep_thought/, fullscreen/
 │   └── [other plugins]
 ├── bundles/                       # Agent bundles
-│   └── agents/                   # Agent definitions
-│       └── _base/                # Shared base template (all agents inherit)
+│   ├── agents/                   # Agent definitions (prompts + agent.json skill names)
+│   │   └── _base/                # Shared base template (all agents inherit)
+│   └── skills/                   # Agent Skills: <name>/SKILL.md ([agentskills.io](https://agentskills.io/specification))
 ├── tests/                         # Test suite
 │   ├── tmux/                     # JSON-based UI tests
 │   │   ├── specs/                # Test specifications

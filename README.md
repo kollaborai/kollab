@@ -80,7 +80,7 @@ were approved, and which hooks or plugins changed the flow.
 | Pipe mode | `git diff \| kollab "review this" -p --timeout 5min` for scripts, CI, shell workflows, and automation |
 | Tool permissions | Approval modes, risk assessment, session/project approvals, blocked tools, trusted tools, and safe wildcard matching |
 | MCP integration | Project and global MCP configs, `/mcp` management, external tools, and approval-aware MCP calls |
-| Agent system | Bundled agents, local `.kollab/agents/`, global `~/.kollab/agents/`, skills, metadata, and dynamic prompt rendering |
+| Agent system | Bundled agents (`bundles/agents/`), optional local/global agents, **[Agent Skills](https://agentskills.io/specification)** modules (`bundles/skills/` + `.kollab/skills/` + `~/.kollab/skills/`), and dynamic prompts |
 | Agent hub | Peer discovery, hub messages, broadcasts, task ledger, output capture, vault memory, cron messages, Telegram bridge, and org launch files |
 | Agent DNS | Experimental identity, trust, capability lookup, Ed25519 keys, AID-style TXT export, ARDP-style registration payloads, and DNS roster commands |
 | Plugin system | Event hooks, custom commands, startup info, config widgets, XML tags, context injection, and clean shutdown |

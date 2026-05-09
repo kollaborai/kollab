@@ -6,25 +6,28 @@ This agent specializes in:
   - Data visualization with matplotlib and seaborn
   - Exploratory data analysis (EDA)
   - Statistical analysis and hypothesis testing
+
+Skill names are assigned via ``agent.json`` and resolved from the Agent Skills
+library (``bundles/skills/<name>/SKILL.md``). This list mirrors that file.
 """
 
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).parent
 
-# Available skills for this agent
-SKILLS = [
-    "pandas-data-manipulation.md",
-    "sql-query-optimization.md",
-    "data-visualization.md",
-    "exploratory-data-analysis.md",
-    "statistical-analysis.md",
+# Mirrors ``skills`` in agent.json (bundled Agent Skills directory names).
+ASSIGNED_SKILL_NAMES = [
+    "data-visualization",
+    "exploratory-data-analysis",
+    "pandas-data-manipulation",
+    "sql-query-optimization",
+    "statistical-analysis",
 ]
 
 
 def get_skills():
-    """Return list of available skill files."""
-    return SKILLS
+    """Return bundled skill directory names declared for this agent."""
+    return list(ASSIGNED_SKILL_NAMES)
 
 
 def get_agent_description():

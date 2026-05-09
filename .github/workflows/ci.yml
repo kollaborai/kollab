@@ -34,7 +34,12 @@ jobs:
             tests/unit/test_hub_project_scope.py \
             tests/unit/test_provider_models.py \
             tests/unit/test_provider_security.py \
-            tests/unit/test_gemini_provider.py
+            tests/unit/test_gemini_provider.py \
+            tests/unit/test_agent_skills_contract.py \
+            tests/unit/test_bundled_skills_shipped.py
+
+      - name: Validate bundled Agent Skills layout
+        run: uv run python scripts/validate_bundled_agent_skills.py
 
   standards-check:
     name: ci/standards-check

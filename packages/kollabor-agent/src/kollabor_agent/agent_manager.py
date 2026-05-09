@@ -52,7 +52,7 @@ from .runtime import AgentRuntime
 logger = logging.getLogger(__name__)
 
 # Cache settings
-CACHE_VERSION = 2  # Bumped for skill library migration
+CACHE_VERSION = 3  # Strict Agent Skills SKILL.md validation (agentskills.io)
 CACHE_TTL_SECONDS = 86400  # 24 hours
 AGENT_CACHE_FILE = get_config_directory() / "agent_metadata.cache"
 
@@ -66,6 +66,38 @@ def validate_skill_name(name: str) -> bool:
     Rules: lowercase + hyphens only, max 64 chars, no consecutive/leading/trailing hyphens.
     """
     return bool(name and len(name) <= 64 and _SKILL_NAME_RE.match(name))
+
+
+def _parse_skill_yaml_frontmatter(
+    raw: str, *, path_for_log: Optional[Path] = None
+) -> Optional[tuple[Dict[str, Any], str]]:
+    """Parse SKILL.md: YAML frontmatter between --- markers and Markdown body.
+
+    Returns None if frontmatter is missing or invalid (per agentskills.io).
+    """
+    if not raw.startswith("---"):
+        return None
+    parts = raw.split("---", 2)
+    if len(parts) < 3:
+        return None
+    try:
+        frontmatter = yaml.safe_load(parts[1])
+    except yaml.YAMLError as e:
+        if path_for_log is not None:
+            logger.error(f"Invalid YAML frontmatter in {path_for_log}: {e}")
+        return None
+    if frontmatter is None or not isinstance(frontmatter, dict):
+        return None
+    body = parts[2].lstrip("\n")
+    return frontmatter, body
+
+
+def skill_markdown_body(raw: str) -> str:
+    """Return SKILL.md instructions (body below frontmatter); raw if none."""
+    parsed = _parse_skill_yaml_frontmatter(raw)
+    if parsed is not None:
+        return parsed[1]
+    return raw
 
 
 @dataclass
@@ -102,49 +134,112 @@ class Skill:
 
     @classmethod
     def from_file(cls, file_path: Path, source: str = "bundled") -> Optional["Skill"]:
-        """Load skill from a SKILL.md file with YAML frontmatter.
+        """Load skill from SKILL.md with YAML frontmatter.
+
+        Enforces the Agent Skills directory contract (agentskills.io): filename
+        SKILL.md, required frontmatter fields, ``name`` matches parent directory.
 
         Args:
-            file_path: Path to the SKILL.md file
+            file_path: Path to SKILL.md inside the skill directory
             source: Origin tier ("bundled", "global", "local")
 
         Returns:
-            Skill instance or None on error
+            Skill instance or None when the file does not meet the standard
         """
+        if file_path.name != "SKILL.md":
+            logger.error(f"Skill file must be named SKILL.md, got {file_path}")
+            return None
+
+        skill_dir_name = file_path.parent.name
+
         try:
             raw = file_path.read_text(encoding="utf-8")
         except Exception as e:
             logger.error(f"Failed to read skill file {file_path}: {e}")
             return None
 
-        # Parse YAML frontmatter between --- delimiters
-        frontmatter: Dict[str, Any] = {}
-        body = raw
-        if raw.startswith("---"):
-            parts = raw.split("---", 2)
-            if len(parts) >= 3:
-                try:
-                    frontmatter = yaml.safe_load(parts[1]) or {}
-                except yaml.YAMLError as e:
-                    logger.error(f"Invalid YAML frontmatter in {file_path}: {e}")
-                    return None
-                body = parts[2].lstrip("\n")
+        parsed = _parse_skill_yaml_frontmatter(raw, path_for_log=file_path)
+        if parsed is None:
+            logger.error(f"Skill {file_path} requires valid YAML frontmatter (--- ... ---)")
+            return None
 
-        name = frontmatter.get("name", "")
-        if not name:
-            # Fall back to parent directory name
-            name = file_path.parent.name
+        frontmatter, body = parsed
 
+        name_fm = frontmatter.get("name")
+        if not isinstance(name_fm, str) or not name_fm.strip():
+            logger.error(f"Skill {file_path} requires non-empty string 'name' in frontmatter")
+            return None
+        name = name_fm.strip()
+        if name != skill_dir_name:
+            logger.error(
+                f"Skill directory name '{skill_dir_name}' must match "
+                f"frontmatter name '{name}' ({file_path})"
+            )
+            return None
         if not validate_skill_name(name):
             logger.warning(f"Invalid skill name '{name}' in {file_path}")
             return None
 
-        description = frontmatter.get("description", "")
-        allowed_tools_raw = frontmatter.get("allowed-tools", "")
-        if isinstance(allowed_tools_raw, str):
-            allowed_tools = allowed_tools_raw.split() if allowed_tools_raw else []
+        raw_desc = frontmatter.get("description")
+        if not isinstance(raw_desc, str) or not raw_desc.strip():
+            logger.error(
+                f"Skill {file_path} requires non-empty string 'description' in frontmatter "
+                "(agentskills.io)"
+            )
+            return None
+        description = raw_desc.strip()
+        if len(description) > 1024:
+            logger.error(f"Skill 'description' exceeds 1024 chars in {file_path}")
+            return None
+
+        comp_raw = frontmatter.get("compatibility")
+        compatibility = ""
+        if comp_raw is not None:
+            if not isinstance(comp_raw, str):
+                logger.error(f"Skill 'compatibility' must be a string in {file_path}")
+                return None
+            stripped = comp_raw.strip()
+            if stripped:
+                if len(stripped) > 500:
+                    logger.error(
+                        f"Skill 'compatibility' exceeds 500 chars in {file_path}"
+                    )
+                    return None
+                compatibility = stripped
+
+        lic = frontmatter.get("license")
+        if lic is not None and not isinstance(lic, str):
+            logger.error(f"Skill 'license' must be a string in {file_path}")
+            return None
+        license_str = lic if isinstance(lic, str) else ""
+
+        md_raw = frontmatter.get("metadata")
+        metadata: Dict[str, Any] = {}
+        if md_raw is not None:
+            if not isinstance(md_raw, dict):
+                logger.error(f"Skill 'metadata' must be a mapping in {file_path}")
+                return None
+            for k, v in md_raw.items():
+                if not isinstance(k, str):
+                    logger.error(f"Skill metadata keys must be strings in {file_path}")
+                    return None
+                if not isinstance(v, str):
+                    logger.error(
+                        f"Skill metadata values must be strings (key {k!r}) in {file_path}"
+                    )
+                    return None
+            metadata = dict(md_raw)
+
+        at_raw = frontmatter.get("allowed-tools")
+        if at_raw is None:
+            allowed_tools: List[str] = []
+        elif isinstance(at_raw, str):
+            allowed_tools = at_raw.split() if at_raw.strip() else []
         else:
-            allowed_tools = list(allowed_tools_raw) if allowed_tools_raw else []
+            logger.error(
+                f"Skill 'allowed-tools' must be a space-separated string in {file_path}"
+            )
+            return None
 
         return cls(
             name=name,
@@ -152,9 +247,9 @@ class Skill:
             content=body,
             file_path=file_path,
             skill_dir=file_path.parent,
-            license=frontmatter.get("license", ""),
-            compatibility=frontmatter.get("compatibility", ""),
-            metadata=frontmatter.get("metadata", {}),
+            license=license_str,
+            compatibility=compatibility,
+            metadata=metadata,
             allowed_tools=allowed_tools,
             source=source,
         )
@@ -263,11 +358,7 @@ class SkillLibrary:
         if skill and not skill.content:
             try:
                 raw = skill.file_path.read_text(encoding="utf-8")
-                if raw.startswith("---"):
-                    parts = raw.split("---", 2)
-                    skill.content = parts[2].lstrip("\n") if len(parts) >= 3 else raw
-                else:
-                    skill.content = raw
+                skill.content = skill_markdown_body(raw)
             except Exception as e:
                 logger.error(f"Failed to load skill content for {name}: {e}")
         return skill
@@ -382,7 +473,11 @@ def _save_cached_agents(cache_file: Path, agents: List[AgentRuntime]) -> None:
                 "identity": agent.identity,
                 "capabilities": agent.capabilities,
                 "vault_enabled": agent.vault_enabled,
-                "tools": list(agent._agent_ref.tools) if agent._agent_ref and hasattr(agent._agent_ref, "tools") else [],
+                "tools": (
+                    list(agent._agent_ref.tools)
+                    if agent._agent_ref and hasattr(agent._agent_ref, "tools")
+                    else []
+                ),
             }
 
         cache_data = {
@@ -405,8 +500,13 @@ class Agent:
 
     Agents are loaded from directories containing:
     - system_prompt.md (required)
-    - agent.json (optional config)
-    - *.md files (skills)
+    - agent.json (optional config including ``skills`` referencing the skill library)
+    - sections/ directory (optional prompt fragments included via <trender>)
+
+    Skill modules use the Agent Skills directory contract (agentskills.io):
+    each skill is ``<skill-name>/SKILL.md`` with YAML frontmatter, discovered
+    from ``bundles/skills/``, ``~/.kollab/skills/``, and ``.kollab/skills/``.
+    Agents list skill names in agent.json ``skills``.
 
     Attributes:
         name: Agent identifier (directory name)
@@ -487,6 +587,7 @@ class Agent:
         identity = ""
         capabilities: List[str] = []
         vault_enabled = True
+        tools: List[str] = []
         config_file = agent_dir / "agent.json"
         if config_file.exists():
             try:
@@ -587,11 +688,7 @@ class Agent:
                 if not skill.content and skill.file_path:
                     try:
                         raw = skill.file_path.read_text(encoding="utf-8")
-                        if raw.startswith("---"):
-                            p = raw.split("---", 2)
-                            skill.content = p[2].lstrip("\n") if len(p) >= 3 else raw
-                        else:
-                            skill.content = raw
+                        skill.content = skill_markdown_body(raw)
                     except Exception as e:
                         logger.error(
                             f"Failed to load skill content for {skill_name}: {e}"
@@ -715,7 +812,8 @@ class Agent:
         if skill and not skill.content:
             # Load content on demand from file
             try:
-                skill.content = skill.file_path.read_text(encoding="utf-8")
+                raw = skill.file_path.read_text(encoding="utf-8")
+                skill.content = skill_markdown_body(raw)
                 logger.debug(
                     f"Loaded skill content on demand: {name} ({len(skill.content)} chars)"
                 )

@@ -96,14 +96,14 @@ locations in priority order:
 
 Each agent is a directory containing:
 - `system_prompt.md` (required)
-- `agent.json` (optional metadata: description, profile, tools, skills)
-- Skill `.md` files (optional)
-- `sections/` directory (optional prompt fragments)
+- `agent.json` (optional metadata: description, profile, tools, skills list)
+- `sections/` directory (optional prompt fragments included via `<trender>`)
 
-Skills follow the Agent Skills standard (agentskills.io): directories with
-`SKILL.md` containing YAML frontmatter + markdown instructions. Assigned to
-agents via the `skills` field in `agent.json`. Progressive disclosure:
-metadata at startup, full content on activation.
+Skills are **not** loose `.md` files next to `system_prompt.md`. They follow the
+[Agent Skills](https://agentskills.io/specification) directory contract: each
+skill is `<name>/SKILL.md` with YAML frontmatter, shipped or installed under
+`bundles/skills/`, `~/.kollab/skills/`, or `.kollab/skills/`, and referenced by
+name from `agent.json`'s `skills` field.
 
 ### Agent Runtime
 

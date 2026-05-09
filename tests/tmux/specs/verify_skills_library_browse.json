@@ -1,0 +1,37 @@
+{
+  "name": "verify-skills-library-browse",
+  "description": "Verify /skills browse loads the consolidated skill library (Agent Skills layout)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 42,
+    "key_delay": 0.25,
+    "menu_delay": 0.55
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 1 },
+
+    { "action": "section", "title": "Open skill library browser" },
+    { "action": "slash_command", "command": "skills", "subcommand": "browse" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "Skill Library|skills",
+      "description": "Skills browse modal or library listing appears"
+    },
+
+    { "action": "section", "title": "Return to main chat" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.8 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "Ready|Type your message",
+      "description": "Main input visible after closing skill browser"
+    }
+  ]
+}

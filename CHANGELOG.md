@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Agent Skills:** `Skill` loading now strictly enforces the published directory
+  contract (`SKILL.md` frontmatter; `name` matches folder; required `description`;
+  validated `metadata`, `allowed-tools`, and `compatibility`). Bundled caches bump
+  to `CACHE_VERSION` 3 — delete `~/.kollab/agent_metadata.cache` only if stale
+  agent metadata causes issues after upgrade.
+
 ## [1.0.1] - 2026-05-05
 
 ### Fixed

@@ -35,7 +35,8 @@ Top-level structure:
 kollabor/                  Core orchestration layer
 packages/                  Workspace packages
 plugins/                   Plugin implementations
-bundles/agents/            Bundled agent definitions and skills
+bundles/agents/            Bundled agent definitions (system prompts + metadata)
+bundles/skills/            Bundled Agent Skills (SKILL.md directories)
 tests/                     Test suite
 main.py                    Dev entrypoint
 kollabor_cli_main.py       Installed CLI entrypoint
@@ -85,19 +86,26 @@ Agent directory shape:
 ```text
 .kollab/agents/<agent-name>/
 ├── system_prompt.md
-├── agent.json            optional metadata
-├── <skill>.md            optional skill files
-└── sections/             optional included prompt fragments
+├── agent.json            optional metadata (declare skill names via "skills")
+└── sections/             optional fragments included via <trender>
+
+# Agent Skills library (same contract everywhere):
+bundles/skills/<skill-name>/SKILL.md
+~/.kollab/skills/<skill-name>/SKILL.md
+.kollab/skills/<skill-name>/SKILL.md
 ```
+
+Skills follow the [Agent Skills](https://agentskills.io/specification) layout: one directory per skill, required `SKILL.md` with YAML frontmatter (`name` must equal the folder name; `description` required; optional `scripts/`, `references/`, `assets/`).
 
 What `AgentManager` expects:
 - required: `system_prompt.md`
 - optional: `agent.json` with fields like:
   - `description`
   - `profile`
+  - `skills` (list of skill names from the library, or `["*"]` for all)
   - `default_skills`
-- all `.md` files besides `system_prompt.md` are treated as skills
-- prompts and skills are rendered through `PromptRenderer`, so `<trender ...>` tags may be used
+- `sections/` and other Markdown includes are fragments for the base prompt (`<trender type="include" ... />`), not the skill library
+- prompts are rendered through `PromptRenderer`, so `<trender ...>` tags may be used
 
 Bundled agents present in this repo:
 - `coder`
@@ -112,7 +120,7 @@ Bundled agents present in this repo:
 
 If asked to add or update an agent:
 - prefer editing `bundles/agents/<name>/`
-- keep `agent.json`, `system_prompt.md`, and skill files consistent
+- keep `agent.json`, `system_prompt.md`, and referenced Agent Skills (`agent.json` skill names) consistent
 - preserve existing tone and section-based prompt structure
 
 ## plugin system
