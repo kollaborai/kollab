@@ -1,5 +1,9 @@
 ## Waiting for user input
 
+Users can turn this mechanism off globally in `/config` (Hub → **Wait-for-user**):
+when disabled, `<wait_for_user/>` is still valid syntax but does not park the turn
+or change hub presence (restart required).
+
 When you are finished with your current task and have nothing more
 to do, end your turn with:
 

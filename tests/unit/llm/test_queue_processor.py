@@ -561,6 +561,47 @@ class TestQueueProcessorToolContinuation(unittest.TestCase):
 
         self.assertEqual(_tool_results_requiring_followup(results), [read_result])
 
+    def test_wait_for_user_disabled_state_update_requires_followup(self):
+        """When parking is off, state_update is not swallowed by wait pairing."""
+        results = [
+            ToolExecutionResult(
+                tool_id="state_update_1",
+                tool_type="state_update",
+                success=True,
+                output="saved",
+            ),
+            ToolExecutionResult(
+                tool_id="wait_for_user_1",
+                tool_type="wait_for_user",
+                success=True,
+                output="ignored",
+            ),
+        ]
+        self.assertEqual(
+            _tool_results_requiring_followup(results, wait_for_user_enabled=False),
+            [results[0]],
+        )
+
+    def test_wait_for_user_disabled_hub_msg_requires_followup(self):
+        results = [
+            ToolExecutionResult(
+                tool_id="hub_msg_1",
+                tool_type="hub_msg",
+                success=True,
+                output="sent",
+            ),
+            ToolExecutionResult(
+                tool_id="wait_for_user_1",
+                tool_type="wait_for_user",
+                success=True,
+                output="ignored",
+            ),
+        ]
+        self.assertEqual(
+            _tool_results_requiring_followup(results, wait_for_user_enabled=False),
+            [results[0]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

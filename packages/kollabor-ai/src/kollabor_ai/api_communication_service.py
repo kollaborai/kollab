@@ -78,6 +78,9 @@ class APICommunicationService:
         self._use_explicit_accumulation = config.get(
             "kollabor.llm.use_explicit_tool_accumulation", False
         )
+        self._debug_tool_stream_path = config.get(
+            "kollabor.llm.debug_tool_stream_path", False
+        )
 
         # Tool accumulator for streaming (provider system)
         self._tool_accumulator: Optional[ToolCallAccumulator] = None
@@ -97,6 +100,8 @@ class APICommunicationService:
         logger.info(
             f"API service initialized for provider={profile.provider} (profile: {profile.name})"
         )
+        if self._debug_tool_stream_path:
+            logger.info("Tool stream path debugging enabled")
 
     def set_session_id(self, session_id: str) -> None:
         """Set current session ID for raw log linking.
@@ -556,6 +561,13 @@ class APICommunicationService:
 
                 # Tool call delta
                 elif isinstance(delta, ToolCallDelta):
+                    if self._debug_tool_stream_path:
+                        logger.info(
+                            "STREAM_TOOL_DELTA id=%r name=%r args_len=%d",
+                            delta.tool_call_id,
+                            delta.tool_name,
+                            len(delta.tool_arguments_delta or ""),
+                        )
                     # Always call add_delta — accumulator handles None ids internally
                     # (Anthropic uses index-based routing: id comes in content_block_start,
                     # subsequent input_json_delta chunks have tool_call_id=None)
@@ -571,6 +583,17 @@ class APICommunicationService:
                         logger.debug(
                             f"EXPLICIT mode: {len(completed_tools)} tools completed "
                             f"({len(accumulated_tools)} total)"
+                        )
+                    if self._debug_tool_stream_path:
+                        buf = (
+                            self._tool_accumulator.get_buffer_status()
+                            if self._tool_accumulator
+                            else {}
+                        )
+                        logger.info(
+                            "STREAM_TOOL_ACCUMULATOR buffers=%d completed_now=%d",
+                            len(buf),
+                            len(completed_tools or []),
                         )
 
                 # Capture stop reason when available (e.g. "tool_use", "end_turn")
@@ -658,6 +681,30 @@ class APICommunicationService:
                 f"tool_calls={len(self.last_tool_calls)}, "
                 f"thinking={'yes' if self.last_thinking_content else 'no'})"
             )
+            if self._debug_tool_stream_path:
+                acc_status = (
+                    self._tool_accumulator.get_buffer_status()
+                    if self._tool_accumulator
+                    else {}
+                )
+                logger.info(
+                    "STREAM_TOOL_SUMMARY stop_reason=%r text_len=%d tool_calls=%d buffers=%d",
+                    self.last_stop_reason,
+                    len(content),
+                    len(self.last_tool_calls),
+                    len(acc_status),
+                )
+
+            if (
+                self.last_stop_reason == "tool_calls"
+                and not self.last_tool_calls
+                and not content.strip()
+            ):
+                logger.warning(
+                    "INCONSISTENT_TOOL_STOP: stop_reason=tool_calls but no tool calls "
+                    "and empty text content. Possible provider payload inconsistency "
+                    "or transformer/accumulator loss."
+                )
 
             return content
 
@@ -863,6 +910,16 @@ class APICommunicationService:
                 "cancelled": cancelled,
                 "error": error,
             }
+
+            if (
+                self.last_stop_reason == "tool_calls"
+                and not self.last_tool_calls
+                and not (response_content or "").strip()
+            ):
+                logger.warning(
+                    "RAW_LOG_INCONSISTENT_TOOL_STOP: writing empty content and zero "
+                    "tool_calls with stop_reason=tool_calls to raw transcript"
+                )
 
             # Write to session-specific raw log file
             raw_file = (

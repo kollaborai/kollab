@@ -473,7 +473,10 @@ class ConfigAltView(AltView):
                 solid_fg(str(C["half_bottom"]) * width, warn),
                 "",
             )
-            prompt_text = " Save to: (L)ocal  (G)lobal  (Esc) cancel"
+            prompt_text = (
+                " Save to: (L)ocal → .kollab/config.json here  "
+                "(G)lobal → ~/.kollab/config.json  (Esc) cancel"
+            )
             self._renderer.write_at(
                 0,
                 footer_y + 1,
@@ -697,6 +700,15 @@ class ConfigAltView(AltView):
 
             if ok:
                 logger.info("ConfigAltView: saved %d changes to %s", saved, target)
+                # Same as modal config save: refresh LLM/plugins that cache config keys.
+                notify = getattr(self.config_service, "_notify_reload_callbacks", None)
+                if callable(notify):
+                    try:
+                        notify()
+                    except Exception as exc:
+                        logger.warning(
+                            "ConfigAltView: reload notify after save failed: %s", exc
+                        )
                 for ws in self._section_widgets:
                     for w in ws:
                         if (

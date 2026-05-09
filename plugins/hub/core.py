@@ -10,42 +10,35 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
-from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
+from kollabor_agent.runtime import AgentRuntime
 from kollabor_events import EventType, Hook, HookPriority
-from kollabor_events.models import (
-    CommandCategory,
-    CommandDefinition,
-    CommandMode,
-    SubcommandInfo,
-)
 from kollabor_plugins import BasePlugin
 
 from .change_feed import ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore
 from .messenger import AgentSocketServer
-from .models import AgentState, HubMessage
 from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager
 from .scratchpad import Scratchpad
-from .session_state import SessionState, SessionStateManager
+from .session_state import SessionState
 from .task_ledger import TaskLedger
-from .vault import AgentVault
 
 # Tool handlers - split by domain
 from .tools import (
     ContextTools,
+    CronTools,
     CrystalTools,
+    FeedTools,
+    FileTools,
     MessagingTools,
     ScratchpadTools,
+    SpawnTools,
     StateTools,
     TaskTools,
-    FileTools,
-    FeedTools,
-    SpawnTools,
-    CronTools,
 )
+from .vault import AgentVault
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +339,14 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
+        if self.config and not self.config.get(
+            "plugins.hub.wait_for_user_enabled", True
+        ):
+            logger.debug("_enter_waiting_state skipped — wait_for_user disabled in config")
+            return
+
         import time
+
         from .presence_states import PresenceState
 
         # Coordinator should never enter cooldown — must always be reachable
@@ -417,7 +417,6 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
-        import time
         from .presence_states import PresenceState
 
         waiting_since = self._identity.waiting_since

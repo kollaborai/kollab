@@ -218,6 +218,7 @@ class HubPlugin(BasePlugin):
 
         # Nudge engine (context-aware tool reminders)
         self._nudge_engine = NudgeEngine()
+        self._hub_config_reload_registered = False
 
         # State
         self._roster: List[Dict] = []
@@ -303,6 +304,7 @@ class HubPlugin(BasePlugin):
                     "require_auth": False,
                     "authority": "kollabor.ai",
                     "wait_cooldown_seconds": 60,
+                    "wait_for_user_enabled": True,
                     "project_scoped": True,
                 }
             }
@@ -504,6 +506,16 @@ class HubPlugin(BasePlugin):
                 },
                 # --- Loop Prevention ---
                 {
+                    "type": "checkbox",
+                    "label": "Wait-for-user (<wait_for_user/>)",
+                    "config_path": "plugins.hub.wait_for_user_enabled",
+                    "help": (
+                        "When on, <wait_for_user/> parks the turn and sets hub waiting "
+                        "state + peer cooldown. When off, the tag is ignored for parking "
+                        "(restart required)."
+                    ),
+                },
+                {
                     "type": "slider",
                     "label": "Wait Cooldown (seconds)",
                     "config_path": "plugins.hub.wait_cooldown_seconds",
@@ -529,6 +541,20 @@ class HubPlugin(BasePlugin):
                 },
             ],
         }
+
+    def _on_hub_config_reload(self) -> None:
+        """Refresh nudge_engine fields after /config saves or config file reload."""
+        try:
+            if not self._nudge_engine or not self.config:
+                return
+            self._nudge_engine._loop_threshold = self.config.get(
+                "plugins.hub.loop_detection_threshold", 3
+            )
+            self._nudge_engine.wait_for_user_enabled = bool(
+                self.config.get("plugins.hub.wait_for_user_enabled", True)
+            )
+        except Exception:
+            pass
 
     async def initialize(self, args=None, **kwargs) -> None:
         """Initialize the hub plugin."""
@@ -556,9 +582,23 @@ class HubPlugin(BasePlugin):
             if self._nudge_engine and self.config:
                 threshold = self.config.get("plugins.hub.loop_detection_threshold", 3)
                 self._nudge_engine._loop_threshold = threshold
+                self._nudge_engine.wait_for_user_enabled = bool(
+                    self.config.get("plugins.hub.wait_for_user_enabled", True)
+                )
             os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1" if scoped else "0"
         except Exception:
             pass
+
+        if (
+            not self._hub_config_reload_registered
+            and self.config
+            and hasattr(self.config, "register_reload_callback")
+        ):
+            try:
+                self.config.register_reload_callback(self._on_hub_config_reload)
+                self._hub_config_reload_registered = True
+            except Exception:
+                pass
 
         if not self._is_enabled():
             logger.info("Hub plugin disabled")
@@ -1751,11 +1791,31 @@ class HubPlugin(BasePlugin):
         context_svc.set_hub_bridge(bridge)
         logger.info("Context hub bridge wired")
 
+    def _wait_for_user_feature_enabled(self) -> bool:
+        """Whether <wait_for_user/> affects hub state and queue parking (config)."""
+        if not self.config:
+            return True
+        return bool(self.config.get("plugins.hub.wait_for_user_enabled", True))
+
     async def _handle_wait_for_user_tool(self, tool_data: dict[str, Any]):
         """Handle <wait_for_user/> tag — put agent into waiting state."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
         reason = tool_data.get("reason", "") or tool_data.get("message", "")
+        if not self._wait_for_user_feature_enabled():
+            logger.debug(
+                "wait_for_user tag ignored (plugins.hub.wait_for_user_enabled=false)"
+            )
+            out = "[wait_for_user] ignored — feature disabled in Hub config"
+            if reason:
+                out += f" ({reason})"
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="wait_for_user",
+                success=True,
+                output=out,
+            )
+
         await self._enter_waiting_state(reason or None)
 
         output = "[wait_for_user] parked"
@@ -1781,6 +1841,10 @@ class HubPlugin(BasePlugin):
             reason: Optional explanation string from the agent.
         """
         if not self._identity:
+            return
+
+        if not self._wait_for_user_feature_enabled():
+            logger.debug("_enter_waiting_state skipped — wait_for_user disabled in config")
             return
 
         from .presence_states import PresenceState
@@ -5438,10 +5502,16 @@ class HubPlugin(BasePlugin):
         # Inject active lane claims for this agent
         if self._change_feed and self._identity:
             claims_result = self._change_feed.get_claims()
-            all_claims = claims_result.get("claims", [])
-            if all_claims:
+            raw = claims_result.get("claims") if isinstance(claims_result, dict) else {}
+            # get_claims returns path -> claim dict; iterating the mapping yields strings.
+            claim_entries = (
+                list(raw.values()) if isinstance(raw, dict) else (raw or [])
+            )
+            if claim_entries:
                 claim_lines = ["\n--- active lane claims ---"]
-                for c in all_claims:
+                for c in claim_entries:
+                    if not isinstance(c, dict):
+                        continue
                     task = c.get("task", "")
                     task_str = f" (task: {task})" if task else ""
                     claim_lines.append(

@@ -72,7 +72,10 @@ the two paths.
     lane_claim, lane_release, file_changed, file_watch, file_unwatch
     feed_recent, feed_file, claims
     task_checkpoint, task_complete, task_approve, task_reject
-    wait_for_user
+    wait_for_user (hub: parking + WAITING state can be disabled via
+      `/config` → Hub → **Wait-for-user** → `plugins.hub.wait_for_user_enabled`;
+      requires restart; when off, the tag is still parsed but does not park the turn
+      or set peer cooldown)
     agent, message, clone, team, broadcast (agent_orchestrator)
     status, capture, stop (agent_orchestrator)
 ```

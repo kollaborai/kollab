@@ -385,3 +385,8 @@ if the flow has bugs.
     2026-04-11/RFC-2026-04-11-hub-loop-prevention.md) but is not implemented.
     it defines <wait_for_user/>, loop detection, and cooldown.
     priority vs fixing the display bugs?
+
+  - **Config:** `plugins.hub.wait_for_user_enabled` (checkbox in `/config` under Hub,
+    **Wait-for-user**) toggles whether `<wait_for_user/>` enters `WAITING` presence,
+    peer-message cooldown, and queue-processor “park” behavior. Default on.
+    Changing it requires an app restart (same pattern as `question_gate_enabled`).
