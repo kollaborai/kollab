@@ -21,10 +21,19 @@ def _clear_env_and_cache(monkeypatch):
     project_scope.resolve_project_root.cache_clear()
 
 
-def test_is_project_scoped_default_false():
+def test_is_project_scoped_default_true():
+    """Unset env defaults to project-scoped hub (docs/reference/env-vars.md)."""
     from plugins.hub.project_scope import is_project_scoped
 
-    assert is_project_scoped() is False
+    assert is_project_scoped() is True
+
+
+def test_is_project_scoped_empty_string_means_default_scoped(monkeypatch):
+    """Empty string is treated like unset — stay project-scoped."""
+    from plugins.hub.project_scope import is_project_scoped
+
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "")
+    assert is_project_scoped() is True
 
 
 @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "On"])
@@ -35,7 +44,7 @@ def test_is_project_scoped_truthy_values(monkeypatch, val):
     assert is_project_scoped() is True
 
 
-@pytest.mark.parametrize("val", ["0", "false", "no", "off", "", "anything"])
+@pytest.mark.parametrize("val", ["0", "false", "no", "off", "anything"])
 def test_is_project_scoped_falsy_values(monkeypatch, val):
     from plugins.hub.project_scope import is_project_scoped
 
@@ -132,7 +141,9 @@ def test_project_socket_key_differs_for_different_roots(monkeypatch):
 
 
 def test_get_hub_dir_global_mode(monkeypatch):
-    """Global mode (default) uses ~/.kollab/hub/."""
+    """Legacy global hub dir ~/.kollab/hub/ requires explicit opt-out."""
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "false")
+
     from plugins.hub.presence import get_hub_dir
 
     d = get_hub_dir()
@@ -157,6 +168,8 @@ def test_get_hub_dir_project_scoped_mode(monkeypatch, tmp_path):
 
 
 def test_get_socket_dir_global_mode(monkeypatch):
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "false")
+
     from plugins.hub.presence import get_socket_dir
 
     d = get_socket_dir()
