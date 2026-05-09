@@ -2,10 +2,12 @@
 
 import argparse
 import asyncio
+import atexit
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
-import sys
+from typing import Any
 
 
 def _build_engine_log_path(now: datetime | None = None) -> Path:
@@ -16,8 +18,12 @@ def _build_engine_log_path(now: datetime | None = None) -> Path:
     return get_logs_dir() / f"kollab-engine-{timestamp}.log"
 
 
+_engine_stderr: Any = None
+
+
 def _configure_logging(log_level: str, log_path: Path) -> None:
     """Send engine logging and stderr prints to the timestamped log file."""
+    global _engine_stderr
     log_path.parent.mkdir(parents=True, exist_ok=True)
     level = getattr(logging, log_level.upper())
 
@@ -27,8 +33,16 @@ def _configure_logging(log_level: str, log_path: Path) -> None:
         handlers=[logging.FileHandler(log_path, encoding="utf-8")],
         force=True,
     )
-    sys.stderr = open(log_path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+    _engine_stderr = open(log_path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+    sys.stderr = _engine_stderr
+    atexit.register(_flush_engine_log)
     logging.getLogger(__name__).info("Engine logging to %s", log_path)
+
+
+def _flush_engine_log() -> None:
+    if _engine_stderr and not _engine_stderr.closed:
+        _engine_stderr.flush()
+        _engine_stderr.close()
 
 
 def main():

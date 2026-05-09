@@ -114,7 +114,7 @@ class HubPlugin(BasePlugin):
         self._notifier: Optional[HubNotifier] = None
 
         # Cron jobs (hub_cron_* tools)
-        self._cron_jobs: Dict[str, "HubCronJob"] = {}
+        self._cron_jobs: Dict[str, Any] = {}
 
         # Messaging bridge (cross-runtime)
         self._messaging_bridge: Optional[Any] = None

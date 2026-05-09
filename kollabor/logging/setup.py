@@ -5,12 +5,8 @@ reading from the config system when available and providing sensible
 defaults during bootstrap.
 """
 
-import sys
 import logging as _logging
-from logging.handlers import (
-    RotatingFileHandler,
-    TimedRotatingFileHandler,
-)
+import logging.handlers  # force-load submodule for TimedRotatingFileHandler
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -99,7 +95,7 @@ class LoggingSetup:
         custom_format = logging_config.get("format", None)
 
         # Convert string level to logging constant
-        numeric_level = getattr(logging, level, _logging.INFO)
+        numeric_level = getattr(_logging, level, _logging.INFO)
 
         # Ensure log directory exists
         log_path = Path(log_file)
@@ -186,7 +182,7 @@ class LoggingSetup:
             level: Log level string (DEBUG, INFO, WARNING, ERROR)
         """
         level = level.upper()
-        numeric_level = getattr(logging, level, _logging.INFO)
+        numeric_level = getattr(_logging, level, _logging.INFO)
 
         # Update root logger
         _logging.getLogger().setLevel(numeric_level)
@@ -199,7 +195,7 @@ class LoggingSetup:
         # Update current config
         self._current_config["level"] = level
 
-        _logging.info(f"Logging level changed to {level}")
+        _logging.getLogger(__name__).info(f"Logging level changed to {level}")
 
 
 # Global instance

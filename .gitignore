@@ -204,6 +204,7 @@ convp/
 # Personal and development directories
 .claude/
 backups/
+*.backup
 code_audit/
 codemon/
 tools/
