@@ -1353,39 +1353,35 @@ class ProfileManager:
                 if profile.base_url and not skip_base_url:
                     profile_dict["base_url"] = profile.base_url
 
-                if profile.api_key:
-                    # Don't persist api_key if it came from env var or OAuth
-                    # OAuth tokens rotate and are sourced from token file
-                    if getattr(profile, "auth_type", None) == "oauth":
-                        pass  # OAuth tokens refreshed from token storage
-                    elif auto_info:
-                        # Auto-profile from a provider env var -- never
-                        # persist the key, even if the user edited this
-                        # profile via /config. The env var is source of
-                        # truth and the key rotates.
-                        pass
+                # Persist secrets for named profiles so config works without env vars.
+                # Use get_api_key() so env/global/sentinel/plaintext resolution matches runtime.
+                raw_stored = (profile.api_key or "").strip()
+                resolved_key = profile.get_api_key()
+                if getattr(profile, "auth_type", None) == "oauth":
+                    pass  # OAuth tokens refreshed from token storage
+                elif auto_info:
+                    # Auto-profile from a provider env var -- never persist the key.
+                    # The provider env var stays the source of truth.
+                    pass
+                elif raw_stored.startswith(KEYRING_SENTINEL_PREFIX):
+                    # Config already references keyring -- keep sentinel stable on save
+                    profile_dict["api_key"] = raw_stored
+                elif resolved_key:
+                    key_val = resolved_key
+                    if _keyring_set(profile.name, key_val):
+                        sentinel = f"{KEYRING_SENTINEL_PREFIX}{profile.name}"
+                        profile_dict["api_key"] = sentinel
+                        logger.info(
+                            f"Profile '{profile.name}': stored API key "
+                            f"in OS keyring, writing sentinel to config"
+                        )
                     else:
-                        env_key = profile._get_env_value("API_KEY")
-                        if not env_key or profile.api_key != env_key:
-                            key_val = profile.api_key
-                            if key_val.startswith(KEYRING_SENTINEL_PREFIX):
-                                # Already a sentinel -- pass through
-                                profile_dict["api_key"] = key_val
-                            elif _keyring_set(profile.name, key_val):
-                                # Stored in keyring -- write sentinel
-                                sentinel = f"{KEYRING_SENTINEL_PREFIX}{profile.name}"
-                                profile_dict["api_key"] = sentinel
-                                logger.info(
-                                    f"Profile '{profile.name}': stored API key "
-                                    f"in OS keyring, writing sentinel to config"
-                                )
-                            else:
-                                # Keyring unavailable -- fall back to plaintext
-                                profile_dict["api_key"] = key_val
-                                logger.warning(
-                                    f"Profile '{profile.name}': keyring unavailable, "
-                                    f"API key saved in plaintext"
-                                )
+                        # Keyring unavailable -- fall back to plaintext
+                        profile_dict["api_key"] = key_val
+                        logger.warning(
+                            f"Profile '{profile.name}': keyring unavailable, "
+                            f"API key saved in plaintext"
+                        )
                 if profile.top_p is not None:
                     profile_dict["top_p"] = profile.top_p
                 if not profile.streaming:

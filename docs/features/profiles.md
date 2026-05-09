@@ -242,7 +242,27 @@ By default, API keys from env vars are used at runtime. To store directly in con
 }
 ```
 
-Stored keys take precedence over env vars for that profile.
+At runtime, profile-specific and global `KOLLAB_*_API_KEY` / `KOLLAB_API_KEY`
+environment variables override keys loaded from config (see resolution order in
+`profile_manager`).
+
+### API keys: environment vs saved profile (`--save` / `--default`)
+
+When you run `kollab --profile <name> --save` or `--default`, Kollab writes the
+profile into `config.json`. **API keys are not stored as cleartext in that file
+when the OS keyring is available:** the secret is saved to your OS keychain
+(service `kollab`, account = profile name), and config stores a sentinel value
+`secret:keyring:<profile_name>` that points at it. Install `keyring` if your
+platform needs it (`pip install keyring`).
+
+If the key came from `KOLLAB_<PROFILE>_API_KEY` or `KOLLAB_API_KEY`, it is still
+persisted to the keyring on save so the profile works **after you unset those env
+vars**. If keyring storage fails, Kollab falls back to saving the key in
+`config.json` and logs a warning.
+
+Auto-detected profiles such as `anthropic-auto` (from `ANTHROPIC_API_KEY` alone)
+still do **not** persist the provider API key into config; keep using the
+provider env var or copy the profile to a named profile and save from `/config`.
 
 ### Persisting Active Profile
 

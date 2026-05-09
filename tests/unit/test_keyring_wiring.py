@@ -16,15 +16,19 @@ Covers:
 - Migration fix: no default-password for tier 2
 """
 
+import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from kollabor_ai.profile_manager import (
     KEYRING_SENTINEL_PREFIX,
     LLMProfile,
+    ProfileManager,
     _keyring_get,
     _keyring_set,
 )
@@ -220,6 +224,49 @@ class TestMigrationDefaultPasswordFix(unittest.TestCase):
         result = migrator._try_encrypted_storage("test", "sk-key")
         # False because no cryptography lib, but it tried
         self.assertFalse(result)
+
+
+class TestSaveProfileEnvKeyPersists(unittest.TestCase):
+    """Env-sourced API keys must persist to keyring when user runs --save / --default."""
+
+    def test_save_writes_sentinel_when_key_matches_profile_env(self):
+        """Previously skipped persist when profile.api_key == env (broken empty profile)."""
+        env_key = "sk-ant-env-only"
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(
+                json.dumps({"kollabor": {"llm": {"profiles": {}}}}),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"KOLLAB_WORK_API_KEY": env_key},
+                clear=False,
+            ):
+                profile = LLMProfile.from_dict(
+                    "work",
+                    {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+                )
+                profile.api_key = env_key  # same as env-created profile
+                mock_set = MagicMock(return_value=True)
+                with patch(
+                    "kollabor_ai.profile_manager.get_global_config_path",
+                    return_value=cfg_path,
+                ), patch(
+                    "kollabor_ai.profile_manager.get_existing_global_config_path",
+                    return_value=cfg_path,
+                ), patch(
+                    "kollabor_ai.profile_manager._keyring_set",
+                    mock_set,
+                ):
+                    pm = ProfileManager.__new__(ProfileManager)
+                    pm.config = None
+                    ProfileManager.save_profile_values_to_config(pm, profile)
+
+            mock_set.assert_called_once_with("work", env_key)
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            saved = data["kollabor"]["llm"]["profiles"]["work"]["api_key"]
+            self.assertEqual(saved, f"{KEYRING_SENTINEL_PREFIX}work")
 
 
 class TestSentinelFormat(unittest.TestCase):
