@@ -576,21 +576,28 @@ class AnthropicResponseTransformer:
                     raw_chunk=chunk,
                 )
 
-        # message_delta: carries output_tokens usage + stop_reason
-        # Always emit so stop_reason="tool_use" is visible to the caller
+        # message_delta: carries output_tokens + stop_reason. Some
+        # anthropic-compat endpoints (z.ai glm) also report final
+        # input_tokens + cache metrics here instead of message_start.
+        # Always emit so stop_reason="tool_use" is visible to the caller.
         if chunk_type == "message_delta":
             usage = chunk.get("usage", {})
             output_tokens = usage.get("output_tokens", 0)
+            input_tokens = usage.get("input_tokens", 0)
+            cache_creation = usage.get("cache_creation_input_tokens", 0)
+            cache_read = usage.get("cache_read_input_tokens", 0)
             stop_reason = chunk.get("delta", {}).get("stop_reason")
-            usage_info = (
-                UsageInfo(
-                    prompt_tokens=0,
+            if output_tokens or input_tokens or cache_creation or cache_read:
+                total_input = input_tokens + cache_creation + cache_read
+                usage_info = UsageInfo(
+                    prompt_tokens=total_input,
                     completion_tokens=output_tokens,
-                    total_tokens=output_tokens,
+                    total_tokens=total_input + output_tokens,
+                    cache_creation_tokens=cache_creation,
+                    cache_read_tokens=cache_read,
                 )
-                if output_tokens
-                else None
-            )
+            else:
+                usage_info = None
             return StreamingResponse(
                 delta=TextDelta(content=""),
                 usage=usage_info,

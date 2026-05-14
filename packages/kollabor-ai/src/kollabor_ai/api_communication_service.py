@@ -74,6 +74,13 @@ class APICommunicationService:
         # Reasoning/thinking content from last response
         self.last_thinking_content: Optional[str] = None
 
+        # Raw upstream payload from last response. For streaming providers
+        # this is a list of raw SSE chunk dicts; for non-streaming it is the
+        # provider's raw response dict wrapped in a single-element list.
+        # Captured here so raw conversation logs reflect what the provider
+        # actually sent (not just our post-processed view).
+        self.last_raw_chunks: List[Dict[str, Any]] = []
+
         # Tool accumulator mode (LEGACY vs EXPLICIT)
         self._use_explicit_accumulation = config.get(
             "kollabor.llm.use_explicit_tool_accumulation", False
@@ -490,6 +497,11 @@ class APICommunicationService:
         # Extract thinking/reasoning content
         self.last_thinking_content = response.get_thinking_content()
 
+        # Capture raw upstream response for raw log
+        self.last_raw_chunks = (
+            [response.raw_response] if response.raw_response else []
+        )
+
         # Extract text content
         content = response.get_text_content()
 
@@ -532,6 +544,11 @@ class APICommunicationService:
         final_stop_reason = None
         accumulated_tools = []  # For EXPLICIT mode
 
+        # Reset raw chunk buffer for this call. Streaming captures every
+        # transformer-emitted raw_chunk so the raw log reflects what the
+        # provider actually sent over the wire.
+        self.last_raw_chunks = []
+
         try:
             # Stream provider responses
             async for streaming_response in self._provider.stream(
@@ -541,6 +558,10 @@ class APICommunicationService:
                 # Check for cancellation
                 if self.cancel_requested:
                     raise asyncio.CancelledError("Streaming request cancelled")
+
+                # Capture raw upstream chunk for raw log (if transformer attached one)
+                if streaming_response.raw_chunk is not None:
+                    self.last_raw_chunks.append(streaming_response.raw_chunk)
 
                 # Handle delta types
                 delta = streaming_response.delta
@@ -906,6 +927,7 @@ class APICommunicationService:
                         else []
                     ),
                     "stop_reason": self.last_stop_reason,
+                    "raw_chunks": self.last_raw_chunks,
                 },
                 "cancelled": cancelled,
                 "error": error,
