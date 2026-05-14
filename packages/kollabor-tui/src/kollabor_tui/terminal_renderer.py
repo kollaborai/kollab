@@ -180,7 +180,7 @@ class TerminalRenderer:
         """Enter raw terminal mode for character-by-character input."""
         success = self.terminal_state.enter_raw_mode()
         if not success:
-            logger.warning("Failed to enter raw mode")
+            logger.debug("Failed to enter raw mode")
 
     def exit_raw_mode(self) -> None:
         """Exit raw terminal mode and restore settings."""

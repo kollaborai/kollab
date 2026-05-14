@@ -319,7 +319,7 @@ class TerminalState:
             logger.debug("Entered raw terminal mode")
             return True
         except Exception as e:
-            logger.error(f"Failed to enter raw mode: {e}")
+            logger.debug(f"Failed to enter raw mode: {e}")
             return False
 
     def exit_raw_mode(self) -> bool:

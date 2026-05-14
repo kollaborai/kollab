@@ -63,7 +63,7 @@ except ImportError as _dns_import_err:
     Endorsement = None  # type: ignore[assignment,misc]
     _DNS_AVAILABLE = False
     import logging as _logging
-    _logging.getLogger(__name__).warning(
+    _logging.getLogger(__name__).debug(
         f"Agent DNS disabled (PyNaCl not installed): {_dns_import_err}. "
         "Install with: pip install pynacl"
     )

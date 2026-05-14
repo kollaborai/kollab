@@ -431,8 +431,9 @@ class FullScreenSession:
             # Unregister input hook if it was registered
             if self.input_hook_registered and self.event_bus:
                 try:
-                    hook_id = f"fullscreen_session_{self.plugin.name}.fullscreen_input"
-                    await self.event_bus.unregister_hook(hook_id)
+                    plugin_name = f"fullscreen_session_{self.plugin.name}"
+                    hook_name = "fullscreen_input"
+                    await self.event_bus.unregister_hook(plugin_name, hook_name)
                     self.input_hook_registered = False
                     logger.info(
                         f"✅ Unregistered FULLSCREEN_INPUT hook for {self.plugin.name}"

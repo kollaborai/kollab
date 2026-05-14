@@ -140,7 +140,7 @@ class ResumeConversationPlugin:
                 plugin_name=self.name,
                 category=CommandCategory.CONVERSATION,
                 mode=CommandMode.STATUS_TAKEOVER,
-                aliases=["history", "conversations"],
+                aliases=["history", "forks"],
                 icon="[⑂]",
                 ui_config=UIConfig(
                     type="modal", title="Conversation History", height=20, width=80

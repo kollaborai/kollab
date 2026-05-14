@@ -213,7 +213,7 @@ class InputLoopManager:
             )
             != "raw"
         ):
-            logger.warning("Raw mode failed - using fallback ESC detection")
+            logger.debug("Raw mode failed - using fallback ESC detection")
 
         # Register all hooks via callback
         if self._register_hooks_callback:
