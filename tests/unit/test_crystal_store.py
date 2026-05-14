@@ -84,6 +84,30 @@ class TestCrystalStoreBasic(unittest.TestCase):
             entry.summary, "The config system has a path encoding issue"
         )
 
+    def test_summary_strips_numbered_list_marker_with_bold(self):
+        """Dreaming output like '1. **Foo** -- detail' must keep 'Foo' as the
+        summary, not the leading list digit. Regression for the nudge emitting
+        '[crys-001] 1' as a useless one-liner.
+        """
+        entry = self.store.add_entry(
+            "1. **Hub message routing bug** -- agents drop messages on retry"
+        )
+        self.assertEqual(entry.summary, "Hub message routing bug")
+
+    def test_summary_strips_numbered_list_marker_no_bold(self):
+        entry = self.store.add_entry(
+            "2. The config system has a path encoding issue. It uses underscores."
+        )
+        self.assertEqual(
+            entry.summary, "The config system has a path encoding issue"
+        )
+
+    def test_summary_strips_bullet_marker(self):
+        entry = self.store.add_entry(
+            "- **Tool retry storm** observed in queue_processor.py"
+        )
+        self.assertEqual(entry.summary, "Tool retry storm")
+
     def test_custom_date(self):
         entry = self.store.add_entry("Test", date="2025-01-15")
         self.assertEqual(entry.date, "2025-01-15")

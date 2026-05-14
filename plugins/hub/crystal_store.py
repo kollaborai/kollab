@@ -181,19 +181,24 @@ class CrystalStore:
     def _extract_summary(self, text: str) -> str:
         """Extract a one-line summary from insight text.
 
-        Uses bold header if present, otherwise first sentence.
+        Strips leading list markers ("1. ", "- ", "* ") before extraction,
+        then uses a bold header if present, otherwise the first sentence.
+        Without the strip step, dreaming output like "1. **Users often..."
+        would produce summary="1" because the first ". " splits at the
+        list-marker dot.
         """
-        # Check for **bold header** pattern
-        bold_match = re.match(r"\*\*(.+?)\*\*", text)
+        cleaned = re.sub(r"^\s*(?:\d+\.|[-*])\s+", "", text).lstrip()
+
+        # Check for **bold header** pattern at the start of the cleaned text
+        bold_match = re.match(r"\*\*(.+?)\*\*", cleaned)
         if bold_match:
             summary = bold_match.group(1).strip()
-            # Truncate long summaries
             if len(summary) > 120:
                 summary = summary[:117] + "..."
             return summary
 
         # Fall back to first sentence
-        sentences = re.split(r"[.!?]\s", text, maxsplit=1)
+        sentences = re.split(r"[.!?]\s", cleaned, maxsplit=1)
         summary = sentences[0].strip()
         if len(summary) > 120:
             summary = summary[:117] + "..."
