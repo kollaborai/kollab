@@ -66,6 +66,13 @@ class LLMProvider(ABC):
         self._supports_streaming: bool = True
         self._supports_tools: bool = True
 
+        # Last wire request payload — the exact dict handed to the HTTP
+        # client / SDK immediately before transport. Captured by each
+        # provider in call() and stream() so api_communication_service
+        # can include it in the raw conversation log. Provider-native
+        # shape; consumers tag with self.provider_type to interpret.
+        self.last_request_payload: Optional[Dict[str, Any]] = None
+
         logger.debug(
             f"Initialized {self._provider_name} provider (model: {self.model})"
         )

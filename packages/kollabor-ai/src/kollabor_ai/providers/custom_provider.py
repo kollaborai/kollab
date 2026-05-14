@@ -133,6 +133,8 @@ class CustomProvider(LLMProvider):
         if self.config.top_p is not None:
             payload["top_p"] = self.config.top_p
 
+        self.last_request_payload = payload
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url,
@@ -287,6 +289,8 @@ class CustomProvider(LLMProvider):
 
         if self.config.top_p is not None:
             payload["top_p"] = self.config.top_p
+
+        self.last_request_payload = payload
 
         async with aiohttp.ClientSession() as session:
             async with session.post(

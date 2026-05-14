@@ -217,6 +217,7 @@ class OpenAIResponsesProvider(LLMProvider):
             request_params = self._prepare_request(
                 messages, tools, stream=False, **kwargs
             )
+            self.last_request_payload = request_params
 
             logger.debug(f"OpenAI Responses non-streaming call (model={self.model})")
 
@@ -295,6 +296,7 @@ class OpenAIResponsesProvider(LLMProvider):
             request_params = self._prepare_request(
                 messages, tools, stream=True, **kwargs
             )
+            self.last_request_payload = request_params
 
             logger.debug(f"OpenAI Responses call-via-stream (model={self.model})")
 
@@ -429,6 +431,7 @@ class OpenAIResponsesProvider(LLMProvider):
             request_params = self._prepare_request(
                 messages, tools, stream=True, **kwargs
             )
+            self.last_request_payload = request_params
 
             logger.debug(f"OpenAI Responses streaming call (model={self.model})")
 

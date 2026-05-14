@@ -19,7 +19,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
 from .errors import map_openai_error
-from .openrouter_model_info import OpenRouterModelInfo
 from .models import (
     OpenRouterConfig,
     ProviderConfig,
@@ -28,6 +27,7 @@ from .models import (
     ToolCallDelta,
     UnifiedResponse,
 )
+from .openrouter_model_info import OpenRouterModelInfo
 from .registry import register_provider
 from .transformers import (
     OpenAIResponseTransformer,
@@ -258,6 +258,7 @@ class OpenRouterProvider(LLMProvider):
                     request_params[key] = kwargs[key]
 
             # Make API call
+            self.last_request_payload = request_params
             logger.debug(f"Calling OpenRouter API (model={self.model})")
             assert self._client is not None  # guaranteed by _validate_initialized
             response = await self._client.chat.completions.create(**request_params)
@@ -349,6 +350,7 @@ class OpenRouterProvider(LLMProvider):
                 if key in kwargs:
                     request_params[key] = kwargs[key]
 
+            self.last_request_payload = request_params
             logger.debug(f"Streaming from OpenRouter (model={self.model})")
 
             # Make streaming API call

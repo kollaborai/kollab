@@ -143,6 +143,7 @@ class GeminiProvider(LLMProvider):
         try:
             # Prepare request payload
             request_payload = self._prepare_request(messages, tools, **kwargs)
+            self.last_request_payload = request_payload
 
             # Build URL with API key
             url = self._build_url(stream=False)
@@ -211,6 +212,7 @@ class GeminiProvider(LLMProvider):
         try:
             # Prepare request payload
             request_payload = self._prepare_request(messages, tools, **kwargs)
+            self.last_request_payload = request_payload
 
             # Build URL with API key and alt=sse for streaming
             url = self._build_url(stream=True)

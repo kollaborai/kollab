@@ -5,9 +5,11 @@ Integrates with ProviderRegistry for unified OpenAI/Anthropic/Azure/Custom suppo
 """
 
 import asyncio
+import copy
 import json
 import logging
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +23,13 @@ from kollabor_ai.providers.models import (
 )
 from kollabor_ai.providers.registry import ProviderRegistry, create_config_from_profile
 from kollabor_ai.providers.transformers import ToolCallAccumulator
+from kollabor_ai.raw_log import (
+    LocalMessage,
+    ProfileSnapshot,
+    RawInteraction,
+    RawRequest,
+    RawResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -889,49 +898,85 @@ class APICommunicationService:
         error: Optional[str] = None,
         duration: float = 0.0,
     ) -> None:
-        """Log raw API request/response to raw conversations directory.
+        """Log a raw API request/response round-trip.
+
+        Builds a typed ``RawInteraction`` so every provider's log entry
+        has the same shape: ``conversation_local`` for what Kollab held,
+        ``wire_request`` for the exact dict handed to the HTTP client.
 
         Args:
-            messages: Messages sent to API
-            tools: Tool definitions sent (if any)
+            messages: ``_prepare_messages`` output (conversation_local view)
+            tools: Tool definitions handed to the provider
             response_content: Response text (None if error/cancelled)
-            cancelled: Whether request was cancelled
-            error: Error message if request failed
+            cancelled: Whether the request was cancelled
+            error: Error message if the request failed
             duration: Request duration in seconds
         """
         try:
             if not self.raw_conversations_dir:
                 return
 
-            entry = {
-                "timestamp": datetime.now().isoformat() + "Z",
-                "session_id": self.current_session_id,
-                "model": self.model,
-                "provider": self._profile.provider if self._profile else "unknown",
-                "streaming": self.enable_streaming,
-                "duration_s": round(duration, 3),
-                "request": {
-                    "message_count": len(messages),
-                    "messages": messages,
-                    "tools": tools,
-                },
-                "response": {
-                    "content": response_content,
-                    "token_usage": self.last_token_usage,
-                    "tool_calls": (
-                        [
-                            {"id": tc.id, "name": tc.name, "input": tc.input}
-                            for tc in self.last_tool_calls
-                        ]
-                        if self.last_tool_calls
-                        else []
+            local_messages = [
+                LocalMessage(
+                    role=str(m.get("role", "")),
+                    content=m.get("content", ""),
+                    metadata={
+                        k: v
+                        for k, v in m.items()
+                        if k not in ("role", "content")
+                    },
+                )
+                for m in messages
+            ]
+
+            # Snapshot provider.last_request_payload at log time so future
+            # mutations (next call reuses the dict) can't rewrite history.
+            wire_request: Optional[Dict[str, Any]] = None
+            wire_provider = ""
+            if self._provider is not None:
+                payload = getattr(self._provider, "last_request_payload", None)
+                if payload is not None:
+                    try:
+                        wire_request = copy.deepcopy(payload)
+                    except Exception:
+                        wire_request = None
+                wire_provider = getattr(
+                    self._provider, "_provider_name", ""
+                ) or str(getattr(self._provider, "provider_type", ""))
+
+            interaction = RawInteraction(
+                turn_id=str(uuid.uuid4()),
+                timestamp=datetime.now().isoformat() + "Z",
+                session_id=self.current_session_id or "",
+                duration_s=round(duration, 3),
+                cancelled=cancelled,
+                error=error,
+                profile=ProfileSnapshot(
+                    provider=self._profile.provider if self._profile else "unknown",
+                    model=self.model or "",
+                    base_url=(
+                        getattr(self._profile, "base_url", "") if self._profile else ""
                     ),
-                    "stop_reason": self.last_stop_reason,
-                    "raw_chunks": self.last_raw_chunks,
-                },
-                "cancelled": cancelled,
-                "error": error,
-            }
+                    streaming=self.enable_streaming,
+                ),
+                request=RawRequest(
+                    conversation_local=local_messages,
+                    wire_request=wire_request,
+                    wire_provider=wire_provider,
+                    tools=tools,
+                ),
+                response=RawResponse(
+                    content=response_content,
+                    token_usage=dict(self.last_token_usage or {}),
+                    tool_calls=[
+                        {"id": tc.id, "name": tc.name, "input": tc.input}
+                        for tc in (self.last_tool_calls or [])
+                    ],
+                    stop_reason=self.last_stop_reason or "",
+                    thinking=self.last_thinking_content,
+                    raw_chunks=list(self.last_raw_chunks or []),
+                ),
+            )
 
             if (
                 self.last_stop_reason == "tool_calls"
@@ -948,7 +993,7 @@ class APICommunicationService:
                 self.raw_conversations_dir / f"{self.current_session_id}_raw.jsonl"
             )
             with open(raw_file, "a") as f:
-                f.write(json.dumps(entry) + "\n")
+                f.write(json.dumps(interaction.to_dict(), default=str) + "\n")
 
         except Exception as e:
             logger.warning(f"Failed to log raw interaction: {e}")

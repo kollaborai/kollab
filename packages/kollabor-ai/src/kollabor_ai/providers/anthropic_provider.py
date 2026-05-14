@@ -145,6 +145,7 @@ class AnthropicProvider(LLMProvider):
         try:
             # Prepare request
             request_data = self._prepare_request(messages, tools, **kwargs)
+            self.last_request_payload = request_data
             headers = self._get_headers()
 
             base_url = self.config.base_url or self._default_base_url
@@ -219,6 +220,7 @@ class AnthropicProvider(LLMProvider):
         try:
             # Prepare request — always include stream=True for SSE
             request_data = self._prepare_request(messages, tools, stream=True, **kwargs)
+            self.last_request_payload = request_data
             headers = self._get_headers()
 
             base_url = self.config.base_url or self._default_base_url
@@ -384,7 +386,14 @@ class AnthropicProvider(LLMProvider):
                     }
                 )
             else:
-                anthropic_messages.append(msg)
+                # Shallow copy so the merger below cannot mutate dicts the
+                # caller still holds a reference to (e.g. api_service's
+                # `messages` list, which is also what _log_raw_interaction
+                # captures). Without this, merging same-role runs rewrites
+                # `content` in place and the raw log looks like duplicate
+                # data was sent when the API actually received one merged
+                # message.
+                anthropic_messages.append(dict(msg))
 
         # Merge consecutive same-role messages (Anthropic requires alternating roles)
         # This happens when multiple tool results create multiple "user" messages

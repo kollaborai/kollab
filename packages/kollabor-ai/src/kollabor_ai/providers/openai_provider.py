@@ -161,6 +161,7 @@ class OpenAIProvider(LLMProvider):
             request_params = self._prepare_request_params(
                 messages, tools, stream=False, **kwargs
             )
+            self.last_request_payload = request_params
 
             logger.debug(f"OpenAI non-streaming call (model={self.model})")
 
@@ -240,6 +241,7 @@ class OpenAIProvider(LLMProvider):
             request_params = self._prepare_request_params(
                 messages, tools, stream=True, **kwargs
             )
+            self.last_request_payload = request_params
 
             logger.debug(f"OpenAI streaming call (model={self.model})")
 
