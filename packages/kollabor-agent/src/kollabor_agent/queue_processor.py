@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -595,12 +596,19 @@ class QueueProcessor:
                 "cache_creation": 0, "cache_read": 0,
             }
 
+            # turn_id binds the initial call and any auto-continuations
+            # together in the raw log so a truncated-then-continued
+            # response is stitchable. The initial call gets a fresh id;
+            # each continuation references it as parent.
+            root_turn_id = str(uuid.uuid4())
+
             response = await self._streaming_handler.call_llm(
                 conversation_history=self.conversation_history,
                 max_history=self._max_history,
                 native_tools=self._native_tools_handler.tools,
                 mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                 is_cancelled_fn=lambda: self.cancel_processing,
+                turn_id=root_turn_id,
             )
 
             # Auto-continue if response was truncated (stop_reason=length)
@@ -658,6 +666,7 @@ class QueueProcessor:
                     native_tools=self._native_tools_handler.tools,
                     mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                     is_cancelled_fn=lambda: self.cancel_processing,
+                    parent_turn_id=root_turn_id,
                 )
 
             # If we continued, merge response and clean up history fragments

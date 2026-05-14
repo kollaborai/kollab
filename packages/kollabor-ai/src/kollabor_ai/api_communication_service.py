@@ -90,6 +90,13 @@ class APICommunicationService:
         # actually sent (not just our post-processed view).
         self.last_raw_chunks: List[Dict[str, Any]] = []
 
+        # Per-call linkage for the raw log. Set by call_llm — last_turn_id
+        # always reflects the most recent call so the auto-continuation
+        # loop in queue_processor can use it as parent_turn_id for the
+        # follow-up call.
+        self.last_turn_id: Optional[str] = None
+        self._current_parent_turn_id: Optional[str] = None
+
         # Tool accumulator mode (LEGACY vs EXPLICIT)
         self._use_explicit_accumulation = config.get(
             "kollabor.llm.use_explicit_tool_accumulation", False
@@ -332,6 +339,8 @@ class APICommunicationService:
         streaming_callback=None,
         tools: Optional[List[Dict[str, Any]]] = None,
         on_rate_limit=None,
+        turn_id: Optional[str] = None,
+        parent_turn_id: Optional[str] = None,
     ) -> str:
         """Make API call to LLM with conversation history and robust error handling.
 
@@ -340,6 +349,15 @@ class APICommunicationService:
             max_history: Maximum number of messages to send (optional)
             streaming_callback: Optional callback for streaming content chunks
             tools: Optional list of tool definitions for native function calling
+            turn_id: Optional explicit turn id for the raw log entry. If
+                omitted, a uuid is generated. The chosen id is exposed on
+                ``self.last_turn_id`` so callers (notably the
+                auto-continuation loop) can pass it as ``parent_turn_id``
+                on follow-up calls.
+            parent_turn_id: Optional. When set, the raw log entry for this
+                call records ``continuation_of=<parent_turn_id>`` so a
+                truncated-and-resumed response can be stitched back to the
+                turn that started it.
 
         Returns:
             LLM response content
@@ -354,6 +372,11 @@ class APICommunicationService:
 
         # Store streaming callback for use in handlers
         self.streaming_callback = streaming_callback
+
+        # Stash linkage for _log_raw_interaction. last_turn_id is also
+        # readable by the caller after the call returns.
+        self.last_turn_id = turn_id or str(uuid.uuid4())
+        self._current_parent_turn_id = parent_turn_id
 
         # Update activity tracking
         self._connection_stats["total_requests"] += 1
@@ -945,7 +968,8 @@ class APICommunicationService:
                 ) or str(getattr(self._provider, "provider_type", ""))
 
             interaction = RawInteraction(
-                turn_id=str(uuid.uuid4()),
+                turn_id=self.last_turn_id or str(uuid.uuid4()),
+                continuation_of=self._current_parent_turn_id,
                 timestamp=datetime.now().isoformat() + "Z",
                 session_id=self.current_session_id or "",
                 duration_s=round(duration, 3),

@@ -62,6 +62,8 @@ class StreamingHandler:
         native_tools: Optional[List[dict]],
         mcp_discovery_complete: asyncio.Event,
         is_cancelled_fn: Callable[[], bool],
+        turn_id: Optional[str] = None,
+        parent_turn_id: Optional[str] = None,
     ) -> str:
         """Make API call to LLM using APICommunicationService.
 
@@ -71,6 +73,10 @@ class StreamingHandler:
             native_tools: Native tool definitions for function calling (or None)
             mcp_discovery_complete: Event signaling MCP discovery is done
             is_cancelled_fn: Callable that returns True if request is cancelled
+            turn_id: Optional explicit raw-log turn id (see api_service.call_llm)
+            parent_turn_id: Optional. Set on follow-up calls so the raw log
+                links a truncated-and-continued response back to the turn
+                that started it.
 
         Returns:
             LLM response string
@@ -105,6 +111,8 @@ class StreamingHandler:
                 streaming_callback=self.handle_chunk,
                 tools=native_tools,
                 on_rate_limit=self._on_rate_limit,
+                turn_id=turn_id,
+                parent_turn_id=parent_turn_id,
             )
         except asyncio.CancelledError:
             logger.info("LLM API call was cancelled")
