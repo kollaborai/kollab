@@ -416,13 +416,24 @@ if paths:
     for i, obj in enumerate(rows[-3:], 1):
         req = obj.get("request") or {}
         resp = obj.get("response") or {}
-        chars = 0
-        if isinstance(req, dict):
-            chars = sum(len(str((m or {}).get("content", ""))) for m in req.get("messages") or [] if isinstance(m, dict))
+        # v1 schema moved messages -> conversation_local and put
+        # model/provider under .profile. Fall back to v0 paths so the
+        # smoke test renders both shapes.
+        profile = obj.get("profile") or {}
+        messages = (
+            req.get("conversation_local")
+            if isinstance(req, dict) and req.get("conversation_local") is not None
+            else (req.get("messages") if isinstance(req, dict) else None)
+        ) or []
+        chars = sum(
+            len(str((m or {}).get("content", "")))
+            for m in messages
+            if isinstance(m, dict)
+        )
         print(json.dumps({
             "turn": i,
-            "model": obj.get("model"),
-            "provider": obj.get("provider"),
+            "model": profile.get("model") or obj.get("model"),
+            "provider": profile.get("provider") or obj.get("provider"),
             "error": obj.get("error"),
             "request_message_chars": chars,
             "tool_calls": resp.get("tool_calls") if isinstance(resp, dict) else None,
