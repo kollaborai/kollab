@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -78,6 +78,8 @@ def _build_service(queue: Optional[EnvQueue]):
     service.inject_system_message = MagicMock(
         side_effect=_async_noop
     )
+    service._native_tools = MagicMock()
+    service._native_tools.load_tools = AsyncMock()
 
     return service
 
@@ -87,7 +89,14 @@ async def _async_noop(*args, **kwargs):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("loop closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -155,3 +164,22 @@ def test_grant_then_revoke_produces_two_distinct_events():
     assert events[0].message == "+tool:file-read"
     assert events[1].kind == EnvKind.TOOL_REVOKE
     assert events[1].message == "-tool:file-read"
+
+
+def test_inject_tool_grant_refreshes_native_tool_schemas():
+    queue = EnvQueue()
+    service = _build_service(queue)
+
+    _run(service.inject_tool_grant("file-read", reason="mcp connect"))
+
+    service._native_tools.load_tools.assert_awaited_once()
+
+
+def test_inject_tool_revoke_refreshes_native_tool_schemas():
+    queue = EnvQueue()
+    service = _build_service(queue)
+    service.tool_executor.set_bundle_scope(["file-read"])
+
+    _run(service.inject_tool_revoke("file-read", reason="mcp disconnect"))
+
+    service._native_tools.load_tools.assert_awaited_once()

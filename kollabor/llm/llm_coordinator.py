@@ -153,6 +153,8 @@ class LLMService:
                 updated = list(current_scope) + [tool_name]
                 self.tool_executor.set_bundle_scope(updated)
 
+        await self._refresh_native_tools_after_scope_change()
+
         # Render docs and inject notification
         docs = render_tool_markdown(tool)
         reason_block = f" ({reason})" if reason else ""
@@ -202,6 +204,8 @@ class LLMService:
             updated = [t for t in current_scope if t != tool_name]
             self.tool_executor.set_bundle_scope(updated)
 
+        await self._refresh_native_tools_after_scope_change()
+
         reason_block = f" ({reason})" if reason else ""
 
         # Find the xml tag for the tool
@@ -237,6 +241,17 @@ class LLMService:
             )
         except Exception:
             pass
+
+    async def _refresh_native_tools_after_scope_change(self) -> None:
+        """Reload native tool schemas after dynamic tool scope changes."""
+        native_tools = getattr(self, "_native_tools", None)
+        load_tools = getattr(native_tools, "load_tools", None)
+        if not callable(load_tools):
+            return
+        try:
+            await load_tools()
+        except Exception as e:
+            logger.debug("Failed to refresh native tool schemas: %s", e)
 
     def __init__(
         self,
