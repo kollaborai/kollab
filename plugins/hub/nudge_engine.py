@@ -185,7 +185,7 @@ class NudgeEngine:
                     "without hub chatter.\n\n"
                 )
                 return (
-                    "[system: hub loop detected]\n"
+                    "[nudge] hub loop detected\n"
                     "you have spent " + str(tracker.turns_hub_only) + " turns "
                     "in a row exchanging hub messages without doing any work "
                     "(file reads, edits, terminal commands, scratchpad writes).\n\n"

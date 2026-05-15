@@ -34,6 +34,12 @@ from .message_handler import MessageHandler
 from .session_manager import SessionManager
 from .status_service import StatusService
 from .streaming_handler import StreamingHandler
+from .system_messages import (
+    PendingSystemMessage,
+    format_system_message,
+    merge_system_messages_with_user_message,
+    normalize_system_subtype,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,17 +111,20 @@ class LLMService:
             content: Message content to inject
             subtype: Message subtype for logging (e.g. 'hub_result', 'nudge')
         """
-        from kollabor_events.data_models import ConversationMessage
+        normalized_subtype = normalize_system_subtype(subtype)
+        formatted_content = format_system_message(content, subtype=normalized_subtype)
 
-        self.conversation_history.append(
-            ConversationMessage(role="user", content=content)
+        if not hasattr(self, "_pending_system_messages"):
+            self._pending_system_messages = []
+        self._pending_system_messages.append(
+            PendingSystemMessage(subtype=normalized_subtype, content=content)
         )
 
         if hasattr(self, "conversation_logger") and self.conversation_logger:
             await self.conversation_logger.log_system_message(
-                content,
+                formatted_content,
                 parent_uuid=getattr(self, "current_parent_uuid", None),
-                subtype=subtype,
+                subtype=normalized_subtype,
             )
 
     async def inject_tool_grant(
@@ -333,6 +342,7 @@ class LLMService:
 
         # Conversation state
         self.conversation_history: List[ConversationMessage] = []
+        self._pending_system_messages: List[PendingSystemMessage] = []
         # Note: max_queue_size is now owned by QueueProcessor, accessed via property
 
         # Initialize conversation logger with intelligence features
@@ -860,6 +870,9 @@ class LLMService:
 
     async def _process_message_batch(self, messages: List[str]):
         """Process a batch of messages. Delegates to QueueProcessor."""
+        if self._pending_system_messages:
+            combined = "\n".join(messages)
+            messages = [self.merge_pending_system_messages(combined)]
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=self.current_parent_uuid,
@@ -867,8 +880,31 @@ class LLMService:
 
     async def _continue_conversation(self):
         """Continue an ongoing conversation. Delegates to QueueProcessor."""
+        if self._pending_system_messages:
+            self.current_parent_uuid = self._add_conversation_message(
+                ConversationMessage(
+                    role="user",
+                    content=self.merge_pending_system_messages(""),
+                ),
+                parent_uuid=self.current_parent_uuid,
+            )
         self.current_parent_uuid = await self._queue_processor.continue_conversation(
             current_parent_uuid=self.current_parent_uuid,
+        )
+
+    def pop_pending_system_messages(self) -> List[PendingSystemMessage]:
+        """Drain queued system/context messages waiting for the next turn."""
+        if not hasattr(self, "_pending_system_messages"):
+            self._pending_system_messages = []
+        pending = list(self._pending_system_messages)
+        self._pending_system_messages.clear()
+        return pending
+
+    def merge_pending_system_messages(self, user_message: str) -> str:
+        """Return one user payload containing queued system context + message."""
+        return merge_system_messages_with_user_message(
+            self.pop_pending_system_messages(),
+            user_message,
         )
 
     # -- Forwarding methods to BackgroundTaskManager --

@@ -5409,6 +5409,10 @@ class HubPlugin(BasePlugin):
                         ]
 
                 async with self._history_lock:
+                    if hasattr(llm_service, "merge_pending_system_messages"):
+                        formatted = llm_service.merge_pending_system_messages(
+                            formatted
+                        )
                     llm_service.conversation_history.append(
                         ConversationMessage(
                             role="user",
@@ -5997,7 +6001,7 @@ class HubPlugin(BasePlugin):
         try:
             async with self._history_lock:
                 await llm_service.inject_system_message(
-                    f"<sys_msg>\n{nudge_text}\n</sys_msg>",
+                    nudge_text,
                     subtype="crystal_nudge",
                 )
             logger.info("crystal nudge: injected %d entries", len(matches))
@@ -6103,7 +6107,7 @@ class HubPlugin(BasePlugin):
                     if llm_svc and hasattr(llm_svc, "inject_system_message"):
                         async with self._history_lock:
                             await llm_svc.inject_system_message(
-                                f"[system: {nudge}]",
+                                nudge,
                                 subtype="hub_nudge",
                             )
                 except Exception as e:

@@ -2,6 +2,11 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock
 
 from kollabor_agent.runtime import AgentRuntime
+from kollabor.llm.system_messages import (
+    PendingSystemMessage,
+    format_system_message,
+    merge_system_messages_with_user_message,
+)
 from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
 
@@ -15,14 +20,22 @@ class FakeLLMService:
         self.current_parent_uuid = "parent-1"
         self.conversation_logger = MagicMock()
         self.conversation_logger.log_system_message = AsyncMock()
+        self._pending_system_messages = []
 
     async def inject_system_message(self, content: str, subtype: str = "injection"):
-        self.conversation_history.append(ConversationMessage(role="user", content=content))
+        self._pending_system_messages.append(
+            PendingSystemMessage(subtype=subtype, content=content)
+        )
         await self.conversation_logger.log_system_message(
-            content,
+            format_system_message(content, subtype=subtype),
             parent_uuid=self.current_parent_uuid,
             subtype=subtype,
         )
+
+    def merge_pending_system_messages(self, user_message: str) -> str:
+        pending = list(self._pending_system_messages)
+        self._pending_system_messages.clear()
+        return merge_system_messages_with_user_message(pending, user_message)
 
 
 class FakeEnvQueue:
@@ -80,11 +93,13 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
 
         contents = [msg.content for msg in llm_service.conversation_history]
 
-        self.assertGreaterEqual(len(contents), 2)
-        self.assertTrue(contents[-2].startswith("[wake:"))
+        self.assertEqual(len(contents), 1)
+        self.assertTrue(contents[-1].startswith("<system_messages>"))
+        self.assertIn("[wake_header]", contents[-1])
+        self.assertIn("[wake:", contents[-1])
         self.assertIn("[hub channel: koordinator -> sapphire]", contents[-1])
         self.assertIn("you have an active task", contents[-1])
-        self.assertIn("Treat it as the current user request", contents[-1])
+        self.assertIn("Handle this once if actionable", contents[-1])
         self.assertTrue(llm_service.conversation_history[-1].metadata["hub_message"])
         self.assertEqual(event_bus.emitted[0][0], EventType.TRIGGER_LLM_CONTINUE)
 

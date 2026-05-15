@@ -807,6 +807,14 @@ class APICommunicationService:
             if meta.get("tool_call_id"):
                 formatted["tool_call_id"] = meta["tool_call_id"]
 
+            # Preserve internal system-message labels for raw logs. Provider
+            # adapters ignore these keys, but _raw.jsonl consumers need to
+            # distinguish context injections from real human user messages.
+            if meta.get("system_message"):
+                formatted["system_message"] = True
+            if meta.get("subtype"):
+                formatted["subtype"] = meta["subtype"]
+
             messages.append(formatted)
 
         return messages
