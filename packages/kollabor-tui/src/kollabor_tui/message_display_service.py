@@ -70,6 +70,10 @@ class MessageDisplayService:
 
         logger.info("Message display service initialized")
 
+    def _is_flow_control_result(self, result: Any) -> bool:
+        """Return True for internal flow-control tools that should not render."""
+        return getattr(result, "tool_type", "") in {"wait_for_user"}
+
     def display_thinking_and_response(
         self,
         thinking_duration: float,
@@ -102,6 +106,10 @@ class MessageDisplayService:
             original_tools: List of original tool data for command extraction
         """
         for i, result in enumerate(tool_results):
+            if self._is_flow_control_result(result):
+                logger.debug("Suppressing flow-control tool display: %s", result.tool_type)
+                continue
+
             # Get original tool data for display
             tool_data = (
                 original_tools[i] if original_tools and i < len(original_tools) else {}
@@ -355,6 +363,13 @@ class MessageDisplayService:
         # Add tool results if present (suppress in pipe mode)
         if tool_results and not pipe_mode:
             for i, result in enumerate(tool_results):
+                if self._is_flow_control_result(result):
+                    logger.debug(
+                        "Suppressing flow-control tool in complete response: %s",
+                        result.tool_type,
+                    )
+                    continue
+
                 # Get original tool data for display
                 tool_data = (
                     original_tools[i]
