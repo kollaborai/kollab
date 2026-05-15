@@ -343,20 +343,31 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
         cache_read = 0
         cost = 0.0
 
-        if ctx and ctx.llm_service and hasattr(ctx.llm_service, "session_stats"):
-            stats = ctx.llm_service.session_stats
-            msgs = stats.get("messages", 0)
-            tokens = stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
-            cache_read = stats.get("cache_read_tokens", 0)
-            cost = stats.get("total_cost_usd", 0.0)
-
-        # Attach mode fallback: read from daemon state snapshot
-        if msgs == 0 and tokens == 0 and ctx and ctx.remote_state:
+        # Prefer daemon-sourced state when available. In attach mode the
+        # local llm_service is only a client-side shadow and can be partially
+        # populated, which made cache-read stats flicker in and out.
+        if ctx and ctx.remote_state and any(
+            key in ctx.remote_state
+            for key in (
+                "messages",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "total_cost_usd",
+            )
+        ):
             rs = ctx.remote_state
             msgs = rs.get("messages", 0)
             tokens = rs.get("input_tokens", 0) + rs.get("output_tokens", 0)
             cache_read = rs.get("cache_read_tokens", 0)
             cost = rs.get("total_cost_usd", 0.0)
+
+        elif ctx and ctx.llm_service and hasattr(ctx.llm_service, "session_stats"):
+            stats = ctx.llm_service.session_stats
+            msgs = stats.get("messages", 0)
+            tokens = stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
+            cache_read = stats.get("cache_read_tokens", 0)
+            cost = stats.get("total_cost_usd", 0.0)
 
         def _fmt(n: int) -> str:
             if n < 1000:

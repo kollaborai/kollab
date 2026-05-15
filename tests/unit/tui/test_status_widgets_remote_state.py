@@ -30,6 +30,7 @@ from kollabor_tui.status.core_widgets import (  # noqa: E402
     render_endpoint,
     render_model,
     render_profile,
+    render_stats,
 )
 
 # ANSI escape regex to strip color/style codes from widget output for assertions
@@ -187,6 +188,31 @@ class TestRenderEndpointRemoteStatePreference(unittest.TestCase):
         out = _strip_ansi(render_endpoint(40, ctx))
         # Default fallback is "local"
         self.assertIn("local", out)
+
+
+class TestRenderStatsRemoteStatePreference(unittest.TestCase):
+    """render_stats should prefer daemon stats over attach shadow stats."""
+
+    def test_remote_state_cache_read_wins_over_partial_local_stats(self) -> None:
+        ctx = MagicMock()
+        ctx.remote_state = {
+            "messages": 16,
+            "input_tokens": 47000,
+            "output_tokens": 200,
+            "cache_read_tokens": 46800,
+            "total_cost_usd": 0.0,
+        }
+        ctx.llm_service.session_stats = {
+            "messages": 16,
+            "input_tokens": 47000,
+            "output_tokens": 200,
+            "cache_read_tokens": 0,
+            "total_cost_usd": 0.0,
+        }
+
+        out = _strip_ansi(render_stats(80, ctx))
+
+        self.assertIn("⟳ 46.8K", out)
 
 
 if __name__ == "__main__":
