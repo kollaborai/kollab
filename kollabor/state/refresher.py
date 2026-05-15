@@ -130,7 +130,8 @@ class WidgetStateRefresher:
             # Assign atomically -- widgets reading concurrently will see
             # either the old dict or the new dict, never a half-populated
             # mutation in progress.
-            self._ctx.remote_state = flat
+            current = getattr(self._ctx, "remote_state", {}) or {}
+            self._ctx.remote_state = {**current, **flat}
         except Exception as e:
             logger.debug("widget state refresh: assign failed: %s", e)
 
@@ -230,5 +231,27 @@ class WidgetStateRefresher:
             flat["approval_mode"] = perm.approval_mode
         except Exception as e:
             logger.debug("refresher get_permission_state failed: %s", e)
+
+        # --- active agent / skills ---
+        try:
+            agent = await self._state.get_active_agent()
+            if agent.name:
+                flat["agent"] = agent.name
+        except Exception as e:
+            logger.debug("refresher get_active_agent failed: %s", e)
+
+        try:
+            skills = await self._state.list_skills()
+            visible = [
+                skill.name
+                for skill in skills.skills
+                if skill.active and skill.name != "system_prompt"
+            ]
+            if visible:
+                flat["skills"] = ", ".join(visible)
+            elif skills.skills:
+                flat["skills"] = "no-skill"
+        except Exception as e:
+            logger.debug("refresher list_skills failed: %s", e)
 
         return flat
