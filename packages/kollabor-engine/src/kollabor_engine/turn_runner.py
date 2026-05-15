@@ -5,6 +5,8 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List
 
+from kollabor_agent.tool_call_contract import normalize_native_tool_call
+
 from . import sse
 from .session import EngineSession
 
@@ -14,7 +16,7 @@ MAX_AGENTIC_TURNS = 20  # prevent runaway loops
 
 
 def _tc_get(tool_call: Any, key: str, default: Any = None) -> Any:
-    """Get a field from a tool_call that may be a dict or a ToolUseContent object."""
+    """Get a field from a normalized tool call dict or provider object."""
     if isinstance(tool_call, dict):
         return tool_call.get(key, default)
     return getattr(tool_call, key, default)
@@ -133,58 +135,16 @@ class TurnRunner:
                 if response_text.strip():
                     final_response_text = response_text
 
-                # Normalise tool_calls to dicts once so all downstream code is safe.
-                # Also resolve the executor tool_type: the tool_executor routes based
-                # on "type" being "mcp_tool", "terminal", "file_*", etc. - not the
-                # LLM's "tool_use". MCP names route to MCP; built-in registry native
-                # names route to their native executor type (file_read, terminal, etc.).
                 mcp_tool_names = set(session.mcp_integration.tool_registry.keys())
-                registry_native_names: set[str] = set()
-                try:
-                    from kollabor_agent.tool_registry import get_registry
-
-                    registry_native_names = {
-                        tool.native_name for tool in get_registry().list()
-                    }
-                except Exception:
-                    logger.debug("Tool registry unavailable during tool normalisation")
-
-                def _normalise_tc(tc: Any) -> dict:
-                    if isinstance(tc, dict):
-                        name = tc.get("name", "")
-                        raw_type = tc.get("type", "tool_use")
-                        input_val = tc.get("input") or tc.get("arguments") or {}
-                    else:
-                        name = getattr(tc, "name", "")
-                        raw_type = getattr(tc, "type", "tool_use")
-                        input_val = getattr(tc, "input", {})
-                    # Resolve executor type
-                    if name in mcp_tool_names:
-                        resolved_type = "mcp_tool"
-                    elif name in registry_native_names:
-                        resolved_type = name
-                    elif raw_type not in ("tool_use",):
-                        resolved_type = raw_type  # already classified (terminal, file_*, etc.)
-                    else:
-                        resolved_type = "mcp_tool"  # default: treat as MCP tool
-
-                    base = {
-                        "type": resolved_type,
-                        "id": _tc_get(tc, "id", ""),
-                        "name": name,
-                        "input": input_val,
-                        "arguments": input_val,
-                    }
-                    if resolved_type != "mcp_tool" and isinstance(input_val, dict):
-                        base.update(input_val)
-                    if isinstance(tc, dict):
-                        return {
-                            **tc,
-                            **base,
-                        }
-                    return base
-
-                tool_calls = [_normalise_tc(tc) for tc in tool_calls]
+                plugin_names = set(session.tool_executor.plugin_handlers.keys())
+                tool_calls = [
+                    normalize_native_tool_call(
+                        tc,
+                        mcp_tool_names=mcp_tool_names,
+                        plugin_handler_names=plugin_names,
+                    )
+                    for tc in tool_calls
+                ]
 
                 # Add assistant response to history using the same metadata pattern
                 # as queue_processor.py — provider's _prepare_request() handles

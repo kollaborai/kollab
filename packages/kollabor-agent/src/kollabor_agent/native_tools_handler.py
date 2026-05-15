@@ -7,8 +7,9 @@ the llm_service.py decomposition (Phase B).
 
 import asyncio
 import logging
-import re
 from typing import Any, Dict, List, Optional
+
+from .tool_call_contract import normalize_native_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -130,85 +131,18 @@ class NativeToolsHandler:
         logger.info(f"Executing {len(tool_calls)} native tool calls")
 
         for tc in tool_calls:
-            tool_name = tc.name
-
-            # Handle malformed tool names that contain XML (LLM confusion)
-            # Example: "read><file>path</file></read><tool_call>search_nodes"
-            if "<" in tool_name or ">" in tool_name:
-                logger.warning(f"Malformed tool name detected: {tool_name[:100]}")
-                # Try to extract actual tool name from <tool_call>...</tool_call>
-                match = re.search(r"<tool_call>([^<]+)", tool_name)
-                if match:
-                    tool_name = match.group(1).strip()
-                    logger.info(f"Extracted tool name from malformed call: {tool_name}")
-                else:
-                    # Try to find any known MCP tool name in the string
-                    available_tools = list(self.mcp_integration.tool_registry.keys())
-                    for known_tool in available_tools:
-                        if known_tool in tool_name:
-                            tool_name = known_tool
-                            logger.info(
-                                f"Found known tool in malformed name: {tool_name}"
-                            )
-                            break
-                    else:
-                        logger.error(
-                            f"Could not parse malformed tool name: {tool_name[:100]}"
-                        )
-                        continue
-
-            # Convert ToolCallResult to tool_executor format
-            # File operations use their name as type (file_create, file_edit, etc.)
-            # Terminal commands use "terminal" as type
-            # MCP tools use "mcp_tool" as type
-            if tool_name.startswith("file_"):
-                tool_type = tool_name
-                tool_data = {
-                    "type": tool_type,
-                    "id": tc.id,
-                    "name": tool_name,
-                    **tc.input,
-                }
-            elif tool_name == "terminal":
-                tool_type = "terminal"
-                tool_data = {
-                    "type": tool_type,
-                    "id": tc.id,
-                    "name": tool_name,
-                    "command": tc.input.get("command", ""),
-                }
-            elif (
-                tool_name in tool_executor.plugin_handlers
-                or tool_name.replace("-", "_") in tool_executor.plugin_handlers
-            ):
-                # Route to registered plugin handler instead of MCP fallback.
-                # Plugin handlers are registered with underscores (hub_msg)
-                # but native tool names use hyphens (hub-msg) -- normalize.
-                tool_type = (
-                    tool_name
-                    if tool_name in tool_executor.plugin_handlers
-                    else tool_name.replace("-", "_")
-                )
-                tool_data = {
-                    "type": tool_type,
-                    "id": tc.id,
-                    "name": tool_name,
-                    **tc.input,
-                }
-            else:
-                tool_type = "mcp_tool"
-                tool_data = {
-                    "type": tool_type,
-                    "id": tc.id,
-                    "name": tool_name,
-                    "arguments": tc.input,
-                }
-
+            tool_data = normalize_native_tool_call(
+                tc,
+                mcp_tool_names=set(self.mcp_integration.tool_registry.keys()),
+                plugin_handler_names=set(tool_executor.plugin_handlers.keys()),
+            )
             result = await tool_executor.execute_tool(tool_data)
             results.append(result)
 
             logger.debug(
-                f"Native tool {tool_name}: {'success' if result.success else 'failed'}"
+                "Native tool %s: %s",
+                tool_data.get("name", ""),
+                "success" if result.success else "failed",
             )
 
         return results

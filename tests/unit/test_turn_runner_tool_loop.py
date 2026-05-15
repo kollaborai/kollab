@@ -1,8 +1,18 @@
 """Regression tests for engine agentic turn continuation."""
 
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+for package_src in (
+    PROJECT_ROOT / "packages" / "kollabor-agent" / "src",
+    PROJECT_ROOT / "packages" / "kollabor-ai" / "src",
+    PROJECT_ROOT / "packages" / "kollabor-engine" / "src",
+):
+    sys.path.insert(0, str(package_src))
 
 from kollabor_engine.turn_runner import TurnRunner
 
@@ -44,6 +54,7 @@ class FakeAPIService:
 class FakeToolExecutor:
     def __init__(self):
         self.calls = []
+        self.plugin_handlers = {}
 
     async def execute_tool(self, tool_call):
         self.calls.append(tool_call)
@@ -142,3 +153,48 @@ async def test_builtin_native_tool_calls_route_to_builtin_executor_type():
     assert tool_call["limit"] == 5
     assert tool_call["arguments"] == {"file": "README.md", "limit": 5}
     assert any(event["type"] == "tool_start" for event in events)
+
+
+class FakeMcpToolAPIService(FakeAPIService):
+    async def call_llm(self, conversation_history, streaming_callback, tools):
+        self.calls += 1
+        self.last_thinking_content = None
+        self.last_token_usage = {"prompt_tokens": 1, "completion_tokens": 1}
+
+        if self.calls == 1:
+            self.last_stop_reason = "tool_use"
+            self.last_tool_calls = [
+                {
+                    "id": "call_browser",
+                    "type": "tool_use",
+                    "name": "browser_get_page",
+                    "input": {"tab": "active"},
+                }
+            ]
+            return ""
+
+        self.last_stop_reason = "end_turn"
+        self.last_tool_calls = []
+        await streaming_callback("got page")
+        return "got page"
+
+
+class FakeMcpToolSession(FakeSession):
+    def __init__(self):
+        super().__init__()
+        self.api_service = FakeMcpToolAPIService()
+        self.mcp_integration = SimpleNamespace(
+            tool_registry={"browser_get_page": {"server": "browser"}}
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_native_tool_call_stays_mcp_tool_when_registered_by_mcp():
+    session = FakeMcpToolSession()
+    await anext(TurnRunner().run(session, "check page"))
+
+    assert session.tool_executor.calls
+    tool_call = session.tool_executor.calls[0]
+    assert tool_call["type"] == "mcp_tool"
+    assert tool_call["name"] == "browser_get_page"
+    assert tool_call["arguments"] == {"tab": "active"}
