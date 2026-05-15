@@ -24,6 +24,67 @@ from kollabor_events.models import EventType, Hook, HookPriority
 logger = logging.getLogger(__name__)
 
 
+class _FakeStdin:
+    def __init__(self):
+        self.writes = []
+        self._closing = False
+
+    def write(self, data):
+        self.writes.append(data)
+
+    async def drain(self):
+        return None
+
+    def is_closing(self):
+        return self._closing
+
+    def close(self):
+        self._closing = True
+
+
+class _FakeStdout:
+    def __init__(self, messages):
+        self._chunks = [
+            (json.dumps(message) + "\n").encode("utf-8")
+            for message in messages
+        ]
+
+    async def read(self, size):
+        if self._chunks:
+            await asyncio.sleep(0)
+            return self._chunks.pop(0)
+        await asyncio.sleep(0)
+        return b""
+
+    def close(self):
+        pass
+
+
+class _FakeStderr:
+    async def read(self):
+        return b""
+
+    def close(self):
+        pass
+
+
+class _FakeProcess:
+    def __init__(self, stdout_messages):
+        self.stdin = _FakeStdin()
+        self.stdout = _FakeStdout(stdout_messages)
+        self.stderr = _FakeStderr()
+        self.returncode = None
+
+    def terminate(self):
+        self.returncode = 0
+
+    def kill(self):
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
 class TestMCPServerConnection(unittest.TestCase):
     """Test MCP server connection management."""
 
@@ -43,6 +104,55 @@ class TestMCPServerConnection(unittest.TestCase):
         # Simulate initialization
         connection.initialized = True
         self.assertTrue(connection.initialized)
+
+    def test_json_rpc_notifications_do_not_satisfy_pending_request(self):
+        """Notifications without ids are ignored while waiting for a response."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.process = _FakeProcess(
+                [
+                    {"jsonrpc": "2.0", "method": "notifications/progress"},
+                    {"jsonrpc": "2.0", "id": "req-1", "result": {"ok": True}},
+                ]
+            )
+
+            response = await connection._send_request(
+                {"jsonrpc": "2.0", "id": "req-1", "method": "tools/list"}
+            )
+
+            self.assertEqual(
+                response,
+                {"jsonrpc": "2.0", "id": "req-1", "result": {"ok": True}},
+            )
+
+        asyncio.run(run_test())
+
+    def test_json_rpc_responses_are_correlated_by_id(self):
+        """Out-of-order responses resolve to the matching request futures."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.process = _FakeProcess(
+                [
+                    {"jsonrpc": "2.0", "id": "req-2", "result": {"order": 2}},
+                    {"jsonrpc": "2.0", "id": "req-1", "result": {"order": 1}},
+                ]
+            )
+
+            first, second = await asyncio.gather(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-1", "method": "first"}
+                ),
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-2", "method": "second"}
+                ),
+            )
+
+            self.assertEqual(first["result"], {"order": 1})
+            self.assertEqual(second["result"], {"order": 2})
+
+        asyncio.run(run_test())
 
 
 class TestMCPIntegration(unittest.TestCase):

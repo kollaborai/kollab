@@ -70,6 +70,9 @@ class MCPServerConnection:
         self.process: Optional[asyncio.subprocess.Process] = None
         self.initialized = False
         self._read_buffer = ""
+        self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._reader_task: Optional[asyncio.Task] = None
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         """Start the MCP server process."""
@@ -85,6 +88,7 @@ class MCPServerConnection:
                 env=env,
             )
             logger.info(f"Started MCP server process: {self.server_name}")
+            self._ensure_reader_task()
             return True
         except Exception as e:
             logger.error(f"Failed to start MCP server {self.server_name}: {e}")
@@ -211,20 +215,33 @@ class MCPServerConnection:
         if not self.process or not self.process.stdin:
             return None
 
+        request_id = request.get("id")
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+            request["id"] = request_id
+        request_id = str(request_id)
+
+        loop = asyncio.get_running_loop()
+        response_future = loop.create_future()
+        self._pending_requests[request_id] = response_future
+        self._ensure_reader_task()
+
         try:
             message = json.dumps(request) + "\n"
-            self.process.stdin.write(message.encode())
-            await self.process.stdin.drain()
+            async with self._write_lock:
+                self.process.stdin.write(message.encode())
+                await self.process.stdin.drain()
 
             # Read response with timeout — use 5 min to allow user permission dialogs
-            response = await asyncio.wait_for(self._read_response(), timeout=300)
-            return response
+            return await asyncio.wait_for(response_future, timeout=300)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout waiting for response from {self.server_name}")
             return None
         except Exception as e:
             logger.error(f"Error sending request to {self.server_name}: {e}")
             return None
+        finally:
+            self._pending_requests.pop(request_id, None)
 
     async def _send_notification(self, notification: Dict[str, Any]) -> None:
         """Send JSON-RPC notification (no response expected)."""
@@ -233,31 +250,79 @@ class MCPServerConnection:
 
         try:
             message = json.dumps(notification) + "\n"
-            self.process.stdin.write(message.encode())
-            await self.process.stdin.drain()
+            async with self._write_lock:
+                self.process.stdin.write(message.encode())
+                await self.process.stdin.drain()
         except Exception as e:
             logger.error(f"Error sending notification to {self.server_name}: {e}")
 
-    async def _read_response(self) -> Optional[Dict[str, Any]]:
-        """Read a JSON-RPC response from stdout."""
+    def _ensure_reader_task(self) -> None:
+        """Start the single stdout reader for this connection if needed."""
+        if self._reader_task is not None and not self._reader_task.done():
+            return
         if not self.process or not self.process.stdout:
-            return None
+            return
+        self._reader_task = asyncio.create_task(
+            self._reader_loop(), name=f"mcp_reader:{self.server_name}"
+        )
 
-        while True:
-            # Check if we have a complete message in buffer
-            if "\n" in self._read_buffer:
-                line, self._read_buffer = self._read_buffer.split("\n", 1)
-                if line.strip():
-                    try:
-                        return json.loads(line)  # type: ignore[no-any-return]
-                    except json.JSONDecodeError:
+    async def _reader_loop(self) -> None:
+        """Read JSON-RPC messages and resolve pending request futures by id."""
+        if not self.process or not self.process.stdout:
+            return
+
+        try:
+            while True:
+                while "\n" in self._read_buffer:
+                    line, self._read_buffer = self._read_buffer.split("\n", 1)
+                    if not line.strip():
                         continue
+                    try:
+                        message = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.debug(
+                            "Ignoring invalid JSON from MCP server %s: %s",
+                            self.server_name,
+                            line[:120],
+                        )
+                        continue
+                    self._dispatch_incoming_message(message)
 
-            # Read more data
-            chunk = await self.process.stdout.read(4096)
-            if not chunk:
-                return None
-            self._read_buffer += chunk.decode()
+                chunk = await self.process.stdout.read(4096)
+                if not chunk:
+                    break
+                self._read_buffer += chunk.decode()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"MCP reader failed for {self.server_name}: {e}")
+        finally:
+            for request_id, future in list(self._pending_requests.items()):
+                if not future.done():
+                    future.set_result(None)
+                self._pending_requests.pop(request_id, None)
+
+    def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
+        """Resolve matched responses and ignore notifications."""
+        response_id = message.get("id")
+        if response_id is None:
+            logger.debug(
+                "Ignoring MCP notification from %s: %s",
+                self.server_name,
+                message.get("method", "<unknown>"),
+            )
+            return
+
+        future = self._pending_requests.get(str(response_id))
+        if future is None:
+            logger.debug(
+                "Ignoring unmatched MCP response from %s: id=%s",
+                self.server_name,
+                response_id,
+            )
+            return
+        if not future.done():
+            future.set_result(message)
 
     async def close(self) -> None:
         """Close the server connection.
@@ -266,6 +331,20 @@ class MCPServerConnection:
         __del__ warnings (BaseSubprocessTransport._closed AttributeError).
         """
         if self.process:
+            if self._reader_task and not self._reader_task.done():
+                self._reader_task.cancel()
+                try:
+                    await self._reader_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug("MCP reader shutdown failed for %s: %s", self.server_name, e)
+            self._reader_task = None
+            for request_id, future in list(self._pending_requests.items()):
+                if not future.done():
+                    future.set_result(None)
+                self._pending_requests.pop(request_id, None)
+
             try:
                 # Close stdin first to signal server
                 if self.process.stdin and not self.process.stdin.is_closing():
