@@ -236,7 +236,14 @@ class MCPServerConnection:
             return await asyncio.wait_for(response_future, timeout=300)
         except asyncio.TimeoutError:
             logger.warning(f"Timeout waiting for response from {self.server_name}")
+            await self.close()
             return None
+        except asyncio.CancelledError:
+            logger.warning(
+                f"MCP request cancelled for {self.server_name}; closing connection"
+            )
+            await self.close()
+            raise
         except Exception as e:
             logger.error(f"Error sending request to {self.server_name}: {e}")
             return None

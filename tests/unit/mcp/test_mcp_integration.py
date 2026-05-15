@@ -60,6 +60,15 @@ class _FakeStdout:
         pass
 
 
+class _HangingStdout:
+    async def read(self, size):
+        await asyncio.sleep(10)
+        return b""
+
+    def close(self):
+        pass
+
+
 class _FakeStderr:
     async def read(self):
         return b""
@@ -69,9 +78,9 @@ class _FakeStderr:
 
 
 class _FakeProcess:
-    def __init__(self, stdout_messages):
+    def __init__(self, stdout_messages=None, stdout=None):
         self.stdin = _FakeStdin()
-        self.stdout = _FakeStdout(stdout_messages)
+        self.stdout = stdout if stdout is not None else _FakeStdout(stdout_messages or [])
         self.stderr = _FakeStderr()
         self.returncode = None
 
@@ -151,6 +160,28 @@ class TestMCPServerConnection(unittest.TestCase):
 
             self.assertEqual(first["result"], {"order": 1})
             self.assertEqual(second["result"], {"order": 2})
+
+        asyncio.run(run_test())
+
+    def test_cancelled_request_closes_connection(self):
+        """Outer MCP timeouts cancel the request and close the poisoned process."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_HangingStdout())
+
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    connection._send_request(
+                        {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+                    ),
+                    timeout=0.01,
+                )
+
+            self.assertIsNone(connection.process)
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._pending_requests, {})
 
         asyncio.run(run_test())
 
