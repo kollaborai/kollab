@@ -27,10 +27,28 @@ from kollabor_tui.visual_effects import VisualEffects
 from .llm import LLMService
 from .llm.permissions.attach_bridge import AttachPermissionBridge
 from .logging import setup_from_config
+from .state.widget_state import WidgetState
 from .updates import VersionCheckService
 from .version import __version__
 
 logger = logging.getLogger(__name__)
+
+
+def merge_widget_state_snapshot(
+    current: dict[str, Any], event: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge a DisplayTap state_snapshot into existing widget state."""
+    current = current or {}
+    base = WidgetState.from_flat_dict(current, source="existing")
+    update = WidgetState.from_flat_dict(event or {}, source="display_tap")
+    merged = base.update_from(update)
+    preserved = {
+        key: value
+        for key, value in current.items()
+        if key not in WidgetState.state_fields()
+        and key not in {"type", "_source", "_updated_at", "_stale", "_degraded"}
+    }
+    return {**preserved, **merged.to_dict()}
 
 
 class TerminalLLMChat:
@@ -484,8 +502,10 @@ class TerminalLLMChat:
                 # daemon's hidden stdin.
                 response = await self._try_attach_permission_prompt(details)
                 if response is None:
-                    response = await self.renderer.layout_manager.show_permission_prompt(
-                        details
+                    response = (
+                        await self.renderer.layout_manager.show_permission_prompt(
+                            details
+                        )
                     )
                 # Convert to PermissionDecision using response handler
                 return await handle_confirmation_response(
@@ -1693,7 +1713,10 @@ class TerminalLLMChat:
                 elif etype == "state_snapshot":
                     # Update widget context with daemon state
                     if hasattr(self, "_widget_context"):
-                        self._widget_context.remote_state = event
+                        self._widget_context.remote_state = merge_widget_state_snapshot(
+                            getattr(self._widget_context, "remote_state", {}) or {},
+                            event,
+                        )
                         if hasattr(self, "render_loop") and self.render_loop:
                             self.render_loop.request_render()
 
@@ -1720,9 +1743,7 @@ class TerminalLLMChat:
                     pass
 
             # Connection ended (skip message if we detached intentionally)
-            daemon_gone = self.running and not getattr(
-                self, "_attach_detaching", False
-            )
+            daemon_gone = self.running and not getattr(self, "_attach_detaching", False)
             if daemon_gone:
                 coordinator.display_message_sequence(
                     [

@@ -4177,7 +4177,9 @@ class HubPlugin(BasePlugin):
             logger.debug(f"State snapshot error: {e}")
 
         if state:
-            self._display_tap.publish({"type": "state_snapshot", **state})
+            payload = dict(state)
+            payload.pop("type", None)
+            self._display_tap.publish({"type": "state_snapshot", **payload})
 
     async def _mailbox_loop(self) -> None:
         """Check filesystem mailbox for messages."""

@@ -36,6 +36,7 @@ from .snapshots import (
     SystemInfoSnapshot,
     SystemPromptSnapshot,
 )
+from .widget_state import WidgetState
 
 __all__ = [
     "StateService",
@@ -43,7 +44,7 @@ __all__ = [
     "RemoteStateService",
     "register_state_handlers",
     "WidgetStateRefresher",
-
+    "WidgetState",
     "Snapshot",
     "ConversationSnapshot",
     "MessageDto",

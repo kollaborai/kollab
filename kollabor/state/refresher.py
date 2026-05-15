@@ -34,6 +34,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .widget_state import WidgetState
+
 if TYPE_CHECKING:
     from .interface import StateService
 
@@ -132,8 +134,18 @@ class WidgetStateRefresher:
             # Assign atomically -- widgets reading concurrently will see
             # either the old dict or the new dict, never a half-populated
             # mutation in progress.
-            current = getattr(self._ctx, "remote_state", {}) or {}
-            self._ctx.remote_state = {**current, **flat}
+            current_raw = getattr(self._ctx, "remote_state", {}) or {}
+            current = WidgetState.from_flat_dict(current_raw, source="existing")
+            updated = current.update_from(
+                WidgetState.from_flat_dict(flat, source="state_service")
+            )
+            preserved = {
+                key: value
+                for key, value in current_raw.items()
+                if key not in WidgetState.state_fields()
+                and key not in {"type", "_source", "_updated_at", "_stale", "_degraded"}
+            }
+            self._ctx.remote_state = {**preserved, **updated.to_dict()}
             if self._request_render is not None:
                 self._request_render()
         except Exception as e:
@@ -173,6 +185,8 @@ class WidgetStateRefresher:
             flat["messages"] = stats.messages
             flat["input_tokens"] = stats.input_tokens
             flat["output_tokens"] = stats.output_tokens
+            flat["total_input_tokens"] = stats.total_input_tokens
+            flat["total_output_tokens"] = stats.total_output_tokens
             flat["cache_read_tokens"] = stats.cache_read_tokens
             flat["cost_usd"] = stats.cost_usd
             flat["total_cost_usd"] = stats.total_cost_usd

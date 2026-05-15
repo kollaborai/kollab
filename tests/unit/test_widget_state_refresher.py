@@ -21,7 +21,13 @@ from kollabor.state.snapshots import (
 
 class FakeStateService:
     async def get_session_stats(self):
-        return SessionStats(messages=2, input_tokens=10, output_tokens=5)
+        return SessionStats(
+            messages=2,
+            input_tokens=10,
+            output_tokens=5,
+            total_input_tokens=100,
+            total_output_tokens=50,
+        )
 
     async def get_processing_state(self):
         return ProcessingSnapshot(is_processing=True, pending_tools_count=1)
@@ -70,6 +76,8 @@ async def test_refresh_merges_without_erasing_existing_remote_state_keys():
 
     assert ctx.remote_state["legacy_only"] == "keep-me"
     assert ctx.remote_state["profile_name"] == "openai-oauth"
+    assert ctx.remote_state["total_input_tokens"] == 100
+    assert ctx.remote_state["total_output_tokens"] == 50
 
 
 @pytest.mark.asyncio
@@ -96,3 +104,39 @@ async def test_refresh_requests_render_after_remote_state_update():
     await refresher.refresh_once()
 
     assert render_requests == ["render"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_embeds_widget_state_freshness_metadata():
+    ctx = SimpleNamespace(remote_state={})
+    refresher = WidgetStateRefresher(ctx, FakeStateService())
+
+    await refresher.refresh_once()
+
+    assert ctx.remote_state["_source"] == "state_service"
+    assert ctx.remote_state["_updated_at"] > 0
+    assert ctx.remote_state["_stale"] is False
+    assert ctx.remote_state["_degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_existing_fields_when_snapshot_is_partial():
+    class PartialStateService(FakeStateService):
+        async def get_session_stats(self):
+            raise RuntimeError("stats unavailable")
+
+    ctx = SimpleNamespace(
+        remote_state={
+            "messages": 5,
+            "cache_read_tokens": 46800,
+            "legacy_only": "keep-me",
+        }
+    )
+    refresher = WidgetStateRefresher(ctx, PartialStateService())
+
+    await refresher.refresh_once()
+
+    assert ctx.remote_state["messages"] == 5
+    assert ctx.remote_state["cache_read_tokens"] == 46800
+    assert ctx.remote_state["legacy_only"] == "keep-me"
+    assert ctx.remote_state["profile_name"] == "openai-oauth"
