@@ -33,9 +33,9 @@ accepted decisions, historical records, or archive.
 ## RFCs
 
 - [rfcs/README.md](rfcs/README.md) - Placement rules for architecture RFCs and dated spec batches
-- [rfcs/RFC-2026-04-06-agent-designation-merge.md](rfcs/RFC-2026-04-06-agent-designation-merge.md) - Agent vs identity redesign proposal
-- [rfcs/RFC-2026-04-04-agent-hub-unification.md](rfcs/RFC-2026-04-04-agent-hub-unification.md) - Multi-phase hub and agent convergence plan
-- [rfcs/RFC-2026-04-05-kollabor-mesh.md](rfcs/RFC-2026-04-05-kollabor-mesh.md) - Cross-runtime agent bridge draft
+- [rfcs/RFC-2026-04-06-agent-designation-merge.md](rfcs/RFC-2026-04-06-agent-designation-merge.md) - Agent vs identity redesign proposal *(rejected)*
+- [rfcs/RFC-2026-04-04-agent-hub-unification.md](rfcs/RFC-2026-04-04-agent-hub-unification.md) - Multi-phase hub and agent convergence plan *(shipped)*
+- [rfcs/RFC-2026-04-05-kollabor-mesh.md](rfcs/RFC-2026-04-05-kollabor-mesh.md) - Cross-runtime agent bridge draft *(draft)*
 
 ## Records
 
@@ -53,9 +53,9 @@ accepted decisions, historical records, or archive.
 
 ## Dated RFC Batches
 
-- [rfcs/RFC-2026-04-11-core-systems-batch.md](rfcs/RFC-2026-04-11-core-systems-batch.md) - Coordinated spec batch for loop prevention, notifications, tool loading, and context service
-- [rfcs/RFC-2026-04-14-agent-pool-and-project-agents.md](rfcs/RFC-2026-04-14-agent-pool-and-project-agents.md) - Agent pool and project-scoped agent proposal
-- [rfcs/RFC-2026-04-20-hub-project-scoping.md](rfcs/RFC-2026-04-20-hub-project-scoping.md) - Project-scoped hub state rollout
+- [rfcs/RFC-2026-04-11-core-systems-batch.md](rfcs/RFC-2026-04-11-core-systems-batch.md) - Coordinated spec batch for loop prevention, notifications, tool loading, and context service *(historical-index)*
+- [rfcs/RFC-2026-04-14-agent-pool-and-project-agents.md](rfcs/RFC-2026-04-14-agent-pool-and-project-agents.md) - Agent pool and project-scoped agent proposal *(revised-spec)*
+- [rfcs/RFC-2026-04-20-hub-project-scoping.md](rfcs/RFC-2026-04-20-hub-project-scoping.md) - Project-scoped hub state rollout *(shipped)*
 
 ## Archive
 

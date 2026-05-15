@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: stabilization-gate
+        name: Stabilization Gate Tests
+        entry: bash scripts/stabilization-gate.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
