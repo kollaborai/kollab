@@ -392,6 +392,16 @@ class TestHubWakeDecision:
         assert decision.mode == "wake"
         assert decision.should_trigger is True
 
+    def test_intended_ambiguous_message_wakes_by_default(self):
+        plugin = self._plugin()
+        message = _hub_message("latest status when you have a second")
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "wake"
+        assert decision.should_trigger is True
+        assert decision.reason == "default intended"
+
     def test_busy_actionable_messages_queue_one_retry(self):
         plugin = self._plugin()
         first = _hub_message("Can you review this?", msg_id="busy-1")

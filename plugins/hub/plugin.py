@@ -5102,7 +5102,7 @@ class HubPlugin(BasePlugin):
         ):
             return HubWakeDecision("observe", False, "ack only")
 
-        actionable = (
+        has_actionable_evidence = (
             self._has_request_evidence(message.content, metadata)
             or self._has_report_evidence(
                 message.content,
@@ -5110,8 +5110,7 @@ class HubPlugin(BasePlugin):
                 metadata=metadata,
             )
         )
-        if not actionable:
-            return HubWakeDecision("observe", False, "no actionable evidence")
+        wake_reason = "actionable" if has_actionable_evidence else "default intended"
 
         duplicate_reason = self._register_hub_wake_candidate(message)
         if duplicate_reason:
@@ -5121,7 +5120,7 @@ class HubPlugin(BasePlugin):
         if not is_busy:
             self._hub_buffer_retry_queued = False
             self._pending_hub_wake_ids.clear()
-            return HubWakeDecision("wake", True, "actionable")
+            return HubWakeDecision("wake", True, wake_reason)
 
         self._pending_hub_wake_ids[message.id] = time.time()
         if self._hub_buffer_retry_queued:
