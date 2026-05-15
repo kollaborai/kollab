@@ -81,3 +81,18 @@ async def test_refresh_adds_agent_and_active_skills_from_state_service():
 
     assert ctx.remote_state["agent"] == "coder"
     assert ctx.remote_state["skills"] == "tdd"
+
+
+@pytest.mark.asyncio
+async def test_refresh_requests_render_after_remote_state_update():
+    ctx = SimpleNamespace(remote_state={})
+    render_requests = []
+    refresher = WidgetStateRefresher(
+        ctx,
+        FakeStateService(),
+        request_render=lambda: render_requests.append("render"),
+    )
+
+    await refresher.refresh_once()
+
+    assert render_requests == ["render"]

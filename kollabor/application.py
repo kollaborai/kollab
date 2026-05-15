@@ -1012,6 +1012,11 @@ class TerminalLLMChat:
                     self._widget_state_refresher = WidgetStateRefresher(
                         widget_context=self._widget_context,
                         state_service=state_service,
+                        request_render=(
+                            self.render_loop.request_render
+                            if hasattr(self, "render_loop") and self.render_loop
+                            else None
+                        ),
                     )
                     self._widget_state_refresher.start()
                     logger.info(
@@ -1698,6 +1703,8 @@ class TerminalLLMChat:
                     # Update widget context with daemon state
                     if hasattr(self, "_widget_context"):
                         self._widget_context.remote_state = event
+                        if hasattr(self, "render_loop") and self.render_loop:
+                            self.render_loop.request_render()
 
                 elif etype == "permission_request":
                     if self._rpc_client is not None:

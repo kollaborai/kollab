@@ -69,6 +69,7 @@ class WidgetStateRefresher:
         state_service: "StateService",
         *,
         interval_seconds: float | None = None,
+        request_render: Any | None = None,
     ) -> None:
         self._ctx = widget_context
         self._state = state_service
@@ -77,6 +78,7 @@ class WidgetStateRefresher:
             if interval_seconds is not None
             else self.DEFAULT_INTERVAL_SECONDS
         )
+        self._request_render = request_render
         self._task: asyncio.Task | None = None
         self._stopped: bool = False
 
@@ -132,6 +134,8 @@ class WidgetStateRefresher:
             # mutation in progress.
             current = getattr(self._ctx, "remote_state", {}) or {}
             self._ctx.remote_state = {**current, **flat}
+            if self._request_render is not None:
+                self._request_render()
         except Exception as e:
             logger.debug("widget state refresh: assign failed: %s", e)
 
