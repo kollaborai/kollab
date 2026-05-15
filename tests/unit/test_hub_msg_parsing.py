@@ -379,6 +379,19 @@ class TestHubWakeDecision:
         assert decision.mode == "wake"
         assert decision.should_trigger is True
 
+    def test_imperative_task_with_run_and_report_back_wakes(self):
+        plugin = self._plugin()
+        message = _hub_message(
+            "lapis — task: check the last 2 commits on main. "
+            "run `git log --oneline -2` and `git show --stat` for each. "
+            "report back to me with a summary of what changed in each commit."
+        )
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "wake"
+        assert decision.should_trigger is True
+
     def test_busy_actionable_messages_queue_one_retry(self):
         plugin = self._plugin()
         first = _hub_message("Can you review this?", msg_id="busy-1")
