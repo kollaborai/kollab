@@ -89,6 +89,25 @@ class LaunchStrategy(Enum):
     API = "api"
 
 
+def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
+    """Return the active agent's bundle tool scope, if one is defined."""
+    if agent is None:
+        return None
+
+    tools = getattr(agent, "tools", None)
+    if tools:
+        return list(tools)
+
+    config = getattr(agent, "config", None)
+    config_get = getattr(config, "get", None)
+    if callable(config_get):
+        tools = config_get("tools")
+        if tools:
+            return list(tools)
+
+    return None
+
+
 @dataclass
 class AgentRuntime:
     """The ONE object that represents everything about an AI agent.
@@ -147,6 +166,10 @@ class AgentRuntime:
     """Whether persistent memory (vault) is active.
     When False, no stream/working/crystallized files are written.
     Some throwaway agents (one-shot tasks) don't need memory."""
+
+    tools: List[str] = field(default_factory=list)
+    """Allowed registry tool names from agent.json.
+    Empty means no explicit bundle scope (legacy all-tools mode)."""
 
     # ── runtime ─────────────────────────────────────────────────
     # Process-level state. Changes every session.
@@ -328,6 +351,18 @@ class AgentRuntime:
             return cast(bool, self._agent_ref.overrides_global)
         return False
 
+    @property
+    def config(self) -> Dict[str, Any]:
+        """Compatibility view for callers that still read Agent.config."""
+        return {
+            "tools": self.tools,
+            "profile": self.profile,
+            "description": self.description,
+            "default_skills": self.default_skills,
+            "capabilities": self.capabilities,
+            "vault_enabled": self.vault_enabled,
+        }
+
     def list_skills(self) -> list:
         """Proxy to Agent.list_skills()."""
         if self._agent_ref and hasattr(self._agent_ref, "list_skills"):
@@ -386,6 +421,7 @@ class AgentRuntime:
             "active_skills": self.active_skills,
             "capabilities": self.capabilities,
             "vault_enabled": self.vault_enabled,
+            "tools": self.tools,
             # runtime
             "agent_id": self.agent_id,
             "pid": self.pid,
@@ -512,6 +548,7 @@ class AgentRuntime:
             active_skills=list(agent.active_skills),
             capabilities=list(agent.capabilities),
             vault_enabled=agent.vault_enabled,
+            tools=list(getattr(agent, "tools", [])),
             # hub -- agent.identity carries over
             identity=agent.identity,
             # bridge -- keep original Agent for skill/prompt proxying
@@ -551,6 +588,7 @@ class AgentRuntime:
             rt.default_skills = list(agent.default_skills)
             rt.active_skills = list(agent.active_skills)
             rt.vault_enabled = agent.vault_enabled
+            rt.tools = list(getattr(agent, "tools", []))
             # capabilities: prefer agent's if identity's is empty
             if not rt.capabilities and agent.capabilities:
                 rt.capabilities = list(agent.capabilities)

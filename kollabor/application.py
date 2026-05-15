@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
+from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai import KollaborConversationLogger, ProfileManager
 from kollabor_config import ConfigService
 from kollabor_events import EventBus
@@ -573,8 +574,9 @@ class TerminalLLMChat:
         # so scope is set on startup, resume, and agent changes
         def _sync_bundle_scope_to_executor(agent):
             te = self.llm_service.tool_executor
-            if agent and hasattr(agent, "tools") and agent.tools:
-                te.set_bundle_scope(agent.tools)
+            tools = get_agent_tool_scope(agent)
+            if tools:
+                te.set_bundle_scope(tools)
             else:
                 te.clear_bundle_scope()
 

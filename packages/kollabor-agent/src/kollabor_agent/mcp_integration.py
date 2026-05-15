@@ -27,6 +27,8 @@ from kollabor_config.config_utils import (
 )
 from kollabor_events.models import EventType
 
+from .runtime import get_agent_tool_scope
+
 if TYPE_CHECKING:
     from kollabor_events.bus import EventBus
 
@@ -314,6 +316,7 @@ class MCPIntegration:
         workspace: Optional[str | Path] = None,
         user_token: Optional[str] = None,
         session_id: str = "",
+        agent_manager: Any = None,
     ):
         """Initialize MCP integration.
 
@@ -322,6 +325,7 @@ class MCPIntegration:
             workspace: Base workspace for local config, discovery, and server cwd
             user_token: Session JWT to inject as MENTIKO_SESSION_TOKEN into MCP subprocess env
             session_id: Engine session ID to inject as MENTIKO_SESSION_ID into MCP subprocess env
+            agent_manager: Optional agent manager for bundle-scoped built-in tools
         """
         self.mcp_servers: Dict[str, Dict[str, Any]] = {}
         self.tool_registry: Dict[str, Dict[str, Any]] = {}
@@ -329,6 +333,7 @@ class MCPIntegration:
         self.event_bus = event_bus
         self.user_token = user_token
         self.session_id = session_id
+        self._agent_manager = agent_manager
         self.workspace = Path(workspace).expanduser().resolve() if workspace else Path.cwd().resolve()
 
         # MCP configuration directories (local project first, then global)
@@ -1128,10 +1133,9 @@ class MCPIntegration:
         agent_manager = getattr(self, '_agent_manager', None)
         if agent_manager:
             active_agent = agent_manager.get_active_agent()
-            if active_agent and hasattr(active_agent, 'config'):
-                tools = active_agent.config.get("tools")
-                if tools:
-                    return tools
+            tools = get_agent_tool_scope(active_agent)
+            if tools:
+                return tools
 
         # No bundle — all tools (legacy default)
         return None

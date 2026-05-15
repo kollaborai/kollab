@@ -15,7 +15,7 @@ either:
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 
 from kollabor_events.data_models import ConversationMessage
 
@@ -361,8 +361,10 @@ class SystemPromptBuilder:
             allowed_tools = None
             if self.agent_manager:
                 active_agent = self.agent_manager.get_active_agent()
-                if active_agent and hasattr(active_agent, 'config'):
-                    allowed_tools = active_agent.config.get("tools")
+                if active_agent:
+                    from kollabor_agent.runtime import get_agent_tool_scope
+
+                    allowed_tools = get_agent_tool_scope(active_agent)
 
             from kollabor_agent.tool_generators.markdown import render_for_bundle
             from kollabor_agent.tool_registry import get_registry

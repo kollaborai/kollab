@@ -21,6 +21,8 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from kollabor_agent.runtime import get_agent_tool_scope
+
 from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
 from .interface import StateService
@@ -933,7 +935,7 @@ class LocalStateService(StateService):
             tool_executor.clear_bundle_scope()
             return
 
-        tools = getattr(agent, "tools", [])
+        tools = get_agent_tool_scope(agent)
         if tools:
             tool_executor.set_bundle_scope(tools)
         else:

@@ -835,6 +835,7 @@ class Agent:
             "identity": self.identity,
             "capabilities": self.capabilities,
             "vault_enabled": self.vault_enabled,
+            "tools": self.tools,
         }
 
 

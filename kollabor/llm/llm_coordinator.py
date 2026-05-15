@@ -343,7 +343,10 @@ class LLMService:
         self.hook_system = LLMHookSystem(event_bus)
 
         # Initialize MCP integration and tool components
-        self.mcp_integration = MCPIntegration(event_bus=event_bus)
+        self.mcp_integration = MCPIntegration(
+            event_bus=event_bus,
+            agent_manager=self.agent_manager,
+        )
         self.response_parser = ResponseParser()
         self.tool_executor = ToolExecutor(
             mcp_integration=self.mcp_integration,

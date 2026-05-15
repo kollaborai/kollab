@@ -5526,15 +5526,24 @@ class HubPlugin(BasePlugin):
             my_subs = self._change_feed.get_subscriptions(self._identity.identity)
             if my_subs:
                 recent = self._change_feed.get_recent(20)
+                recent_entries = (
+                    recent.get("entries", []) if isinstance(recent, dict) else []
+                )
                 matching = []
-                for change in recent.get("entries", []):
+                for change in recent_entries:
+                    if not isinstance(change, dict):
+                        continue
                     for pattern in my_subs:
+                        if not hasattr(pattern, "match"):
+                            continue
                         if pattern.match(change.get("path", "")):
                             matching.append(change)
                             break
                 if matching:
                     change_lines = ["\n--- recent file changes (subscribed) ---"]
                     for c in matching[:10]:
+                        if not isinstance(c, dict):
+                            continue
                         change_lines.append(
                             f"  {c.get('identity', '?')} "
                             f"{c.get('action', '?')} "
