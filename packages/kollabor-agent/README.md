@@ -35,8 +35,7 @@ kollabor_agent/
 │   ├── scratchpad.py             (109 lines)  scratchpad get/append/clear
 │   ├── task.py                   (148 lines)  task_checkpoint/complete/approve/reject
 │   ├── context.py                (125 lines)  context_query, curate, evict
-│   ├── git.py                    (52 lines)   git operations
-│   └── wait.py                   (66 lines)   wait_for_user
+│   └── git.py                    (52 lines)   git operations
 ├── tool_generators/              (3 files)    Schema/doc generators
 │   ├── markdown.py               (154 lines)  ToolDefinition -> markdown docs
 │   ├── xml_regex.py              (71 lines)   ToolDefinition -> XML regex pattern

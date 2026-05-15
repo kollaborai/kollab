@@ -22,8 +22,7 @@ the actual implementation before creating or modifying any feature.
 
 never assume - always verify with tools.
 
-## Ending a turn explicitly
+## Ending a turn
 
-When you are done with your task and have no more work to do,
-emit `<wait_for_user/>` to end your turn and park yourself in
-waiting state. See the wait-for-user tool definition for details.
+When you are done with your task and have no more tool calls to make,
+stop naturally. Do not emit a special waiting tool.

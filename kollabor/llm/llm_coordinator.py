@@ -448,10 +448,6 @@ class LLMService:
         self.question_gate_enabled = config.get(
             "kollabor.llm.question_gate_enabled", True
         )
-        self.wait_for_user_enabled = config.get(
-            "plugins.hub.wait_for_user_enabled", True
-        )
-
         # Provider system integration (wrapper pattern - LEGACY mode for backward compatibility)
         self._provider_registry = ProviderRegistry
         self._tool_accumulator = ToolCallAccumulator(legacy_mode=True)
@@ -514,7 +510,6 @@ class LLMService:
             max_history=self.max_history,
             question_gate_enabled=self.question_gate_enabled,
             max_queue_size=self.task_config.queue.max_size,
-            wait_for_user_enabled=self.wait_for_user_enabled,
         )
 
         # Message handler (owns event/message handling methods)
@@ -1186,20 +1181,14 @@ class LLMService:
             "kollabor.llm.enable_streaming", False
         )
 
-        # Question gate + wait-for-user: cached at init; file save + in-memory
-        # config update these keys, but QueueProcessor uses cached copies until
-        # reload_config runs (triggered by ConfigAltView after Ctrl+S save).
+        # Question gate: cached at init; file save + in-memory config update
+        # this key, but QueueProcessor uses cached copies until reload_config
+        # runs (triggered by ConfigAltView after Ctrl+S save).
         self.question_gate_enabled = self.config.get(
             "kollabor.llm.question_gate_enabled", True
         )
-        self.wait_for_user_enabled = self.config.get(
-            "plugins.hub.wait_for_user_enabled", True
-        )
         if getattr(self, "_queue_processor", None) is not None:
             self._queue_processor.question_gate_enabled = self.question_gate_enabled
-            self._queue_processor.wait_for_user_enabled = (
-                self.wait_for_user_enabled
-            )
 
         # Note: processing_delay and thinking_delay are already read dynamically each call
 
@@ -1208,8 +1197,7 @@ class LLMService:
             f"terminal_timeout={self.tool_executor.terminal_timeout}, "
             f"mcp_timeout={self.tool_executor.mcp_timeout}, "
             f"streaming={self.api_service.enable_streaming}, "
-            f"question_gate={self.question_gate_enabled}, "
-            f"wait_for_user={self.wait_for_user_enabled}"
+            f"question_gate={self.question_gate_enabled}"
         )
 
     # --- StatusService delegation methods ---

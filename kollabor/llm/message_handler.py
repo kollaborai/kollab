@@ -141,8 +141,8 @@ class MessageHandler:
         except Exception as e:
             logger.debug(f"Could not forward cancel to daemon: {e}")
 
-        # If the agent is parked (wait_for_user), clear the waiting state
-        # so the next user message gets processed instead of being ignored.
+        # If the agent is externally parked, clear the waiting state so the
+        # next user message gets processed instead of being ignored.
         if not self._coordinator.is_processing:
             try:
                 hub = (

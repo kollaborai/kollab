@@ -28,7 +28,7 @@ class FakeConfig:
 class CapturingToolExecutor:
     def __init__(self):
         self.calls = []
-        self.plugin_handlers = {}
+        self.plugin_handlers = {"state_update": object()}
 
     async def execute_tool(self, tool_data):
         self.calls.append(tool_data)
@@ -36,13 +36,13 @@ class CapturingToolExecutor:
 
 
 @pytest.mark.asyncio
-async def test_registry_builtin_native_tool_does_not_fall_back_to_mcp():
+async def test_plugin_native_tool_does_not_fall_back_to_mcp():
     api_service = FakeApiService(
         [
             SimpleNamespace(
-                id="call_wait",
-                name="wait_for_user",
-                input={"reason": "done"},
+                id="call_state",
+                name="state_update",
+                input={"state": "done"},
             )
         ]
     )
@@ -58,10 +58,10 @@ async def test_registry_builtin_native_tool_does_not_fall_back_to_mcp():
 
     assert executor.calls
     tool_call = executor.calls[0]
-    assert tool_call["type"] == "wait_for_user"
-    assert tool_call["name"] == "wait_for_user"
-    assert tool_call["reason"] == "done"
-    assert tool_call["arguments"] == {"reason": "done"}
+    assert tool_call["type"] == "state_update"
+    assert tool_call["name"] == "state_update"
+    assert tool_call["state"] == "done"
+    assert tool_call["arguments"] == {"state": "done"}
 
 
 @pytest.mark.asyncio

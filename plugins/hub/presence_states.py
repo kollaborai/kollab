@@ -15,9 +15,9 @@ class PresenceState(str, Enum):
     """Agent is working and can be re-invoked by any mechanism."""
 
     WAITING = "waiting"
-    """Agent emitted <wait_for_user/>. Only coordinator or
-    force="true" messages can wake it during cooldown. After
-    cooldown expires, any peer message can wake it."""
+    """Agent is externally parked. Only coordinator or force="true" messages
+    can wake it during cooldown. After cooldown expires, any peer message can
+    wake it."""
 
     IDLE = "idle"
     """Agent hasn't been re-invoked recently but is NOT explicitly

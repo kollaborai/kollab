@@ -29,7 +29,6 @@
     "scratchpad-clear",
     "task-checkpoint",
     "task-complete",
-    "wait-for-user",
     "curate",
     "context-query",
     "evict"

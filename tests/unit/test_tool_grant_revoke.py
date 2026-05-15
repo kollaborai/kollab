@@ -5,7 +5,6 @@ via FakeCoordinator which contains the production logic, including
 registry lookup, markdown rendering, and scope updates.
 """
 
-import pytest
 import asyncio
 from dataclasses import dataclass
 from typing import List
@@ -28,32 +27,69 @@ def _ensure_registry():
     ToolRegistry._instance = None
     new_registry = ToolRegistry()
     ToolRegistry._instance = new_registry
+    from kollabor_agent.tool_definitions.context import context_query, curate, evict
     from kollabor_agent.tool_definitions.file_ops import (
-        file_read, file_edit, file_create, file_create_overwrite,
-        file_delete, file_move, file_copy, file_copy_overwrite,
-        file_append, file_insert_after, file_insert_before,
-        directory_create, directory_remove, file_grep,
+        directory_create,
+        directory_remove,
+        file_append,
+        file_copy,
+        file_copy_overwrite,
+        file_create,
+        file_create_overwrite,
+        file_delete,
+        file_edit,
+        file_grep,
+        file_insert_after,
+        file_insert_before,
+        file_move,
+        file_read,
     )
-    from kollabor_agent.tool_definitions.terminal import terminal_tool
     from kollabor_agent.tool_definitions.git import git_tool
     from kollabor_agent.tool_definitions.hub import (
-        hub_msg, hub_broadcast, hub_stop, hub_status, hub_spawn,
-        hub_agents, hub_capture, hub_queue, hub_claim, hub_work,
-        claims, hub_vault, hub_vaults, vault_write,
-        crystal_search, crystal_read, crystal_list, crystal_edit, crystal_delete,
-        hub_cron_add, hub_cron_list, hub_cron_delete,
-        lane_claim, lane_release,
-        file_changed, file_watch, file_unwatch, feed_recent, feed_file,
+        claims,
+        crystal_delete,
+        crystal_edit,
+        crystal_list,
+        crystal_read,
+        crystal_search,
+        feed_file,
+        feed_recent,
+        file_changed,
+        file_unwatch,
+        file_watch,
+        hub_agents,
+        hub_broadcast,
+        hub_capture,
+        hub_claim,
+        hub_cron_add,
+        hub_cron_delete,
+        hub_cron_list,
+        hub_msg,
+        hub_queue,
+        hub_spawn,
+        hub_status,
+        hub_stop,
+        hub_vault,
+        hub_vaults,
+        hub_work,
+        lane_claim,
+        lane_release,
         state_update,
+        vault_write,
     )
     from kollabor_agent.tool_definitions.scratchpad import (
-        scratchpad, scratchpad_append, scratchpad_clear, scratchpad_get,
+        scratchpad,
+        scratchpad_append,
+        scratchpad_clear,
+        scratchpad_get,
     )
-    from kollabor_agent.tool_definitions.wait import wait_for_user
-    from kollabor_agent.tool_definitions.context import curate, context_query, evict
     from kollabor_agent.tool_definitions.task import (
-        task_checkpoint, task_complete, task_approve, task_reject,
+        task_approve,
+        task_checkpoint,
+        task_complete,
+        task_reject,
     )
+    from kollabor_agent.tool_definitions.terminal import terminal_tool
     for t in [
         file_read, file_edit, file_create, file_create_overwrite,
         file_delete, file_move, file_copy, file_copy_overwrite,
@@ -69,7 +105,7 @@ def _ensure_registry():
         file_changed, file_watch, file_unwatch, feed_recent, feed_file,
         state_update,
         scratchpad, scratchpad_append, scratchpad_clear, scratchpad_get,
-        wait_for_user, curate, context_query, evict,
+        curate, context_query, evict,
         task_checkpoint, task_complete, task_approve, task_reject,
     ]:
         new_registry.register(t)
@@ -93,8 +129,9 @@ class FakeCoordinator:
 
     async def inject_tool_grant(self, tool_name: str, reason: str = "") -> None:
         import logging
-        from kollabor_agent.tool_registry import get_registry
+
         from kollabor_agent.tool_generators.markdown import render_tool_markdown
+        from kollabor_agent.tool_registry import get_registry
 
         tool = get_registry().get(tool_name)
         if tool is None:
@@ -216,9 +253,9 @@ class TestToolGrantReal:
     def test_grant_includes_xml_tag_in_notification(self):
         _ensure_registry()
         coord = FakeCoordinator()
-        _run(coord.inject_tool_grant("wait-for-user"))
+        _run(coord.inject_tool_grant("terminal"))
         msg = coord.conversation_history[0]
-        assert "<wait_for_user>" in msg.content
+        assert "<terminal>" in msg.content
 
 
 # ============================================================

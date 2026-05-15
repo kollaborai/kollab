@@ -3,19 +3,11 @@
 
 Covers:
 1. spinner IndexError when frame set changes size (46670c1)
-2. wait_for_user loop — turn_completed when sole tool (87649b9)
-3. hub_status shows project/CWD per agent (5c33388)
+2. hub_status shows project/CWD per agent (5c33388)
 """
 
-import asyncio
 import unittest
-from dataclasses import dataclass, field
-from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from kollabor_agent.queue_processor import QueueProcessor
-from kollabor_agent.tool_executor import ToolExecutionResult
-
+from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
 # Fix 1: Spinner IndexError (46670c1)
@@ -118,104 +110,7 @@ class TestSpinnerIndexError(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Fix 2: wait_for_user loop (87649b9)
-# ---------------------------------------------------------------------------
-# When wait_for_user is the sole tool executed, turn_completed should be
-# True so the queue loop doesn't re-enter. Before the fix, only real tools
-# set turn_completed = False, leaving it unset (True from init) — but the
-# issue was the loop kept cycling because turn_completed was never
-# explicitly set True for the wait_for_user-only case.
-
-
-class TestWaitForUserLoopFix(unittest.TestCase):
-    """Test that sole wait_for_user sets turn_completed = True."""
-
-    def setUp(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-
-    def tearDown(self):
-        self.loop.close()
-
-    def _make_processor(self):
-        """Minimal QueueProcessor for testing step-10 logic."""
-        processor = MagicMock(spec=QueueProcessor)
-        processor.turn_completed = False
-
-        # Bind the real method we're testing — but step 10 is inline in
-        # process_message, not a separate method. So we test the logic
-        # directly by simulating the code path.
-
-        # Actually, let's just test the ToolExecutionResult filtering
-        # logic that the fix relies on.
-        return processor
-
-    def test_real_tools_set_turn_not_completed(self):
-        """When real tools execute, turn_completed should be False."""
-        results = [
-            ToolExecutionResult(
-                tool_id="t1", tool_type="read", success=True, output="file content"
-            ),
-            ToolExecutionResult(
-                tool_id="t2", tool_type="write", success=True, output="done"
-            ),
-        ]
-        real = [r for r in results if r.tool_type != "wait_for_user"]
-        self.assertEqual(len(real), 2)
-        # Per the code: if real_results: turn_completed = False
-
-    def test_only_wait_for_user_sets_turn_completed(self):
-        """When only wait_for_user executes, turn_completed should be True."""
-        results = [
-            ToolExecutionResult(
-                tool_id="t1", tool_type="wait_for_user", success=True, output="standing by"
-            ),
-        ]
-        real = [r for r in results if r.tool_type != "wait_for_user"]
-        self.assertEqual(len(real), 0)
-        self.assertEqual(len(results), 1)
-        # Per the code: elif all_results and not real_results: turn_completed = True
-
-    def test_mixed_tools_and_wait_for_user(self):
-        """Real tools + wait_for_user — real tools take precedence."""
-        results = [
-            ToolExecutionResult(
-                tool_id="t1", tool_type="read", success=True, output="data"
-            ),
-            ToolExecutionResult(
-                tool_id="t2", tool_type="wait_for_user", success=True, output="waiting"
-            ),
-        ]
-        real = [r for r in results if r.tool_type != "wait_for_user"]
-        self.assertEqual(len(real), 1)
-        # Per the code: if real_results: turn_completed = False
-
-    def test_no_results_at_all(self):
-        """No tool results at all — neither branch fires."""
-        results = []
-        real = [r for r in results if r.tool_type != "wait_for_user"]
-        self.assertEqual(len(real), 0)
-        self.assertEqual(len(results), 0)
-        # Neither branch matches — turn_completed stays whatever it was before
-
-    def test_multiple_wait_for_user_only(self):
-        """Multiple wait_for_user results and nothing else."""
-        results = [
-            ToolExecutionResult(
-                tool_id="t1", tool_type="wait_for_user", success=True, output="a"
-            ),
-            ToolExecutionResult(
-                tool_id="t2", tool_type="wait_for_user", success=True, output="b"
-            ),
-        ]
-        real = [r for r in results if r.tool_type != "wait_for_user"]
-        self.assertEqual(len(real), 0)
-        self.assertEqual(len(results), 2)
-        # Per the code: elif all_results and not real_results: turn_completed = True
-
-
-# ---------------------------------------------------------------------------
-# Fix 3: hub_status project/CWD display (5c33388)
+# Fix 2: hub_status project/CWD display (5c33388)
 # ---------------------------------------------------------------------------
 # The hub_status output now includes [project] for each agent.
 

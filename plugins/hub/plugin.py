@@ -303,8 +303,6 @@ class HubPlugin(BasePlugin):
                     "allowed_runtimes": ["kollab"],
                     "require_auth": False,
                     "authority": "kollabor.ai",
-                    "wait_cooldown_seconds": 60,
-                    "wait_for_user_enabled": True,
                     "project_scoped": True,
                 }
             }
@@ -504,26 +502,6 @@ class HubPlugin(BasePlugin):
                     "config_path": "plugins.hub.route_untagged_to_coordinator",
                     "help": "Auto-send untagged LLM responses to coordinator",
                 },
-                # --- Loop Prevention ---
-                {
-                    "type": "checkbox",
-                    "label": "Wait-for-user (<wait_for_user/>)",
-                    "config_path": "plugins.hub.wait_for_user_enabled",
-                    "help": (
-                        "When on, <wait_for_user/> parks the turn and sets hub waiting "
-                        "state + peer cooldown. When off, the tag is ignored for parking "
-                        "(restart required)."
-                    ),
-                },
-                {
-                    "type": "slider",
-                    "label": "Wait Cooldown (seconds)",
-                    "config_path": "plugins.hub.wait_cooldown_seconds",
-                    "min_value": 10,
-                    "max_value": 600,
-                    "step": 10,
-                    "help": "How long after <wait_for_user/> that peer messages are rejected",
-                },
                 {
                     "type": "slider",
                     "label": "Loop Detection Threshold (turns)",
@@ -549,9 +527,6 @@ class HubPlugin(BasePlugin):
                 return
             self._nudge_engine._loop_threshold = self.config.get(
                 "plugins.hub.loop_detection_threshold", 3
-            )
-            self._nudge_engine.wait_for_user_enabled = bool(
-                self.config.get("plugins.hub.wait_for_user_enabled", True)
             )
         except Exception:
             pass
@@ -582,9 +557,6 @@ class HubPlugin(BasePlugin):
             if self._nudge_engine and self.config:
                 threshold = self.config.get("plugins.hub.loop_detection_threshold", 3)
                 self._nudge_engine._loop_threshold = threshold
-                self._nudge_engine.wait_for_user_enabled = bool(
-                    self.config.get("plugins.hub.wait_for_user_enabled", True)
-                )
             os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1" if scoped else "0"
         except Exception:
             pass
@@ -1519,31 +1491,6 @@ class HubPlugin(BasePlugin):
             "evict", self._handle_evict_tool
         )
 
-        # --- wait_for_user ---
-        # Matches:
-        #   <wait_for_user/>
-        #   <wait_for_user>reason</wait_for_user>
-        #   <wait_for_user message="reason" />
-        def _extract_wait_for_user(m):
-            # Group 1: message attribute (from <wait_for_user message="..."/>)
-            # Group 2: body text (from <wait_for_user>text</wait_for_user>)
-            attr_msg = m.group(1)
-            body_msg = m.group(2)
-            reason = attr_msg or body_msg or ""
-            return {"reason": reason.strip()}
-
-        wait_pat = _re.compile(
-            r'<wait_for_user(?:\s+message="([^"]*)")?\s*/>'
-            r"|<wait_for_user>(.*?)</wait_for_user>",
-            _re.DOTALL | _re.IGNORECASE,
-        )
-        response_parser.register_plugin_tag(
-            "wait_for_user", wait_pat, "wait_for_user", _extract_wait_for_user
-        )
-        tool_executor.register_plugin_handler(
-            "wait_for_user", self._handle_wait_for_user_tool
-        )
-
         # --- hub_ask_ctx ---
         # <hub_ask_ctx peer="lapis" />
         # <hub_ask_ctx peer="lapis" filter="file:kollabor/" />
@@ -1568,11 +1515,11 @@ class HubPlugin(BasePlugin):
         )
 
         logger.info(
-            "Registered 44 hub pipeline tags "
+            "Registered 43 hub pipeline tags "
             "(hub_msg, hub_broadcast, hub_stop, hub_status, "
             "scratchpad*, state_update, task_*, change feed, "
             "agent ops, vault_write, global_vault_write, crystal_*, "
-            "curate, context_query, evict, wait_for_user, hub_ask_ctx)"
+            "curate, context_query, evict, hub_ask_ctx)"
         )
 
     async def _handle_curate_tool(self, tool_data: dict[str, Any]):
@@ -1791,45 +1738,6 @@ class HubPlugin(BasePlugin):
         context_svc.set_hub_bridge(bridge)
         logger.info("Context hub bridge wired")
 
-    def _wait_for_user_feature_enabled(self) -> bool:
-        """Whether <wait_for_user/> affects hub state and queue parking (config)."""
-        if not self.config:
-            return True
-        return bool(self.config.get("plugins.hub.wait_for_user_enabled", True))
-
-    async def _handle_wait_for_user_tool(self, tool_data: dict[str, Any]):
-        """Handle <wait_for_user/> tag — put agent into waiting state."""
-        from kollabor_agent.tool_executor import ToolExecutionResult
-
-        reason = tool_data.get("reason", "") or tool_data.get("message", "")
-        if not self._wait_for_user_feature_enabled():
-            logger.debug(
-                "wait_for_user tag ignored (plugins.hub.wait_for_user_enabled=false)"
-            )
-            out = "[wait_for_user] ignored — feature disabled in Hub config"
-            if reason:
-                out += f" ({reason})"
-            return ToolExecutionResult(
-                tool_id=tool_data.get("id", "unknown"),
-                tool_type="wait_for_user",
-                success=True,
-                output=out,
-            )
-
-        await self._enter_waiting_state(reason or None)
-
-        output = "[wait_for_user] parked"
-        if reason:
-            output += f" — {reason}"
-        output += ". cooldown: 60s."
-
-        return ToolExecutionResult(
-            tool_id=tool_data.get("id", "unknown"),
-            tool_type="wait_for_user",
-            success=True,
-            output=output,
-        )
-
     async def _enter_waiting_state(self, reason: Optional[str] = None) -> None:
         """Put this agent into waiting state.
 
@@ -1841,10 +1749,6 @@ class HubPlugin(BasePlugin):
             reason: Optional explanation string from the agent.
         """
         if not self._identity:
-            return
-
-        if not self._wait_for_user_feature_enabled():
-            logger.debug("_enter_waiting_state skipped — wait_for_user disabled in config")
             return
 
         from .presence_states import PresenceState
@@ -5148,8 +5052,7 @@ class HubPlugin(BasePlugin):
                     "This message is addressed to you. Treat it as the current "
                     "user request. If it asks you to work, investigate, report, "
                     "or continue, start now and use tools as needed. Do not "
-                    "return <wait_for_user/> unless the message explicitly "
-                    "tells you to stand by."
+                    "let the turn end naturally when no more tool calls are needed."
                 )
 
             try:
@@ -5587,9 +5490,7 @@ class HubPlugin(BasePlugin):
     async def _set_working(self, context, event=None):
         """Mark agent as working when LLM request starts.
 
-        Preserves WAITING state if the agent emitted <wait_for_user/>
-        during this turn — the continuation LLM call must not overwrite
-        the waiting state.
+        Preserves WAITING state for external attach/control-plane state.
         """
         from .presence_states import PresenceState
 
@@ -5622,9 +5523,7 @@ class HubPlugin(BasePlugin):
     async def _set_idle(self, context, event_context=None):
         """Mark agent as idle when LLM response completes.
 
-        Preserves WAITING state if the agent emitted <wait_for_user/>
-        during this response — the waiting state must survive until
-        cooldown expires or the agent is woken.
+        Preserves WAITING state for external attach/control-plane state.
         """
         from .presence_states import PresenceState
 
@@ -5639,9 +5538,7 @@ class HubPlugin(BasePlugin):
         if not self._started or not self._identity or not self._presence:
             return data
 
-        # User typing IS the event wait_for_user was waiting for.
-        # Clear waiting state before anything else so the LLM_RESPONSE
-        # handler won't suppress tool continuation on this turn.
+        # User typing wakes externally parked agents before broadcasting.
         if self._identity.state == "waiting":
             await self._exit_waiting_state()
 
@@ -5812,6 +5709,12 @@ class HubPlugin(BasePlugin):
         # Start from clean_response for display (already stripped of tags by parser)
         # Fall back to response_text only if clean_response isn't available
         cleaned = data.get("clean_response", response)
+        wait_tag_pat = re.compile(
+            r'<wait_for_user(?:\s+message="[^"]*")?\s*/>'
+            r"|<wait_for_user>.*?</wait_for_user>",
+            re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = wait_tag_pat.sub("", cleaned).strip()
         # All hub XML tags are now handled by the pipeline.
         # See _register_pipeline_tools for the full list of 33 tags.
 
@@ -5927,16 +5830,10 @@ class HubPlugin(BasePlugin):
             if not has_native_tools:
                 data["suppress_display"] = True
 
-        # If agent entered waiting state this turn, suppress force_continue.
-        # The wait_for_user handler already set the state; we just need to
-        # make sure the pipeline doesn't auto-continue us.
-        if (
-            self._identity
-            and self._identity.state == "waiting"
-        ):
+        if wait_tag_pat.search(response):
             data["force_continue"] = False
             data["turn_complete"] = True
-            logger.info("force_continue suppressed + turn_complete set (waiting state active)")
+            logger.info("ignored removed wait_for_user tag and ended turn")
 
         # Bridge relay: forward ALL LLM responses to the bridge.
         # Hub messages from this agent are already forwarded at send time,

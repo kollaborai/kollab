@@ -56,8 +56,6 @@ class NudgeEngine:
         self._trackers: Dict[str, AgentTracker] = {}
         self._cooldown = cooldown
         self._loop_threshold = loop_threshold
-        # Hub plugin sets from plugins.hub.wait_for_user_enabled after load
-        self.wait_for_user_enabled: bool = True
 
     def _get_tracker(self, identity: str) -> AgentTracker:
         if not identity:
@@ -181,21 +179,11 @@ class NudgeEngine:
         if tracker.turns_hub_only >= self._loop_threshold:
             if self._can_nudge(tracker, "loop_detected"):
                 self._record_nudge(tracker, "loop_detected")
-                if self.wait_for_user_enabled:
-                    wait_hint = (
-                        "if your task is finished, end your next turn with:\n"
-                        "  <wait_for_user/>\n\n"
-                        "this will put you in waiting state. peer agents "
-                        "that try to message you will get an error telling "
-                        "them you are in cooldown. the coordinator can "
-                        "still break through. cooldown is 60s.\n\n"
-                    )
-                else:
-                    wait_hint = (
-                        "if your task is finished, stop exchanging hub-only prose "
-                        "and either run a real tool next turn or let your turn end "
-                        "without hub chatter.\n\n"
-                    )
+                wait_hint = (
+                    "if your task is finished, stop exchanging hub-only prose "
+                    "and either run a real tool next turn or let your turn end "
+                    "without hub chatter.\n\n"
+                )
                 return (
                     "[system: hub loop detected]\n"
                     "you have spent " + str(tracker.turns_hub_only) + " turns "
@@ -252,8 +240,7 @@ class NudgeEngine:
     def reset_loop_counter(self, identity: str) -> None:
         """Reset the loop counter for an agent.
 
-        Called by the hub plugin when an agent emits <wait_for_user/>
-        or wakes from waiting state.
+        Called by the hub plugin when an agent wakes from waiting state.
         """
         tracker = self._get_tracker(identity)
         tracker.turns_hub_only = 0

@@ -53,7 +53,6 @@ class ToolRegistry:
             scratchpad,
             task,
             terminal,
-            wait,
         )
 
         # Always explicitly register — handles post-reset reinit
@@ -64,7 +63,6 @@ class ToolRegistry:
         context.register_all()
         scratchpad.register_all()
         task.register_all()
-        wait.register_all()
 
     def register(self, tool_def: ToolDefinition, replace: bool = False) -> None:
         """Register a tool definition.

@@ -14,8 +14,7 @@
     "scratchpad-append",
     "scratchpad-get",
     "task-checkpoint",
-    "task-complete",
-    "wait-for-user"
+    "task-complete"
   ],
   "skills": [
     "data-visualization",

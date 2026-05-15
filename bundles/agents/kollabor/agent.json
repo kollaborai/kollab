@@ -55,7 +55,6 @@
     "task-complete",
     "task-approve",
     "task-reject",
-    "wait-for-user",
     "curate",
     "context-query",
     "evict"

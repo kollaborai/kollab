@@ -244,8 +244,7 @@ class AgentRuntime:
 
     waiting_since: Optional[float] = None
     """Unix timestamp when the agent entered waiting state.
-    None if not waiting. Set by hub plugin when <wait_for_user/>
-    is emitted."""
+    None if not waiting."""
 
     cooldown_until: Optional[float] = None
     """Unix timestamp when the cooldown expires.
@@ -253,9 +252,8 @@ class AgentRuntime:
     rejected. None if no cooldown active."""
 
     waiting_reason: Optional[str] = None
-    """Optional reason string from <wait_for_user>reason</wait_for_user>.
-    Shown in /hub status and propagated to peers that try to
-    message during cooldown."""
+    """Optional reason shown in /hub status and propagated to peers
+    that try to message during cooldown."""
 
     # ── lineage ─────────────────────────────────────────────────
     # Where this agent came from. Who spawned it.

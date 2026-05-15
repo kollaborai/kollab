@@ -6,7 +6,6 @@ Tools for reporting progress on tasks within a session.
 from ..tool_definition import ToolDefinition, ToolParameter
 from ..tool_registry import get_registry
 
-
 # --- task-checkpoint ---
 task_checkpoint = ToolDefinition(
     name="task-checkpoint",
@@ -68,7 +67,7 @@ task_complete = ToolDefinition(
     result_format="Task marked as complete.",
     key_rules=[
         "task tags are for reporting, not for creating new tasks",
-        "combine with <wait_for_user> in the same turn when finishing a task",
+        "after task_complete, stop naturally when no more tool calls are needed",
     ],
 )
 

@@ -339,12 +339,6 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
-        if self.config and not self.config.get(
-            "plugins.hub.wait_for_user_enabled", True
-        ):
-            logger.debug("_enter_waiting_state skipped — wait_for_user disabled in config")
-            return
-
         import time
 
         from .presence_states import PresenceState

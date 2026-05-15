@@ -483,8 +483,8 @@ class TestQueueProcessor(unittest.TestCase):
 
 
 class TestQueueProcessorToolContinuation(unittest.TestCase):
-    def test_state_update_with_wait_for_user_does_not_force_followup(self):
-        """A successful state save can park in the same turn as wait_for_user."""
+    def test_state_update_requires_followup(self):
+        """Every executed tool result is fed back before the turn can end."""
         results = [
             ToolExecutionResult(
                 tool_id="state_update_1",
@@ -492,18 +492,12 @@ class TestQueueProcessorToolContinuation(unittest.TestCase):
                 success=True,
                 output="saved: ['state']",
             ),
-            ToolExecutionResult(
-                tool_id="wait_for_user_1",
-                tool_type="wait_for_user",
-                success=True,
-                output="[wait_for_user] parked",
-            ),
         ]
 
-        self.assertEqual(_tool_results_requiring_followup(results), [])
+        self.assertEqual(_tool_results_requiring_followup(results), results)
 
-    def test_hub_message_with_wait_for_user_does_not_force_followup(self):
-        """Hub sends are bookkeeping when the model explicitly parks."""
+    def test_hub_message_requires_followup(self):
+        """Hub sends are tool results and should be visible to the model."""
         results = [
             ToolExecutionResult(
                 tool_id="hub_msg_1",
@@ -511,17 +505,11 @@ class TestQueueProcessorToolContinuation(unittest.TestCase):
                 success=True,
                 output="delivered to koordinator",
             ),
-            ToolExecutionResult(
-                tool_id="wait_for_user_1",
-                tool_type="wait_for_user",
-                success=True,
-                output="[wait_for_user] parked",
-            ),
         ]
 
-        self.assertEqual(_tool_results_requiring_followup(results), [])
+        self.assertEqual(_tool_results_requiring_followup(results), results)
 
-    def test_failed_state_update_with_wait_for_user_still_forces_followup(self):
+    def test_failed_state_update_requires_followup(self):
         """State-save failures should still be shown to the model."""
         failed_state = ToolExecutionResult(
             tool_id="state_update_1",
@@ -529,78 +517,25 @@ class TestQueueProcessorToolContinuation(unittest.TestCase):
             success=False,
             error="vault not initialized",
         )
-        results = [
-            failed_state,
-            ToolExecutionResult(
-                tool_id="wait_for_user_1",
-                tool_type="wait_for_user",
-                success=True,
-                output="[wait_for_user] parked",
-            ),
-        ]
+        results = [failed_state]
 
         self.assertEqual(_tool_results_requiring_followup(results), [failed_state])
 
-    def test_real_tool_with_wait_for_user_still_forces_followup(self):
-        """Task-producing tool results still require a follow-up turn."""
+    def test_real_tool_requires_followup(self):
+        """Task-producing tool results require a follow-up turn."""
         read_result = ToolExecutionResult(
             tool_id="file_read_1",
             tool_type="file_read",
             success=True,
             output="file contents",
         )
-        results = [
-            read_result,
-            ToolExecutionResult(
-                tool_id="wait_for_user_1",
-                tool_type="wait_for_user",
-                success=True,
-                output="[wait_for_user] parked",
-            ),
-        ]
+        results = [read_result]
 
         self.assertEqual(_tool_results_requiring_followup(results), [read_result])
 
-    def test_wait_for_user_disabled_state_update_requires_followup(self):
-        """When parking is off, state_update is not swallowed by wait pairing."""
-        results = [
-            ToolExecutionResult(
-                tool_id="state_update_1",
-                tool_type="state_update",
-                success=True,
-                output="saved",
-            ),
-            ToolExecutionResult(
-                tool_id="wait_for_user_1",
-                tool_type="wait_for_user",
-                success=True,
-                output="ignored",
-            ),
-        ]
-        self.assertEqual(
-            _tool_results_requiring_followup(results, wait_for_user_enabled=False),
-            [results[0]],
-        )
-
-    def test_wait_for_user_disabled_hub_msg_requires_followup(self):
-        results = [
-            ToolExecutionResult(
-                tool_id="hub_msg_1",
-                tool_type="hub_msg",
-                success=True,
-                output="sent",
-            ),
-            ToolExecutionResult(
-                tool_id="wait_for_user_1",
-                tool_type="wait_for_user",
-                success=True,
-                output="ignored",
-            ),
-        ]
-        self.assertEqual(
-            _tool_results_requiring_followup(results, wait_for_user_enabled=False),
-            [results[0]],
-        )
+    def test_no_tool_results_needs_no_followup(self):
+        """Natural stop condition: no tool calls means no continuation."""
+        self.assertEqual(_tool_results_requiring_followup([]), [])
 
 
 if __name__ == "__main__":

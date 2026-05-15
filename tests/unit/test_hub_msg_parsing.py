@@ -4,12 +4,9 @@ import re
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from plugins.hub.nudge_engine import (
-    AgentTracker,
     HUB_LOOP_THRESHOLD,
     NudgeEngine,
 )
@@ -233,7 +230,7 @@ class TestNudgeEngine:
         nudge = engine.evaluate(identity)
         assert nudge is not None
         assert "hub messages" in nudge
-        assert "<wait_for_user/>" in nudge
+        assert "let your turn end" in nudge
 
     def test_no_nudge_below_threshold(self):
         engine = self._make_engine()

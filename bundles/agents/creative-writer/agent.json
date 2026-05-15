@@ -12,8 +12,7 @@
     "hub-status",
     "scratchpad",
     "scratchpad-append",
-    "scratchpad-get",
-    "wait-for-user"
+    "scratchpad-get"
   ],
   "skills": [
     "character-development",

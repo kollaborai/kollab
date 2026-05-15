@@ -1,9 +1,8 @@
 """Tests for bundle scope enforcement in tool execution."""
 
-import pytest
 import asyncio
 
-from kollabor_agent.tool_executor import ToolExecutor, ToolExecutionResult
+from kollabor_agent.tool_executor import ToolExecutor
 
 
 def _run_async(coro):
@@ -172,16 +171,12 @@ class TestBundleScopeIntegration:
         """Research bundle: read-only tools only."""
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         research_tools = [
             "terminal", "file-read", "file-grep",
             "hub-msg", "hub-status", "hub-agents",
             "scratchpad", "scratchpad-append", "scratchpad-get", "scratchpad-clear",
             "task-checkpoint", "task-complete",
-            "wait-for-user",
             "curate", "context-query", "evict",
         ]
 
@@ -205,13 +200,9 @@ class TestBundleScopeIntegration:
     def test_kollabor_bundle_has_full_access(self):
         """Kollab/koordinator bundles have all tools."""
         import json
-        import os
 
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         with open("bundles/agents/kollabor/agent.json") as f:
             data = json.load(f)
@@ -277,9 +268,6 @@ class TestNativeNameReverseLookup:
         """file_mkdir (native) should map to 'directory' (registry name)."""
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         executor = ToolExecutor(
             mcp_integration=None,
@@ -296,9 +284,6 @@ class TestNativeNameReverseLookup:
         """file_rmdir (native) should map to 'directory-remove' (registry name)."""
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         executor = ToolExecutor(
             mcp_integration=None,
@@ -314,9 +299,6 @@ class TestNativeNameReverseLookup:
         """file_mkdir blocked when 'directory' not in bundle tools."""
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         executor = ToolExecutor(
             mcp_integration=None,
@@ -338,9 +320,6 @@ class TestXmlTagReverseLookup:
         """hub_msg (xml_tag) maps to hub-msg (registry name)."""
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         executor = ToolExecutor(
             mcp_integration=None,
@@ -356,9 +335,6 @@ class TestXmlTagReverseLookup:
         """scratchpad_append (xml_tag) maps to scratchpad-append (registry)."""
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         executor = ToolExecutor(
             mcp_integration=None,
@@ -370,13 +346,10 @@ class TestXmlTagReverseLookup:
 
         assert executor._check_bundle_scope("scratchpad_append") is None
 
-    def test_wait_for_user_maps_correctly(self):
-        """wait_for_user (xml_tag) maps to wait-for-user (registry)."""
+    def test_removed_wait_for_user_is_not_in_bundle_scope(self):
+        """wait_for_user is no longer a registered runtime tool."""
         from kollabor_agent.tool_registry import ToolRegistry
         ToolRegistry._instance = None
-        from kollabor_agent.tool_definitions import (
-            file_ops, terminal, git, hub, scratchpad, wait, context, task
-        )
 
         executor = ToolExecutor(
             mcp_integration=None,
@@ -384,6 +357,9 @@ class TestXmlTagReverseLookup:
             terminal_timeout=30,
             mcp_timeout=30,
         )
-        executor.set_bundle_scope(["wait-for-user"])
+        executor.set_bundle_scope(["terminal"])
+        registry = ToolRegistry.get_global()
 
-        assert executor._check_bundle_scope("wait_for_user") is None
+        assert registry.get("wait-for-user") is None
+        assert registry.get_by_xml_tag("wait_for_user") is None
+        assert executor._check_bundle_scope("wait_for_user") is not None

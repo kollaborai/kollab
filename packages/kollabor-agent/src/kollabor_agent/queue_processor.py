@@ -26,35 +26,11 @@ def _should_ingest(result: ToolExecutionResult) -> bool:
     return bool(output) and len(output.encode("utf-8", errors="replace")) >= 8192
 
 
-_PARK_COMPATIBLE_BOOKKEEPING_TOOL_TYPES = {
-    "state_update",
-    "hub_msg",
-    "hub_broadcast",
-    "hub_reply",
-}
-
-
 def _tool_results_requiring_followup(
     results: List[ToolExecutionResult],
-    wait_for_user_enabled: bool = True,
 ) -> List[ToolExecutionResult]:
-    """Return tool results that need another LLM turn before parking."""
-    has_wait_for_user = (
-        wait_for_user_enabled
-        and any(r.tool_type == "wait_for_user" for r in results)
-    )
-    followup_results = []
-    for result in results:
-        if result.tool_type == "wait_for_user":
-            continue
-        if (
-            has_wait_for_user
-            and result.success
-            and result.tool_type in _PARK_COMPATIBLE_BOOKKEEPING_TOOL_TYPES
-        ):
-            continue
-        followup_results.append(result)
-    return followup_results
+    """Return tool results that need another LLM turn."""
+    return list(results)
 
 
 class QueueProcessor:
@@ -95,7 +71,6 @@ class QueueProcessor:
         max_history: int,
         question_gate_enabled: bool,
         max_queue_size: int,
-        wait_for_user_enabled: bool = True,
     ):
         """Initialize queue processor.
 
@@ -120,7 +95,6 @@ class QueueProcessor:
             max_history: Maximum history messages for API calls
             question_gate_enabled: Whether question gate is enabled
             max_queue_size: Maximum queue size
-            wait_for_user_enabled: Whether <wait_for_user/> counts as turn parking
         """
         # Shared mutable containers (passed by reference)
         self.conversation_history = conversation_history
@@ -144,7 +118,6 @@ class QueueProcessor:
         self._add_message_fn = add_message_fn
         self._max_history = max_history
         self.question_gate_enabled = question_gate_enabled
-        self.wait_for_user_enabled = wait_for_user_enabled
 
         # Queue state (owned by QueueProcessor, accessed via properties)
         self.processing_queue: asyncio.Queue[Any] = asyncio.Queue(
@@ -840,10 +813,7 @@ class QueueProcessor:
                 logger.info("Plugin requested turn continuation")
             if turn_complete:
                 self.turn_completed = True
-                if self.wait_for_user_enabled:
-                    logger.info("Plugin requested turn completion (wait_for_user)")
-                else:
-                    logger.debug("Plugin requested turn completion")
+                logger.debug("Plugin requested turn completion")
 
             # Step 5: Display clean text (before tool results)
             if suppress_display:
@@ -1063,11 +1033,7 @@ class QueueProcessor:
                     self._track_file_interaction(result)
 
                 # Plugin/XML tool results from same response: batched user message
-                # Flow-control tools (wait_for_user) are internal signals — exclude
-                # from conversation history so the LLM doesn't see them on wake.
-                history_results = [
-                    r for r in xml_tool_results if r.tool_type != "wait_for_user"
-                ]
+                history_results = list(xml_tool_results)
                 if history_results:
                     batched = []
                     for result in history_results:
@@ -1102,11 +1068,7 @@ class QueueProcessor:
                     parent_uuid=parent_uuid,
                 )
 
-                # Flow-control tools (wait_for_user) are internal signals — exclude
-                # from conversation history so the LLM doesn't see them on wake.
-                history_results_xml = [
-                    r for r in xml_tool_results if r.tool_type != "wait_for_user"
-                ]
+                history_results_xml = list(xml_tool_results)
                 if history_results_xml:
                     batched_tool_results = []
                     for result in history_results_xml:
@@ -1147,30 +1109,10 @@ class QueueProcessor:
                 self._last_tool_error_sig = None
 
             # Step 10: Determine continuation
-            # If tools executed, the LLM MUST see their results back.
-            # No plugin can veto this — tool results without a follow-up
-            # turn means the model never learns what happened.
-            # Exception: wait_for_user is a flow-control signal, not a
-            # real tool.  If it was emitted alongside bookkeeping tools
-            # (hub_msg, state_update), honour the park — the agent
-            # explicitly said "I'm done, park me."
-            real_results = _tool_results_requiring_followup(
-                all_results, self.wait_for_user_enabled
-            )
-            if real_results:
+            # If tools executed, the LLM MUST see their results back. Natural
+            # turn completion happens when the model returns no tool calls.
+            if _tool_results_requiring_followup(all_results):
                 self.turn_completed = False
-            elif all_results and not real_results:
-                # Only wait_for_user/bookkeeping was executed — honour the park
-                if self.wait_for_user_enabled:
-                    self.turn_completed = True
-                    logger.info(
-                        "wait_for_user had no follow-up tool results, honouring park"
-                    )
-                else:
-                    logger.debug(
-                        "Flow-control-only tools without follow-up; "
-                        "wait_for_user disabled — not forcing turn_completed"
-                    )
 
         except asyncio.CancelledError:
             logger.info("Message processing cancelled by user")

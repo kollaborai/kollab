@@ -26,7 +26,8 @@ nearby code changes.
 Acceptance:
 
 - Native `file_read` dispatches as `file_read`.
-- Native `wait_for_user` dispatches as `wait_for_user`.
+- Removed wait-for-user as a runtime tool; turns now stop naturally when no
+  tool calls remain.
 - Native MCP tools preserve `type=mcp_tool` and `arguments`.
 - Focused tool gate passes.
 
