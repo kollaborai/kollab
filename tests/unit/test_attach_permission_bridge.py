@@ -10,9 +10,8 @@ from kollabor_events.permissions_models import ConfirmationResponse
 
 
 class FakeDisplayTap:
-    subscriber_count = 1
-
-    def __init__(self):
+    def __init__(self, subscriber_count=1):
+        self.subscriber_count = subscriber_count
         self.events = []
 
     def publish(self, event):
@@ -35,6 +34,19 @@ class FakeRpcClient:
 
     async def call(self, method, params, timeout=None):
         self.calls.append((method, params, timeout))
+        return {"ok": True}
+
+
+class BlockingRpcClient:
+    def __init__(self):
+        self.calls = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def call(self, method, params, timeout=None):
+        self.calls.append((method, params, timeout))
+        self.started.set()
+        await self.release.wait()
         return {"ok": True}
 
 
@@ -114,5 +126,71 @@ def test_attach_bridge_client_event_shows_prompt_and_replies_over_rpc():
                 10,
             )
         ]
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_client_event_can_send_response_without_waiting_for_reply():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        rpc_client = BlockingRpcClient()
+        layout_manager = FakeLayoutManager()
+
+        await bridge.handle_client_event(
+            rpc_client=rpc_client,
+            layout_manager=layout_manager,
+            event={
+                "type": "permission_request",
+                "details": {
+                    "tool_id": "terminal_0",
+                    "tool_type": "terminal",
+                    "risk_level": "MEDIUM",
+                },
+            },
+            wait_for_rpc_reply=False,
+        )
+
+        await asyncio.wait_for(rpc_client.started.wait(), timeout=1)
+        assert rpc_client.calls == [
+            (
+                PERMISSION_RESPONSE_RPC_METHOD,
+                {"tool_id": "terminal_0", "response": "APPROVE_ONCE"},
+                10,
+            )
+        ]
+        rpc_client.release.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_waits_for_late_visible_client():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap(subscriber_count=0)
+
+        async def subscribe_later():
+            await asyncio.sleep(0.05)
+            display_tap.subscriber_count = 1
+
+        task = asyncio.create_task(subscribe_later())
+        assert await bridge.wait_for_visible_attach_client(
+            display_tap,
+            timeout=0.5,
+        )
+        await task
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_returns_false_when_no_visible_client_arrives():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap(subscriber_count=0)
+
+        assert not await bridge.wait_for_visible_attach_client(
+            display_tap,
+            timeout=0.01,
+        )
 
     asyncio.run(run_bridge())

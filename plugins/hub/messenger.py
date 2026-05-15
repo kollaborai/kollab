@@ -446,6 +446,12 @@ class AgentSocketServer:
                                 self._identity_info, "is_coordinator", False
                             )
 
+                        # Register the subscriber before ack/snapshot so the
+                        # daemon can see a visible attach client immediately.
+                        # Permission prompts may be requested as soon as input
+                        # is accepted, while the snapshot can still be draining.
+                        sub_queue = self._display_tap.subscribe(client_id)
+
                         # Send ack
                         ack = (
                             json.dumps(
@@ -471,7 +477,13 @@ class AgentSocketServer:
                         await writer.drain()
 
                         # Enter persistent streaming loop
-                        await self._stream_to_attacher(reader, writer, client_id, mode)
+                        await self._stream_to_attacher(
+                            reader,
+                            writer,
+                            client_id,
+                            mode,
+                            sub_queue=sub_queue,
+                        )
                         return  # Connection ends when attacher detaches
 
                 elif action == "get_status":
@@ -585,6 +597,7 @@ class AgentSocketServer:
         writer: asyncio.StreamWriter,
         client_id: str,
         mode: str,
+        sub_queue: Any | None = None,
     ) -> None:
         """Persistent streaming loop for an attached client.
 
@@ -595,7 +608,8 @@ class AgentSocketServer:
 
         if self._display_tap is None:
             return
-        sub_queue = self._display_tap.subscribe(client_id)
+        if sub_queue is None:
+            sub_queue = self._display_tap.subscribe(client_id)
 
         # Serialize writes on the shared StreamWriter between _send_events
         # (server->client event stream) and the RPC reply branch in

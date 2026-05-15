@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -27,6 +28,14 @@ import pytest_asyncio
 from kollabor_rpc import RpcServer
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.messenger import AgentSocketServer
+
+
+class SlowSnapshotDisplayTap(DisplayTap):
+    """DisplayTap test double that keeps snapshot draining visibly slow."""
+
+    def get_snapshot(self) -> list[dict[str, Any]]:
+        time.sleep(0.2)
+        return super().get_snapshot()
 
 
 @pytest.fixture
@@ -194,6 +203,40 @@ async def test_rpc_request_on_attached_path(
         assert found_reply["result"]["echo"] == "attached"
     finally:
         # Tell the server to close the attached loop cleanly
+        try:
+            writer.write((json.dumps({"type": "detach"}) + "\n").encode("utf-8"))
+            await writer.drain()
+        except Exception:
+            pass
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_attach_registers_display_subscriber_before_snapshot_drains(
+    running_server: tuple[AgentSocketServer, RpcServer, str],
+) -> None:
+    """Attach must be visible to daemon permission routing before snapshot."""
+    server, _, socket_path = running_server
+    server._display_tap = SlowSnapshotDisplayTap(history_size=10)
+
+    reader, writer = await asyncio.open_unix_connection(path=socket_path)
+    try:
+        attach_msg = {
+            "action": "attach",
+            "mode": "interactive",
+            "client_id": "slow-snapshot-client",
+        }
+        writer.write((json.dumps(attach_msg) + "\n").encode("utf-8"))
+        await writer.drain()
+
+        ack = await _readline(reader)
+        assert ack["type"] == "attach_ack"
+        assert server._display_tap.subscriber_count == 1
+    finally:
         try:
             writer.write((json.dumps({"type": "detach"}) + "\n").encode("utf-8"))
             await writer.drain()

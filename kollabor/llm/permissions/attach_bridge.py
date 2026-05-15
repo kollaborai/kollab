@@ -12,6 +12,7 @@ from kollabor_events.permissions_models import ConfirmationResponse
 logger = logging.getLogger(__name__)
 
 PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
+DEFAULT_VISIBLE_CLIENT_GRACE_SECONDS = 2.0
 
 
 class AttachPermissionBridge:
@@ -77,6 +78,7 @@ class AttachPermissionBridge:
         rpc_client: Any,
         layout_manager: Any,
         event: dict[str, Any],
+        wait_for_rpc_reply: bool = True,
     ) -> None:
         """Show a permission_request event locally and send the answer back."""
         details = event.get("details") or {}
@@ -86,7 +88,7 @@ class AttachPermissionBridge:
         response = await layout_manager.show_permission_prompt(details)
         response_name = getattr(response, "name", str(response))
 
-        await rpc_client.call(
+        response_call = rpc_client.call(
             PERMISSION_RESPONSE_RPC_METHOD,
             {
                 "tool_id": details.get("tool_id"),
@@ -94,10 +96,50 @@ class AttachPermissionBridge:
             },
             timeout=10,
         )
+        if wait_for_rpc_reply:
+            await response_call
+            return
+
+        task = asyncio.create_task(response_call)
+
+        def _log_response_error(done_task: asyncio.Task[Any]) -> None:
+            try:
+                done_task.result()
+            except Exception as exc:
+                logger.warning(
+                    "attach permission response rpc failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        task.add_done_callback(_log_response_error)
 
     def has_visible_attach_client(self, display_tap: Any) -> bool:
         """Return true when at least one attach client can answer prompts."""
         return bool(getattr(display_tap, "subscriber_count", 0))
+
+    async def wait_for_visible_attach_client(
+        self,
+        display_tap: Any,
+        *,
+        timeout: float = DEFAULT_VISIBLE_CLIENT_GRACE_SECONDS,
+    ) -> bool:
+        """Wait briefly for an attach client subscription to become visible.
+
+        Attach sends its ack before the streaming subscription is registered.
+        A fast first tool call can otherwise fall back to the hidden daemon TUI
+        and leave the visible client stuck at "executing tools".
+        """
+        if self.has_visible_attach_client(display_tap):
+            return True
+
+        deadline = asyncio.get_running_loop().time() + max(timeout, 0)
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+            if self.has_visible_attach_client(display_tap):
+                return True
+
+        return self.has_visible_attach_client(display_tap)
 
     def _parse_response(self, response_name: str) -> ConfirmationResponse:
         """Parse wire response names from the attach client."""

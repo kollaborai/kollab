@@ -1705,6 +1705,7 @@ class TerminalLLMChat:
                             rpc_client=self._rpc_client,
                             layout_manager=self.renderer.layout_manager,
                             event=event,
+                            wait_for_rpc_reply=False,
                         )
                     else:
                         coordinator.display_message_sequence(
@@ -1840,7 +1841,9 @@ class TerminalLLMChat:
         if not display_tap or not rpc_server:
             return None
 
-        if not self._attach_permission_bridge.has_visible_attach_client(display_tap):
+        if not await self._attach_permission_bridge.wait_for_visible_attach_client(
+            display_tap
+        ):
             return None
 
         return await self._attach_permission_bridge.request_confirmation(
