@@ -1532,15 +1532,6 @@ class TerminalLLMChat:
                 )
                 self._remote_state_service = None
 
-        # Signal startup complete so the input bar accepts input.
-        # Phase 4.5 launch-flag drain (RPC calls to the daemon) runs
-        # AFTER _read_remote_events is scheduled below (search for
-        # attach_event_reader) -- it needs the event reader loop
-        # running to receive RPC replies. Doing the drain here
-        # would deadlock because the reader isn't consuming yet.
-        self._startup_ready.set()
-        self._startup_complete = True
-
         # Store writer for input forwarding
         self._attach_writer = writer
 
@@ -1837,6 +1828,13 @@ class TerminalLLMChat:
                 self._drain_attach_pending_flags(),
                 "attach_drain_pending_flags",
             )
+
+        # Signal startup complete only after input forwarding hooks and the
+        # remote event reader are live. Setting this earlier opens a race where
+        # fast user input can bypass attach_proxy_input or where RPC replies
+        # have no reader yet.
+        self._startup_complete = True
+        self._startup_ready.set()
 
     async def _try_attach_permission_prompt(self, details: Dict[str, Any]):
         """Route daemon permission prompts to the visible attach client."""
