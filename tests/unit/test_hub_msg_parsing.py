@@ -3,11 +3,13 @@
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.nudge_engine import (
     HUB_LOOP_THRESHOLD,
@@ -254,6 +256,142 @@ class TestUntaggedCoordinatorRouting:
         await plugin._parse_hub_messages(data)
 
         assert routed == []
+
+
+# ================================================================== #
+#  HUB WAKE DECISION
+# ================================================================== #
+
+
+def _hub_message(
+    content: str,
+    *,
+    msg_id: str = "msg-1",
+    metadata: dict | None = None,
+    thread_id: str = "thread-1",
+) -> HubMessage:
+    return HubMessage(
+        id=msg_id,
+        from_agent="agent-lapis",
+        from_identity="lapis",
+        to="koordinator",
+        content=content,
+        thread_id=thread_id,
+        metadata=metadata or {},
+    )
+
+
+class TestHubWakeDecision:
+    def _plugin(self) -> HubPlugin:
+        plugin = HubPlugin()
+        plugin._task_ledger = None
+        return plugin
+
+    def _decide(
+        self,
+        plugin: HubPlugin,
+        message: HubMessage,
+        *,
+        is_processing: bool = False,
+    ):
+        return plugin._decide_hub_wake(
+            message,
+            is_intended=True,
+            is_human_elsewhere=False,
+            llm_service=SimpleNamespace(is_processing=is_processing),
+        )
+
+    def test_completion_report_ending_standing_by_wakes_once(self):
+        plugin = self._plugin()
+        message = _hub_message(
+            "DOCS/GATE TASK COMPLETE. 2 commits shipped:\n"
+            "COMMIT bb9c57b - banners\n"
+            "COMMIT a711648 - README\n\n"
+            "standing by."
+        )
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "wake"
+        assert decision.should_trigger is True
+
+    def test_pure_standing_by_without_active_task_observes(self):
+        plugin = self._plugin()
+        message = _hub_message("standing by.")
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "observe"
+        assert decision.should_trigger is False
+        assert decision.reason == "ack only"
+
+    def test_done_standing_by_with_active_task_wakes(self):
+        plugin = self._plugin()
+        plugin._roster = [{"identity": "lapis", "current_task": "docs/gate"}]
+        message = _hub_message("I'm done, standing by.")
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "wake"
+        assert decision.should_trigger is True
+
+    def test_duplicate_full_and_short_reports_wake_once_by_commits(self):
+        plugin = self._plugin()
+        full = _hub_message(
+            "DOCS/GATE TASK COMPLETE.\n"
+            "COMMIT bb9c57b - banners\n"
+            "COMMIT a711648 - README\nstanding by.",
+            msg_id="full",
+        )
+        short = _hub_message(
+            "docs/gate task complete. 2 commits:\n"
+            "bb9c57b - 12 files\n"
+            "a711648 - 2 files\n\n"
+            "standing by.",
+            msg_id="short",
+            thread_id="another-thread",
+        )
+
+        first = self._decide(plugin, full)
+        second = self._decide(plugin, short)
+
+        assert first.should_trigger is True
+        assert second.mode == "observe"
+        assert second.should_trigger is False
+        assert second.reason == "duplicate report fingerprint"
+
+    def test_chinese_ack_observes(self):
+        plugin = self._plugin()
+        message = _hub_message("收到。感谢你的报告，lapis。文档/门禁已交付。等待下一个任务。")
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "observe"
+        assert decision.should_trigger is False
+        assert decision.reason == "ack only"
+
+    def test_direct_question_wakes(self):
+        plugin = self._plugin()
+        message = _hub_message("Can you review the docs/gate commits?")
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "wake"
+        assert decision.should_trigger is True
+
+    def test_busy_actionable_messages_queue_one_retry(self):
+        plugin = self._plugin()
+        first = _hub_message("Can you review this?", msg_id="busy-1")
+        second = _hub_message("Can you inspect the follow-up too?", msg_id="busy-2")
+
+        first_decision = self._decide(plugin, first, is_processing=True)
+        second_decision = self._decide(plugin, second, is_processing=True)
+
+        assert first_decision.mode == "buffer"
+        assert first_decision.should_trigger is True
+        assert second_decision.mode == "buffer"
+        assert second_decision.should_trigger is False
+        assert list(plugin._pending_hub_wake_ids.keys()) == ["busy-1", "busy-2"]
 
 
 # ================================================================== #

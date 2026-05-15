@@ -75,6 +75,15 @@ STOP_TERM_SECONDS = 1.0
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
 
+@dataclass
+class HubWakeDecision:
+    """Decision for whether an incoming hub message should wake the LLM."""
+
+    mode: str
+    should_trigger: bool
+    reason: str = ""
+
+
 def _get_loop():
     """Return the running event loop, or create one if none is running."""
     try:
@@ -233,6 +242,16 @@ class HubPlugin(BasePlugin):
         self._bridge: Optional[MessagingBridge] = None
         self._hub_cron_jobs: List[HubCronJob] = []
         self._recent_hub_msgs: Dict[str, float] = {}  # hash -> timestamp
+        self._hub_wake_seen_ids: collections.OrderedDict[str, float] = (
+            collections.OrderedDict()
+        )
+        self._hub_wake_seen_fingerprints: collections.OrderedDict[str, float] = (
+            collections.OrderedDict()
+        )
+        self._pending_hub_wake_ids: collections.OrderedDict[str, float] = (
+            collections.OrderedDict()
+        )
+        self._hub_buffer_retry_queued: bool = False
         # Agent DNS
         self._dns_storage: Optional[Any] = None
         self._dns_identity: Optional[Any] = None
@@ -2407,6 +2426,27 @@ class HubPlugin(BasePlugin):
             thread_id = thread_id or self._active_thread_id
             reply_to = reply_to or self._active_thread_msg_id
 
+        sender_has_task = bool(
+            self._identity and getattr(self._identity, "current_task", "")
+        )
+        if not sender_has_task and self._identity and self._task_ledger:
+            try:
+                sender_has_task = bool(
+                    self._task_ledger.get_active_for(self._identity.identity)
+                )
+            except Exception:
+                sender_has_task = False
+
+        metadata = {"wait": any_wait}
+        if self._is_ack_only_content(
+            content, sender_has_active_task=sender_has_task
+        ):
+            metadata["ack"] = True
+        elif self._has_report_evidence(
+            content, sender_has_active_task=sender_has_task
+        ):
+            metadata["task_report"] = True
+
         # Route the message
         msg = HubMessage(
             action="message",
@@ -2418,6 +2458,7 @@ class HubPlugin(BasePlugin):
             force=force_attr in ("true", "yes", "1"),
             thread_id=thread_id,  # empty string = HubMessage.__post_init__ creates new thread
             reply_to=reply_to,
+            metadata=metadata,
         )
         rejections = await self._route_message(msg)
         self._display_outgoing_message(target, content)
@@ -2454,7 +2495,7 @@ class HubPlugin(BasePlugin):
             tool_type="hub_msg",
             success=True,
             output=output,
-            metadata={"wait": any_wait},
+            metadata=metadata,
         )
 
     async def _handle_hub_broadcast_tool(self, tool_data: dict):
@@ -2806,6 +2847,11 @@ class HubPlugin(BasePlugin):
                     "reason</task_reject>"
                 ),
                 scope=MessageScope.DIRECT.value,
+                metadata={
+                    "task_complete": True,
+                    "task_report": True,
+                    "task_id": card.id,
+                },
             )
             agents = await self._presence.discover_agents_async()
             for a in agents:
@@ -4776,6 +4822,7 @@ class HubPlugin(BasePlugin):
                     f"context: {slot.context}"
                 ),
                 scope=MessageScope.DIRECT.value,
+                metadata={"task_assignment": True, "work_slot_id": slot.id},
             )
             await AgentMessenger.send_to_agent(target.socket_path, msg)
 
@@ -4818,6 +4865,257 @@ class HubPlugin(BasePlugin):
             )
             await self._deliver_to_agent(peer, intro)
             logger.info(f"Announced to {peer.identity}")
+
+    _HUB_WAKE_DEDUPE_TTL = 120.0
+    _ACK_MARKERS = (
+        "got it",
+        "confirmed",
+        "thanks",
+        "thank you",
+        "received",
+        "roger",
+        "ack",
+        "standing by",
+        "waiting for next",
+        "waiting for the next",
+        "awaiting next",
+        "收到",
+        "感谢",
+        "等待下一个任务",
+    )
+    _REQUEST_MARKERS = (
+        "?",
+        "please",
+        "can you",
+        "could you",
+        "review",
+        "approve",
+        "reject",
+        "fix",
+        "implement",
+        "investigate",
+        "go ahead",
+        "[work assignment",
+        "qa needed",
+        "manual wake",
+    )
+    _REPORT_MARKERS = (
+        "task complete",
+        "task completed",
+        "complete",
+        "complete.",
+        "completed",
+        "shipped",
+        "resolved",
+        "done.",
+        "i'm done",
+        "im done",
+        "all docs/gate items resolved",
+    )
+
+    def _normalize_hub_wake_content(self, content: str) -> str:
+        text = (content or "").strip().lower()
+        text = re.sub(r"\s+", " ", text)
+        return text.strip(" .!。\n\t")
+
+    def _is_ack_only_content(
+        self, content: str, *, sender_has_active_task: bool = False
+    ) -> bool:
+        """True for passive acknowledgements with no completion evidence."""
+        text = self._normalize_hub_wake_content(content)
+        if not text:
+            return False
+        if self._has_report_evidence(
+            content, sender_has_active_task=sender_has_active_task
+        ):
+            return False
+        if any(marker in text for marker in self._REQUEST_MARKERS):
+            return False
+        return any(marker in text for marker in self._ACK_MARKERS)
+
+    def _sender_has_active_task(self, message: HubMessage) -> bool:
+        sender = getattr(message, "from_identity", "")
+        if not sender:
+            return False
+        for peer in self._roster or []:
+            if peer.get("identity") == sender and peer.get("current_task"):
+                return True
+        if self._task_ledger:
+            try:
+                if self._task_ledger.get_active_for(sender):
+                    return True
+            except Exception:
+                pass
+        if self._presence:
+            try:
+                for peer in self._presence.scan_all_presence():
+                    if peer.identity == sender and peer.current_task:
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def _task_ledger_matches_report(self, content: str) -> bool:
+        if not self._task_ledger:
+            return False
+        task_ids = re.findall(
+            r"\b(?:task|TASK)[\s:#-]*([A-Za-z0-9][A-Za-z0-9_-]{1,})",
+            content or "",
+        )
+        for task_id in task_ids:
+            try:
+                if self._task_ledger.get(task_id):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _has_report_evidence(
+        self,
+        content: str,
+        *,
+        sender_has_active_task: bool,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        metadata = metadata or {}
+        if any(
+            metadata.get(k)
+            for k in ("task_complete", "task_report", "task_id")
+        ):
+            return True
+        text = self._normalize_hub_wake_content(content)
+        if re.search(r"\b[0-9a-f]{7,40}\b", text):
+            return True
+        if re.search(r"\b\d+\s+files?\b", text):
+            return True
+        if self._task_ledger_matches_report(content):
+            return True
+        if any(marker in text for marker in self._REPORT_MARKERS):
+            if "done" in text and not sender_has_active_task:
+                return any(m in text for m in ("complete", "shipped", "resolved"))
+            return True
+        return False
+
+    def _has_request_evidence(
+        self, content: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        metadata = metadata or {}
+        if metadata.get("task_assignment") or metadata.get("manual_wake"):
+            return True
+        text = self._normalize_hub_wake_content(content)
+        return any(marker in text for marker in self._REQUEST_MARKERS)
+
+    def _prune_hub_wake_cache(self, now: float) -> None:
+        cutoff = now - self._HUB_WAKE_DEDUPE_TTL
+        for cache in (
+            self._hub_wake_seen_ids,
+            self._hub_wake_seen_fingerprints,
+            self._pending_hub_wake_ids,
+        ):
+            while cache:
+                _, ts = next(iter(cache.items()))
+                if ts >= cutoff:
+                    break
+                cache.popitem(last=False)
+
+    def _hub_wake_fingerprint(self, message: HubMessage) -> str:
+        content = message.content or ""
+        metadata = message.metadata or {}
+        task_id = str(metadata.get("task_id", "") or "")
+        commits = sorted(set(re.findall(r"\b[0-9a-f]{7,40}\b", content.lower())))
+        task_ids = sorted(
+            set(
+                re.findall(
+                    r"\b(?:task|TASK)[\s:#-]*([A-Za-z0-9][A-Za-z0-9_-]{1,})",
+                    content,
+                )
+            )
+        )
+        if task_id:
+            marker = f"task:{task_id}"
+            thread_id = ""
+        elif commits:
+            marker = "commits:" + ",".join(commits)
+            thread_id = ""
+        elif task_ids:
+            marker = "tasks:" + ",".join(task_ids)
+            thread_id = ""
+        else:
+            marker = self._normalize_hub_wake_content(content)
+            thread_id = getattr(message, "thread_id", "") or ""
+        return "|".join(
+            [
+                message.from_identity,
+                message.to,
+                thread_id,
+                marker,
+            ]
+        )
+
+    def _register_hub_wake_candidate(self, message: HubMessage) -> Optional[str]:
+        now = time.time()
+        self._prune_hub_wake_cache(now)
+        msg_id = getattr(message, "id", "") or ""
+        if msg_id and msg_id in self._hub_wake_seen_ids:
+            return "duplicate message id"
+
+        fingerprint = self._hub_wake_fingerprint(message)
+        if fingerprint in self._hub_wake_seen_fingerprints:
+            return "duplicate report fingerprint"
+
+        if msg_id:
+            self._hub_wake_seen_ids[msg_id] = now
+        self._hub_wake_seen_fingerprints[fingerprint] = now
+        return None
+
+    def _decide_hub_wake(
+        self,
+        message: HubMessage,
+        *,
+        is_intended: bool,
+        is_human_elsewhere: bool,
+        llm_service: Any,
+    ) -> HubWakeDecision:
+        if not is_intended:
+            return HubWakeDecision("observe", False, "not intended")
+        if is_human_elsewhere:
+            return HubWakeDecision("observe", False, "human elsewhere")
+        if "is going offline" in (message.content or ""):
+            return HubWakeDecision("observe", False, "departure")
+
+        metadata = message.metadata or {}
+        sender_has_task = self._sender_has_active_task(message)
+        if metadata.get("ack") or self._is_ack_only_content(
+            message.content, sender_has_active_task=sender_has_task
+        ):
+            return HubWakeDecision("observe", False, "ack only")
+
+        actionable = (
+            self._has_request_evidence(message.content, metadata)
+            or self._has_report_evidence(
+                message.content,
+                sender_has_active_task=sender_has_task,
+                metadata=metadata,
+            )
+        )
+        if not actionable:
+            return HubWakeDecision("observe", False, "no actionable evidence")
+
+        duplicate_reason = self._register_hub_wake_candidate(message)
+        if duplicate_reason:
+            return HubWakeDecision("observe", False, duplicate_reason)
+
+        is_busy = bool(getattr(llm_service, "is_processing", False))
+        if not is_busy:
+            self._hub_buffer_retry_queued = False
+            self._pending_hub_wake_ids.clear()
+            return HubWakeDecision("wake", True, "actionable")
+
+        self._pending_hub_wake_ids[message.id] = time.time()
+        if self._hub_buffer_retry_queued:
+            return HubWakeDecision("buffer", False, "retry already queued")
+        self._hub_buffer_retry_queued = True
+        return HubWakeDecision("buffer", True, "busy, queue one retry")
 
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
@@ -5024,6 +5322,12 @@ class HubPlugin(BasePlugin):
                 and source_agent
                 and source_agent != my_name
             )
+            wake_decision = self._decide_hub_wake(
+                message,
+                is_intended=is_intended,
+                is_human_elsewhere=is_human_elsewhere,
+                llm_service=llm_service,
+            )
             thread_id = getattr(message, "thread_id", "")
             reply_to = getattr(message, "reply_to", "")
             thread_header = ""
@@ -5051,21 +5355,17 @@ class HubPlugin(BasePlugin):
             elif message.to == my_name:
                 formatted += (
                     "\n\n[hub wake instruction]\n"
-                    "This message is addressed to you. Treat it as the current "
-                    "user request. If it asks you to work, investigate, report, "
-                    "or continue, start now and use tools as needed. Do not "
-                    "let the turn end naturally when no more tool calls are needed."
+                    f"classification: {wake_decision.mode} "
+                    f"({wake_decision.reason}). "
+                    "Handle this once if actionable. If it is only an "
+                    "acknowledgement, do not respond. When no work remains, "
+                    "let the turn end naturally."
                 )
 
             try:
                 from kollabor_events.data_models import ConversationMessage
 
-                is_departure = "is going offline" in message.content
-                should_trigger_llm = (
-                    is_intended
-                    and not is_departure
-                    and not is_human_elsewhere
-                )
+                should_trigger_llm = wake_decision.should_trigger
 
                 # If a parked agent is being woken, inject the wake catch-up
                 # before the hub message. The direct assignment must stay as
@@ -5087,6 +5387,8 @@ class HubPlugin(BasePlugin):
                     "hub_message_id": message.id,
                     "hub_thread_id": getattr(message, "thread_id", ""),
                     "hub_reply_to": getattr(message, "reply_to", ""),
+                    "hub_wake_mode": wake_decision.mode,
+                    "hub_wake_reason": wake_decision.reason,
                 }
                 # Pass through bridge metadata for relay
                 if hasattr(message, "metadata") and message.metadata:
@@ -5128,6 +5430,12 @@ class HubPlugin(BasePlugin):
                         {
                             "source": f"hub:{message.from_identity}",
                             "content": message.content,
+                            "hub_message_id": message.id,
+                            "hub_wake_mode": wake_decision.mode,
+                            "hub_wake_reason": wake_decision.reason,
+                            "pending_hub_message_ids": list(
+                                self._pending_hub_wake_ids.keys()
+                            ),
                         },
                         "hub_plugin",
                     )
@@ -6098,6 +6406,7 @@ class HubPlugin(BasePlugin):
             to=coordinator,
             content=clean,
             scope=MessageScope.DIRECT.value,
+            metadata={"source": "untagged_final"},
         )
 
         await self._route_message(msg)
@@ -6847,6 +7156,7 @@ class HubPlugin(BasePlugin):
             content="[system: user wake] the user has manually woken you up. resume work.",
             scope=MessageScope.DIRECT.value,
             force=True,
+            metadata={"manual_wake": True},
         )
         await self._route_message(wake_msg)
         return f"woke {target}"
