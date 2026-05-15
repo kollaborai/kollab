@@ -5,6 +5,8 @@ status: draft
 author: maintainers
 ---
 
+> **STALE NOTE** (2026-05-15): This spec remains in draft. Crystal memory XML tags are implemented and in active use — see live code for current tag set rather than this spec.
+
 # Crystal Memory XML Tags
 
 give agents full CRUD access to their own crystallized memory

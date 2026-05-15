@@ -3,6 +3,7 @@ title: "Context Service"
 doc_type: architecture-rfc
 created: 2026-04-11
 modified: 2026-04-20
+status: shipped
 status: phases A-D shipped (A-C = single-agent ledger + curator + compaction; D = hub bridge MVP, see RFC-2026-04-13-context-service-phase-d-hub-bridge.md)
 owner: kollabor-ai
 depends_on:

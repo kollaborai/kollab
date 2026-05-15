@@ -3,6 +3,7 @@ title: "Agent Notification System"
 doc_type: architecture-rfc
 created: 2026-04-11
 modified: 2026-04-20
+status: shipped
 status: shipped 2026-04-20 (phases A-D — tool_grant/revoke/action_needed/external producers deferred pending caller sites)
 owner: kollabor-ai + plugins
 depends_on:

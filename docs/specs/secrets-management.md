@@ -4,6 +4,8 @@ created: 2026-04-07
 modified: 2026-04-07
 status: draft
 ---
+> **STALE NOTE** (2026-05-15): This spec is a draft from 2026-04-07. Secrets management is partially implemented via the Mentiko secrets API. Do not treat as authoritative.
+
 # Secrets Management Spec
 
 status: draft

@@ -4,6 +4,8 @@ created: 2026-04-07
 modified: 2026-04-07
 status: draft
 ---
+> **STALE NOTE** (2026-05-15): This spec is a draft from 2026-04-07. Hub coordinator routing has been implemented differently — see `plugins/hub/` source for current behavior.
+
 # Hub Coordinator Default Routing Spec
 
 status: draft

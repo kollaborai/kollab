@@ -3,6 +3,7 @@ title: "Agent + Hub Unification Plan"
 doc_type: architecture-rfc
 created: 2026-04-04
 modified: 2026-04-05
+status: shipped
 status: phases 0-6 complete, 7-9 not started
 ---
 # Agent + Hub Unification Plan

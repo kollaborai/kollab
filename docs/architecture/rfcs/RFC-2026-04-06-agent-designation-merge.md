@@ -4,6 +4,7 @@ doc_type: architecture-rfc
 created: 2026-04-06
 modified: 2026-04-06
 status: rejected
+superseded_by: RFC-2026-04-04-agent-hub-unification
 reviews:
   - ../records/reviews/REVIEW-2026-04-06-agent-designation-merge-architecture.md
   - ../records/reviews/REVIEW-2026-04-06-agent-designation-merge-ux.md

@@ -3,6 +3,7 @@ title: "Hub Loop Prevention"
 doc_type: architecture-rfc
 created: 2026-04-11
 modified: 2026-04-11
+status: shipped
 status: all phases implemented
 owner: kollabor-agent + plugins/hub
 depends_on:

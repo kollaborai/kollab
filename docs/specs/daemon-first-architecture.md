@@ -4,6 +4,8 @@ created: 2026-04-07
 modified: 2026-04-07
 status: draft
 ---
+> **STALE NOTE** (2026-05-15): This spec is a draft from 2026-04-07. Partial implementation exists in the daemon layer. Do not treat as authoritative — verify against live code before using as reference.
+
 # Daemon-First Architecture Spec
 
 status: draft

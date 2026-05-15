@@ -3,6 +3,7 @@ title: "Context Service — Phase D: Hub Bridge"
 doc_type: architecture-rfc
 created: 2026-04-13
 modified: 2026-04-13
+status: shipped
 status: MVP shipped 2026-04-20 (notification system pending — divergent warnings use fallback inline injection)
 parent: RFC-2026-04-11-context-service.md
 owner: kollabor-ai + plugins/hub

@@ -3,6 +3,7 @@ title: "Hub Project Scoping"
 doc_type: architecture-rfc
 created: 2026-04-20
 modified: 2026-04-20
+status: shipped
 status: shipped 2026-04-20 (phase 1 — opt-in flag, default OFF)
 owner: kollabor-plugins (hub)
 tracking: project-scoped hub state rollout
