@@ -5844,8 +5844,20 @@ class HubPlugin(BasePlugin):
         if cleaned:
             await self._bridge_forward(cleaned)
 
-        # Route untagged responses to coordinator if enabled
-        if not had_tags and cleaned:
+        # Route untagged responses to coordinator if enabled. This path is
+        # only for terminal/final summaries from worker agents. Native tool
+        # turns can include plain text plus pending tool calls; routing those
+        # intermediate progress lines wakes the coordinator repeatedly.
+        has_pending_tool_work = bool(data.get("all_tools")) or bool(
+            data.get("has_native_tools")
+        )
+        turn_completed = data.get("turn_completed")
+        if (
+            not had_tags
+            and cleaned
+            and not has_pending_tool_work
+            and turn_completed is not False
+        ):
             await self._maybe_route_to_coordinator(cleaned)
 
         return data

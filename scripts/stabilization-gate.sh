@@ -16,5 +16,6 @@ python -m pytest \
   tests/unit/test_widget_state.py \
   tests/unit/test_widget_state_refresher.py \
   tests/unit/tui/test_status_widgets_remote_state.py \
+  tests/unit/test_hub_msg_parsing.py \
   tests/unit/tui/test_permission_prompt_render.py \
   tests/test_hub_rpc_integration.py

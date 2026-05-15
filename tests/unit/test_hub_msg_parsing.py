@@ -4,8 +4,11 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from plugins.hub.plugin import HubPlugin
 from plugins.hub.nudge_engine import (
     HUB_LOOP_THRESHOLD,
     NudgeEngine,
@@ -182,6 +185,75 @@ class TestIdleChatterDetection:
 
     def test_not_idle_regular_message(self):
         assert _idle_check("I've finished the refactor") is False
+
+
+# ================================================================== #
+#  UNTAGGED COORDINATOR ROUTING
+# ================================================================== #
+
+
+class TestUntaggedCoordinatorRouting:
+    @pytest.mark.asyncio
+    async def test_plain_terminal_response_routes_to_coordinator(self):
+        plugin = HubPlugin()
+        routed = []
+
+        async def fake_route(response: str):
+            routed.append(response)
+
+        plugin._maybe_route_to_coordinator = fake_route
+
+        data = {
+            "response_text": "phase complete",
+            "clean_response": "phase complete",
+            "turn_completed": True,
+        }
+
+        result = await plugin._parse_hub_messages(data)
+
+        assert routed == ["phase complete"]
+        assert result["clean_response"] == "phase complete"
+
+    @pytest.mark.asyncio
+    async def test_native_tool_turn_does_not_route_progress_to_coordinator(self):
+        plugin = HubPlugin()
+        routed = []
+
+        async def fake_route(response: str):
+            routed.append(response)
+
+        plugin._maybe_route_to_coordinator = fake_route
+
+        data = {
+            "response_text": "I will inspect that now.",
+            "clean_response": "I will inspect that now.",
+            "has_native_tools": True,
+            "turn_completed": False,
+        }
+
+        await plugin._parse_hub_messages(data)
+
+        assert routed == []
+
+    @pytest.mark.asyncio
+    async def test_incomplete_text_turn_does_not_route_to_coordinator(self):
+        plugin = HubPlugin()
+        routed = []
+
+        async def fake_route(response: str):
+            routed.append(response)
+
+        plugin._maybe_route_to_coordinator = fake_route
+
+        data = {
+            "response_text": "continuing investigation",
+            "clean_response": "continuing investigation",
+            "turn_completed": False,
+        }
+
+        await plugin._parse_hub_messages(data)
+
+        assert routed == []
 
 
 # ================================================================== #

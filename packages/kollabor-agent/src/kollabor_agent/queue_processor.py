@@ -1259,6 +1259,7 @@ class QueueProcessor:
                 "tool_results": None,
                 "all_tools": all_tools or [],
                 "has_native_tools": has_native_tools,
+                "turn_completed": self.turn_completed,
             },
             "llm_service",
         )
