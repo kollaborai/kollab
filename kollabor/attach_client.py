@@ -1,5 +1,30 @@
 """Live TUI proxy client for attaching to a running agent.
 
+.. deprecated::
+    This is the LEGACY standalone attach client. It runs as a bare
+    terminal viewer outside the main Kollab application (launched from
+    cli.py `_handle_cli_attach`). The primary attach path is now the
+    in-app proxy mode implemented by
+    `TerminalLLMChat._initialize_attach_proxy()` in
+    `kollabor/application.py`, which provides richer features:
+
+    - RPC client for RemoteStateService (profile/agent/skill switching)
+    - Permission prompt routing via `AttachPermissionBridge`
+    - Widget state refresh from daemon
+    - Pending launch flag drain (--profile, --agent, --skill, etc.)
+    - Daemon death watchdog with graceful shutdown
+    - Hub info registration for status bar display
+    - Ctrl+Z detach (daemon survives) vs Ctrl+C (daemon dies)
+
+    This file is retained for backward compatibility with direct
+    `kollab --attach <identity>` invocations that bypass the full
+    application. The in-app proxy covers all features here (event
+    stream rendering, input forwarding, detach) plus many more.
+
+    The companion `kollabor/llm/permissions/attach_bridge.py` is NOT
+    a replacement for this file -- it handles a different concern
+    (routing permission prompts to visible attach clients via DisplayTap).
+
 Connects to an agent's unix socket, subscribes to its display
 event stream, and renders the output in the local terminal.
 Supports optional interactive mode for input injection.
