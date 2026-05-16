@@ -19,5 +19,13 @@ python -m pytest \
   tests/unit/llm/test_agent_hud.py \
   tests/unit/test_hub_wake_order.py \
   tests/unit/test_hub_msg_parsing.py \
+  tests/unit/test_hub_mesh_force.py \
+  tests/unit/test_hub_identity_mailbox.py \
+  tests/unit/test_hub_dns_liveness.py \
+  tests/unit/test_hub_delivery_policy.py \
+  tests/unit/test_hub_delivery_trace.py \
+  tests/unit/test_hub_remote_trust.py \
+  tests/unit/test_hub_pending_replies.py \
+  tests/unit/test_ghost_response.py \
   tests/unit/tui/test_permission_prompt_render.py \
   tests/test_hub_rpc_integration.py

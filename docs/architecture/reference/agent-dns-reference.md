@@ -2,7 +2,7 @@
 title: "Agent DNS: Discovery, Identity & Trust"
 doc_type: architecture-reference
 created: 2026-04-11
-modified: 2026-04-11
+modified: 2026-05-15
 status: reference
 ---
 # Agent DNS: Discovery, Identity & Trust
@@ -126,6 +126,8 @@ Combines A-record (address), SRV-record (capabilities), and TXT-record
 | `public_key` | str | Ed25519 public key (hex) |
 | `attestation` | Attestation | Signed identity proof |
 | `trust_score` | float | 0.0-1.0, starts neutral at 0.5 |
+| `endpoint_state` | str | Current endpoint freshness: "fresh" or "stale" |
+| `last_endpoint_seen` | float | Last time the socket or endpoint was confirmed live |
 | `ttl` | float | Seconds before record considered stale |
 
 Identity format follows ARDP: `agent:<designation>@<authority>`
@@ -178,6 +180,52 @@ DNS-like agent registry providing:
 - **Capability queries** (SRV-record): capability -> list of agents
 - **Bulk queries**: by runtime, by caste
 - **Liveness maintenance**: cross-reference with presence data
+
+## Trust, Liveness, And Delivery Boundaries
+
+Agent DNS is the durable identity and trust registry. It is not the sole
+delivery path and it must not delete trust decisions because a runtime process
+went offline.
+
+- identity: stable designation, authority, public key, and capabilities
+- trust: approval state, rejection state, trust score, endorsements
+- liveness: current socket or endpoint freshness
+- delivery: policy result plus socket, mailbox, or remote transport
+- wake: independent decision about whether a message should enter the LLM
+
+Approved and rejected trust records survive liveness refresh. Liveness refresh
+may mark an endpoint stale, but it cannot silently erase approval state.
+
+Remote agents must use signed envelopes. Unknown remote agents are quarantined
+until explicitly approved. Local same-project agents are allowed by default
+with a warning when DNS freshness is missing, unless strict local mode is on.
+
+Delivery is handled outside DNS:
+
+- `plugins/hub/delivery.py` decides whether a sender can deliver, reject, or
+  quarantine a message.
+- `plugins/hub/messenger.py` owns socket and mailbox transport.
+- `plugins/hub/plugin.py` wires delivery, wake classification, and HUD injection.
+- `plugins/hub/task_ledger.py` tracks expected replies so coordinator promises
+  do not vanish after restart.
+
+## Troubleshooting Delivery
+
+Use these checks when a worker says it reported back but koordinator did not
+wake:
+
+```bash
+rg "Message from .* blocked|queued_identity_mailbox|quarantined|socket_send_failed" ~/.kollab -g "*.log" -g "*.jsonl"
+python -m pytest tests/unit/test_hub_dns_liveness.py tests/unit/test_hub_delivery_policy.py tests/unit/test_hub_pending_replies.py -q
+```
+
+The important question is not "did the peer speak?" It is:
+
+1. was the message created?
+2. was the sender policy accepted, rejected, or quarantined?
+3. was the message socket-sent or identity-mailbox queued?
+4. was the message injected into the recipient's HUD or LLM turn?
+5. did wake classification decide `wake`, `observe`, or `buffer`?
 
 ### Standards Export
 
