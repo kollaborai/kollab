@@ -58,6 +58,9 @@ class AgentRegistry:
             existing.current_task = record.current_task
             existing.is_coordinator = record.is_coordinator
             existing.last_seen = time.time()
+            existing.last_endpoint_seen = existing.last_seen
+            existing.endpoint_state = "fresh"
+            existing.tags["endpoint_state"] = "fresh"
             existing.runtime = record.runtime
             existing.protocols = record.protocols
             # Update capabilities if provided (don't clear existing)
@@ -75,6 +78,9 @@ class AgentRegistry:
         else:
             record.registered_at = time.time()
             record.last_seen = time.time()
+            record.last_endpoint_seen = record.last_seen
+            record.endpoint_state = "fresh"
+            record.tags["endpoint_state"] = "fresh"
             self._records[record.designation] = record
             self._save()
             logger.info(f"registered DNS record for {record.designation}")
@@ -226,6 +232,12 @@ class AgentRegistry:
 
     # --- Maintenance ---
 
+    def _mark_endpoint_stale(self, record: AgentRecord) -> None:
+        """Mark runtime endpoint stale without deleting identity/trust state."""
+        record.state = "offline"
+        record.endpoint_state = "stale"
+        record.tags["endpoint_state"] = "stale"
+
     def refresh_liveness(
         self,
         live_agents: List[AgentRuntime],
@@ -255,15 +267,21 @@ class AgentRegistry:
                 or designation in preserved
             ):
                 record.last_seen = time.time()
+                record.last_endpoint_seen = record.last_seen
+                record.endpoint_state = "fresh"
+                record.tags["endpoint_state"] = "fresh"
             elif record.is_stale:
-                stale.append(designation)
+                if record.approval_state in {"approved", "auto_approved", "rejected"}:
+                    self._mark_endpoint_stale(record)
+                else:
+                    stale.append(designation)
 
         for designation in stale:
             del self._records[designation]
             removed += 1
 
         # Always persist — last_seen updates and removals
-        self._save()
+        self._save(deleted_keys=stale)
         if removed > 0:
             logger.info(f"removed {removed} stale DNS records")
 
@@ -376,6 +394,9 @@ class AgentRegistry:
 
     # --- Internal ---
 
-    def _save(self) -> None:
+    def _save(self, deleted_keys: Optional[List[str]] = None) -> None:
         """Persist records to storage."""
-        self._storage.save_registry(self._records)
+        if hasattr(self._storage, "merge_save_registry"):
+            self._storage.merge_save_registry(self._records, deleted_keys=deleted_keys)
+        else:
+            self._storage.save_registry(self._records)

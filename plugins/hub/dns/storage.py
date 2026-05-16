@@ -12,7 +12,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..presence import get_hub_dir
 from .models import AgentRecord, ReputationScore
@@ -126,6 +126,18 @@ class DNSStorage:
             "updated_at": time.time(),
         }
         _locked_atomic_write(self._registry_path, data)
+
+    def merge_save_registry(
+        self,
+        records: Dict[str, AgentRecord],
+        deleted_keys: Optional[List[str]] = None,
+    ) -> None:
+        """Merge-save records so concurrent agents do not clobber trust state."""
+        existing = self.load_registry()
+        for key in deleted_keys or []:
+            existing.pop(key, None)
+        existing.update(records)
+        self.save_registry(existing)
 
     # --- Reputation ---
 

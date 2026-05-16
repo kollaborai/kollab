@@ -245,6 +245,8 @@ class AgentRecord:
     is_coordinator: bool = False
     registered_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
+    endpoint_state: str = "fresh"
+    last_endpoint_seen: float = field(default_factory=time.time)
     ttl: float = 30.0  # seconds before record considered stale
     caste: str = ""  # gem caste: communication, engineering, etc.
     tags: Dict[str, str] = field(default_factory=dict)
@@ -299,6 +301,8 @@ class AgentRecord:
             "is_coordinator": self.is_coordinator,
             "registered_at": self.registered_at,
             "last_seen": self.last_seen,
+            "endpoint_state": self.endpoint_state,
+            "last_endpoint_seen": self.last_endpoint_seen,
             "ttl": self.ttl,
             "caste": self.caste,
             "tags": self.tags,
