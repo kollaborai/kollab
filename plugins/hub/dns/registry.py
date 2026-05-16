@@ -12,7 +12,7 @@ Managed by the coordinator (primary writer), readable by all agents
 
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from kollabor_agent.runtime import AgentRuntime
 
@@ -226,7 +226,11 @@ class AgentRegistry:
 
     # --- Maintenance ---
 
-    def refresh_liveness(self, live_agents: List[AgentRuntime]) -> int:
+    def refresh_liveness(
+        self,
+        live_agents: List[AgentRuntime],
+        preserve_designations: Optional[Iterable[str]] = None,
+    ) -> int:
         """Cross-reference registry with live presence data.
 
         Updates last_seen for live agents, removes stale records.
@@ -234,6 +238,7 @@ class AgentRegistry:
         Returns count of records removed.
         """
         self._ensure_loaded()
+        preserved = {d for d in (preserve_designations or []) if d}
         live_ids = {a.agent_id for a in live_agents}
         live_designations = set()
         for a in live_agents:
@@ -244,7 +249,11 @@ class AgentRegistry:
         removed = 0
         stale = []
         for designation, record in self._records.items():
-            if record.agent_id in live_ids or designation in live_designations:
+            if (
+                record.agent_id in live_ids
+                or designation in live_designations
+                or designation in preserved
+            ):
                 record.last_seen = time.time()
             elif record.is_stale:
                 stale.append(designation)

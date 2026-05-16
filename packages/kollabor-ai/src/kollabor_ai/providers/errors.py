@@ -362,6 +362,25 @@ class ServerError(ProviderError):
         return data
 
 
+class EmptyResponseError(ProviderError):
+    """Provider returned no content, tool calls, usage, or raw chunks."""
+
+    def __init__(
+        self,
+        message: str,
+        provider: str,
+        error_code: Optional[str] = None,
+        original_error: Optional[Exception] = None,
+        safe_message: Optional[str] = None,
+    ):
+        if safe_message is None:
+            safe_message = (
+                f"{provider.capitalize()} returned an empty response. "
+                "Please try again."
+            )
+        super().__init__(message, provider, error_code, original_error, safe_message)
+
+
 def map_openai_error(error: Exception, provider: str = "openai") -> ProviderError:
     """
     Map OpenAI API exceptions to unified error types.

@@ -1109,3 +1109,21 @@ class AgentMessenger:
             except Exception:
                 pass
         return messages
+
+    @staticmethod
+    def read_mailboxes(agent_keys: List[str]) -> List[HubMessage]:
+        """Read and consume mailboxes for all durable addresses.
+
+        Agents get a fresh agent_id on restart, but their hub identity
+        stays stable. Reading both prevents offline messages from being
+        stranded in the old session's mailbox.
+        """
+        messages: List[HubMessage] = []
+        seen: set[str] = set()
+        for key in dict.fromkeys(k for k in agent_keys if k):
+            for msg in AgentMessenger.read_mailbox(key):
+                if msg.id in seen:
+                    continue
+                seen.add(msg.id)
+                messages.append(msg)
+        return sorted(messages, key=lambda msg: msg.timestamp)

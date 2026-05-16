@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from kollabor_ai.profile_manager import LLMProfile
+from kollabor_ai.providers.errors import EmptyResponseError
 from kollabor_ai.providers.models import (
     TextDelta,
     ThinkingDelta,
@@ -439,6 +440,7 @@ class APICommunicationService:
 
                 error_str = str(e)
                 is_rate_limit = isinstance(e, RateLimitError) or "429" in error_str
+                is_empty_response = isinstance(e, EmptyResponseError)
 
                 # Server errors (500, 502, 503, 504) and network errors are transient
                 is_server_error = any(
@@ -446,7 +448,7 @@ class APICommunicationService:
                     for code in ("500", "502", "503", "504", "Network error")
                 )
 
-                is_retryable = is_rate_limit or is_server_error
+                is_retryable = is_rate_limit or is_server_error or is_empty_response
 
                 if is_retryable and attempt < max_retries:
                     # Use retry_after from headers if available, else exponential backoff
@@ -454,12 +456,17 @@ class APICommunicationService:
                     delay = retry_after if retry_after else base_delay * (2**attempt)
                     delay = min(delay, 120.0)  # cap at 2 minutes
 
-                    error_type = "Rate limited" if is_rate_limit else "Server error"
+                    if is_rate_limit:
+                        error_type = "Rate limited"
+                    elif is_empty_response:
+                        error_type = "Empty response"
+                    else:
+                        error_type = "Server error"
                     logger.warning(
                         f"{error_type} (attempt {attempt + 1}/{max_retries}), "
                         f"retrying in {delay:.0f}s: {error_str[:120]}"
                     )
-                    if on_rate_limit:
+                    if on_rate_limit and is_rate_limit:
                         try:
                             await on_rate_limit(attempt + 1, max_retries, int(delay))
                         except Exception:
@@ -536,6 +543,7 @@ class APICommunicationService:
 
         # Extract text content
         content = response.get_text_content()
+        self._raise_if_empty_provider_response(content)
 
         logger.debug(
             f"Provider response received (tokens={response.usage.total_tokens}, "
@@ -759,12 +767,36 @@ class APICommunicationService:
                     "or transformer/accumulator loss."
                 )
 
+            self._raise_if_empty_provider_response(content)
+
             return content
 
         finally:
             # Reset tool accumulator
             if self._tool_accumulator:
                 self._tool_accumulator.reset()
+
+    def _raise_if_empty_provider_response(self, content: str) -> None:
+        """Reject provider responses with no observable response signal."""
+        if (content or "").strip():
+            return
+        if self.last_tool_calls or self.last_thinking_content:
+            return
+        token_usage = self.last_token_usage or {}
+        total_tokens = int(token_usage.get("total_tokens") or 0)
+        if self.last_raw_chunks or total_tokens:
+            return
+
+        provider = (
+            getattr(self._provider, "provider_name", None)
+            or getattr(self, "provider_type", None)
+            or "provider"
+        )
+        raise EmptyResponseError(
+            "provider returned no content, tool calls, thinking, usage, or raw chunks",
+            provider=str(provider),
+            error_code="empty_response",
+        )
 
     def _prepare_messages(
         self, conversation_history: List[Any], max_history: Optional[int]

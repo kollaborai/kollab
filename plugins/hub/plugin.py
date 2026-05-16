@@ -2446,6 +2446,8 @@ class HubPlugin(BasePlugin):
             content, sender_has_active_task=sender_has_task
         ):
             metadata["task_report"] = True
+        elif self._has_request_evidence(content):
+            metadata["task_assignment"] = True
 
         # Route the message
         msg = HubMessage(
@@ -2468,6 +2470,7 @@ class HubPlugin(BasePlugin):
         await self._bridge_forward(f"[{my_name} -> {target}] {content}")
 
         # Build output — check rejections first
+        queued_for = list((msg.metadata or {}).get("_queued_for", []))
         if rejections:
             parts = []
             for ident, reason in rejections:
@@ -2476,6 +2479,16 @@ class HubPlugin(BasePlugin):
                 f"[hub_msg] rejected: {'; '.join(parts)}. "
                 f"send with force=\"true\" to break through."
             )
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                output=output,
+                error=output,
+                metadata=metadata,
+            )
+        elif queued_for:
+            output = f"queued for {', '.join(queued_for)} (offline)"
         elif self._presence:
             known = self._presence.scan_all_presence()
             known_ids = {a.identity for a in known}
@@ -2515,11 +2528,13 @@ class HubPlugin(BasePlugin):
         result_text = await self._handle_broadcast_command(
             content, force=force_attr in ("true", "yes", "1")
         )
+        rejected = "rejected:" in result_text.lower()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_broadcast",
-            success=True,
+            success=not rejected,
             output=result_text,
+            error=result_text if rejected else None,
         )
 
     async def _handle_hub_stop_tool(self, tool_data: dict):
@@ -4115,7 +4130,15 @@ class HubPlugin(BasePlugin):
                     if self._dns_registry and self._presence:
                         try:
                             live_agents = self._presence.get_cached_agents()
-                            self._dns_registry.refresh_liveness(live_agents)
+                            preserve = (
+                                [self._identity.identity]
+                                if self._identity
+                                else []
+                            )
+                            self._dns_registry.refresh_liveness(
+                                live_agents,
+                                preserve_designations=preserve,
+                            )
                             if self._dns_reputation:
                                 for record in self._dns_registry.get_all():
                                     trust = self._dns_reputation.get_trust(
@@ -4236,7 +4259,9 @@ class HubPlugin(BasePlugin):
             try:
                 await asyncio.sleep(poll_interval)
                 if self._identity:
-                    messages = AgentMessenger.read_mailbox(self._identity.agent_id)
+                    messages = AgentMessenger.read_mailboxes(
+                        [self._identity.agent_id, self._identity.identity]
+                    )
                     for msg in messages:
                         await self._on_message_received(msg)
             except asyncio.CancelledError:
@@ -6227,6 +6252,7 @@ class HubPlugin(BasePlugin):
         # Self already sees the message via _display_outgoing_message
         agents = await self._presence.discover_agents_async()
         my_id = self._identity.agent_id if self._identity else ""
+        delivered_identities: set[str] = set()
 
         # Gatekeeper: check if sender is approved for mesh participation.
         # Unapproved agents (pending/rejected) can only receive messages,
@@ -6240,7 +6266,8 @@ class HubPlugin(BasePlugin):
             sender_approved = self._dns_registry.is_approved(
                 self._identity.identity
             )
-        if not sender_approved:
+        force_flag = bool(getattr(message, "force", False))
+        if not sender_approved and not force_flag:
             record = self._dns_registry.resolve(self._identity.identity)
             approval_state = record.approval_state if record else "unknown"
             logger.warning(
@@ -6248,6 +6275,12 @@ class HubPlugin(BasePlugin):
                 f"not approved (state={approval_state})"
             )
             return [("mesh", "sender not approved for mesh participation")]
+        if not sender_approved and force_flag:
+            self._loop_metrics["force_breakthroughs"] += 1
+            logger.info(
+                f"Force breakthrough: unapproved sender "
+                f"{self._identity.identity} sending despite mesh approval gate"
+            )
 
         for agent in agents:
             if agent.agent_id == my_id:
@@ -6265,8 +6298,29 @@ class HubPlugin(BasePlugin):
                 else:
                     reason = "in waiting state"
                 rejections.append((agent.identity, reason))
+            else:
+                delivered_identities.add(agent.identity)
+
+        if self._should_queue_offline_direct_target(message, delivered_identities):
+            queued_for = list((message.metadata or {}).get("_queued_for", []))
+            if message.to not in queued_for:
+                message.metadata["_queued_for"] = [*queued_for, message.to]
+            await AgentMessenger.send_to_file(message.to, message)
 
         return rejections
+
+    def _should_queue_offline_direct_target(
+        self, message: HubMessage, delivered_identities: set[str]
+    ) -> bool:
+        """Queue direct messages for durable agent identities when offline."""
+        target = (message.to or "").strip()
+        if not target or target in ("*", "all", "everyone", "team", "project"):
+            return False
+        if target in delivered_identities:
+            return False
+        if self._identity and target == self._identity.identity:
+            return False
+        return target == "koordinator" or target in POOL_BY_NAME
 
     # Control-plane actions that must bypass the WAITING cooldown gate.
     # These never trigger an LLM turn — they only update silent local state.
@@ -6355,6 +6409,8 @@ class HubPlugin(BasePlugin):
         success = await AgentMessenger.send_to_agent(agent.socket_path, message)
         if not success:
             await AgentMessenger.send_to_file(agent.agent_id, message)
+            if agent.identity and agent.identity != agent.agent_id:
+                await AgentMessenger.send_to_file(agent.identity, message)
         return True
 
     def _resolve_scope(self, target: str) -> str:
