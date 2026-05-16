@@ -32,6 +32,7 @@ from kollabor_plugins import BasePlugin
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
+from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
 from .messaging_bridge import BridgeManager, IncomingMessage, MessagingBridge
 from .messenger import AgentMessenger, AgentSocketServer
 from .models import POOL_BY_NAME, POOL_IDENTITIES, AgentState, HubMessage, MessageScope
@@ -6223,6 +6224,71 @@ class HubPlugin(BasePlugin):
 
         return data
 
+    def _decide_sender_delivery(self, message: HubMessage):
+        """Decide whether this local sender may route a hub message."""
+        approval_state = "unknown"
+        if self._dns_registry and self._identity:
+            record = self._dns_registry.resolve(self._identity.identity)
+            approval_state = record.approval_state if record else "unknown"
+
+        strict_local_unknown = bool(
+            self.config
+            and self.config.get("plugins.hub.strict_local_unknown_senders", False)
+        )
+        policy = DeliveryPolicy(strict_local_unknown=strict_local_unknown)
+        return policy.decide_sender(
+            SenderContext(
+                sender=(
+                    self._identity.identity if self._identity else message.from_identity
+                ),
+                is_self=True,
+                is_coordinator=bool(self._identity and self._identity.is_coordinator),
+                is_remote=bool((message.metadata or {}).get("remote")),
+                approval_state=approval_state,
+                same_project=True,
+                force=bool(getattr(message, "force", False)),
+            )
+        )
+
+    async def _quarantine_hub_message(
+        self, message: HubMessage, reason: str
+    ) -> None:
+        """Store a message that failed remote trust checks for inspection."""
+        message.metadata["quarantined"] = True
+        message.metadata["quarantine_reason"] = reason
+        target = self._identity.identity if self._identity else "unknown"
+        await AgentMessenger.send_to_file(f"{target}.quarantine", message)
+
+    def _delivery_trace(self) -> DeliveryTrace:
+        """Return the hub delivery trace writer."""
+        from .presence import get_hub_dir
+
+        if not hasattr(self, "_hub_delivery_trace"):
+            self._hub_delivery_trace = DeliveryTrace(
+                get_hub_dir() / "delivery_trace.jsonl"
+            )
+        return self._hub_delivery_trace
+
+    def _trace_delivery(
+        self,
+        message: HubMessage,
+        event: str,
+        *,
+        target: str = "",
+        detail: str = "",
+    ) -> None:
+        """Best-effort delivery trace recording."""
+        try:
+            self._delivery_trace().record(
+                message_id=message.id,
+                event=event,
+                sender=message.from_identity,
+                target=target or message.to,
+                detail=detail,
+            )
+        except Exception as e:
+            logger.debug("hub delivery trace failed: %s", e)
+
     async def _route_message(
         self, message: HubMessage
     ) -> List[Tuple[str, str]]:
@@ -6254,32 +6320,22 @@ class HubPlugin(BasePlugin):
         my_id = self._identity.agent_id if self._identity else ""
         delivered_identities: set[str] = set()
 
-        # Gatekeeper: check if sender is approved for mesh participation.
-        # Unapproved agents (pending/rejected) can only receive messages,
-        # not send to others. Coordinator and self always bypass.
-        sender_approved = True
-        if (
-            self._dns_registry
-            and self._identity
-            and not self._identity.is_coordinator
-        ):
-            sender_approved = self._dns_registry.is_approved(
-                self._identity.identity
-            )
-        force_flag = bool(getattr(message, "force", False))
-        if not sender_approved and not force_flag:
-            record = self._dns_registry.resolve(self._identity.identity)
-            approval_state = record.approval_state if record else "unknown"
+        decision = self._decide_sender_delivery(message)
+        if decision.mode == "reject":
             logger.warning(
-                f"Message from {self._identity.identity} blocked: "
-                f"not approved (state={approval_state})"
+                "Message from %s rejected: %s",
+                self._identity.identity if self._identity else message.from_identity,
+                decision.reason,
             )
-            return [("mesh", "sender not approved for mesh participation")]
-        if not sender_approved and force_flag:
-            self._loop_metrics["force_breakthroughs"] += 1
-            logger.info(
-                f"Force breakthrough: unapproved sender "
-                f"{self._identity.identity} sending despite mesh approval gate"
+            return [("mesh", decision.reason)]
+        if decision.mode == "quarantine":
+            await self._quarantine_hub_message(message, decision.reason)
+            return [("mesh", decision.reason)]
+        if decision.trace_level == "warning":
+            logger.warning(
+                "Message from %s allowed with warning: %s",
+                self._identity.identity if self._identity else message.from_identity,
+                decision.reason,
             )
 
         for agent in agents:
