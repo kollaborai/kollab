@@ -24,6 +24,7 @@ accepted decisions, historical records, or archive.
 
 - [reference/altview-framework-reference.md](reference/altview-framework-reference.md) - Alternate-buffer view lifecycle and session model
 - [reference/attach-mode-rendering-pipeline-reference.md](reference/attach-mode-rendering-pipeline-reference.md) - Attach client and daemon rendering path
+- [reference/agent-hud-reference.md](reference/agent-hud-reference.md) - Model-facing HUD diffs and hub wake rules
 - [reference/agent-dns-reference.md](reference/agent-dns-reference.md) - Agent discovery, identity, and trust notes
 
 ## Decisions

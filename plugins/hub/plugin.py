@@ -5409,17 +5409,20 @@ class HubPlugin(BasePlugin):
                         ]
 
                 async with self._history_lock:
-                    if hasattr(llm_service, "merge_pending_system_messages"):
-                        formatted = llm_service.merge_pending_system_messages(
-                            formatted
-                        )
-                    llm_service.conversation_history.append(
-                        ConversationMessage(
-                            role="user",
+                    hud_content = formatted
+                    drain_hud_now = should_trigger_llm and wake_decision.mode != "buffer"
+                    if hasattr(llm_service, "queue_agent_hud"):
+                        llm_service.queue_agent_hud(
+                            section="hub",
+                            label=f"{message.from_identity}->{message.to}",
                             content=formatted,
-                            metadata=msg_metadata,
                         )
-                    )
+                        hud_content = (
+                            llm_service.drain_pending_agent_hud()
+                            if drain_hud_now
+                            else ""
+                        )
+
                     # Log to JSONL so injected hub messages appear in conversation log
                     if (
                         hasattr(llm_service, "conversation_logger")
@@ -5427,7 +5430,7 @@ class HubPlugin(BasePlugin):
                     ):
                         try:
                             await llm_service.conversation_logger.log_system_message(
-                                formatted,
+                                hud_content or formatted,
                                 parent_uuid=getattr(
                                     llm_service, "current_parent_uuid", None
                                 ),
@@ -5435,6 +5438,16 @@ class HubPlugin(BasePlugin):
                             )
                         except Exception:
                             pass
+                    if should_trigger_llm and hud_content:
+                        msg_metadata["agent_hud"] = True
+                        msg_metadata["agent_hud_sources"] = ["hub"]
+                        llm_service.conversation_history.append(
+                            ConversationMessage(
+                                role="user",
+                                content=hud_content,
+                                metadata=msg_metadata,
+                            )
+                        )
                 # Trigger LLM if this agent is the intended target (or broadcast).
                 # Skip departures to avoid feedback loops.
                 # Skip human-elsewhere (human typing in another agent's window).

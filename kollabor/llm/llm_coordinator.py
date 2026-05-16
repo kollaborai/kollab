@@ -34,11 +34,11 @@ from .message_handler import MessageHandler
 from .session_manager import SessionManager
 from .status_service import StatusService
 from .streaming_handler import StreamingHandler
-from .system_messages import (
-    PendingSystemMessage,
-    format_system_message,
-    merge_system_messages_with_user_message,
-    normalize_system_subtype,
+from .agent_hud import (
+    AgentHudEntry,
+    format_agent_hud,
+    merge_agent_hud_with_user_message,
+    normalize_hud_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,25 +102,29 @@ class LLMService:
     async def inject_system_message(
         self, content: str, subtype: str = "injection"
     ) -> None:
-        """Inject a system message into conversation history AND log it.
+        """Queue an agent HUD entry and log it.
 
-        Use this instead of raw conversation_history.append() so the
-        message appears in the JSONL conversation log for debugging.
+        Use this for non-human runtime context. It must not create a
+        standalone model turn; queued HUD diffs are merged into the next
+        real user or actionable hub turn.
 
         Args:
             content: Message content to inject
             subtype: Message subtype for logging (e.g. 'hub_result', 'nudge')
         """
-        normalized_subtype = normalize_system_subtype(subtype)
-        formatted_content = format_system_message(content, subtype=normalized_subtype)
-
-        if not hasattr(self, "_pending_system_messages"):
-            self._pending_system_messages = []
-        self._pending_system_messages.append(
-            PendingSystemMessage(subtype=normalized_subtype, content=content)
+        normalized_subtype = normalize_hud_label(subtype, fallback="injection")
+        entry = self.queue_agent_hud(
+            section="system",
+            label=normalized_subtype,
+            content=content,
         )
+        formatted_content = format_agent_hud([entry]) if entry else ""
 
-        if hasattr(self, "conversation_logger") and self.conversation_logger:
+        if (
+            formatted_content
+            and hasattr(self, "conversation_logger")
+            and self.conversation_logger
+        ):
             await self.conversation_logger.log_system_message(
                 formatted_content,
                 parent_uuid=getattr(self, "current_parent_uuid", None),
@@ -342,7 +346,7 @@ class LLMService:
 
         # Conversation state
         self.conversation_history: List[ConversationMessage] = []
-        self._pending_system_messages: List[PendingSystemMessage] = []
+        self._pending_agent_hud: List[AgentHudEntry] = []
         # Note: max_queue_size is now owned by QueueProcessor, accessed via property
 
         # Initialize conversation logger with intelligence features
@@ -870,9 +874,9 @@ class LLMService:
 
     async def _process_message_batch(self, messages: List[str]):
         """Process a batch of messages. Delegates to QueueProcessor."""
-        if self._pending_system_messages:
+        if self._pending_agent_hud:
             combined = "\n".join(messages)
-            messages = [self.merge_pending_system_messages(combined)]
+            messages = [self.merge_pending_agent_hud(combined)]
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=self.current_parent_uuid,
@@ -880,30 +884,64 @@ class LLMService:
 
     async def _continue_conversation(self):
         """Continue an ongoing conversation. Delegates to QueueProcessor."""
-        if self._pending_system_messages:
-            self.current_parent_uuid = self._add_conversation_message(
-                ConversationMessage(
-                    role="user",
-                    content=self.merge_pending_system_messages(""),
-                ),
-                parent_uuid=self.current_parent_uuid,
-            )
+        if self._pending_agent_hud and getattr(
+            self._queue_processor, "turn_completed", False
+        ):
+            hud_content = self.drain_pending_agent_hud()
+            if hud_content:
+                from kollabor_events.data_models import ConversationMessage
+
+                self.current_parent_uuid = self._add_conversation_message(
+                    ConversationMessage(
+                        role="user",
+                        content=hud_content,
+                        metadata={
+                            "agent_hud": True,
+                            "agent_hud_sources": ["pending"],
+                        },
+                    ),
+                    parent_uuid=self.current_parent_uuid,
+                )
         self.current_parent_uuid = await self._queue_processor.continue_conversation(
             current_parent_uuid=self.current_parent_uuid,
         )
 
-    def pop_pending_system_messages(self) -> List[PendingSystemMessage]:
-        """Drain queued system/context messages waiting for the next turn."""
-        if not hasattr(self, "_pending_system_messages"):
-            self._pending_system_messages = []
-        pending = list(self._pending_system_messages)
-        self._pending_system_messages.clear()
+    def queue_agent_hud(
+        self,
+        section: str,
+        label: str,
+        content: str,
+    ) -> AgentHudEntry | None:
+        """Queue one changed HUD item for the next model-visible turn."""
+        body = (content or "").strip()
+        if not body:
+            return None
+        if not hasattr(self, "_pending_agent_hud"):
+            self._pending_agent_hud = []
+        entry = AgentHudEntry(
+            section=normalize_hud_label(section, fallback="state"),
+            label=normalize_hud_label(label, fallback="info"),
+            content=body,
+        )
+        self._pending_agent_hud.append(entry)
+        return entry
+
+    def pop_pending_agent_hud(self) -> List[AgentHudEntry]:
+        """Drain queued HUD diffs waiting for the next turn."""
+        if not hasattr(self, "_pending_agent_hud"):
+            self._pending_agent_hud = []
+        pending = list(self._pending_agent_hud)
+        self._pending_agent_hud.clear()
         return pending
 
-    def merge_pending_system_messages(self, user_message: str) -> str:
-        """Return one user payload containing queued system context + message."""
-        return merge_system_messages_with_user_message(
-            self.pop_pending_system_messages(),
+    def drain_pending_agent_hud(self) -> str:
+        """Return only pending HUD diffs, without creating a turn by itself."""
+        return format_agent_hud(self.pop_pending_agent_hud())
+
+    def merge_pending_agent_hud(self, user_message: str) -> str:
+        """Return one user payload containing queued HUD diffs + message."""
+        return merge_agent_hud_with_user_message(
+            self.pop_pending_agent_hud(),
             user_message,
         )
 

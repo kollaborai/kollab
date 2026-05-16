@@ -807,13 +807,13 @@ class APICommunicationService:
             if meta.get("tool_call_id"):
                 formatted["tool_call_id"] = meta["tool_call_id"]
 
-            # Preserve internal system-message labels for raw logs. Provider
-            # adapters ignore these keys, but _raw.jsonl consumers need to
-            # distinguish context injections from real human user messages.
-            if meta.get("system_message"):
-                formatted["system_message"] = True
-            if meta.get("subtype"):
-                formatted["subtype"] = meta["subtype"]
+            # Preserve HUD labels for raw logs. Provider adapters ignore
+            # these keys, but _raw.jsonl consumers need to distinguish
+            # instrumentation from real human user messages.
+            if meta.get("agent_hud"):
+                formatted["agent_hud"] = True
+            if meta.get("agent_hud_sources"):
+                formatted["agent_hud_sources"] = meta["agent_hud_sources"]
 
             messages.append(formatted)
 
