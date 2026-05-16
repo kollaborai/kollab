@@ -2463,6 +2463,23 @@ class HubPlugin(BasePlugin):
             reply_to=reply_to,
             metadata=metadata,
         )
+        if (
+            metadata.get("task_assignment")
+            and self._task_ledger
+            and target not in ("all", "*", "everyone", "team", "project")
+        ):
+            try:
+                self._task_ledger.expect_reply(
+                    task_id=str(metadata.get("task_id") or msg.id),
+                    assignee=target,
+                    requested_by=(
+                        self._identity.identity if self._identity else "unknown"
+                    ),
+                    message_id=msg.id,
+                    deadline_seconds=int(metadata.get("deadline_seconds", 120)),
+                )
+            except Exception as e:
+                logger.debug("failed to record expected hub reply: %s", e)
         rejections = await self._route_message(msg)
         self._display_outgoing_message(target, content)
 
@@ -5365,6 +5382,15 @@ class HubPlugin(BasePlugin):
                 is_human_elsewhere=is_human_elsewhere,
                 llm_service=llm_service,
             )
+            if self._task_ledger and wake_decision.mode == "wake":
+                try:
+                    self._task_ledger.resolve_reply(
+                        assignee=message.from_identity,
+                        evidence=message.content,
+                        message_id=message.id,
+                    )
+                except Exception as e:
+                    logger.debug("failed to resolve expected hub reply: %s", e)
             thread_id = getattr(message, "thread_id", "")
             reply_to = getattr(message, "reply_to", "")
             thread_header = ""
@@ -5438,6 +5464,24 @@ class HubPlugin(BasePlugin):
                     hud_content = formatted
                     drain_hud_now = should_trigger_llm and wake_decision.mode != "buffer"
                     if hasattr(llm_service, "queue_agent_hud"):
+                        pending_replies = []
+                        if self._task_ledger:
+                            try:
+                                pending_replies = self._task_ledger.pending_replies()
+                            except Exception as e:
+                                logger.debug(
+                                    "failed to load pending hub replies: %s", e
+                                )
+                        if pending_replies:
+                            llm_service.queue_agent_hud(
+                                section="hub",
+                                label="pending replies",
+                                content="\n".join(
+                                    f"{item.get('assignee', '?')}: "
+                                    f"{item.get('task_id', '?')}"
+                                    for item in pending_replies[:8]
+                                ),
+                            )
                         llm_service.queue_agent_hud(
                             section="hub",
                             label=f"{message.from_identity}->{message.to}",
@@ -6304,6 +6348,7 @@ class HubPlugin(BasePlugin):
         """
         assert self._presence is not None
         rejections: List[Tuple[str, str]] = []
+        self._trace_delivery(message, "route_started", detail=message.action)
 
         # Log outgoing message to vault (skip cron noise)
         if self._vault and message.from_identity not in ("hub-cron", "task-cron"):
@@ -6322,6 +6367,7 @@ class HubPlugin(BasePlugin):
 
         decision = self._decide_sender_delivery(message)
         if decision.mode == "reject":
+            self._trace_delivery(message, "rejected", detail=decision.reason)
             logger.warning(
                 "Message from %s rejected: %s",
                 self._identity.identity if self._identity else message.from_identity,
@@ -6329,6 +6375,7 @@ class HubPlugin(BasePlugin):
             )
             return [("mesh", decision.reason)]
         if decision.mode == "quarantine":
+            self._trace_delivery(message, "quarantined", detail=decision.reason)
             await self._quarantine_hub_message(message, decision.reason)
             return [("mesh", decision.reason)]
         if decision.trace_level == "warning":
@@ -6362,6 +6409,12 @@ class HubPlugin(BasePlugin):
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
             await AgentMessenger.send_to_file(message.to, message)
+            self._trace_delivery(
+                message,
+                "queued_identity_mailbox",
+                target=message.to,
+                detail="offline direct target",
+            )
 
         return rejections
 
@@ -6405,6 +6458,12 @@ class HubPlugin(BasePlugin):
         # These messages never trigger a LLM turn so there is no loop risk.
         if message.action in self._CONTROL_PLANE_ACTIONS:
             success = await AgentMessenger.send_to_agent(agent.socket_path, message)
+            self._trace_delivery(
+                message,
+                "socket_send_succeeded" if success else "socket_send_failed",
+                target=agent.identity,
+                detail=agent.socket_path,
+            )
             if not success:
                 await AgentMessenger.send_to_file(agent.agent_id, message)
             return True
@@ -6463,10 +6522,28 @@ class HubPlugin(BasePlugin):
                 await self._exit_waiting_state()
 
         success = await AgentMessenger.send_to_agent(agent.socket_path, message)
+        self._trace_delivery(
+            message,
+            "socket_send_succeeded" if success else "socket_send_failed",
+            target=agent.identity,
+            detail=agent.socket_path,
+        )
         if not success:
             await AgentMessenger.send_to_file(agent.agent_id, message)
+            self._trace_delivery(
+                message,
+                "queued_agent_id_mailbox",
+                target=agent.agent_id,
+                detail="socket send failed",
+            )
             if agent.identity and agent.identity != agent.agent_id:
                 await AgentMessenger.send_to_file(agent.identity, message)
+                self._trace_delivery(
+                    message,
+                    "queued_identity_mailbox",
+                    target=agent.identity,
+                    detail="socket send failed",
+                )
         return True
 
     def _resolve_scope(self, target: str) -> str:

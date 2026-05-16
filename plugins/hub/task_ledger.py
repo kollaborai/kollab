@@ -133,6 +133,31 @@ class TaskLedger:
     def _task_path(self, task_id: str) -> Path:
         return self._tasks_dir / f"{task_id}.json"
 
+    def _pending_replies_path(self) -> Path:
+        return self._tasks_dir / "_pending_replies.json"
+
+    def _load_pending_replies(self) -> List[Dict[str, Any]]:
+        path = self._pending_replies_path()
+        if not path.exists():
+            return []
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            replies = data.get("expected_replies", [])
+            return replies if isinstance(replies, list) else []
+        except Exception as e:
+            logger.debug(f"Failed to load pending replies: {e}")
+            return []
+
+    def _save_pending_replies(self, replies: List[Dict[str, Any]]) -> None:
+        path = self._pending_replies_path()
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump({"expected_replies": replies}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.rename(path)
+
     def _save(self, card: TaskCard) -> None:
         card.updated_at = time.time()
         path = self._task_path(card.id)
@@ -183,6 +208,65 @@ class TaskLedger:
 
     def get(self, task_id: str) -> Optional[TaskCard]:
         return self._load(task_id)
+
+    def expect_reply(
+        self,
+        *,
+        task_id: str,
+        assignee: str,
+        requested_by: str,
+        message_id: str,
+        deadline_seconds: int,
+    ) -> None:
+        replies = self._load_pending_replies()
+        replies.append(
+            {
+                "task_id": task_id,
+                "assignee": assignee,
+                "requested_by": requested_by,
+                "message_id": message_id,
+                "created_at": time.time(),
+                "deadline_seconds": deadline_seconds,
+                "status": "pending",
+            }
+        )
+        self._save_pending_replies(replies)
+
+    def pending_replies(self) -> List[Dict[str, Any]]:
+        return [
+            item
+            for item in self._load_pending_replies()
+            if item.get("status") == "pending"
+        ]
+
+    def resolve_reply(
+        self,
+        *,
+        assignee: str,
+        evidence: str,
+        message_id: str,
+    ) -> bool:
+        strong_markers = (
+            "task complete",
+            "shipped",
+            "resolved",
+            "verdict",
+            "no blockers",
+            "review delivered",
+            "done",
+        )
+        if not any(marker in evidence.lower() for marker in strong_markers):
+            return False
+
+        replies = self._load_pending_replies()
+        for item in replies:
+            if item.get("assignee") == assignee and item.get("status") == "pending":
+                item["status"] = "resolved"
+                item["resolved_by_message_id"] = message_id
+                item["resolved_at"] = time.time()
+                self._save_pending_replies(replies)
+                return True
+        return False
 
     def get_active_for(self, identity: str) -> List[TaskCard]:
         """Get all active tasks assigned to this agent."""
