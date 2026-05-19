@@ -35,6 +35,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class MCPRequestTimeoutError(TimeoutError):
+    """Raised when an MCP JSON-RPC request times out and closes the connection."""
+
+
 def _get_loop():
     """Return the running event loop, or create one if none is running."""
     try:
@@ -56,17 +60,21 @@ def _get_version() -> str:
 class MCPServerConnection:
     """Manages a connection to an MCP server via stdio."""
 
+    DEFAULT_REQUEST_TIMEOUT = 300.0
+
     def __init__(
         self,
         server_name: str,
         command: str,
         cwd: Optional[Path] = None,
         extra_env: Optional[dict[str, str]] = None,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     ):
         self.server_name = server_name
         self.command = command
         self.cwd = cwd
         self.extra_env = extra_env or {}
+        self.request_timeout = request_timeout
         self.process: Optional[asyncio.subprocess.Process] = None
         self.initialized = False
         self._read_buffer = ""
@@ -112,7 +120,10 @@ class MCPServerConnection:
         }
 
         logger.debug(f"Sending initialize request to {self.server_name}")
-        response = await self._send_request(request)
+        try:
+            response = await self._send_request(request)
+        except MCPRequestTimeoutError:
+            response = None
 
         if response is None:
             logger.warning(
@@ -179,7 +190,10 @@ class MCPServerConnection:
             "params": {},
         }
 
-        response = await self._send_request(request)
+        try:
+            response = await self._send_request(request)
+        except MCPRequestTimeoutError:
+            return []
         if response and "result" in response:
             tools = response["result"].get("tools", [])
             logger.info(f"Got {len(tools)} tools from {self.server_name}")
@@ -188,7 +202,10 @@ class MCPServerConnection:
         return []
 
     async def call_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        timeout: float | None = None,
     ) -> Dict[str, Any]:
         """Call a tool on the server."""
         if not self.initialized:
@@ -201,7 +218,10 @@ class MCPServerConnection:
             "params": {"name": tool_name, "arguments": arguments},
         }
 
-        response = await self._send_request(request)
+        try:
+            response = await self._send_request(request, timeout=timeout)
+        except MCPRequestTimeoutError as e:
+            return {"error": str(e)}
         if response:
             if "result" in response:
                 return response["result"]  # type: ignore[no-any-return]
@@ -210,7 +230,11 @@ class MCPServerConnection:
 
         return {"error": "No response from server"}
 
-    async def _send_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _send_request(
+        self,
+        request: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Optional[Dict[str, Any]]:
         """Send JSON-RPC request and wait for response."""
         if not self.process or not self.process.stdin:
             return None
@@ -232,12 +256,24 @@ class MCPServerConnection:
                 self.process.stdin.write(message.encode())
                 await self.process.stdin.drain()
 
-            # Read response with timeout — use 5 min to allow user permission dialogs
-            return await asyncio.wait_for(response_future, timeout=300)
+            effective_timeout = (
+                self.request_timeout if timeout is None else float(timeout)
+            )
+            return await asyncio.wait_for(
+                response_future,
+                timeout=effective_timeout,
+            )
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout waiting for response from {self.server_name}")
+            timeout_display = self._format_timeout(effective_timeout)
+            logger.warning(
+                "MCP request timed out after %s seconds for %s",
+                timeout_display,
+                self.server_name,
+            )
             await self.close()
-            return None
+            raise MCPRequestTimeoutError(
+                f"MCP request timed out after {timeout_display} seconds"
+            )
         except asyncio.CancelledError:
             logger.warning(
                 f"MCP request cancelled for {self.server_name}; closing connection"
@@ -249,6 +285,11 @@ class MCPServerConnection:
             return None
         finally:
             self._pending_requests.pop(request_id, None)
+
+    @staticmethod
+    def _format_timeout(timeout: float) -> str:
+        """Format timeout seconds without noisy trailing zeros."""
+        return f"{timeout:g}"
 
     async def _send_notification(self, notification: Dict[str, Any]) -> None:
         """Send JSON-RPC notification (no response expected)."""
@@ -945,13 +986,17 @@ class MCPIntegration:
             return False
 
     async def call_mcp_tool(
-        self, tool_name: str, params: Dict[str, Any]
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        timeout: float | None = None,
     ) -> Dict[str, Any]:
         """Execute an MCP tool call using proper MCP protocol.
 
         Args:
             tool_name: Name of the tool to execute
             params: Parameters for the tool
+            timeout: Optional per-call timeout in seconds
 
         Returns:
             Tool execution result
@@ -1000,7 +1045,7 @@ class MCPIntegration:
                 return error_result
 
         try:
-            result = await connection.call_tool(tool_name, params)
+            result = await connection.call_tool(tool_name, params, timeout=timeout)
             logger.info(f"Executed MCP tool: {tool_name}")
 
             # Emit tool call post event

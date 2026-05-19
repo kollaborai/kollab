@@ -1,5 +1,6 @@
 """Regression tests for engine agentic turn continuation."""
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -198,3 +199,24 @@ async def test_mcp_native_tool_call_stays_mcp_tool_when_registered_by_mcp():
     assert tool_call["type"] == "mcp_tool"
     assert tool_call["name"] == "browser_get_page"
     assert tool_call["arguments"] == {"tab": "active"}
+
+
+@pytest.mark.asyncio
+async def test_direct_engine_tool_execution_normalizes_provider_object():
+    session = FakeBuiltInToolSession()
+    raw_tool_call = SimpleNamespace(
+        id="call_direct",
+        type="tool_use",
+        name="file_read",
+        input={"file": "README.md", "limit": 5},
+    )
+
+    await TurnRunner()._execute_tool(session, raw_tool_call, asyncio.Queue())
+
+    assert session.tool_executor.calls
+    tool_call = session.tool_executor.calls[0]
+    assert tool_call["type"] == "file_read"
+    assert tool_call["name"] == "file_read"
+    assert tool_call["file"] == "README.md"
+    assert tool_call["limit"] == 5
+    assert tool_call["arguments"] == {"file": "README.md", "limit": 5}

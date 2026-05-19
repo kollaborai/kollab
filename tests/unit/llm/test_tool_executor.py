@@ -349,5 +349,40 @@ class TestToolExecutor(unittest.TestCase):
                 self.assertEqual(result.tool_id, f"terminal_{i}")
 
 
+class TestToolExecutorMCPTimeoutOwnership(unittest.IsolatedAsyncioTestCase):
+    """MCP integration owns MCP call timeout behavior."""
+
+    async def test_mcp_timeout_is_forwarded_without_outer_cancellation(self):
+        class TimeoutOwningMCP:
+            def __init__(self):
+                self.timeout = None
+
+            async def call_mcp_tool(self, tool_name, arguments, timeout=None):
+                self.timeout = timeout
+                await asyncio.sleep(0.02)
+                return {"error": f"MCP request timed out after {timeout} seconds"}
+
+        mcp = TimeoutOwningMCP()
+        executor = ToolExecutor(
+            mcp_integration=mcp,
+            event_bus=MagicMock(),
+            terminal_timeout=10,
+            mcp_timeout=0.01,
+        )
+
+        result = await executor._execute_mcp_tool(
+            {
+                "type": "mcp_tool",
+                "id": "mcp_tool_0",
+                "name": "slow_tool",
+                "arguments": {},
+            }
+        )
+
+        self.assertEqual(mcp.timeout, 0.01)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "MCP request timed out after 0.01 seconds")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

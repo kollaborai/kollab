@@ -306,6 +306,11 @@ class TurnRunner:
                 "name": getattr(tool_call, "name", ""),
                 "input": getattr(tool_call, "input", {}),
             }
+        tool_call = normalize_native_tool_call(
+            tool_call,
+            mcp_tool_names=set(session.mcp_integration.tool_registry.keys()),
+            plugin_handler_names=set(session.tool_executor.plugin_handlers.keys()),
+        )
         tool_id = _tc_get(tool_call, "id", "")
         tool_name = _tc_get(tool_call, "name") or _tc_get(tool_call, "type", "unknown")
         tool_type = _tc_get(tool_call, "type", "unknown")

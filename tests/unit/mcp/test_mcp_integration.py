@@ -122,7 +122,13 @@ class TestMCPServerConnection(unittest.TestCase):
             connection.process = _FakeProcess(
                 [
                     {"jsonrpc": "2.0", "method": "notifications/progress"},
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/message",
+                        "params": {"level": "info"},
+                    },
                     {"jsonrpc": "2.0", "id": "req-1", "result": {"ok": True}},
+                    {"jsonrpc": "2.0", "method": "notifications/progress"},
                 ]
             )
 
@@ -144,22 +150,29 @@ class TestMCPServerConnection(unittest.TestCase):
             connection = MCPServerConnection("test", "echo test")
             connection.process = _FakeProcess(
                 [
+                    {"jsonrpc": "2.0", "id": "req-3", "result": {"order": 3}},
+                    {"jsonrpc": "2.0", "id": "unknown", "result": {"bad": True}},
+                    {"jsonrpc": "2.0", "method": "notifications/progress"},
                     {"jsonrpc": "2.0", "id": "req-2", "result": {"order": 2}},
                     {"jsonrpc": "2.0", "id": "req-1", "result": {"order": 1}},
                 ]
             )
 
-            first, second = await asyncio.gather(
+            first, second, third = await asyncio.gather(
                 connection._send_request(
                     {"jsonrpc": "2.0", "id": "req-1", "method": "first"}
                 ),
                 connection._send_request(
                     {"jsonrpc": "2.0", "id": "req-2", "method": "second"}
                 ),
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-3", "method": "third"}
+                ),
             )
 
             self.assertEqual(first["result"], {"order": 1})
             self.assertEqual(second["result"], {"order": 2})
+            self.assertEqual(third["result"], {"order": 3})
 
         asyncio.run(run_test())
 
@@ -182,6 +195,76 @@ class TestMCPServerConnection(unittest.TestCase):
             self.assertIsNone(connection.process)
             self.assertFalse(connection.initialized)
             self.assertEqual(connection._pending_requests, {})
+
+        asyncio.run(run_test())
+
+    def test_call_tool_timeout_closes_connection_with_clear_error(self):
+        """The MCP connection owns call timeout cleanup and reports it clearly."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_HangingStdout())
+
+            result = await connection.call_tool("slow_tool", {}, timeout=0.01)
+
+            self.assertIn("timed out after 0.01 seconds", result["error"])
+            self.assertIsNone(connection.process)
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._pending_requests, {})
+
+        asyncio.run(run_test())
+
+    def test_timed_out_mcp_call_reconnects_before_next_call(self):
+        """A timed-out stdio connection cannot poison the next MCP call."""
+
+        async def run_test():
+            mcp = MCPIntegration(event_bus=None)
+            mcp.mcp_servers = {
+                "test-server": {
+                    "type": "stdio",
+                    "command": "test-server",
+                    "enabled": True,
+                }
+            }
+            mcp.tool_registry["slow_tool"] = {
+                "server": "test-server",
+                "definition": {},
+                "enabled": True,
+            }
+
+            poisoned = MCPServerConnection("test-server", "test-server")
+            poisoned.initialized = True
+            poisoned.process = _FakeProcess(stdout=_HangingStdout())
+            mcp.server_connections["test-server"] = poisoned
+
+            first = await mcp.call_mcp_tool("slow_tool", {}, timeout=0.01)
+            self.assertIn("timed out after 0.01 seconds", first["error"])
+
+            class HealthyConnection:
+                initialized = True
+
+                async def call_tool(self, tool_name, arguments, timeout=None):
+                    return {"content": [{"type": "text", "text": "ok"}]}
+
+            async def reconnect(server_name, command):
+                mcp.server_connections[server_name] = HealthyConnection()
+                return [
+                    {
+                        "name": "slow_tool",
+                        "description": "slow",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                    }
+                ]
+
+            mcp._connect_and_list_tools = reconnect  # type: ignore[method-assign]
+
+            second = await mcp.call_mcp_tool("slow_tool", {}, timeout=0.01)
+            self.assertEqual(second, {"content": [{"type": "text", "text": "ok"}]})
 
         asyncio.run(run_test())
 
