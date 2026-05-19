@@ -1526,5 +1526,5 @@ Spec coverage:
 Risk notes:
 
 - Remote envelope verification starts as a contract scaffold. Full Ed25519 validation needs a follow-up slice once the canonical key library is chosen.
-- Local unknown senders default to delivery with warning because Marco prefers responsiveness over dropped reports. Strict mode remains available for locked-down environments.
+- Local unknown senders default to delivery with warning because missed reports are worse than noisy local delivery. Strict mode remains available for locked-down environments.
 - The current giant `plugins/hub/plugin.py` is still too big. This plan extracts the delivery decision first without doing a risky hub rewrite.
