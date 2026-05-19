@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 from kollabor_events.data_models import ConversationMessage
+from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
 
 
@@ -57,6 +58,22 @@ class _ChangeFeed:
 
 
 class TestHubRosterInject(unittest.TestCase):
+    def test_malformed_roster_update_does_not_poison_roster(self):
+        plugin = HubPlugin.__new__(HubPlugin)
+        plugin._roster = [{"identity": "lapis", "state": "idle"}]
+
+        asyncio.run(
+            plugin._on_message(
+                HubMessage(
+                    action="roster_update",
+                    content='["lapis", "sapphire"]',
+                    from_identity="hub",
+                )
+            )
+        )
+
+        self.assertEqual(plugin._roster, [{"identity": "lapis", "state": "idle"}])
+
     def test_inject_handles_dict_backed_claims_and_malformed_changes(self):
         plugin = HubPlugin.__new__(HubPlugin)
         plugin._identity = SimpleNamespace(
