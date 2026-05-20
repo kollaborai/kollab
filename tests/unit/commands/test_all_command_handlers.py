@@ -24,7 +24,8 @@ Handlers already covered in other test files (skipped here):
 import asyncio
 import os
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Project root -- needed for plugins that call Path.cwd() at import/init time.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -152,6 +153,210 @@ class TestSystemCommandHandler(unittest.TestCase):
 
         assert isinstance(result, CommandResult)
         assert not result.success  # no state_service -> graceful failure
+
+    def test_status_modal_includes_attach_runtime_state(self):
+        class StateService:
+            async def get_system_info(self):
+                return SimpleNamespace(
+                    python_version="3.12",
+                    platform_name="Darwin",
+                    platform_arch="arm64",
+                    daemon_pid=123,
+                    daemon_uptime_seconds=9.4,
+                    cwd="/tmp/project",
+                    total_commands=42,
+                    enabled_commands=40,
+                    command_categories=7,
+                    plugin_count=8,
+                )
+
+            async def get_active_profile(self):
+                return SimpleNamespace(name="openai-oauth", model="gpt-test")
+
+            async def get_active_agent(self):
+                return SimpleNamespace(name="coder")
+
+            async def get_permission_state(self):
+                return SimpleNamespace(approval_mode="DEFAULT")
+
+            async def get_processing_state(self):
+                return SimpleNamespace(pending_tools_count=2)
+
+            async def get_hub_state(self):
+                return SimpleNamespace(my_identity="koordinator", peer_count=3)
+
+        services = {
+            "state_service": StateService(),
+            "rpc_client": SimpleNamespace(pending_count=5),
+            "attach_runtime_state": {
+                "identity": "koordinator",
+                "socket_path": "/tmp/kollab.sock",
+                "connected_at": 100.0,
+                "last_heartbeat_at": 103.5,
+            },
+        }
+        handler = self._make_handler(extra_services=services)
+        with patch(
+            "kollabor.commands.system_commands.handlers.system.time.time",
+            return_value=106.0,
+        ):
+            result = _safe_run(handler.handle_status(_make_slash_command()))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert result.success
+        modal = result.ui_config.modal_config
+        labels = {
+            widget["label"]: widget["value"]
+            for section in modal["sections"]
+            for widget in section["widgets"]
+        }
+        assert labels["Identity"] == "koordinator"
+        assert labels["Socket"] == "/tmp/kollab.sock"
+        assert labels["Heartbeat"] == "2.5s ago"
+        assert labels["Profile"] == "openai-oauth | gpt-test"
+        assert labels["Agent"] == "coder"
+        assert labels["Permissions"] == "DEFAULT"
+        assert labels["Pending RPC"] == "5"
+        assert labels["Ctrl+Z"] == "detach; daemon keeps running"
+        assert labels["Ctrl+C"] == "stop attached client and owned daemon"
+
+    def test_attach_heartbeat_never_renders_raw_epoch(self):
+        handler = self._make_handler()
+
+        with patch(
+            "kollabor.commands.system_commands.handlers.system.time.time",
+            return_value=106.0,
+        ):
+            value = handler._format_attach_heartbeat({"last_heartbeat_at": 103.5})
+
+        assert value == "2.5s ago"
+        assert "103.5" not in value
+
+    def test_doctor_no_state_service_reports_blocked(self):
+        handler = self._make_handler()
+        result = _safe_run(handler.handle_doctor(_make_slash_command()))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert not result.success
+        assert "verdict: blocked" in result.message
+        assert "state service" in result.message
+        assert "proof read" in result.message
+
+    def test_doctor_ready_with_state_service(self):
+        class StateService:
+            async def get_active_profile(self):
+                return SimpleNamespace(
+                    name="openai-oauth",
+                    provider="openai",
+                    model="gpt-test",
+                )
+
+            async def get_permission_state(self):
+                return SimpleNamespace(approval_mode="DEFAULT")
+
+            async def get_mcp_state(self):
+                return SimpleNamespace(
+                    total_servers=1,
+                    connected_servers=1,
+                    total_tools=3,
+                )
+
+            async def get_hub_state(self):
+                return SimpleNamespace(my_identity="koordinator", peer_count=0)
+
+            async def get_active_agent(self):
+                return SimpleNamespace(name="coder")
+
+            async def get_system_info(self):
+                return SimpleNamespace(daemon_pid=0, daemon_uptime_seconds=0)
+
+        services = {
+            "state_service": StateService(),
+            "renderer": object(),
+            "command_registry": object(),
+            "permission_manager": object(),
+            "llm_service": object(),
+        }
+        handler = self._make_handler(extra_services=services)
+        result = _safe_run(handler.handle_doctor(_make_slash_command()))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert result.success
+        assert "verdict: ready" in result.message
+        assert "profile" in result.message
+        assert "proof read" in result.message
+
+    def test_doctor_proof_mode_checks_xml_native_and_mock_mcp_contracts(self):
+        class StateService:
+            async def get_active_profile(self):
+                return SimpleNamespace(name="test", provider="test", model="model")
+
+            async def get_permission_state(self):
+                return SimpleNamespace(approval_mode="DEFAULT")
+
+            async def get_mcp_state(self):
+                return SimpleNamespace(
+                    total_servers=0,
+                    connected_servers=0,
+                    total_tools=0,
+                )
+
+            async def get_hub_state(self):
+                return SimpleNamespace(my_identity="koordinator", peer_count=0)
+
+            async def get_active_agent(self):
+                return SimpleNamespace(name="coder")
+
+            async def get_system_info(self):
+                return SimpleNamespace(daemon_pid=0, daemon_uptime_seconds=0)
+
+        services = {
+            "state_service": StateService(),
+            "renderer": object(),
+            "command_registry": object(),
+            "permission_manager": object(),
+            "llm_service": object(),
+        }
+        handler = self._make_handler(extra_services=services)
+        result = _safe_run(handler.handle_doctor(_make_slash_command("proof")))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert result.success
+        assert "proof xml" in result.message
+        assert "proof native" in result.message
+        assert "proof mock-mcp" in result.message
+
+    def test_doctor_contract_proof_uses_stable_contract_probe(self):
+        handler = self._make_handler()
+        checks = []
+
+        def add(status, name, detail, fix=None):
+            checks.append((status, name, detail, fix))
+
+        with patch(
+            "kollabor.commands.system_commands.handlers.system.collect_tool_contract_proofs",
+            return_value=[
+                ("proof xml", "file_read normalized"),
+                ("proof mock-mcp", "doctor_ping normalized"),
+                ("proof native", "state_update normalized"),
+            ],
+        ) as proof:
+            handler._doctor_contract_proof_checks(add)
+
+        proof.assert_called_once_with()
+        assert checks == [
+            ("ok", "proof xml", "file_read normalized", None),
+            ("ok", "proof mock-mcp", "doctor_ping normalized", None),
+            ("ok", "proof native", "state_update normalized", None),
+        ]
 
     # /permissions -- permission_manager=None -> early CommandResult(success=False)
     def test_permissions_no_manager(self):

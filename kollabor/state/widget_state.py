@@ -45,6 +45,7 @@ class WidgetState:
     git_branch: str = ""
     daemon_pid: int = 0
     daemon_uptime: float = 0.0
+    runtime_mode: str = ""
 
     # --- Hub ---
     hub_identity: str = ""

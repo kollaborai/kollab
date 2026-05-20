@@ -60,6 +60,38 @@ class TestFindSplitPoint(unittest.TestCase):
     def setUp(self):
         self.plugin = _make_plugin()
 
+    def test_compact_preview_is_non_mutating_and_shows_buckets(self):
+        history = [
+            _system(),
+            _user("old q"),
+            _assistant("old a"),
+            _msg(
+                "user",
+                "please fix the failing build",
+                hub_message=True,
+                hub_is_intended=True,
+            ),
+            _user("recent q"),
+            _assistant("recent a"),
+        ]
+        self.plugin._llm_service = MagicMock(
+            conversation_history=history,
+            session_stats={"input_tokens": 6000},
+        )
+        self.plugin.config.get.side_effect = lambda key, default=None: {
+            "plugins.context_compaction.keep_recent": 2,
+            "plugins.context_compaction.min_human_turns": 1,
+            "plugins.context_compaction.token_threshold_k": 0,
+        }.get(key, default)
+
+        preview = self.plugin._build_compact_preview()
+
+        self.assertIn("compact preview:", preview)
+        self.assertIn("preserved:", preview)
+        self.assertIn("removed:", preview)
+        self.assertIn("pinned:", preview)
+        self.assertEqual(len(history), 6)
+
     # ---- basic cases (no tool calls) ----
 
     def test_short_history_returns_zero(self):

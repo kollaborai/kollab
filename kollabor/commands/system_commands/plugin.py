@@ -315,6 +315,16 @@ class SystemCommandsPlugin:
             display_type="error",
         )
 
+    async def handle_doctor(self, command: SlashCommand) -> CommandResult:
+        """Handle /doctor command."""
+        if self._system_handler:
+            return await self._system_handler.handle_doctor(command)
+        return CommandResult(
+            success=False,
+            message="System handler not initialized",
+            display_type="error",
+        )
+
     async def handle_permissions(self, command: SlashCommand) -> CommandResult:
         """Handle /permissions command."""
         if self._system_handler:

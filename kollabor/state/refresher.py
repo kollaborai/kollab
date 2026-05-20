@@ -42,6 +42,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _render_relevant_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the part of widget state that should wake the renderer."""
+    return {key: value for key, value in (state or {}).items() if key != "_updated_at"}
+
+
 class WidgetStateRefresher:
     """Background coroutine that keeps ``ctx.remote_state`` fresh.
 
@@ -145,8 +150,12 @@ class WidgetStateRefresher:
                 if key not in WidgetState.state_fields()
                 and key not in {"type", "_source", "_updated_at", "_stale", "_degraded"}
             }
-            self._ctx.remote_state = {**preserved, **updated.to_dict()}
-            if self._request_render is not None:
+            next_state = {**preserved, **updated.to_dict()}
+            should_render = _render_relevant_state(current_raw) != _render_relevant_state(
+                next_state
+            )
+            self._ctx.remote_state = next_state
+            if should_render and self._request_render is not None:
                 self._request_render()
         except Exception as e:
             logger.debug("widget state refresh: assign failed: %s", e)
@@ -178,6 +187,10 @@ class WidgetStateRefresher:
         transient failure doesn't wipe out unrelated fields.
         """
         flat: dict[str, Any] = {}
+        degraded = False
+        runtime_mode = str(getattr(self._ctx, "runtime_mode", "") or "")
+        if runtime_mode:
+            flat["runtime_mode"] = runtime_mode
 
         # --- session stats ---
         try:
@@ -192,6 +205,7 @@ class WidgetStateRefresher:
             flat["total_cost_usd"] = stats.total_cost_usd
             flat["session"] = stats.session_id
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_session_stats failed: %s", e)
 
         # --- processing state ---
@@ -201,6 +215,7 @@ class WidgetStateRefresher:
             flat["bg_tasks"] = proc.bg_tasks_count
             flat["pending_tools"] = proc.pending_tools_count
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_processing_state failed: %s", e)
 
         # --- system info (terminal sessions + daemon pid/uptime for debugging) ---
@@ -212,6 +227,7 @@ class WidgetStateRefresher:
             flat["daemon_pid"] = sysinfo.daemon_pid
             flat["daemon_uptime"] = sysinfo.daemon_uptime_seconds
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_system_info failed: %s", e)
 
         # --- hub state ---
@@ -221,6 +237,7 @@ class WidgetStateRefresher:
             flat["hub_is_coordinator"] = hub.my_is_coordinator
             flat["hub_peers"] = hub.peer_count
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_hub_state failed: %s", e)
 
         # --- mcp state ---
@@ -231,6 +248,7 @@ class WidgetStateRefresher:
                 "tools": mcp.total_tools,
             }
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_mcp_state failed: %s", e)
 
         # --- profile state ---
@@ -241,6 +259,7 @@ class WidgetStateRefresher:
             flat["provider"] = profile.provider
             flat["endpoint"] = profile.endpoint
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_active_profile failed: %s", e)
 
         # --- permission state ---
@@ -248,6 +267,7 @@ class WidgetStateRefresher:
             perm = await self._state.get_permission_state()
             flat["approval_mode"] = perm.approval_mode
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_permission_state failed: %s", e)
 
         # --- active agent / skills ---
@@ -256,6 +276,7 @@ class WidgetStateRefresher:
             if agent.name:
                 flat["agent"] = agent.name
         except Exception as e:
+            degraded = True
             logger.debug("refresher get_active_agent failed: %s", e)
 
         try:
@@ -270,6 +291,10 @@ class WidgetStateRefresher:
             elif skills.skills:
                 flat["skills"] = "no-skill"
         except Exception as e:
+            degraded = True
             logger.debug("refresher list_skills failed: %s", e)
+
+        if degraded:
+            flat["_degraded"] = True
 
         return flat

@@ -28,6 +28,7 @@ class TestFromFlatDict:
             "git_branch": "main",
             "daemon_pid": 12345,
             "daemon_uptime": 3600.0,
+            "runtime_mode": "attach",
             "hub_identity": "sapphire",
             "hub_is_coordinator": False,
             "hub_peers": 3,
@@ -50,6 +51,7 @@ class TestFromFlatDict:
         assert state.model == "gpt-5.4"
         assert state.agent == "coder"
         assert state.skills == "tdd, debugging"
+        assert state.runtime_mode == "attach"
         assert state.hub_identity == "sapphire"
         assert state.mcp == {"connected": 1, "tools": 4}
         assert state._source == "refresher"
@@ -71,7 +73,7 @@ class TestFromFlatDict:
         d = {"messages": 3, "input_tokens": 100}
         state = WidgetState.from_flat_dict(d)
 
-        assert len(WidgetState.state_fields()) == 28
+        assert len(WidgetState.state_fields()) == 29
         assert state.messages == 3
         assert state.input_tokens == 100
         assert state.output_tokens == 0  # default
@@ -88,6 +90,7 @@ class TestToDict:
             input_tokens=300,
             profile_name="claude",
             model="claude-sonnet-4-6",
+            runtime_mode="daemon",
             hub_identity="lapis",
             mcp={"connected": 2, "tools": 8},
             _source="refresher",
@@ -98,6 +101,7 @@ class TestToDict:
         assert d["input_tokens"] == 300
         assert d["profile_name"] == "claude"
         assert d["model"] == "claude-sonnet-4-6"
+        assert d["runtime_mode"] == "daemon"
         assert d["hub_identity"] == "lapis"
         assert d["mcp"] == {"connected": 2, "tools": 8}
         assert d["_source"] == "refresher"
@@ -249,7 +253,32 @@ class TestApplicationStateSnapshotMerge:
         assert merged["model"] == "glm-5.1"
         assert merged["cache_read_tokens"] == 46800
         assert merged["total_cost_usd"] == 0.12
-        assert merged["_source"] == "display_tap"
+        assert merged["_source"] == "state_service"
+
+    def test_state_snapshot_merge_keeps_state_service_freshness_metadata(self):
+        current = {
+            "profile_name": "openai-oauth",
+            "_source": "state_service",
+            "_updated_at": 100.0,
+            "_stale": False,
+            "_degraded": False,
+        }
+        event = {
+            "type": "state_snapshot",
+            "messages": 16,
+            "_source": "display_tap",
+            "_updated_at": 104.0,
+            "_stale": True,
+            "_degraded": True,
+        }
+
+        merged = merge_widget_state_snapshot(current, event)
+
+        assert merged["messages"] == 16
+        assert merged["_source"] == "state_service"
+        assert merged["_updated_at"] == 100.0
+        assert merged["_stale"] is False
+        assert merged["_degraded"] is False
 
     def test_state_snapshot_merge_allows_explicit_zero_updates(self):
         current = {

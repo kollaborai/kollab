@@ -59,6 +59,11 @@ class RpcClient:
         self._lock: asyncio.Lock = asyncio.Lock()
         self._closed: bool = False
 
+    @property
+    def pending_count(self) -> int:
+        """Return the number of in-flight RPC requests."""
+        return len(self._pending)
+
     async def call(
         self,
         method: str,

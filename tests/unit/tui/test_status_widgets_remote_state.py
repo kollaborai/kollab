@@ -31,6 +31,7 @@ from kollabor_tui.status.core_widgets import (  # noqa: E402
     render_model,
     render_profile,
     render_stats,
+    render_status,
 )
 
 # ANSI escape regex to strip color/style codes from widget output for assertions
@@ -213,6 +214,84 @@ class TestRenderStatsRemoteStatePreference(unittest.TestCase):
         out = _strip_ansi(render_stats(80, ctx))
 
         self.assertIn("⟳ 46.8K", out)
+
+
+class TestRenderStatusHealth(unittest.TestCase):
+    """render_status should expose source, mode, freshness, and age."""
+
+    def test_remote_daemon_fresh_state(self) -> None:
+        ctx = _make_ctx(
+            remote_state={
+                "_source": "state_refresher",
+                "_updated_at": 100.0,
+                "_stale": False,
+                "_degraded": False,
+                "daemon_pid": 123,
+            }
+        )
+        out = _strip_ansi(render_status(80, ctx, now=101.8))
+
+        self.assertIn("Ready", out)
+        self.assertIn("daemon", out)
+        self.assertIn("fresh", out)
+        self.assertIn("state_refresher", out)
+        self.assertNotIn("1.8s", out)
+
+    def test_status_health_respects_widget_width(self) -> None:
+        ctx = _make_ctx(
+            remote_state={
+                "_source": "state_refresher",
+                "_updated_at": 100.0,
+                "_stale": False,
+                "_degraded": False,
+                "daemon_pid": 123,
+            }
+        )
+
+        out = _strip_ansi(render_status(24, ctx, now=101.8))
+
+        self.assertLessEqual(len(out), 24)
+        self.assertNotIn("state_refresher", out)
+
+    def test_working_status_respects_widget_width(self) -> None:
+        ctx = _make_ctx(
+            remote_state={
+                "is_processing": True,
+                "_source": "state_refresher",
+                "_updated_at": 100.0,
+                "daemon_pid": 123,
+            }
+        )
+
+        out = _strip_ansi(render_status(8, ctx, now=101.8))
+
+        self.assertLessEqual(len(out), 8)
+        self.assertEqual(out, "*W")
+
+    def test_attach_degraded_stale_state(self) -> None:
+        ctx = _make_ctx(
+            remote_state={
+                "_source": "attach",
+                "_updated_at": 100.0,
+                "_stale": True,
+                "_degraded": True,
+                "daemon_pid": 456,
+                "hub_identity": "koordinator",
+            }
+        )
+        ctx.is_attach_mode = True
+        out = _strip_ansi(render_status(80, ctx, now=112.4))
+
+        self.assertIn("attach", out)
+        self.assertIn("stale", out)
+        self.assertIn("degraded", out)
+        self.assertNotIn("12.4s", out)
+
+    def test_local_state_when_no_remote_snapshot(self) -> None:
+        ctx = _make_ctx(remote_state={})
+        out = _strip_ansi(render_status(80, ctx, now=100.0))
+
+        self.assertIn("Ready", out)
 
 
 if __name__ == "__main__":

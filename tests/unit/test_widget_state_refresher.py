@@ -107,8 +107,24 @@ async def test_refresh_requests_render_after_remote_state_update():
 
 
 @pytest.mark.asyncio
-async def test_refresh_embeds_widget_state_freshness_metadata():
+async def test_refresh_does_not_request_render_for_timestamp_only_update():
     ctx = SimpleNamespace(remote_state={})
+    render_requests = []
+    refresher = WidgetStateRefresher(
+        ctx,
+        FakeStateService(),
+        request_render=lambda: render_requests.append("render"),
+    )
+
+    await refresher.refresh_once()
+    await refresher.refresh_once()
+
+    assert render_requests == ["render"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_embeds_widget_state_freshness_metadata():
+    ctx = SimpleNamespace(remote_state={}, runtime_mode="attach")
     refresher = WidgetStateRefresher(ctx, FakeStateService())
 
     await refresher.refresh_once()
@@ -117,6 +133,7 @@ async def test_refresh_embeds_widget_state_freshness_metadata():
     assert ctx.remote_state["_updated_at"] > 0
     assert ctx.remote_state["_stale"] is False
     assert ctx.remote_state["_degraded"] is False
+    assert ctx.remote_state["runtime_mode"] == "attach"
 
 
 @pytest.mark.asyncio
@@ -140,3 +157,4 @@ async def test_refresh_preserves_existing_fields_when_snapshot_is_partial():
     assert ctx.remote_state["cache_read_tokens"] == 46800
     assert ctx.remote_state["legacy_only"] == "keep-me"
     assert ctx.remote_state["profile_name"] == "openai-oauth"
+    assert ctx.remote_state["_degraded"] is True

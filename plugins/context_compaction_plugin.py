@@ -410,6 +410,10 @@ class ContextCompactionPlugin(BasePlugin):
 
     async def _handle_compact_command(self, command) -> str:
         """Handle /compact -- show active compaction config."""
+        args = getattr(command, "args", []) or []
+        if args and str(args[0]).lower() == "preview":
+            return self._build_compact_preview()
+
         # Resolve provider info
         model = "?"
         provider = "?"
@@ -497,6 +501,36 @@ class ContextCompactionPlugin(BasePlugin):
             f"  disabled:       {'yes' if self._disabled_for_session else 'no'}",
         ]
 
+        return "\n".join(lines)
+
+    def _build_compact_preview(self) -> str:
+        """Build a non-mutating preview of what compaction would affect."""
+        history = self._get_conversation_history() or []
+        keep_recent = int(
+            self.config.get("plugins.context_compaction.keep_recent", 8)
+        )
+        split = self._find_split_point(history, keep_recent)
+        remove_candidates = history[:split]
+        to_keep = history[split:]
+        preserved, summarizable = self._extract_preservable_messages(
+            remove_candidates
+        )
+
+        prompt_tokens = self._get_prompt_tokens()
+        estimated_removed = int(
+            prompt_tokens * (len(summarizable) / max(1, len(history)))
+        )
+
+        lines = [
+            "compact preview:",
+            f"  messages:       {len(history)}",
+            f"  preserved:      {len(to_keep)} recent",
+            f"  removed:        {len(summarizable)} summarizable",
+            f"  pinned:         {len(preserved)} hub/task",
+            f"  token delta:    ~{estimated_removed // 1000}K removed",
+            "",
+            "  apply:          /compact apply",
+        ]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

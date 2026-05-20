@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -39,6 +40,7 @@ def merge_widget_state_snapshot(
 ) -> dict[str, Any]:
     """Merge a DisplayTap state_snapshot into existing widget state."""
     current = current or {}
+    current_source = str(current.get("_source") or "")
     base = WidgetState.from_flat_dict(current, source="existing")
     update = WidgetState.from_flat_dict(event or {}, source="display_tap")
     merged = base.update_from(update)
@@ -48,7 +50,12 @@ def merge_widget_state_snapshot(
         if key not in WidgetState.state_fields()
         and key not in {"type", "_source", "_updated_at", "_stale", "_degraded"}
     }
-    return {**preserved, **merged.to_dict()}
+    result = {**preserved, **merged.to_dict()}
+    if current_source in {"state_service", "state_refresher"}:
+        for key in ("_source", "_updated_at", "_stale", "_degraded"):
+            if key in current:
+                result[key] = current[key]
+    return result
 
 
 class TerminalLLMChat:
@@ -638,6 +645,13 @@ class TerminalLLMChat:
             layout_manager=self.layout_manager,
             event_bus=self.event_bus,
         )
+        if self._attach_to:
+            widget_context.runtime_mode = "attach"
+            widget_context.is_attach_mode = True
+        elif getattr(self.args, "detached", False):
+            widget_context.runtime_mode = "daemon"
+        else:
+            widget_context.runtime_mode = "local"
         self.layout_renderer.set_context(widget_context)
         # Store reference for plugin widget access
         self._widget_context = widget_context
@@ -850,8 +864,13 @@ class TerminalLLMChat:
                 "deferred_startup",
             )
 
-            # Wait for completion
-            await asyncio.gather(render_task, input_task)
+            # Wait for completion. CLI commands can intentionally clean up and
+            # exit during deferred startup, which cancels the foreground loops.
+            try:
+                await asyncio.gather(render_task, input_task)
+            except asyncio.CancelledError:
+                if self.running:
+                    raise
 
         except KeyboardInterrupt:
             print("\r\n")
@@ -1507,6 +1526,16 @@ class TerminalLLMChat:
         # get_status_line() can show the remote identity on the status bar
         if self.event_bus and hub_info:
             self.event_bus.register_service("attach_hub_info", hub_info)
+        if self.event_bus:
+            attach_runtime_state = {
+                "identity": identity,
+                "socket_path": str(self._attach_socket),
+                "connected_at": time.time(),
+                "last_heartbeat_at": 0.0,
+            }
+            self.event_bus.register_service(
+                "attach_runtime_state", attach_runtime_state
+            )
 
         # === RPC client (phase 1 of daemon transparency refactor) ===
         # Local import: kollabor_rpc is only needed in the attach branch, and
@@ -1740,7 +1769,9 @@ class TerminalLLMChat:
                         )
 
                 elif etype == "heartbeat":
-                    pass
+                    runtime = self.event_bus.get_service("attach_runtime_state")
+                    if isinstance(runtime, dict):
+                        runtime["last_heartbeat_at"] = time.time()
 
             # Connection ended (skip message if we detached intentionally)
             daemon_gone = self.running and not getattr(self, "_attach_detaching", False)
@@ -2752,6 +2783,9 @@ class TerminalLLMChat:
         Ensures no orphaned tasks or resources remain.
         """
         logger.info("Starting application cleanup...")
+        self.running = False
+        if hasattr(self, "input_handler"):
+            self.input_handler.running = False
 
         # Stop the WidgetStateRefresher background task if running
         # (phase 5 of daemon transparency refactor)
@@ -2799,7 +2833,6 @@ class TerminalLLMChat:
 
         # Mark startup as incomplete
         self._startup_complete = False
-        self.running = False
 
         # Call full shutdown to cleanup other resources
         await self.shutdown()

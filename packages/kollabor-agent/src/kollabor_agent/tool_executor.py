@@ -862,9 +862,11 @@ class ToolExecutor:
         logger.debug(f"Executing MCP tool: {tool_name} with args {tool_arguments}")
 
         try:
-            # Call MCP tool with timeout
-            mcp_result = await asyncio.wait_for(
-                self.mcp_integration.call_mcp_tool(tool_name, tool_arguments),
+            # MCPIntegration owns call timeout cleanup so it can close and
+            # reconnect poisoned stdio connections before later tool calls.
+            mcp_result = await self.mcp_integration.call_mcp_tool(
+                tool_name,
+                tool_arguments,
                 timeout=self.mcp_timeout,
             )
 
@@ -884,13 +886,6 @@ class ToolExecutor:
                     tool_id=tool_id, tool_type="mcp_tool", success=True, output=output
                 )
 
-        except asyncio.TimeoutError:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                tool_type="mcp_tool",
-                success=False,
-                error=f"MCP tool timed out after {self.mcp_timeout} seconds",
-            )
         except Exception as e:
             return ToolExecutionResult(
                 tool_id=tool_id,

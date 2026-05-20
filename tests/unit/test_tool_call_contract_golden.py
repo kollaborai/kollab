@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from kollabor.tool_contract_proof import collect_tool_contract_proofs
 from kollabor_agent.queue_processor import QueueProcessor
 from kollabor_agent.tool_call_contract import normalize_native_tool_call
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -52,6 +53,14 @@ def test_xml_native_and_mcp_normalize_to_executor_shape():
         "input": {"tab": "active"},
         "arguments": {"tab": "active"},
     }
+
+
+def test_doctor_contract_probe_reports_stable_proof_labels():
+    assert collect_tool_contract_proofs() == [
+        ("proof xml", "file_read normalized"),
+        ("proof mock-mcp", "doctor_ping normalized"),
+        ("proof native", "state_update normalized"),
+    ]
 
 
 def test_tool_result_conversation_format_is_stable():
