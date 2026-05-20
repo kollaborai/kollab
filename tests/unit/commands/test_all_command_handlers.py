@@ -25,7 +25,7 @@ import asyncio
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Project root -- needed for plugins that call Path.cwd() at import/init time.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -196,7 +196,11 @@ class TestSystemCommandHandler(unittest.TestCase):
             },
         }
         handler = self._make_handler(extra_services=services)
-        result = _safe_run(handler.handle_status(_make_slash_command()))
+        with patch(
+            "kollabor.commands.system_commands.handlers.system.time.time",
+            return_value=106.0,
+        ):
+            result = _safe_run(handler.handle_status(_make_slash_command()))
         _assert_result(result)
         from kollabor_events.models import CommandResult
 
@@ -210,12 +214,25 @@ class TestSystemCommandHandler(unittest.TestCase):
         }
         assert labels["Identity"] == "koordinator"
         assert labels["Socket"] == "/tmp/kollab.sock"
+        assert labels["Heartbeat"] == "2.5s ago"
         assert labels["Profile"] == "openai-oauth | gpt-test"
         assert labels["Agent"] == "coder"
         assert labels["Permissions"] == "DEFAULT"
         assert labels["Pending RPC"] == "5"
         assert labels["Ctrl+Z"] == "detach; daemon keeps running"
         assert labels["Ctrl+C"] == "stop attached client and owned daemon"
+
+    def test_attach_heartbeat_never_renders_raw_epoch(self):
+        handler = self._make_handler()
+
+        with patch(
+            "kollabor.commands.system_commands.handlers.system.time.time",
+            return_value=106.0,
+        ):
+            value = handler._format_attach_heartbeat({"last_heartbeat_at": 103.5})
+
+        assert value == "2.5s ago"
+        assert "103.5" not in value
 
     def test_doctor_no_state_service_reports_blocked(self):
         handler = self._make_handler()
@@ -316,6 +333,30 @@ class TestSystemCommandHandler(unittest.TestCase):
         assert "proof xml" in result.message
         assert "proof native" in result.message
         assert "proof mock-mcp" in result.message
+
+    def test_doctor_contract_proof_uses_stable_contract_probe(self):
+        handler = self._make_handler()
+        checks = []
+
+        def add(status, name, detail, fix=None):
+            checks.append((status, name, detail, fix))
+
+        with patch(
+            "kollabor.commands.system_commands.handlers.system.collect_tool_contract_proofs",
+            return_value=[
+                ("proof xml", "file_read normalized"),
+                ("proof mock-mcp", "doctor_ping normalized"),
+                ("proof native", "state_update normalized"),
+            ],
+        ) as proof:
+            handler._doctor_contract_proof_checks(add)
+
+        proof.assert_called_once_with()
+        assert checks == [
+            ("ok", "proof xml", "file_read normalized", None),
+            ("ok", "proof mock-mcp", "doctor_ping normalized", None),
+            ("ok", "proof native", "state_update normalized", None),
+        ]
 
     # /permissions -- permission_manager=None -> early CommandResult(success=False)
     def test_permissions_no_manager(self):

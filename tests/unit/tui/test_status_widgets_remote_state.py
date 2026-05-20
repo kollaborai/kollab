@@ -237,6 +237,37 @@ class TestRenderStatusHealth(unittest.TestCase):
         self.assertIn("state_refresher", out)
         self.assertNotIn("1.8s", out)
 
+    def test_status_health_respects_widget_width(self) -> None:
+        ctx = _make_ctx(
+            remote_state={
+                "_source": "state_refresher",
+                "_updated_at": 100.0,
+                "_stale": False,
+                "_degraded": False,
+                "daemon_pid": 123,
+            }
+        )
+
+        out = _strip_ansi(render_status(24, ctx, now=101.8))
+
+        self.assertLessEqual(len(out), 24)
+        self.assertNotIn("state_refresher", out)
+
+    def test_working_status_respects_widget_width(self) -> None:
+        ctx = _make_ctx(
+            remote_state={
+                "is_processing": True,
+                "_source": "state_refresher",
+                "_updated_at": 100.0,
+                "daemon_pid": 123,
+            }
+        )
+
+        out = _strip_ansi(render_status(8, ctx, now=101.8))
+
+        self.assertLessEqual(len(out), 8)
+        self.assertEqual(out, "*W")
+
     def test_attach_degraded_stale_state(self) -> None:
         ctx = _make_ctx(
             remote_state={

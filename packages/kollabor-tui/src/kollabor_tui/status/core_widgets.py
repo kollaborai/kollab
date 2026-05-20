@@ -324,31 +324,23 @@ def _render_status(
 
         health = _state_health_label(ctx, now=now)
 
-        # "* Ready" = 7 chars, "* Working" = 9 chars
-        # Use 7 as threshold since "Ready" is the common state
-        if width >= 24:
-            if is_processing:
-                icon = _fg("*", T().warning[0])
-                text = _fg(f"Working {health}", T().warning[0])
-            else:
-                icon = _fg("*", T().ai_tag)
-                text = _fg(f"Ready {health}", T().ai_tag)
+        status = "Working" if is_processing else "Ready"
+        color = T().warning[0] if is_processing else T().ai_tag
+        icon = _fg("*", color)
+        text = _fg(status, color)
+        text_with_health = _fg(f"{status} {health}", color)
+        full_plain = f"* {status} {health}"
+        status_plain = f"* {status}"
+
+        if width >= len(full_plain):
+            return f"{icon} {text_with_health}"
+        if width >= len(status_plain):
             return f"{icon} {text}"
-        elif width >= 7:
-            # Full format
-            if is_processing:
-                icon = _fg("*", T().warning[0])
-                text = _fg("Working", T().warning[0])
-            else:
-                icon = _fg("*", T().ai_tag)
-                text = _fg("Ready", T().ai_tag)
-            return f"{icon} {text}"
-        else:
-            # Compact format: just icon with first letter
-            if is_processing:
-                return _fg("*W", T().warning[0])
-            else:
-                return _fg("*R", T().ai_tag)
+        if width >= 2:
+            return _fg(f"*{status[0]}", color)
+        if width == 1:
+            return icon
+        return ""
     except Exception as e:
         logger.error(f"status widget error: {e}")
         return _fg("*?", T().text_dim)
