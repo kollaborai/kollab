@@ -18,6 +18,7 @@ python -m pytest \
   tests/unit/tui/test_status_widgets_remote_state.py \
   tests/unit/llm/test_agent_hud.py \
   tests/unit/test_hub_wake_order.py \
+  tests/unit/test_hub_runtime_split.py \
   tests/unit/test_hub_msg_parsing.py \
   tests/unit/test_hub_mesh_force.py \
   tests/unit/test_hub_identity_mailbox.py \
