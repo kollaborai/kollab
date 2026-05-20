@@ -8,7 +8,7 @@ intact and swaps history seamlessly between LLM turns.
 import asyncio
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -21,6 +21,7 @@ from kollabor_events.models import CommandCategory, CommandDefinition
 from kollabor_plugins import BasePlugin
 
 logger = logging.getLogger(__name__)
+
 
 def _load_model_registry() -> Dict[str, Any]:
     """Load the model registry from bundles/data/models.json.
@@ -148,6 +149,26 @@ SUMMARY_INJECTION_PREFIX = (
 SUMMARY_INJECTION_SUFFIX = "\n\nContinue from where we left off."
 
 
+@dataclass
+class _CompactPlan:
+    """Snapshot of the messages and buckets a compaction would use."""
+
+    created_at: datetime
+    session_id: Optional[str]
+    snapshot_len: int
+    history_snapshot: List[ConversationMessage]
+    history_signature: tuple[str, ...]
+    split_point: int
+    system_msg: Optional[ConversationMessage]
+    to_summarize: List[ConversationMessage]
+    to_keep: List[ConversationMessage]
+    preserved_tasks: List[ConversationMessage]
+    summarizable: List[ConversationMessage]
+    ledger_handled: List[ConversationMessage]
+    prompt_tokens: int
+    estimated_removed_tokens: int
+
+
 class ContextCompactionPlugin(BasePlugin):
     """Automatically compacts conversation history by summarizing old messages."""
 
@@ -245,6 +266,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._pending_compaction: Optional[List[ConversationMessage]] = None
         self._pre_compaction_len: int = 0
         self._pending_session_id: Optional[str] = None
+        self._last_compact_preview: Optional[_CompactPlan] = None
         self._consecutive_failures: int = 0
         self._disabled_for_session: bool = False
         self._compaction_task: Optional[asyncio.Task] = None
@@ -264,7 +286,6 @@ class ContextCompactionPlugin(BasePlugin):
         event_bus=None,
         config=None,
         command_registry=None,
-
         renderer=None,
         llm_service=None,
         conversation_logger=None,
@@ -411,8 +432,11 @@ class ContextCompactionPlugin(BasePlugin):
     async def _handle_compact_command(self, command) -> str:
         """Handle /compact -- show active compaction config."""
         args = getattr(command, "args", []) or []
-        if args and str(args[0]).lower() == "preview":
+        subcommand = str(args[0]).lower() if args else ""
+        if subcommand == "preview":
             return self._build_compact_preview()
+        if subcommand in {"apply", "confirm"}:
+            return await self._handle_compact_apply()
 
         # Resolve provider info
         model = "?"
@@ -437,9 +461,7 @@ class ContextCompactionPlugin(BasePlugin):
             source = f"manual ({token_k_override}K)"
         elif ctx_window:
             ratio = float(
-                self.config.get(
-                    "plugins.context_compaction.compaction_ratio", 0.75
-                )
+                self.config.get("plugins.context_compaction.compaction_ratio", 0.75)
             )
             source = f"auto ({ratio:.0%} of {ctx_window // 1000}K)"
         else:
@@ -447,9 +469,7 @@ class ContextCompactionPlugin(BasePlugin):
 
         # Current state
         prompt_tokens = self._get_prompt_tokens()
-        keep_recent_cfg = self.config.get(
-            "plugins.context_compaction.keep_recent", 8
-        )
+        keep_recent_cfg = self.config.get("plugins.context_compaction.keep_recent", 8)
         if ctx_window:
             keep_actual = max(keep_recent_cfg, ctx_window // 100_000)
         else:
@@ -469,19 +489,13 @@ class ContextCompactionPlugin(BasePlugin):
                 if m.role == "user" and not m.metadata.get("hub_message")
             )
 
-        pct = (
-            f" ({prompt_tokens * 100 // threshold}%)"
-            if threshold > 0
-            else ""
-        )
+        pct = f" ({prompt_tokens * 100 // threshold}%)" if threshold > 0 else ""
         keep_str = (
             f"{keep_actual} (scaled from {keep_recent_cfg})"
             if keep_actual != keep_recent_cfg
             else str(keep_actual)
         )
-        ctx_str = (
-            f"{ctx_window // 1000}K" if ctx_window else "unknown"
-        )
+        ctx_str = f"{ctx_window // 1000}K" if ctx_window else "unknown"
 
         lines = [
             "compaction profile:",
@@ -506,32 +520,194 @@ class ContextCompactionPlugin(BasePlugin):
     def _build_compact_preview(self) -> str:
         """Build a non-mutating preview of what compaction would affect."""
         history = self._get_conversation_history() or []
-        keep_recent = int(
-            self.config.get("plugins.context_compaction.keep_recent", 8)
-        )
-        split = self._find_split_point(history, keep_recent)
-        remove_candidates = history[:split]
-        to_keep = history[split:]
-        preserved, summarizable = self._extract_preservable_messages(
-            remove_candidates
-        )
+        plan = self._build_compaction_plan(list(history))
+        self._last_compact_preview = plan
 
-        prompt_tokens = self._get_prompt_tokens()
-        estimated_removed = int(
-            prompt_tokens * (len(summarizable) / max(1, len(history)))
-        )
+        if not plan:
+            return "\n".join(
+                [
+                    "compact preview:",
+                    "  status:        skipped",
+                    "  reason:        no conversation history",
+                    "  source:         preview",
+                ]
+            )
 
         lines = [
             "compact preview:",
+            f"  source:         preview @ {self._format_plan_time(plan)}",
             f"  messages:       {len(history)}",
-            f"  preserved:      {len(to_keep)} recent",
-            f"  removed:        {len(summarizable)} summarizable",
-            f"  pinned:         {len(preserved)} hub/task",
-            f"  token delta:    ~{estimated_removed // 1000}K removed",
+            f"  preserved:      {len(plan.to_keep)} recent",
+            f"  removed:        {len(plan.summarizable)} summarized",
+            f"  pinned:         {len(plan.preserved_tasks)} hub/task",
+            f"  token delta:    ~{plan.estimated_removed_tokens // 1000}K removed",
             "",
             "  apply:          /compact apply",
         ]
         return "\n".join(lines)
+
+    async def _handle_compact_apply(self) -> str:
+        """Apply manual compaction, reusing a current preview when possible."""
+        history = self._get_conversation_history() or []
+        if not history:
+            return "\n".join(
+                [
+                    "compact apply:",
+                    "  status:        skipped",
+                    "  reason:        no conversation history",
+                    "  source:         fresh",
+                ]
+            )
+
+        preview = self._last_compact_preview
+        note = None
+        if preview and self._is_plan_current(preview, history):
+            plan = preview
+            source = f"preview @ {self._format_plan_time(plan)}"
+        else:
+            if preview:
+                note = "preview stale; reran from current history"
+            plan = self._build_compaction_plan(list(history))
+            source = f"fresh @ {self._format_plan_time(plan)}" if plan else "fresh"
+
+        if not plan or not plan.to_summarize:
+            lines = [
+                "compact apply:",
+                "  status:        skipped",
+                "  reason:        not enough messages to summarize",
+                f"  source:         {source}",
+            ]
+            if note:
+                lines.append(f"  note:          {note}")
+            return "\n".join(lines)
+
+        before_len = len(history)
+        await self._run_compaction(plan)
+        if self._pending_compaction is None:
+            return "\n".join(
+                [
+                    "compact apply:",
+                    "  status:        failed",
+                    "  reason:        summary was not created",
+                    f"  source:         {source}",
+                ]
+            )
+
+        await self._apply_pending_compaction({}, None)
+        after_len = len(history)
+        self._last_compact_preview = None
+
+        lines = [
+            "compact apply:",
+            "  status:        applied",
+            f"  source:         {source}",
+            f"  messages:      {before_len} -> {after_len}",
+            f"  preserved:     {len(plan.to_keep)} recent",
+            f"  removed:       {len(plan.summarizable)} summarized",
+            f"  pinned:        {len(plan.preserved_tasks)} hub/task",
+            f"  token delta:   ~{plan.estimated_removed_tokens // 1000}K removed",
+        ]
+        if note:
+            lines.append(f"  note:         {note}")
+        return "\n".join(lines)
+
+    def _build_compaction_plan(
+        self, history_snapshot: List[ConversationMessage]
+    ) -> Optional[_CompactPlan]:
+        """Build shared preview/apply buckets from an immutable history snapshot."""
+        if not history_snapshot:
+            return None
+
+        keep_recent = self._get_effective_keep_recent()
+        split_point = self._find_split_point(history_snapshot, keep_recent)
+
+        system_msg = None
+        start_idx = 0
+        if history_snapshot and history_snapshot[0].role == "system":
+            system_msg = history_snapshot[0]
+            start_idx = 1
+
+        to_summarize = history_snapshot[start_idx:split_point]
+        to_keep = history_snapshot[split_point:]
+        ledger_handled, untracked_msgs = self._partition_by_ledger(to_summarize)
+        preserved_tasks, summarizable = self._extract_preservable_messages(
+            untracked_msgs
+        )
+        prompt_tokens = self._get_prompt_tokens()
+
+        return _CompactPlan(
+            created_at=datetime.now(timezone.utc),
+            session_id=self._get_current_session_id(),
+            snapshot_len=len(history_snapshot),
+            history_snapshot=history_snapshot,
+            history_signature=self._history_signature(history_snapshot),
+            split_point=split_point,
+            system_msg=system_msg,
+            to_summarize=to_summarize,
+            to_keep=to_keep,
+            preserved_tasks=preserved_tasks,
+            summarizable=summarizable,
+            ledger_handled=ledger_handled,
+            prompt_tokens=prompt_tokens,
+            estimated_removed_tokens=self._estimate_removed_tokens(
+                history_snapshot, summarizable, prompt_tokens
+            ),
+        )
+
+    def _get_effective_keep_recent(self) -> int:
+        """Return configured keep_recent scaled for large context windows."""
+        keep_recent_cfg = int(
+            self.config.get("plugins.context_compaction.keep_recent", 8)
+        )
+        context_window = self._resolve_context_window()
+        if context_window:
+            return max(keep_recent_cfg, context_window // 100_000)
+        return keep_recent_cfg
+
+    def _is_plan_current(
+        self, plan: _CompactPlan, history: List[ConversationMessage]
+    ) -> bool:
+        """Return true if a preview still matches the current history prefix."""
+        current_session_id = self._get_current_session_id()
+        if plan.session_id and current_session_id != plan.session_id:
+            return False
+        if len(history) < plan.snapshot_len:
+            return False
+        current_signature = self._history_signature(history[: plan.snapshot_len])
+        return current_signature == plan.history_signature
+
+    @staticmethod
+    def _format_plan_time(plan: _CompactPlan) -> str:
+        """Format a plan timestamp in a terminal-friendly UTC form."""
+        created = plan.created_at.astimezone(timezone.utc).replace(microsecond=0)
+        return created.isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _history_signature(cls, history: List[ConversationMessage]) -> tuple[str, ...]:
+        """Build a stable signature for stale preview detection."""
+        return tuple(cls._message_signature(msg) for msg in history)
+
+    @staticmethod
+    def _message_signature(msg: ConversationMessage) -> str:
+        try:
+            metadata = json.dumps(msg.metadata, sort_keys=True, default=str)
+        except TypeError:
+            metadata = repr(msg.metadata)
+        return "\0".join([msg.role, msg.content, metadata])
+
+    @staticmethod
+    def _estimate_removed_tokens(
+        history: List[ConversationMessage],
+        summarizable: List[ConversationMessage],
+        prompt_tokens: int,
+    ) -> int:
+        """Estimate token savings without mutating or calling the summarizer."""
+        if prompt_tokens > 0 and history:
+            ratio = len(summarizable) / max(1, len(history))
+            return int(prompt_tokens * ratio)
+
+        char_count = sum(len(msg.content or "") for msg in summarizable)
+        return max(0, char_count // 4)
 
     # ------------------------------------------------------------------
     # Hooks
@@ -917,52 +1093,35 @@ class ContextCompactionPlugin(BasePlugin):
             parts.append(f"[{role_label}]: {content}")
         return "\n\n".join(parts)
 
-    async def _run_compaction(self) -> None:
+    async def _run_compaction(self, plan: Optional[_CompactPlan] = None) -> None:
         """Background task: summarize old messages and stage compaction."""
         try:
             history = self._get_conversation_history()
             if not history:
                 return
-            history_snapshot = list(history)
-            snapshot_len = len(history_snapshot)
-            snapshot_session_id = self._get_current_session_id()
+            if plan is None:
+                plan = self._build_compaction_plan(list(history))
+            if not plan:
+                return
 
-            keep_recent_cfg = self.config.get(
-                "plugins.context_compaction.keep_recent", 8
-            )
-            # Scale keep_recent up for large context windows so agents
-            # don't lose thread with 1M-token models keeping only 8 messages.
-            context_window = self._resolve_context_window()
-            if context_window:
-                # ~1 extra message per 100K of context window
-                auto_keep = max(keep_recent_cfg, context_window // 100_000)
-            else:
-                auto_keep = keep_recent_cfg
-            keep_recent = auto_keep
+            history_snapshot = plan.history_snapshot
+            snapshot_len = plan.snapshot_len
+            snapshot_session_id = plan.session_id
             max_summary_tokens = self.config.get(
                 "plugins.context_compaction.max_summary_tokens", 2000
             )
 
-            # Identify boundaries
-            split_point = self._find_split_point(history_snapshot, keep_recent)
-            if split_point <= 1:
+            if not plan.to_summarize:
                 # Nothing meaningful to summarize
                 logger.info("Not enough messages to summarize, skipping")
                 return
 
-            # Separate system message
-            system_msg = None
-            start_idx = 0
-            if history_snapshot and history_snapshot[0].role == "system":
-                system_msg = history_snapshot[0]
-                start_idx = 1
-
-            to_summarize = history_snapshot[start_idx:split_point]
-            to_keep = history_snapshot[split_point:]
-
-            if not to_summarize:
-                logger.info("No messages to summarize after boundaries")
-                return
+            system_msg = plan.system_msg
+            to_summarize = plan.to_summarize
+            to_keep = plan.to_keep
+            ledger_handled = plan.ledger_handled
+            preserved_tasks = plan.preserved_tasks
+            summarizable = plan.summarizable
 
             # Save verbatim messages to vault before they're lost to compaction
             try:
@@ -988,20 +1147,6 @@ class ContextCompactionPlugin(BasePlugin):
                         )
             except Exception as e:
                 logger.debug(f"Vault snapshot failed: {e}")
-
-            # --- Context service ledger integration ---
-            # Partition messages: those with ctx_ids in metadata get
-            # handled by the ledger; the rest go to LLM summarization.
-            ledger_handled, untracked_msgs = (
-                self._partition_by_ledger(to_summarize)
-            )
-
-            # --- Task-aware extraction ---
-            # Separate hub task messages (preserved verbatim) from
-            # regular conversation (summarized by LLM).
-            preserved_tasks, summarizable = self._extract_preservable_messages(
-                untracked_msgs
-            )
 
             summary_text = None
             if summarizable:
@@ -1036,13 +1181,9 @@ class ContextCompactionPlugin(BasePlugin):
             )
 
             # Write checkpoint before staging the compaction swap
-            checkpoint_filename = self._write_compaction_checkpoint(
-                history_snapshot
-            )
+            checkpoint_filename = self._write_compaction_checkpoint(history_snapshot)
             if checkpoint_filename:
-                self._log_checkpoint_event(
-                    checkpoint_filename, len(history_snapshot)
-                )
+                self._log_checkpoint_event(checkpoint_filename, len(history_snapshot))
 
             # Stage for safe application from the snapshot baseline.
             self._pre_compaction_len = snapshot_len
@@ -1220,9 +1361,7 @@ class ContextCompactionPlugin(BasePlugin):
             has_summary = any(
                 e.decision == "summary" and e.decision_body for e in entries
             )
-            has_evicted = all(
-                e.decision == "evicted" for e in entries
-            )
+            has_evicted = all(e.decision == "evicted" for e in entries)
 
             if has_keep:
                 # Preserve verbatim
@@ -1235,9 +1374,7 @@ class ContextCompactionPlugin(BasePlugin):
                 summary_parts = []
                 for e in entries:
                     if e.decision == "summary" and e.decision_body:
-                        summary_parts.append(
-                            f"[{e.ctx_id} summary] {e.decision_body}"
-                        )
+                        summary_parts.append(f"[{e.ctx_id} summary] {e.decision_body}")
                 new_msg = ConversationMessage(
                     role=msg.role,
                     content="\n".join(summary_parts),
@@ -1273,7 +1410,6 @@ class ContextCompactionPlugin(BasePlugin):
             )
 
         return ledger_handled, untracked
-
 
     def _build_compacted_history(
         self,
@@ -1441,12 +1577,9 @@ class ContextCompactionPlugin(BasePlugin):
         try:
             with open(session_file, "a") as f:
                 f.write(json.dumps(record) + "\n")
-            logger.debug(
-                f"Logged checkpoint event for round {next_round}"
-            )
+            logger.debug(f"Logged checkpoint event for round {next_round}")
         except Exception as e:
             logger.warning(f"Failed to log checkpoint event: {e}")
-
 
     async def _log_compaction_event(
         self,
