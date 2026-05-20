@@ -272,6 +272,8 @@ class TaskLedger:
         """Get all active tasks assigned to this agent."""
         result = []
         for f in self._tasks_dir.glob("*.json"):
+            if f.stem.startswith("_"):
+                continue
             card = self._load(f.stem)
             if (
                 card
@@ -284,6 +286,8 @@ class TaskLedger:
     def get_all(self, status: Optional[str] = None) -> List[TaskCard]:
         result = []
         for f in self._tasks_dir.glob("*.json"):
+            if f.stem.startswith("_"):
+                continue
             card = self._load(f.stem)
             if card and (status is None or card.status == status):
                 result.append(card)
