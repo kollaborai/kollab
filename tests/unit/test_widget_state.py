@@ -253,7 +253,32 @@ class TestApplicationStateSnapshotMerge:
         assert merged["model"] == "glm-5.1"
         assert merged["cache_read_tokens"] == 46800
         assert merged["total_cost_usd"] == 0.12
-        assert merged["_source"] == "display_tap"
+        assert merged["_source"] == "state_service"
+
+    def test_state_snapshot_merge_keeps_state_service_freshness_metadata(self):
+        current = {
+            "profile_name": "openai-oauth",
+            "_source": "state_service",
+            "_updated_at": 100.0,
+            "_stale": False,
+            "_degraded": False,
+        }
+        event = {
+            "type": "state_snapshot",
+            "messages": 16,
+            "_source": "display_tap",
+            "_updated_at": 104.0,
+            "_stale": True,
+            "_degraded": True,
+        }
+
+        merged = merge_widget_state_snapshot(current, event)
+
+        assert merged["messages"] == 16
+        assert merged["_source"] == "state_service"
+        assert merged["_updated_at"] == 100.0
+        assert merged["_stale"] is False
+        assert merged["_degraded"] is False
 
     def test_state_snapshot_merge_allows_explicit_zero_updates(self):
         current = {

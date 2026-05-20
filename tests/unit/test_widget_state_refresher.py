@@ -107,6 +107,22 @@ async def test_refresh_requests_render_after_remote_state_update():
 
 
 @pytest.mark.asyncio
+async def test_refresh_does_not_request_render_for_timestamp_only_update():
+    ctx = SimpleNamespace(remote_state={})
+    render_requests = []
+    refresher = WidgetStateRefresher(
+        ctx,
+        FakeStateService(),
+        request_render=lambda: render_requests.append("render"),
+    )
+
+    await refresher.refresh_once()
+    await refresher.refresh_once()
+
+    assert render_requests == ["render"]
+
+
+@pytest.mark.asyncio
 async def test_refresh_embeds_widget_state_freshness_metadata():
     ctx = SimpleNamespace(remote_state={}, runtime_mode="attach")
     refresher = WidgetStateRefresher(ctx, FakeStateService())

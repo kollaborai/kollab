@@ -40,6 +40,7 @@ def merge_widget_state_snapshot(
 ) -> dict[str, Any]:
     """Merge a DisplayTap state_snapshot into existing widget state."""
     current = current or {}
+    current_source = str(current.get("_source") or "")
     base = WidgetState.from_flat_dict(current, source="existing")
     update = WidgetState.from_flat_dict(event or {}, source="display_tap")
     merged = base.update_from(update)
@@ -49,7 +50,12 @@ def merge_widget_state_snapshot(
         if key not in WidgetState.state_fields()
         and key not in {"type", "_source", "_updated_at", "_stale", "_degraded"}
     }
-    return {**preserved, **merged.to_dict()}
+    result = {**preserved, **merged.to_dict()}
+    if current_source in {"state_service", "state_refresher"}:
+        for key in ("_source", "_updated_at", "_stale", "_degraded"):
+            if key in current:
+                result[key] = current[key]
+    return result
 
 
 class TerminalLLMChat:

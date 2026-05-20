@@ -42,6 +42,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _render_relevant_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the part of widget state that should wake the renderer."""
+    return {key: value for key, value in (state or {}).items() if key != "_updated_at"}
+
+
 class WidgetStateRefresher:
     """Background coroutine that keeps ``ctx.remote_state`` fresh.
 
@@ -145,8 +150,12 @@ class WidgetStateRefresher:
                 if key not in WidgetState.state_fields()
                 and key not in {"type", "_source", "_updated_at", "_stale", "_degraded"}
             }
-            self._ctx.remote_state = {**preserved, **updated.to_dict()}
-            if self._request_render is not None:
+            next_state = {**preserved, **updated.to_dict()}
+            should_render = _render_relevant_state(current_raw) != _render_relevant_state(
+                next_state
+            )
+            self._ctx.remote_state = next_state
+            if should_render and self._request_render is not None:
                 self._request_render()
         except Exception as e:
             logger.debug("widget state refresh: assign failed: %s", e)

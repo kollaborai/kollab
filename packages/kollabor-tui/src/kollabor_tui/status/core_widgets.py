@@ -377,7 +377,7 @@ def _state_health_label(ctx: Optional[WidgetContext], *, now: float | None = Non
     parts = [mode, "stale" if stale else "fresh"]
     if degraded:
         parts.append("degraded")
-    parts.extend([f"{age:.1f}s", source])
+    parts.append(source)
     return " ".join(parts)
 
 

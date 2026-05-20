@@ -234,8 +234,8 @@ class TestRenderStatusHealth(unittest.TestCase):
         self.assertIn("Ready", out)
         self.assertIn("daemon", out)
         self.assertIn("fresh", out)
-        self.assertIn("1.8s", out)
         self.assertIn("state_refresher", out)
+        self.assertNotIn("1.8s", out)
 
     def test_attach_degraded_stale_state(self) -> None:
         ctx = _make_ctx(
@@ -254,7 +254,7 @@ class TestRenderStatusHealth(unittest.TestCase):
         self.assertIn("attach", out)
         self.assertIn("stale", out)
         self.assertIn("degraded", out)
-        self.assertIn("12.4s", out)
+        self.assertNotIn("12.4s", out)
 
     def test_local_state_when_no_remote_snapshot(self) -> None:
         ctx = _make_ctx(remote_state={})
