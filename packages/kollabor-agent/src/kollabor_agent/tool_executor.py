@@ -15,6 +15,11 @@ from kollabor_events.models import EventType
 from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
 from .shell_executor import ShellExecutor
+from .tool_timeline import (
+    TIMELINE_METADATA_KEY,
+    ToolTimeline,
+    summarize_timeline_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +59,7 @@ class ToolExecutionResult:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary."""
-        return {
+        data = {
             "tool_id": self.tool_id,
             "tool_type": self.tool_type,
             "success": self.success,
@@ -63,6 +68,9 @@ class ToolExecutionResult:
             "execution_time": self.execution_time,
             "timestamp": self.timestamp,
         }
+        if self.metadata:
+            data["metadata"] = dict(self.metadata)
+        return data
 
     def __str__(self) -> str:
         """String representation of result."""
@@ -124,6 +132,7 @@ class ToolExecutor:
             workspace=self.workspace,
         )
         self.file_ops_executor.event_bus = event_bus
+        self.tool_timeline = ToolTimeline()
 
         # Plugin-registered tool handlers (populated via register_plugin_handler)
         self._plugin_handlers: Dict[
@@ -309,32 +318,68 @@ class ToolExecutor:
         """
         tool_type = tool_data.get("type", "unknown")
         tool_id = tool_data.get("id", "unknown")
+        tool_name = self._get_display_name(tool_data)
+        timeline_events: list[dict[str, Any]] = []
+
+        def record_timeline(
+            phase: str,
+            detail: str = "",
+            *,
+            success: bool | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            event = self.tool_timeline.record_phase(
+                phase,
+                tool_id=str(tool_id),
+                tool_type=str(tool_type),
+                detail=detail,
+                success=success,
+                metadata=metadata,
+            )
+            timeline_events.append(event.to_dict())
+
+        def attach_timeline(result: ToolExecutionResult) -> ToolExecutionResult:
+            if not timeline_events:
+                return result
+            existing = result.metadata.get(TIMELINE_METADATA_KEY, [])
+            result.metadata[TIMELINE_METADATA_KEY] = [
+                *timeline_events,
+                *list(existing),
+            ]
+            return result
+
+        record_timeline("started", tool_name)
 
         # Check for cancellation before starting
         if self.is_cancelled():
             logger.info(f"Tool {tool_id} skipped - cancellation requested")
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                tool_type=tool_type,
-                success=False,
-                error="Cancelled by user",
-                metadata={"cancelled": True},
+            record_timeline("cancelled", "Cancelled by user", success=False)
+            return attach_timeline(
+                ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error="Cancelled by user",
+                    metadata={"cancelled": True},
+                )
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
         scope_error = self._check_bundle_scope(tool_type)
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                tool_type=tool_type,
-                success=False,
-                error=scope_error,
-                metadata={"scope_denied": True},
+            record_timeline("scope_denied", scope_error, success=False)
+            return attach_timeline(
+                ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=scope_error,
+                    metadata={"scope_denied": True},
+                )
             )
 
         # Set tool executing state for spinner animation
-        tool_name = self._get_display_name(tool_data)
         if self.renderer:
             self.renderer.set_tool_executing(True, tool_name)
 
@@ -343,6 +388,7 @@ class ToolExecutor:
         try:
             # Emit pre-execution hook (includes permission check)
             logger.info(f"[DIAG] Emitting TOOL_CALL_PRE for {tool_id}")
+            record_timeline("permission_requested", tool_name)
             pre_call_results = await self.event_bus.emit_with_hooks(
                 EventType.TOOL_CALL_PRE, {"tool_data": tool_data}, "tool_executor"
             )
@@ -356,18 +402,24 @@ class ToolExecutor:
                 reason = permission_decision.get("reason", "Permission denied")
 
                 logger.warning(f"Tool {tool_id} execution denied: {reason}")
-                return ToolExecutionResult(
-                    tool_id=tool_id,
-                    tool_type=tool_type,
-                    success=False,
-                    error=reason,
-                    execution_time=time.time() - start_time,
-                    metadata={"permission_denied": True},
+                record_timeline("permission_denied", reason, success=False)
+                return attach_timeline(
+                    ToolExecutionResult(
+                        tool_id=tool_id,
+                        tool_type=tool_type,
+                        success=False,
+                        error=reason,
+                        execution_time=time.time() - start_time,
+                        metadata={"permission_denied": True},
+                    )
                 )
+
+            record_timeline("permission_granted", tool_name, success=True)
 
             # Execute based on tool type
             try:
                 logger.debug(f"Executing tool {tool_id} of type {tool_type}")
+                record_timeline("executing", tool_name)
                 try:
                     # Check plugin handlers BEFORE built-in types.
                     # Normalize hyphen->underscore: native tools use hyphens
@@ -443,6 +495,46 @@ class ToolExecutor:
             # Update execution time
             result.execution_time = time.time() - start_time
 
+            for mcp_event in result.metadata.pop("_timeline", []):
+                if not isinstance(mcp_event, dict):
+                    continue
+                record_timeline(
+                    str(mcp_event.get("phase", "mcp_event")),
+                    str(mcp_event.get("detail", "")),
+                    success=mcp_event.get("success"),
+                    metadata=mcp_event.get("metadata") or {},
+                )
+
+            if result.output:
+                line_count = result.output.count("\n") + 1
+                char_count = len(result.output)
+                record_timeline(
+                    "stdout",
+                    f"{line_count} lines, {char_count} chars",
+                    success=True,
+                    metadata={"lines": line_count, "chars": char_count},
+                )
+            if result.error:
+                char_count = len(result.error)
+                record_timeline(
+                    "stderr",
+                    result.error[:120],
+                    success=False,
+                    metadata={"chars": char_count},
+                )
+            result_detail = (
+                f"success in {result.execution_time:.2f}s"
+                if result.success
+                else f"failed in {result.execution_time:.2f}s"
+            )
+            record_timeline(
+                "result",
+                result_detail,
+                success=result.success,
+                metadata={"execution_time": result.execution_time},
+            )
+            attach_timeline(result)
+
             # Emit post-execution hook
             await self.event_bus.emit_with_hooks(
                 EventType.TOOL_CALL_POST,
@@ -458,6 +550,12 @@ class ToolExecutor:
 
         except Exception as e:
             execution_time = time.time() - start_time
+            record_timeline(
+                "result",
+                f"failed in {execution_time:.2f}s",
+                success=False,
+                metadata={"execution_time": execution_time},
+            )
             error_result = ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type=tool_type,
@@ -465,6 +563,7 @@ class ToolExecutor:
                 error=f"Execution error: {str(e)}",
                 execution_time=execution_time,
             )
+            attach_timeline(error_result)
 
             self._update_stats(error_result)
             logger.error(f"Tool execution failed: {e}")
@@ -864,11 +963,26 @@ class ToolExecutor:
         try:
             # MCPIntegration owns call timeout cleanup so it can close and
             # reconnect poisoned stdio connections before later tool calls.
-            mcp_result = await self.mcp_integration.call_mcp_tool(
-                tool_name,
-                tool_arguments,
-                timeout=self.mcp_timeout,
-            )
+            try:
+                mcp_result = await self.mcp_integration.call_mcp_tool(
+                    tool_name,
+                    tool_arguments,
+                    timeout=self.mcp_timeout,
+                    include_timeline=True,
+                )
+            except TypeError as e:
+                if "include_timeline" not in str(e):
+                    raise
+                mcp_result = await self.mcp_integration.call_mcp_tool(
+                    tool_name,
+                    tool_arguments,
+                    timeout=self.mcp_timeout,
+                )
+            mcp_timeline = []
+            if isinstance(mcp_result, dict):
+                mcp_timeline = list(mcp_result.pop("_timeline", []))
+            else:
+                mcp_result = {"error": "MCP tool returned no result"}
 
             # Process MCP result
             if "error" in mcp_result:
@@ -877,13 +991,18 @@ class ToolExecutor:
                     tool_type="mcp_tool",
                     success=False,
                     error=mcp_result["error"],
+                    metadata={"_timeline": mcp_timeline},
                 )
             else:
                 # Format MCP output for display
                 output = self._format_mcp_output(mcp_result)
 
                 return ToolExecutionResult(
-                    tool_id=tool_id, tool_type="mcp_tool", success=True, output=output
+                    tool_id=tool_id,
+                    tool_type="mcp_tool",
+                    success=True,
+                    output=output,
+                    metadata={"_timeline": mcp_timeline},
                 )
 
         except Exception as e:
@@ -1063,9 +1182,16 @@ class ToolExecutor:
             Formatted string for conversation logging
         """
         if result.success:
-            return f"[{result.tool_type}] {result.output}"
+            formatted = f"[{result.tool_type}] {result.output}"
         else:
-            return f"[{result.tool_type}] ERROR: {result.error}"
+            formatted = f"[{result.tool_type}] ERROR: {result.error}"
+
+        timeline = summarize_timeline_events(
+            (getattr(result, "metadata", None) or {}).get(TIMELINE_METADATA_KEY, [])
+        )
+        if timeline:
+            return f"{formatted}\nTimeline:\n{timeline}"
+        return formatted
 
     def reset_stats(self):
         """Reset execution statistics."""

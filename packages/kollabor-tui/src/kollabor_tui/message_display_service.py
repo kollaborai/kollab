@@ -32,6 +32,9 @@ from kollabor_tui.tool_display import (
     format_tool_result as _td_format_tool_result,
 )
 from kollabor_tui.tool_display import (
+    format_tool_timeline as _td_format_tool_timeline,
+)
+from kollabor_tui.tool_display import (
     get_result_summary_modern as _td_get_result_summary_modern,
 )
 from kollabor_tui.tool_display import (
@@ -128,10 +131,11 @@ class MessageDisplayService:
             # For other tools, we might show output if it's short enough
             output_content = ""
             show_output = self._should_show_output(result)
+            output_lines = self._format_tool_timeline(result)
 
             if show_output:
-                output_lines = self._format_tool_output(result)
-                output_content = "\n".join(output_lines)
+                output_lines.extend(self._format_tool_output(result))
+            output_content = "\n".join(output_lines)
 
             # Create message sequence for this tool using modern "tool" type
             tool_messages = [
@@ -254,6 +258,10 @@ class MessageDisplayService:
         """Delegates to kollabor_tui.tool_display._format_tool_output"""
         return list(_td_format_tool_output(result))
 
+    def _format_tool_timeline(self, result) -> List[str]:
+        """Delegates to kollabor_tui.tool_display._format_tool_timeline"""
+        return list(_td_format_tool_timeline(result))
+
     def _format_edit_diff(self, result) -> List[str]:
         """Delegates to kollabor_tui.tool_display._format_edit_diff"""
         return list(_td_format_edit_diff(result))
@@ -370,7 +378,7 @@ class MessageDisplayService:
                 result_summary = self._get_tool_result_summary(result, tool_data)
 
                 # Build tool result content (output only, summary goes inline)
-                result_lines = []
+                result_lines = self._format_tool_timeline(result)
 
                 # Add actual output if appropriate
                 if self._should_show_output(result):
