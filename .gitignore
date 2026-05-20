@@ -218,6 +218,10 @@ docs/archive/
 agent_wishlist*.md
 session-mockup*.md
 docs/scratchpad.md
+
+# Local presentation drafts
+docs/research/2026-05-19-cli-harness-ux-presentation.md
+outputs/manual-20260519-cli-ux/
 docs/scratchpad/
 
 # Beads/Dolt tracker files
