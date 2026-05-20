@@ -850,8 +850,13 @@ class TerminalLLMChat:
                 "deferred_startup",
             )
 
-            # Wait for completion
-            await asyncio.gather(render_task, input_task)
+            # Wait for completion. CLI commands can intentionally clean up and
+            # exit during deferred startup, which cancels the foreground loops.
+            try:
+                await asyncio.gather(render_task, input_task)
+            except asyncio.CancelledError:
+                if self.running:
+                    raise
 
         except KeyboardInterrupt:
             print("\r\n")
@@ -2752,6 +2757,9 @@ class TerminalLLMChat:
         Ensures no orphaned tasks or resources remain.
         """
         logger.info("Starting application cleanup...")
+        self.running = False
+        if hasattr(self, "input_handler"):
+            self.input_handler.running = False
 
         # Stop the WidgetStateRefresher background task if running
         # (phase 5 of daemon transparency refactor)
@@ -2799,7 +2807,6 @@ class TerminalLLMChat:
 
         # Mark startup as incomplete
         self._startup_complete = False
-        self.running = False
 
         # Call full shutdown to cleanup other resources
         await self.shutdown()

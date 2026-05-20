@@ -29,3 +29,5 @@ python -m pytest \
   tests/unit/test_ghost_response.py \
   tests/unit/tui/test_permission_prompt_render.py \
   tests/test_hub_rpc_integration.py
+
+tests/tmux/fresh_daemon_doctor_smoke.sh

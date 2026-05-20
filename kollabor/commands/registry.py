@@ -13,6 +13,7 @@ RESERVED_COMMANDS: Set[str] = {
     "help",
     "version",
     "config",
+    "doctor",
     "status",
     "permissions",
     "profile",

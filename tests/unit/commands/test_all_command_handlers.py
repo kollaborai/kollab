@@ -24,6 +24,7 @@ Handlers already covered in other test files (skipped here):
 import asyncio
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 # Project root -- needed for plugins that call Path.cwd() at import/init time.
@@ -152,6 +153,106 @@ class TestSystemCommandHandler(unittest.TestCase):
 
         assert isinstance(result, CommandResult)
         assert not result.success  # no state_service -> graceful failure
+
+    def test_doctor_no_state_service_reports_blocked(self):
+        handler = self._make_handler()
+        result = _safe_run(handler.handle_doctor(_make_slash_command()))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert not result.success
+        assert "verdict: blocked" in result.message
+        assert "state service" in result.message
+        assert "proof read" in result.message
+
+    def test_doctor_ready_with_state_service(self):
+        class StateService:
+            async def get_active_profile(self):
+                return SimpleNamespace(
+                    name="openai-oauth",
+                    provider="openai",
+                    model="gpt-test",
+                )
+
+            async def get_permission_state(self):
+                return SimpleNamespace(approval_mode="DEFAULT")
+
+            async def get_mcp_state(self):
+                return SimpleNamespace(
+                    total_servers=1,
+                    connected_servers=1,
+                    total_tools=3,
+                )
+
+            async def get_hub_state(self):
+                return SimpleNamespace(my_identity="koordinator", peer_count=0)
+
+            async def get_active_agent(self):
+                return SimpleNamespace(name="coder")
+
+            async def get_system_info(self):
+                return SimpleNamespace(daemon_pid=0, daemon_uptime_seconds=0)
+
+        services = {
+            "state_service": StateService(),
+            "renderer": object(),
+            "command_registry": object(),
+            "permission_manager": object(),
+            "llm_service": object(),
+        }
+        handler = self._make_handler(extra_services=services)
+        result = _safe_run(handler.handle_doctor(_make_slash_command()))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert result.success
+        assert "verdict: ready" in result.message
+        assert "profile" in result.message
+        assert "proof read" in result.message
+
+    def test_doctor_proof_mode_checks_xml_native_and_mock_mcp_contracts(self):
+        class StateService:
+            async def get_active_profile(self):
+                return SimpleNamespace(name="test", provider="test", model="model")
+
+            async def get_permission_state(self):
+                return SimpleNamespace(approval_mode="DEFAULT")
+
+            async def get_mcp_state(self):
+                return SimpleNamespace(
+                    total_servers=0,
+                    connected_servers=0,
+                    total_tools=0,
+                )
+
+            async def get_hub_state(self):
+                return SimpleNamespace(my_identity="koordinator", peer_count=0)
+
+            async def get_active_agent(self):
+                return SimpleNamespace(name="coder")
+
+            async def get_system_info(self):
+                return SimpleNamespace(daemon_pid=0, daemon_uptime_seconds=0)
+
+        services = {
+            "state_service": StateService(),
+            "renderer": object(),
+            "command_registry": object(),
+            "permission_manager": object(),
+            "llm_service": object(),
+        }
+        handler = self._make_handler(extra_services=services)
+        result = _safe_run(handler.handle_doctor(_make_slash_command("proof")))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert result.success
+        assert "proof xml" in result.message
+        assert "proof native" in result.message
+        assert "proof mock-mcp" in result.message
 
     # /permissions -- permission_manager=None -> early CommandResult(success=False)
     def test_permissions_no_manager(self):

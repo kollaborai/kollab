@@ -1,13 +1,19 @@
 """System command handler.
 
-Handles /help, /config, /status, /permissions, /version, /restart.
+Handles /help, /config, /doctor, /status, /permissions, /version, /restart.
 """
 
 import logging
 import platform
+import shutil
+import subprocess
 from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
+from kollabor_agent.tool_call_contract import normalize_native_tool_call
+from kollabor_ai.response_parser import ResponseParser
 from kollabor_events.models import (
     CommandCategory,
     CommandDefinition,
@@ -24,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class SystemCommandHandler(BaseCommandHandler):
-    """Handles /help, /config, /status, /version, /permissions, /restart."""
+    """Handles /help, /config, /doctor, /status, /version, /permissions, /restart."""
 
     MODAL_ACTIONS = set()  # No modal actions for system commands
 
@@ -70,6 +76,20 @@ class SystemCommandHandler(BaseCommandHandler):
             icon="[CFG]",
         )
         self.command_registry.register_command(config_command)
+
+        # Register /doctor command
+        doctor_command = CommandDefinition(
+            name="doctor",
+            description="Run a first-run readiness check and harmless proof task",
+            handler=self.handle_doctor,
+            plugin_name="system",
+            category=CommandCategory.SYSTEM,
+            mode=CommandMode.INSTANT,
+            aliases=["checkup", "ready"],
+            icon="[DR]",
+            cli_hidden=False,
+        )
+        self.command_registry.register_command(doctor_command)
 
         # Register /status command
         status_command = CommandDefinition(
@@ -287,6 +307,67 @@ class SystemCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
 
+    async def handle_doctor(self, command: SlashCommand) -> CommandResult:
+        """Handle /doctor command.
+
+        Runs a read-only readiness report for first-run and attach debugging.
+        The command deliberately avoids mutating config or starting servers.
+        """
+        try:
+            state_service = None
+            if self.event_bus and hasattr(self.event_bus, "get_service"):
+                state_service = self.event_bus.get_service("state_service")
+
+            checks: list[dict[str, str]] = []
+
+            def add(status: str, name: str, detail: str, fix: str = "") -> None:
+                checks.append(
+                    {
+                        "status": status,
+                        "name": name,
+                        "detail": detail,
+                        "fix": fix,
+                    }
+                )
+
+            cwd = Path.cwd()
+            git_branch = self._read_git_branch(cwd)
+            add("ok", "cwd", str(cwd))
+            if git_branch:
+                add("ok", "git", f"branch {git_branch}")
+            else:
+                add("warn", "git", "not in a git worktree", "run from a project repo")
+
+            if state_service is None:
+                add(
+                    "block",
+                    "state service",
+                    "not registered",
+                    "start the full kollab app, not a bare handler",
+                )
+            else:
+                await self._doctor_state_checks(state_service, add)
+
+            self._doctor_service_checks(add)
+            self._doctor_proof_check(cwd, add)
+            self._doctor_contract_proof_checks(add)
+
+            message = self._format_doctor_report(checks)
+            blocked = any(c["status"] == "block" for c in checks)
+
+            return CommandResult(
+                success=not blocked,
+                message=message,
+                display_type="error" if blocked else "success",
+            )
+        except Exception as e:
+            self.logger.error(f"Error in doctor command: {e}")
+            return CommandResult(
+                success=False,
+                message=f"doctor failed: {e}",
+                display_type="error",
+            )
+
     def _build_status_modal_definition(self, sys_info: Any) -> Dict[str, Any]:
         """Build the /status modal definition from a SystemInfoSnapshot.
 
@@ -385,6 +466,220 @@ class SystemCommandHandler(BaseCommandHandler):
                 }
             ],
         }
+
+    async def _doctor_state_checks(self, state_service: Any, add: Any) -> None:
+        """Collect readiness checks from the unified StateService."""
+        try:
+            profile = await state_service.get_active_profile()
+            name = getattr(profile, "name", "") or ""
+            model = getattr(profile, "model", "") or ""
+            provider = getattr(profile, "provider", "") or ""
+            if name and model:
+                add("ok", "profile", f"{name} | {provider or 'provider?'} | {model}")
+            elif name:
+                add("warn", "profile", f"{name} has no model", "set a model/profile")
+            else:
+                add("block", "profile", "no active profile", "run /profile list")
+        except Exception as e:
+            add("block", "profile", f"unreadable: {e}", "check profile config")
+
+        try:
+            perm = await state_service.get_permission_state()
+            mode = getattr(perm, "approval_mode", "") or "unknown"
+            add("ok", "permissions", mode)
+        except Exception as e:
+            add("warn", "permissions", f"unreadable: {e}", "run /permissions show")
+
+        try:
+            mcp = await state_service.get_mcp_state()
+            total = int(getattr(mcp, "total_servers", 0) or 0)
+            connected = int(getattr(mcp, "connected_servers", 0) or 0)
+            tools = int(getattr(mcp, "total_tools", 0) or 0)
+            if total == 0:
+                add("warn", "mcp", "0 servers configured", "run /mcp add or /mcp show")
+            elif connected == 0:
+                add(
+                    "warn",
+                    "mcp",
+                    f"{total} configured, 0 connected",
+                    "run /mcp test <server>",
+                )
+            else:
+                add("ok", "mcp", f"{connected}/{total} connected, {tools} tools")
+        except Exception as e:
+            add("warn", "mcp", f"unreadable: {e}", "run /mcp show")
+
+        try:
+            hub = await state_service.get_hub_state()
+            ident = getattr(hub, "my_identity", "") or ""
+            peers = int(getattr(hub, "peer_count", 0) or 0)
+            if ident:
+                add("ok", "hub", f"{ident}, {peers} peers")
+            else:
+                add("warn", "hub", "no identity yet", "start with hub enabled")
+        except Exception as e:
+            add("warn", "hub", f"unreadable: {e}", "run /hub status")
+
+        try:
+            agent = await state_service.get_active_agent()
+            name = getattr(agent, "name", "") or ""
+            if name:
+                add("ok", "agent", name)
+            else:
+                add("warn", "agent", "default/no active agent", "run /agent list")
+        except Exception as e:
+            add("warn", "agent", f"unreadable: {e}", "run /agent list")
+
+        try:
+            sys_info = await state_service.get_system_info()
+            pid = int(getattr(sys_info, "daemon_pid", 0) or 0)
+            uptime = float(getattr(sys_info, "daemon_uptime_seconds", 0.0) or 0.0)
+            if pid:
+                add("ok", "daemon", f"pid {pid}, uptime {int(uptime)}s")
+            else:
+                add("ok", "runtime", "local process")
+        except Exception as e:
+            add("warn", "runtime", f"unreadable: {e}", "run /status")
+
+    def _doctor_service_checks(self, add: Any) -> None:
+        """Collect service registry checks without assuming full app startup."""
+        services = {
+            "renderer": "terminal renderer missing",
+            "command_registry": "command registry missing",
+            "permission_manager": "permission manager missing",
+            "llm_service": "llm service missing",
+        }
+        for service_name, missing in services.items():
+            try:
+                if service_name == "command_registry":
+                    service = getattr(self, "command_registry", None)
+                else:
+                    service = (
+                        self.event_bus.get_service(service_name)
+                        if self.event_bus and hasattr(self.event_bus, "get_service")
+                        else None
+                    )
+            except Exception:
+                service = None
+            if service is None:
+                add("warn", service_name, missing)
+            else:
+                add("ok", service_name, "registered")
+
+    def _doctor_proof_check(self, cwd: Path, add: Any) -> None:
+        """Run a harmless proof read so /doctor proves local tool viability."""
+        candidates = [
+            cwd / "pyproject.toml",
+            cwd / "README.md",
+            cwd / "AGENTS.md",
+        ]
+        proof = next((p for p in candidates if p.is_file()), None)
+        if proof is None:
+            add(
+                "warn",
+                "proof read",
+                "no pyproject/readme/agents file found",
+                "run from a project root",
+            )
+            return
+
+        try:
+            with proof.open("rb") as fh:
+                chunk = fh.read(128)
+            if chunk:
+                add("ok", "proof read", f"read {proof.name} ({len(chunk)} bytes)")
+            else:
+                add("warn", "proof read", f"{proof.name} is empty")
+        except Exception as e:
+            add("block", "proof read", f"failed: {e}", "check file permissions")
+
+    def _doctor_contract_proof_checks(self, add: Any) -> None:
+        """Validate XML, native, and MCP tool-call contract normalization."""
+        try:
+            parser = ResponseParser()
+            parsed = parser.parse_response(
+                "<read><file>pyproject.toml</file></read>\n"
+                '<tool name="doctor_ping" mode="mock">ok</tool>'
+            )
+            tools = parser.get_all_tools(parsed)
+            by_type = {tool["type"]: tool for tool in tools}
+            if by_type.get("file_read", {}).get("file") != "pyproject.toml":
+                raise ValueError("xml file_read contract did not normalize")
+            add("ok", "proof xml", "file_read normalized")
+
+            mock_mcp = by_type.get("mcp_tool", {})
+            if (
+                mock_mcp.get("name") != "doctor_ping"
+                or mock_mcp.get("arguments", {}).get("mode") != "mock"
+            ):
+                raise ValueError("mock MCP contract did not normalize")
+            add("ok", "proof mock-mcp", "doctor_ping normalized")
+
+            native = normalize_native_tool_call(
+                SimpleNamespace(
+                    id="doctor_native",
+                    name="state_update",
+                    input={"state": "doctor-ok"},
+                ),
+                plugin_handler_names={"state_update"},
+            )
+            if (
+                native.get("type") != "state_update"
+                or native.get("arguments", {}).get("state") != "doctor-ok"
+            ):
+                raise ValueError("native tool contract did not normalize")
+            add("ok", "proof native", "state_update normalized")
+        except Exception as e:
+            add("block", "proof contracts", f"failed: {e}", "run tool contract tests")
+
+    def _read_git_branch(self, cwd: Path) -> str:
+        """Read the current git branch with a bounded, read-only probe."""
+        git = shutil.which("git")
+        if not git:
+            return ""
+        try:
+            proc = subprocess.run(
+                [git, "branch", "--show-current"],
+                cwd=str(cwd),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+                check=False,
+            )
+        except Exception:
+            return ""
+        return (proc.stdout or "").strip()
+
+    def _format_doctor_report(self, checks: list[dict[str, str]]) -> str:
+        counts = {
+            "ok": sum(1 for c in checks if c["status"] == "ok"),
+            "warn": sum(1 for c in checks if c["status"] == "warn"),
+            "block": sum(1 for c in checks if c["status"] == "block"),
+        }
+        if counts["block"]:
+            verdict = "blocked"
+        elif counts["warn"]:
+            verdict = "degraded"
+        else:
+            verdict = "ready"
+
+        icon = {"ok": "[ok]", "warn": "[warn]", "block": "[block]"}
+        lines = [
+            "kollab doctor:",
+            f"  verdict: {verdict}",
+            f"  checks: {counts['ok']} ok, {counts['warn']} warn, {counts['block']} blocked",
+            "",
+        ]
+        for check in checks:
+            line = (
+                f"  {icon[check['status']]} {check['name']:<18} "
+                f"{check['detail']}"
+            )
+            lines.append(line.rstrip())
+            if check["fix"]:
+                lines.append(f"       fix: {check['fix']}")
+        return "\n".join(lines)
 
     async def handle_permissions(self, command: SlashCommand) -> CommandResult:
         """Handle /permissions command.
