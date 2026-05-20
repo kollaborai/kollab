@@ -103,6 +103,30 @@ async def test_call_resolves_on_matching_reply() -> None:
     result = await asyncio.wait_for(task, timeout=1.0)
     assert result == {"pong": True}
     assert client._pending == {}
+    assert client.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_count_tracks_in_flight_call() -> None:
+    writer = FakeStreamWriter()
+    client = RpcClient(writer)
+
+    task = asyncio.create_task(client.call("ping", timeout=2.0))
+    await _wait_for_write(writer, expected=1)
+
+    assert client.pending_count == 1
+
+    request_id = writer.get_all_writes()[0]["request_id"]
+    client.on_reply(
+        {
+            "action": "rpc_reply",
+            "request_id": request_id,
+            "result": "pong",
+        }
+    )
+
+    assert await asyncio.wait_for(task, timeout=1.0) == "pong"
+    assert client.pending_count == 0
 
 
 @pytest.mark.asyncio

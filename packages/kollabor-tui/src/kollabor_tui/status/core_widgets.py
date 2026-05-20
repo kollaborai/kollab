@@ -5,6 +5,7 @@ current directory, profile, model, status, stats, agent, and skills.
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -128,6 +129,7 @@ class WidgetContext:
         self.event_bus = event_bus
         self.widget_config: Any = None
         self.widget_id: str | None = None
+        self.runtime_mode: str = "local"
         # Remote state from daemon (populated in attach mode)
         self.remote_state: dict = {}
 
@@ -292,23 +294,47 @@ def render_endpoint(width: int, ctx: Optional[WidgetContext]) -> str:
         return _fg("@ ?", T().text_dim)
 
 
-def render_status(width: int, ctx: Optional[WidgetContext]) -> str:
+def render_status(
+    width: int,
+    ctx: Optional[WidgetContext],
+    *,
+    now: float | None = None,
+) -> str:
     """Render status indicator widget (Ready/Working).
 
     Width-aware formats:
     - Full (7+ chars): "* Ready" or "* Working"
     - Compact (<7 chars): "*R" or "*W"
     """
+    return _render_status(width, ctx, now=now)
+
+
+def _render_status(
+    width: int,
+    ctx: Optional[WidgetContext],
+    *,
+    now: float | None = None,
+) -> str:
     try:
         is_processing = False
         if ctx and ctx.llm_service:
-            is_processing = ctx.llm_service.is_processing
+            is_processing = ctx.llm_service.is_processing is True
         if not is_processing and ctx and ctx.remote_state:
-            is_processing = ctx.remote_state.get("is_processing", False)
+            is_processing = ctx.remote_state.get("is_processing", False) is True
+
+        health = _state_health_label(ctx, now=now)
 
         # "* Ready" = 7 chars, "* Working" = 9 chars
         # Use 7 as threshold since "Ready" is the common state
-        if width >= 7:
+        if width >= 24:
+            if is_processing:
+                icon = _fg("*", T().warning[0])
+                text = _fg(f"Working {health}", T().warning[0])
+            else:
+                icon = _fg("*", T().ai_tag)
+                text = _fg(f"Ready {health}", T().ai_tag)
+            return f"{icon} {text}"
+        elif width >= 7:
             # Full format
             if is_processing:
                 icon = _fg("*", T().warning[0])
@@ -326,6 +352,33 @@ def render_status(width: int, ctx: Optional[WidgetContext]) -> str:
     except Exception as e:
         logger.error(f"status widget error: {e}")
         return _fg("*?", T().text_dim)
+
+
+def _state_health_label(ctx: Optional[WidgetContext], *, now: float | None = None) -> str:
+    """Render widget-state source/freshness so daemon truth is inspectable."""
+    rs = ctx.remote_state if ctx and ctx.remote_state else {}
+    if not rs:
+        return "local"
+
+    now = time.monotonic() if now is None else now
+    source = str(rs.get("_source") or "remote")
+    updated_at = float(rs.get("_updated_at") or 0.0)
+    age = max(0.0, now - updated_at) if updated_at else 0.0
+    stale = bool(rs.get("_stale")) or (updated_at > 0 and age > 10.0)
+    degraded = bool(rs.get("_degraded"))
+
+    if getattr(ctx, "is_attach_mode", False) is True:
+        mode = "attach"
+    elif int(rs.get("daemon_pid") or 0):
+        mode = "daemon"
+    else:
+        mode = str(rs.get("runtime_mode") or "local")
+
+    parts = [mode, "stale" if stale else "fresh"]
+    if degraded:
+        parts.append("degraded")
+    parts.extend([f"{age:.1f}s", source])
+    return " ".join(parts)
 
 
 def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:

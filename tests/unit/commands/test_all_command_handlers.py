@@ -154,6 +154,69 @@ class TestSystemCommandHandler(unittest.TestCase):
         assert isinstance(result, CommandResult)
         assert not result.success  # no state_service -> graceful failure
 
+    def test_status_modal_includes_attach_runtime_state(self):
+        class StateService:
+            async def get_system_info(self):
+                return SimpleNamespace(
+                    python_version="3.12",
+                    platform_name="Darwin",
+                    platform_arch="arm64",
+                    daemon_pid=123,
+                    daemon_uptime_seconds=9.4,
+                    cwd="/tmp/project",
+                    total_commands=42,
+                    enabled_commands=40,
+                    command_categories=7,
+                    plugin_count=8,
+                )
+
+            async def get_active_profile(self):
+                return SimpleNamespace(name="openai-oauth", model="gpt-test")
+
+            async def get_active_agent(self):
+                return SimpleNamespace(name="coder")
+
+            async def get_permission_state(self):
+                return SimpleNamespace(approval_mode="DEFAULT")
+
+            async def get_processing_state(self):
+                return SimpleNamespace(pending_tools_count=2)
+
+            async def get_hub_state(self):
+                return SimpleNamespace(my_identity="koordinator", peer_count=3)
+
+        services = {
+            "state_service": StateService(),
+            "rpc_client": SimpleNamespace(pending_count=5),
+            "attach_runtime_state": {
+                "identity": "koordinator",
+                "socket_path": "/tmp/kollab.sock",
+                "connected_at": 100.0,
+                "last_heartbeat_at": 103.5,
+            },
+        }
+        handler = self._make_handler(extra_services=services)
+        result = _safe_run(handler.handle_status(_make_slash_command()))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        assert result.success
+        modal = result.ui_config.modal_config
+        labels = {
+            widget["label"]: widget["value"]
+            for section in modal["sections"]
+            for widget in section["widgets"]
+        }
+        assert labels["Identity"] == "koordinator"
+        assert labels["Socket"] == "/tmp/kollab.sock"
+        assert labels["Profile"] == "openai-oauth | gpt-test"
+        assert labels["Agent"] == "coder"
+        assert labels["Permissions"] == "DEFAULT"
+        assert labels["Pending RPC"] == "5"
+        assert labels["Ctrl+Z"] == "detach; daemon keeps running"
+        assert labels["Ctrl+C"] == "stop attached client and owned daemon"
+
     def test_doctor_no_state_service_reports_blocked(self):
         handler = self._make_handler()
         result = _safe_run(handler.handle_doctor(_make_slash_command()))

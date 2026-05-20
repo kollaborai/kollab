@@ -268,6 +268,55 @@ class TestMCPServerConnection(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_mock_mcp_tool_execution_uses_real_call_path(self):
+        """Doctor proof can rely on a real MCPIntegration call path."""
+
+        async def run_test():
+            mcp = MCPIntegration(event_bus=None)
+            mcp.mcp_servers = {
+                "doctor-mock": {
+                    "type": "stdio",
+                    "command": "doctor-mock",
+                    "enabled": True,
+                }
+            }
+            mcp.tool_registry["doctor_ping"] = {
+                "server": "doctor-mock",
+                "definition": {
+                    "name": "doctor_ping",
+                    "description": "doctor proof ping",
+                },
+                "enabled": True,
+            }
+
+            class MockConnection:
+                initialized = True
+
+                async def call_tool(self, tool_name, arguments, timeout=None):
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"{tool_name}:{arguments['message']}",
+                            }
+                        ]
+                    }
+
+            mcp.server_connections["doctor-mock"] = MockConnection()
+
+            result = await mcp.call_mcp_tool(
+                "doctor_ping",
+                {"message": "ok"},
+                timeout=0.5,
+            )
+
+            self.assertEqual(
+                result,
+                {"content": [{"type": "text", "text": "doctor_ping:ok"}]},
+            )
+
+        asyncio.run(run_test())
+
 
 class TestMCPIntegration(unittest.TestCase):
     """Test MCP integration functionality."""

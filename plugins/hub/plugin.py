@@ -8364,7 +8364,9 @@ class HubPlugin(BasePlugin):
     def _format_status(self) -> str:
         """Format hub status display."""
         if not self._identity:
-            return "hub: not connected"
+            lines = ["hub: not connected"]
+            lines.extend(self._format_cockpit_lines())
+            return "\n".join(lines)
 
         assert self._presence is not None
         agents = self._presence.get_cached_agents()
@@ -8404,7 +8406,22 @@ class HubPlugin(BasePlugin):
             for slot in pending[:5]:
                 lines.append(f"  [{slot.id}] {slot.task[:60]}")
 
+        lines.extend(self._format_cockpit_lines())
         return "\n".join(lines)
+
+    def _format_cockpit_lines(self) -> list[str]:
+        lines: list[str] = ["", "cockpit:"]
+        if self._task_ledger:
+            pending_replies = self._task_ledger.pending_replies()
+            lines.append(f"  pending replies: {len(pending_replies)}")
+        else:
+            lines.append("  pending replies: unavailable")
+        try:
+            trace_path = self._delivery_trace().path
+            lines.append(f"  delivery trace: {trace_path}")
+        except Exception:
+            lines.append("  delivery trace: unavailable")
+        return lines
 
     def _format_whoami(self) -> str:
         if not self._identity:

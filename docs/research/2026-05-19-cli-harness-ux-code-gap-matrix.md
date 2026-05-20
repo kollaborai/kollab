@@ -34,19 +34,20 @@ Update from the first implementation slice:
   checks without requiring a model call.
 - `tests/tmux/fresh_daemon_doctor_smoke.sh` proves `/doctor` renders through a
   fresh daemon-backed attach client with an isolated HOME.
-- The remaining runtime proof should add mock MCP and multi-tool execution.
+- Runtime proof now includes read proof, XML/native/mock-MCP normalization,
+  real MCPIntegration mock connection execution, and fresh daemon attach smoke.
 
 ## Code Ownership Map
 
 | UX pillar | Current owner files | Current tests | Current state |
 | --- | --- | --- | --- |
-| First-run under 90 seconds | `kollabor/cli.py`, `main.py`, `kollabor/application.py`, `kollabor/commands/system_commands/handlers/system.py`, profile/login/MCP commands | `tests/unit/commands/test_all_command_handlers.py`, `tests/tmux/fresh_daemon_doctor_smoke.sh` | `/doctor` proof exists; still needs mock MCP/tool proof expansion |
-| Cockpit status bar | `packages/kollabor-tui/src/kollabor_tui/status/core_widgets.py`, `kollabor/state/refresher.py`, `kollabor/state/widget_state.py` | `tests/unit/tui/test_status_widgets_remote_state.py`, `tests/unit/test_widget_state.py`, `tests/unit/test_widget_state_refresher.py` | Strong foundation; needs UX copy/state labels and live proof |
-| Context management | `plugins/context_compaction_plugin.py`, `kollabor/state/context*.py`, `kollabor/state/local.py`, `kollabor/state/remote.py` | `tests/unit/test_compaction_dual_gate.py`, `tests/unit/test_context_compaction_tool_boundaries.py` | Functional internals; needs visible compact preview and pin/drop UX |
-| Tool reliability timeline | `packages/kollabor-agent/src/kollabor_agent/*`, `kollabor/llm/llm_coordinator.py`, MCP integration/manager | `tests/unit/test_tool_call_contract_golden.py`, `tests/unit/mcp/test_mcp_integration.py`, tool registry tests | Contract hardening exists; timeline visualization still missing |
+| First-run under 90 seconds | `kollabor/cli.py`, `main.py`, `kollabor/application.py`, `kollabor/commands/system_commands/handlers/system.py`, profile/login/MCP commands | `tests/unit/commands/test_all_command_handlers.py`, `tests/unit/mcp/test_mcp_integration.py`, `tests/tmux/fresh_daemon_doctor_smoke.sh` | `/doctor` proof exists with read/XML/native/mock-MCP checks |
+| Cockpit status bar | `packages/kollabor-tui/src/kollabor_tui/status/core_widgets.py`, `kollabor/state/refresher.py`, `kollabor/state/widget_state.py` | `tests/unit/tui/test_status_widgets_remote_state.py`, `tests/unit/test_widget_state.py`, `tests/unit/test_widget_state_refresher.py` | Existing status widget now exposes mode/freshness/source/age |
+| Context management | `plugins/context_compaction_plugin.py`, `kollabor/state/context*.py`, `kollabor/state/local.py`, `kollabor/state/remote.py` | `tests/unit/test_compaction_dual_gate.py`, `tests/unit/test_context_compaction_tool_boundaries.py` | `/compact preview` now exposes preserved/removed/pinned counts |
+| Tool reliability timeline | `packages/kollabor-agent/src/kollabor_agent/*`, `kollabor/llm/llm_coordinator.py`, MCP integration/manager | `tests/unit/test_tool_call_contract_golden.py`, `tests/unit/test_tool_timeline.py`, `tests/unit/mcp/test_mcp_integration.py`, tool registry tests | Timeline event contract exists; UI rendering still missing |
 | Expert controls | command handlers under `kollabor/commands/`, permission manager, profile/agent/skill commands | `tests/unit/commands/test_all_command_handlers.py`, permission tests | Many controls exist; needs discoverable palette/modes/status feedback |
-| Attach mode | `kollabor/application.py`, `kollabor/attach_client.py`, `kollabor/state/remote.py`, `kollabor/llm/permissions/attach_bridge.py` | `tests/unit/test_attach_client.py`, `tests/unit/test_attach_permission_bridge.py`, `tests/unit/test_attach_startup_order.py` | In-app path is canonical; legacy client remains for compatibility |
-| Hub/multi-agent ownership | `plugins/hub/plugin.py`, `plugins/hub/delivery.py`, `plugins/hub/task_ledger.py`, `plugins/hub/dns/*`, `plugins/hub/remote_envelope.py` | `tests/unit/test_hub_*`, `tests/test_hub_rpc_integration.py` | Delivery reliability improved; UX dashboard/roster still thin |
+| Attach mode | `kollabor/application.py`, `kollabor/attach_client.py`, `kollabor/state/remote.py`, `kollabor/llm/permissions/attach_bridge.py` | `tests/unit/test_attach_client.py`, `tests/unit/test_attach_permission_bridge.py`, `tests/unit/test_attach_startup_order.py`, `tests/unit/commands/test_all_command_handlers.py` | `/status` now exposes attach runtime, heartbeat, profile, agent, permissions, pending RPC |
+| Hub/multi-agent ownership | `plugins/hub/plugin.py`, `plugins/hub/delivery.py`, `plugins/hub/task_ledger.py`, `plugins/hub/dns/*`, `plugins/hub/remote_envelope.py` | `tests/unit/test_hub_*`, `tests/test_hub_rpc_integration.py` | Hub status now includes read-only cockpit counts; richer dashboard still pending |
 | Regression gate | `scripts/stabilization-gate.sh`, `tests/tmux/fresh_daemon_doctor_smoke.sh` | gate invokes 22 targeted test files; fresh-daemon smoke currently separate | Good focused gate; still needs MCP/tool smoke folded in |
 
 ## Pillar Matrix

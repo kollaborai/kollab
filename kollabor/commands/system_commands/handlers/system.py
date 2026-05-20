@@ -284,7 +284,10 @@ class SystemCommandHandler(BaseCommandHandler):
                     display_type="error",
                 )
 
-            status_definition = self._build_status_modal_definition(sys_info)
+            status_definition = await self._build_status_modal_definition(
+                sys_info,
+                state_service=state_service,
+            )
 
             return CommandResult(
                 success=True,
@@ -368,7 +371,12 @@ class SystemCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
 
-    def _build_status_modal_definition(self, sys_info: Any) -> Dict[str, Any]:
+    async def _build_status_modal_definition(
+        self,
+        sys_info: Any,
+        *,
+        state_service: Any,
+    ) -> Dict[str, Any]:
         """Build the /status modal definition from a SystemInfoSnapshot.
 
         The snapshot already carries python/platform/arch and command
@@ -376,10 +384,93 @@ class SystemCommandHandler(BaseCommandHandler):
         fallback to local platform module lookups -- if the daemon
         returned an empty string, we show an empty string.
         """
+        profile = await self._maybe_state_snapshot(state_service, "get_active_profile")
+        agent = await self._maybe_state_snapshot(state_service, "get_active_agent")
+        perm = await self._maybe_state_snapshot(state_service, "get_permission_state")
+        proc = await self._maybe_state_snapshot(state_service, "get_processing_state")
+        hub = await self._maybe_state_snapshot(state_service, "get_hub_state")
+        attach_runtime = self._get_service("attach_runtime_state") or {}
+        rpc_client = self._get_service("rpc_client")
+        pending_rpc = getattr(rpc_client, "pending_count", 0) if rpc_client else 0
+        profile_label = (
+            f"{getattr(profile, 'name', '') or 'unknown'} | "
+            f"{getattr(profile, 'model', '') or 'unknown'}"
+        )
+
         return {
             "title": "System Status",
             "footer": "Esc to close",
             "sections": [
+                {
+                    "title": "Runtime",
+                    "widgets": [
+                        {
+                            "type": "label",
+                            "label": "Identity",
+                            "value": str(attach_runtime.get("identity") or "local"),
+                        },
+                        {
+                            "type": "label",
+                            "label": "Socket",
+                            "value": str(attach_runtime.get("socket_path") or "local"),
+                        },
+                        {
+                            "type": "label",
+                            "label": "Heartbeat",
+                            "value": self._format_attach_heartbeat(attach_runtime),
+                        },
+                        {
+                            "type": "label",
+                            "label": "Pending RPC",
+                            "value": str(pending_rpc),
+                        },
+                        {
+                            "type": "label",
+                            "label": "Ctrl+Z",
+                            "value": "detach; daemon keeps running",
+                        },
+                        {
+                            "type": "label",
+                            "label": "Ctrl+C",
+                            "value": "stop attached client and owned daemon",
+                        },
+                    ],
+                },
+                {
+                    "title": "Session",
+                    "widgets": [
+                        {
+                            "type": "label",
+                            "label": "Profile",
+                            "value": profile_label,
+                        },
+                        {
+                            "type": "label",
+                            "label": "Agent",
+                            "value": str(getattr(agent, "name", "") or "unknown"),
+                        },
+                        {
+                            "type": "label",
+                            "label": "Permissions",
+                            "value": str(
+                                getattr(perm, "approval_mode", "") or "unknown"
+                            ),
+                        },
+                        {
+                            "type": "label",
+                            "label": "Pending Tools",
+                            "value": str(getattr(proc, "pending_tools_count", 0) or 0),
+                        },
+                        {
+                            "type": "label",
+                            "label": "Hub",
+                            "value": (
+                                f"{getattr(hub, 'my_identity', '') or 'none'} | "
+                                f"{getattr(hub, 'peer_count', 0) or 0} peers"
+                            ),
+                        },
+                    ],
+                },
                 {
                     "title": "Commands",
                     "widgets": [
@@ -466,6 +557,27 @@ class SystemCommandHandler(BaseCommandHandler):
                 }
             ],
         }
+
+    def _get_service(self, name: str) -> Any:
+        if self.event_bus and hasattr(self.event_bus, "get_service"):
+            try:
+                return self.event_bus.get_service(name)
+            except Exception:
+                return None
+        return None
+
+    async def _maybe_state_snapshot(self, state_service: Any, method: str) -> Any:
+        try:
+            fn = getattr(state_service, method)
+            return await fn()
+        except Exception:
+            return None
+
+    def _format_attach_heartbeat(self, attach_runtime: dict[str, Any]) -> str:
+        last = attach_runtime.get("last_heartbeat_at")
+        if not last:
+            return "none"
+        return str(last)
 
     async def _doctor_state_checks(self, state_service: Any, add: Any) -> None:
         """Collect readiness checks from the unified StateService."""

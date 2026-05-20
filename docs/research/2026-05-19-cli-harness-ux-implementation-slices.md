@@ -17,6 +17,9 @@ Initial implementation exists. `/doctor` and `python main.py --doctor` report a
 ready/degraded/blocked verdict, core runtime checks, and one harmless proof
 read. A fresh daemon-backed attach smoke exists at
 `tests/tmux/fresh_daemon_doctor_smoke.sh`.
+Current implementation also verifies XML normalization, native tool
+normalization, mock-MCP normalization, and a real `MCPIntegration.call_mcp_tool`
+mock connection path.
 
 Build:
 - Add a `/doctor` command.
@@ -34,7 +37,8 @@ the pieces, but not the guided success path.
 Tests:
 - command unit test with fake managers: done
 - fresh daemon attach smoke with isolated HOME: done
-- mock MCP proof path: pending
+- mock MCP normalization proof: done
+- real MCPIntegration mock connection proof: done
 
 Done means:
 Fresh user can run one command and know whether Kollab is ready, degraded, or
@@ -51,13 +55,19 @@ Build:
 - Surface last-updated age from `_updated_at`.
 - Ensure stale/degraded state cannot look healthy.
 
+Status:
+Implemented in the existing `status` widget rather than adding a new widget.
+`WidgetState` carries `runtime_mode`; the refresher marks partial snapshot
+failures as degraded and preserves source/update metadata.
+
 Why now:
 The typed state layer already exists and passed tests. This is a high-leverage
 UX improvement with low architectural risk.
 
 Tests:
-- extend widget-state tests for stale/degraded rendering
-- attach-mode remote-state preference tests
+- widget-state runtime mode round trip: done
+- stale/degraded rendering: done
+- attach-mode remote-state preference tests: done
 - render invalidation assertion stays covered
 
 Done means:
@@ -70,7 +80,7 @@ Goal:
 Make attach mode inspectable.
 
 Build:
-- Add `/attach status` or a status modal tab.
+- Extend `/status` with attach/runtime sections.
 - Show daemon pid/uptime, socket identity, connected profile/model, active
   agent, skills, permission mode, hub peers, pending RPC state, last heartbeat,
   and Ctrl+Z/Ctrl+C semantics.
@@ -81,10 +91,9 @@ The canonical in-app attach path is already real. The user just cannot inspect
 it as one coherent surface.
 
 Tests:
-- attach startup order
-- remote state reads
-- permission bridge routing
-- daemon disconnect behavior
+- `/status` modal runtime-state test: done
+- RPC pending count test: done
+- existing attach startup/permission bridge coverage remains in the gate
 
 Done means:
 Attach no longer feels magical. It can explain what it is connected to and what
@@ -106,7 +115,7 @@ Users praised auto-compact in competitor tools but hate hidden context loss.
 Kollab can win by making context control explicit.
 
 Tests:
-- preview is non-mutating
+- preview is non-mutating: done
 - apply mutates expected history
 - pin/drop buckets stable
 
@@ -129,6 +138,8 @@ The contract tests and MCP recovery work are strong. The UX still needs to show
 what happened without log spelunking.
 
 Tests:
+- tool timeline event contract golden: done
+- replayable event sequence golden: done
 - XML tool timeline golden
 - native tool timeline golden
 - MCP timeout/reconnect timeline golden
@@ -148,12 +159,17 @@ Build:
   assignments.
 - Pull from existing delivery trace and pending reply data.
 
+Status:
+Initial read-only cockpit is added to hub status. It exposes pending replies and
+the delivery trace path without changing routing behavior.
+
 Why now:
 Recent hub hardening made delivery more reliable. Now make the reliability
 visible so missed-final-report bugs are obvious.
 
 Tests:
-- pending replies
+- pending replies: done
+- hub status cockpit counts: done
 - delivery trace
 - reject/quarantine paths
 - wake active/passive classification
@@ -200,7 +216,7 @@ Fresh daemon proof now exists for the first-run doctor path:
 Latest local result:
 
 - command: `tests/tmux/fresh_daemon_doctor_smoke.sh`
-- result: 4/4 passed
+- result: 7/7 passed
 
 The broader runtime proof still needs:
 

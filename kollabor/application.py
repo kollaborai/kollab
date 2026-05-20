@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -638,6 +639,13 @@ class TerminalLLMChat:
             layout_manager=self.layout_manager,
             event_bus=self.event_bus,
         )
+        if self._attach_to:
+            widget_context.runtime_mode = "attach"
+            widget_context.is_attach_mode = True
+        elif getattr(self.args, "detached", False):
+            widget_context.runtime_mode = "daemon"
+        else:
+            widget_context.runtime_mode = "local"
         self.layout_renderer.set_context(widget_context)
         # Store reference for plugin widget access
         self._widget_context = widget_context
@@ -1512,6 +1520,16 @@ class TerminalLLMChat:
         # get_status_line() can show the remote identity on the status bar
         if self.event_bus and hub_info:
             self.event_bus.register_service("attach_hub_info", hub_info)
+        if self.event_bus:
+            attach_runtime_state = {
+                "identity": identity,
+                "socket_path": str(self._attach_socket),
+                "connected_at": time.time(),
+                "last_heartbeat_at": 0.0,
+            }
+            self.event_bus.register_service(
+                "attach_runtime_state", attach_runtime_state
+            )
 
         # === RPC client (phase 1 of daemon transparency refactor) ===
         # Local import: kollabor_rpc is only needed in the attach branch, and
@@ -1745,7 +1763,9 @@ class TerminalLLMChat:
                         )
 
                 elif etype == "heartbeat":
-                    pass
+                    runtime = self.event_bus.get_service("attach_runtime_state")
+                    if isinstance(runtime, dict):
+                        runtime["last_heartbeat_at"] = time.time()
 
             # Connection ended (skip message if we detached intentionally)
             daemon_gone = self.running and not getattr(self, "_attach_detaching", False)
