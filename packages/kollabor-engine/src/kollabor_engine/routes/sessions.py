@@ -185,19 +185,6 @@ async def create_session(body: CreateSessionRequest, request: Request):
         # For openai/anthropic, strip /chat/completions since SDK appends it
         base_url = creds.base_url or ""
 
-        # Debug: log received credentials
-        import sys
-
-        print("[ENGINE-DEBUG] Creating session with credentials:", file=sys.stderr)
-        print(f"[ENGINE-DEBUG]   provider={creds.provider}", file=sys.stderr)
-        print(f"[ENGINE-DEBUG]   model={creds.model}", file=sys.stderr)
-        print(f"[ENGINE-DEBUG]   base_url={base_url}", file=sys.stderr)
-        print(f"[ENGINE-DEBUG]   max_tokens={creds.max_tokens}", file=sys.stderr)
-        print(
-            f"[ENGINE-DEBUG]   api_key=sk-*** (length={len(creds.api_key)})",
-            file=sys.stderr,
-        )
-
         profile = LLMProfile(
             name="app-inline",
             provider=creds.provider,

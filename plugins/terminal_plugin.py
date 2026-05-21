@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -37,6 +38,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+def _filter_env(env: dict) -> dict:
+    """Remove sensitive environment variables before passing to child processes."""
+    sensitive_patterns = (
+        "API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "AUTH",
+    )
+    filtered = {}
+    for key, value in env.items():
+        upper = key.upper()
+        if any(pat in upper for pat in sensitive_patterns):
+            continue
+        filtered[key] = value
+    return filtered
+
+
+
 class TerminalSession:
     """Represents a managed terminal session backed by subprocess.Popen."""
 
@@ -243,17 +259,21 @@ Aliases: /t, /term, /tmux"""
         try:
             shell_cmd = command if command else os.environ.get("SHELL", "/bin/bash")
 
-            env = os.environ.copy()
+            env = _filter_env(os.environ.copy())
             env["KOLLAB_ROOT_SOCKET"] = os.environ.get(
                 "KOLLAB_ROOT_SOCKET", Path.cwd().name
             )
 
+            try:
+                cmd_parts = shlex.split(shell_cmd)
+            except ValueError:
+                cmd_parts = ["/bin/sh", "-c", shell_cmd]
             proc = subprocess.Popen(
-                shell_cmd,
+                cmd_parts,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                shell=True,
+                shell=False,
                 cwd=str(Path.cwd()),
                 env=env,
             )
@@ -592,7 +612,7 @@ Aliases: /t, /term, /tmux"""
         try:
             effective_cwd = Path(cwd) if cwd and cwd.strip() else Path.cwd()
 
-            env = os.environ.copy()
+            env = _filter_env(os.environ.copy())
             env["KOLLAB_ROOT_SOCKET"] = os.environ.get(
                 "KOLLAB_ROOT_SOCKET", Path.cwd().name
             )
@@ -646,17 +666,21 @@ Aliases: /t, /term, /tmux"""
         try:
             effective_cwd = cwd if cwd and cwd.strip() else str(Path.cwd())
 
-            env = os.environ.copy()
+            env = _filter_env(os.environ.copy())
             env["KOLLAB_ROOT_SOCKET"] = os.environ.get(
                 "KOLLAB_ROOT_SOCKET", Path.cwd().name
             )
 
+            try:
+                cmd_parts = shlex.split(command)
+            except ValueError:
+                cmd_parts = ["/bin/sh", "-c", command]
             proc = subprocess.Popen(
-                command,
+                cmd_parts,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                shell=True,
+                shell=False,
                 cwd=effective_cwd,
                 env=env,
             )
