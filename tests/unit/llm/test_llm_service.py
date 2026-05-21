@@ -354,7 +354,7 @@ class TestMessageDisplayCoordination(unittest.TestCase):
     def test_thinking_display_integration(self):
         """Test that _execute_llm_turn passes thinking_duration to display_complete_response.
 
-        The actual 'Thought for X seconds' formatting is tested by
+        The actual turn-timing formatting is tested by
         test_message_sequence_atomic_display. This test verifies the integration:
         the queue processor measures elapsed time and forwards it to the display service.
         """
@@ -410,18 +410,16 @@ class TestMessageDisplayCoordination(unittest.TestCase):
         response = "Test response content"
 
         if thinking_duration > 0.1:
-            message_sequence.append(
-                ("system", f"Thought for {thinking_duration:.1f} seconds", {})
-            )
+            message_sequence.append(("spacer", "", {}))
 
         if response.strip():
             message_sequence.append(("assistant", response, {}))
 
         # Verify sequence structure
         self.assertEqual(len(message_sequence), 2)
-        self.assertEqual(message_sequence[0][0], "system")
+        self.assertEqual(message_sequence[0][0], "spacer")
         self.assertEqual(message_sequence[1][0], "assistant")
-        self.assertIn("Thought for 0.5 seconds", message_sequence[0][1])
+        self.assertEqual(message_sequence[0][1], "")
         self.assertEqual(message_sequence[1][1], response)
 
 
