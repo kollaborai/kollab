@@ -1656,8 +1656,8 @@ class BannerRenderer:
         from .terminal_state import get_global_width
 
         width = max(40, get_global_width())
-        border_fg = T().input_bg[0]
         panel_bg = T().dark[0]
+        border_fg = panel_bg
         panel_fg = T().text
         panel_muted = T().text_dim
 

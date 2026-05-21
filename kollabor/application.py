@@ -1294,7 +1294,7 @@ class TerminalLLMChat:
         for line in wrapped_lines:
             output_parts.append(solid_fg(line, T().text_dim))
 
-        ready_text = "\n".join(output_parts)
+        ready_text = "\n" + "\n".join(output_parts) + "\n"
         self.renderer.message_coordinator.display_raw_text(ready_text)
 
     async def _check_for_updates(self) -> None:

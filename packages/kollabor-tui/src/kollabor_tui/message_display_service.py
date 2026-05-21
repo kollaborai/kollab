@@ -348,13 +348,12 @@ class MessageDisplayService:
         message_sequence: list[tuple[str, str, dict]] = []
         pipe_mode = getattr(self.renderer, "pipe_mode", False)
 
-        # Add a little separation after long turns (suppress in pipe mode).
-        # Temporarily hide the visible timing/reasoning row while we tune the UI:
+        # Timing/reasoning rows stay hidden while we tune the UI. Spacing now
+        # lives in the message renderers so every visible user/assistant marker
+        # gets the same compact separation, including attach/proxy output.
         # status_message = self._build_turn_status_message(
         #     thinking_duration, thinking_content
         # )
-        if thinking_duration > show_thinking_threshold and not pipe_mode:
-            message_sequence.append(("spacer", "", {}))
 
         # Add assistant response if present and not skipped (for streaming mode)
         if response.strip() and not skip_response_content:

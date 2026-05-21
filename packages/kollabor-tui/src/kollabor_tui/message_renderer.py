@@ -480,7 +480,7 @@ class ModernMessageRenderer:
         if width is None:
             width = get_global_width()
 
-        return self._compact_lines(
+        return "\n" + self._compact_lines(
             content.split("\n"),
             width=width,
             text_color=T().text,
@@ -518,12 +518,12 @@ class ModernMessageRenderer:
         if width is None:
             width = get_global_width()
 
-        return self._compact_lines(
+        return "\n" + self._compact_lines(
             lines,
             width=width,
             text_color=_assistant_text_color(),
             first_prefix=" ֎ ",
-            prefix_color=T().ai_tag,
+            prefix_color=T().text,
         )
 
     def tool_call(

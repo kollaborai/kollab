@@ -403,7 +403,7 @@ class CleanRenderer:
     TAG_WIDTH = 3
 
     def user_message(self, content: str, width: Optional[int] = None) -> str:
-        return _plain_rows(
+        return "\n" + _plain_rows(
             _content_lines(content),
             " ▌ ",
             T().user_tag,
@@ -415,10 +415,10 @@ class CleanRenderer:
         return self.response_block(_content_lines(content), width)
 
     def response_block(self, lines: List[str], width: Optional[int] = None) -> str:
-        return _plain_rows(
+        return "\n" + _plain_rows(
             lines,
             " ֎ ",
-            T().ai_tag,
+            T().text,
             _assistant_text_color(),
             width,
         )
