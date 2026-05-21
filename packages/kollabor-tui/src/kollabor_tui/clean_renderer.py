@@ -14,7 +14,7 @@ and no width padding, so terminal resize never causes wrap artifacts.
 import logging
 from typing import List, Optional
 
-from kollabor_tui.design_system import C, S, T, solid, solid_fg, wrap_text
+from kollabor_tui.design_system import S, T, solid, solid_fg, wrap_text
 from kollabor_tui.design_system.border_style import get_border_style
 from kollabor_tui.terminal_state import get_global_width
 
@@ -58,6 +58,38 @@ def _content_width(tag_width: int, width: Optional[int] = None) -> int:
     return (width or get_global_width()) - tag_width - 1
 
 
+def _plain_rows(
+    lines: List[str],
+    prefix: str,
+    prefix_color,
+    text_color,
+    width: Optional[int] = None,
+    continuation_prefix: Optional[str] = None,
+) -> str:
+    """Render compact rows with a foreground-colored icon only."""
+    output: List[str] = []
+    line_width = width or get_global_width()
+    continuation_prefix = continuation_prefix if continuation_prefix is not None else (
+        " " * len(prefix)
+    )
+
+    for line_idx, line in enumerate(lines):
+        active_prefix = prefix if line_idx == 0 else continuation_prefix
+        available = max(1, line_width - len(active_prefix))
+        wrapped = wrap_text(line, available) if line else [""]
+
+        for wrap_idx, wrapped_line in enumerate(wrapped):
+            row_prefix = active_prefix if wrap_idx == 0 else " " * len(active_prefix)
+            rendered = ""
+            if row_prefix:
+                rendered += solid_fg(row_prefix, prefix_color)
+            if wrapped_line:
+                rendered += solid_fg(wrapped_line, text_color)
+            output.append(rendered)
+
+    return "\n".join(output)
+
+
 class CleanRenderer:
     """Clean renderer -- colored tag column, plain content.
 
@@ -68,43 +100,19 @@ class CleanRenderer:
     TAG_WIDTH = 3
 
     def user_message(self, content: str, width: Optional[int] = None) -> str:
-        cw = _content_width(self.TAG_WIDTH, width)
-        lines = _expand_lines(_content_lines(content), cw)
-        output = []
-        tag_bg = T().user_tag
-        tag_fg = T().text_dark
-        output.append(_tag_edge(tag_bg))
-        for i, line in enumerate(lines):
-            icon = " ❯ " if i == 0 else "   "
-            output.append(_tag(icon, tag_bg, tag_fg) + " " + line)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return _plain_rows(
+            _content_lines(content),
+            "▌ ",
+            T().user_tag,
+            T().text,
+            width,
+        )
 
     def assistant_message(self, content: str, width: Optional[int] = None) -> str:
-        cw = _content_width(self.TAG_WIDTH, width)
-        lines = _expand_lines(_content_lines(content), cw)
-        output = []
-        tag_bg = T().ai_tag
-        tag_fg = T().text_dark
-        output.append(_tag_edge(tag_bg))
-        for i, line in enumerate(lines):
-            icon = " ◆ " if i == 0 else "   "
-            output.append(_tag(icon, tag_bg, tag_fg) + " " + line)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return self.response_block(_content_lines(content), width)
 
     def response_block(self, lines: List[str], width: Optional[int] = None) -> str:
-        cw = _content_width(self.TAG_WIDTH, width)
-        lines = _expand_lines(lines, cw)
-        output = []
-        tag_bg = T().ai_tag
-        tag_fg = T().text_dark
-        output.append(_tag_edge(tag_bg))
-        for i, line in enumerate(lines):
-            icon = " ◆ " if i == 0 else "   "
-            output.append(_tag(icon, tag_bg, tag_fg) + " " + line)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return _plain_rows(lines, "", T().ai_tag, T().text, width)
 
     def tool_call(
         self,
@@ -114,27 +122,33 @@ class CleanRenderer:
         nested_width: Optional[int] = None,
         result_summary: Optional[str] = None,
     ) -> str:
-        configs = {
-            "running": (f" {C['tool_running']} ", T().tool_tag, T().text, "running..."),
-            "success": (f" {C['tool_success']} ", T().ai_tag, T().text_dark, ""),
-            "error": (f" {C['tool_error']} ", T().error[0], T().text, "error"),
+        label = name.strip().lower() or "tool"
+        detail = args.strip()
+        width = nested_width or get_global_width()
+        status_colors = {
+            "running": T().warning[0],
+            "success": T().primary[0],
+            "error": T().error[0],
         }
-        icon, tag_bg, tag_fg, status_text = configs.get(status, configs["running"])
+        label_color = status_colors.get(status, T().tool_tag)
+        headline = f"{label} {detail}".strip()
+        rendered = _plain_rows([headline], "", label_color, T().text, width)
 
-        display_text = result_summary if result_summary else status_text
-        cw = _content_width(self.TAG_WIDTH, nested_width)
-        output = []
-        output.append(_tag_edge(tag_bg))
-        # Tool name line - wrap if name(args) is very long
-        name_lines = _expand_lines([f"{S.BOLD}{name}({args}){S.RESET_BOLD}"], cw)
-        output.append(_tag(icon, tag_bg, tag_fg) + " " + name_lines[0])
-        for extra in name_lines[1:]:
-            output.append(_tag("   ", tag_bg, tag_fg) + " " + extra)
+        display_text = result_summary
+        if display_text is None and status == "running":
+            display_text = "running..."
+        elif display_text is None and status == "error":
+            display_text = "error"
+
         if display_text:
-            for dl in _expand_lines([display_text], cw):
-                output.append(_tag("   ", tag_bg, tag_fg) + " " + dl)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+            rendered += "\n" + _plain_rows(
+                [display_text],
+                "  ↳ ",
+                T().text_dim,
+                T().text_dim,
+                width,
+            )
+        return rendered
 
     def tool_result(
         self, lines: List[str], nested_width: Optional[int] = None, wrap: bool = False
@@ -180,56 +194,28 @@ class CleanRenderer:
     def error_block(
         self, title: str, message: str, nested_width: Optional[int] = None
     ) -> str:
-        cw = _content_width(self.TAG_WIDTH, nested_width)
-        tag_bg = T().error[0]
-        tag_fg = T().text
-        message_lines = _expand_lines(message.split("\n"), cw)
-        output = []
-        output.append(_tag_edge(tag_bg))
-        output.append(_tag(" x ", tag_bg, tag_fg) + f" {S.BOLD}{title}{S.RESET_BOLD}")
-        for line in message_lines:
-            output.append(_tag("   ", tag_bg, tag_fg) + " " + line)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return _plain_rows(
+            [title] + message.split("\n"),
+            "✖ ",
+            T().error[0],
+            T().text,
+            nested_width,
+        )
 
     def warning_block(self, message: str, nested_width: Optional[int] = None) -> str:
-        cw = _content_width(self.TAG_WIDTH, nested_width)
-        tag_bg = T().warning[0]
-        tag_fg = T().text_dark
-        message_lines = _expand_lines(message.split("\n"), cw)
-        output = []
-        output.append(_tag_edge(tag_bg))
-        for i, line in enumerate(message_lines):
-            icon = " ! " if i == 0 else "   "
-            output.append(_tag(icon, tag_bg, tag_fg) + " " + line)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return _plain_rows(
+            message.split("\n"),
+            "⚠ ",
+            T().warning[0],
+            T().text,
+            nested_width,
+        )
 
     def info_block(self, message: str, width: Optional[int] = None) -> str:
-        cw = _content_width(self.TAG_WIDTH, width)
-        tag_bg = T().secondary[0]
-        tag_fg = T().text_dark
-        message_lines = _expand_lines(message.split("\n"), cw)
-        output = []
-        output.append(_tag_edge(tag_bg))
-        for i, line in enumerate(message_lines):
-            icon = " ℹ " if i == 0 else "   "
-            output.append(_tag(icon, tag_bg, tag_fg) + " " + line)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return _plain_rows(message.split("\n"), "ℹ ", T().text_dim, T().text, width)
 
     def success_block(self, message: str, width: Optional[int] = None) -> str:
-        cw = _content_width(self.TAG_WIDTH, width)
-        tag_bg = T().success[0]
-        tag_fg = T().text_dark
-        message_lines = _expand_lines(message.split("\n"), cw)
-        output = []
-        output.append(_tag_edge(tag_bg))
-        for i, line in enumerate(message_lines):
-            icon = " ✔ " if i == 0 else "   "
-            output.append(_tag(icon, tag_bg, tag_fg) + " " + line)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return _plain_rows(message.split("\n"), "✔ ", T().success[0], T().text, width)
 
     def agent_message(
         self,
@@ -239,33 +225,20 @@ class CleanRenderer:
         observing=False,
         width=None,
     ) -> str:
-        cw = _content_width(self.TAG_WIDTH, width)
         if agent_color is None:
             agent_color = T().secondary[0]
         if observing:
             agent_color = tuple(max(c // 3, 15) for c in agent_color)
-        tag_fg = T().text_dark
-        message_lines = _expand_lines(content.split("\n"), cw)
-        output = []
-        output.append(_tag_edge(agent_color))
-        for i, line in enumerate(message_lines):
-            icon = tag_char if i == 0 else "   "
-            output.append(_tag(icon, agent_color, tag_fg) + " " + line)
-        output.append(_tag_edge(agent_color, top=False))
-        return "\n".join(output)
+        prefix = f"{tag_char.strip()} "
+        text_color = T().text_dim if observing else T().text
+        return _plain_rows(content.split("\n"), prefix, agent_color, text_color, width)
 
     def thinking_indicator(
         self, seconds: float, tokens: Optional[int] = None, width: Optional[int] = None
     ) -> str:
-        tag_bg = T().thinking_tag
-        tag_fg = T().text_dark
         text = (
             f"thinking {seconds}s  ({tokens} tokens)"
             if tokens
             else f"thinking {seconds}s..."
         )
-        output = []
-        output.append(_tag_edge(tag_bg))
-        output.append(_tag(" ~ ", tag_bg, tag_fg) + " " + text)
-        output.append(_tag_edge(tag_bg, top=False))
-        return "\n".join(output)
+        return _plain_rows([text], "~ ", T().thinking_tag, T().text, width)

@@ -16,10 +16,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # Design system imports for modern rendering
 from kollabor_tui.design_system import (
     Box,
-    C,
     S,
     T,
     TagBox,
+    solid_fg,
+    wrap_text,
 )
 from kollabor_tui.terminal_state import get_global_width
 
@@ -198,7 +199,7 @@ class ModernMessageRenderer:
     """
 
     def user_message(self, content: str, width: int | None = None) -> str:
-        """Render user message with themed tag style.
+        """Render user message as a compact transcript row.
 
         Args:
             content: User message text (may contain newlines)
@@ -211,26 +212,16 @@ class ModernMessageRenderer:
         if width is None:
             width = get_global_width()
 
-        # Split content by newlines to handle multi-line content (e.g., shell output)
-        content_lines = content.split("\n")
-        # Don't add space prefix here - TagBox's continuation_indent handles alignment
-        lines = list(content_lines)
-        # First line gets the prompt arrow, rest get blank tag
-        tag_chars = [" ❯ "] + ["   "] * (len(lines) - 1)
-
-        return TagBox.render(
-            lines=lines,
-            tag_bg=T().user_tag,
-
-            tag_width=3,
-            content_colors=T().dark,
-            content_fg=T().text,
-            content_width=width - 3,
-            tag_chars=tag_chars,
+        return self._compact_lines(
+            content.split("\n"),
+            width=width,
+            text_color=T().text,
+            first_prefix="▌ ",
+            prefix_color=T().user_tag,
         )
 
     def assistant_message(self, content: str, width: int | None = None) -> str:
-        """Render assistant response with themed tag style.
+        """Render assistant response as compact plain text.
 
         Args:
             content: Response text (may contain newlines)
@@ -243,26 +234,10 @@ class ModernMessageRenderer:
         if width is None:
             width = get_global_width()
 
-        # Split content by newlines to handle multi-line content
-        content_lines = content.split("\n")
-        # Don't add space prefix here - TagBox's continuation_indent handles alignment
-        lines = list(content_lines)
-        # First line gets the diamond icon, rest get blank tag
-        tag_chars = [" ◆ "] + ["   "] * (len(lines) - 1)
-
-        return TagBox.render(
-            lines=lines,
-            tag_bg=T().ai_tag,
-
-            tag_width=3,
-            content_colors=T().response_bg,
-            content_fg=T().text,
-            content_width=width - 3,
-            tag_chars=tag_chars,
-        )
+        return self.response_block(content.split("\n"), width=width)
 
     def response_block(self, lines: List[str], width: int | None = None) -> str:
-        """Render multi-line LLM response with themed AI tag bar.
+        """Render multi-line LLM response as compact plain text.
 
         Args:
             lines: List of response text lines
@@ -275,19 +250,7 @@ class ModernMessageRenderer:
         if width is None:
             width = get_global_width()
 
-        content_lines = [f" {line}" for line in lines]
-        tag_chars = [" ◆ "] + ["   "] * (len(lines) - 1)
-
-        return TagBox.render(
-            lines=content_lines,
-            tag_bg=T().ai_tag,
-
-            tag_width=3,
-            content_colors=T().response_bg,
-            content_fg=T().text,
-            content_width=width - 3,
-            tag_chars=tag_chars,
-        )
+        return self._compact_lines(lines, width=width, text_color=T().text)
 
     def tool_call(
         self,
@@ -313,60 +276,101 @@ class ModernMessageRenderer:
         if nested_width is None:
             nested_width = get_global_width()
 
-        # Get spinner frame dynamically for running status
-        if status == "running" and _is_tool_spinner_enabled():
-            spinner = _get_tool_spinner()
-            running_icon = f" {spinner.get_current_frame()} "
-        else:
-            running_icon = f" {C['tool_running']} "
+        label = name.strip().lower() or "tool"
+        detail = args.strip()
+        headline = self._truncate_plain(f"{label} {detail}".strip(), nested_width)
 
-        configs = {
-            "running": (
-                running_icon,
-                T().tool_tag,
-                T().text,
-                T().secondary,
-                T().text,
-                "running...",
-            ),
-            "success": (
-                f" {C['tool_success']} ",
-                T().ai_tag,
-                T().text_dark,
-                T().success,
-                T().text_dark,
-                "",
-            ),
-            "error": (
-                f" {C['tool_error']} ",
-                T().error[0],
-                T().text,
-                T().error,
-                T().text,
-                "error",
-            ),
+        status_colors = {
+            "running": T().warning[0],
+            "success": T().primary[0],
+            "error": T().error[0],
         }
-        icon, tag_bg, tag_fg, content_colors, content_fg, status_text = configs.get(
-            status, configs["running"]
-        )
+        label_color = status_colors.get(status, T().tool_tag)
+        if headline == label:
+            rendered = solid_fg(headline, label_color)
+        elif headline.startswith(f"{label} "):
+            rendered = (
+                solid_fg(label, label_color)
+                + " "
+                + solid_fg(headline[len(label) + 1 :], T().text)
+            )
+        else:
+            rendered = solid_fg(headline, T().text)
 
-        # Build lines - use result_summary if provided, otherwise use status text
-        lines = [f" {S.BOLD}{name}({args}){S.RESET_BOLD}"]
-        display_text = result_summary if result_summary else status_text
+        display_text = result_summary
+        if display_text is None and status == "running":
+            display_text = "running..."
+        elif display_text is None and status == "error":
+            display_text = "error"
+
         if display_text:
-            lines.append(f" {display_text}")
+            summary = self._truncate_plain(f"  ↳ {display_text}", nested_width)
+            rendered += "\n" + solid_fg(summary, T().text_dim)
 
-        return TagBox.render(
-            lines=lines,
-            tag_bg=tag_bg,
-            tag_fg=tag_fg,
-            tag_width=3,
-            content_colors=content_colors,
-            content_fg=content_fg,
-            content_width=nested_width - 3,
-            tag_chars=[icon] + ["   "] * (len(lines) - 1),
-            indent=INDENT,
-        )
+        return rendered
+
+    @staticmethod
+    def _truncate_plain(text: str, width: int) -> str:
+        """Truncate plain text to a visible width."""
+        if len(text) <= width:
+            return text
+        if width <= 1:
+            return text[:width]
+        return text[: width - 1] + "…"
+
+    @staticmethod
+    def _paint_compact_line(
+        prefix: str,
+        text: str,
+        text_color: tuple[int, int, int],
+        prefix_color: tuple[int, int, int] | None = None,
+    ) -> str:
+        rendered = ""
+        if prefix:
+            rendered += solid_fg(prefix, prefix_color or text_color)
+        if text:
+            rendered += solid_fg(text, text_color)
+        return rendered
+
+    def _compact_lines(
+        self,
+        lines: List[str],
+        width: int,
+        text_color: tuple[int, int, int],
+        first_prefix: str = "",
+        prefix_color: tuple[int, int, int] | None = None,
+        continuation_prefix: str | None = None,
+    ) -> str:
+        """Render lines without full-width boxes or background fills."""
+        if continuation_prefix is None:
+            continuation_prefix = " " * len(first_prefix)
+
+        rendered_lines: list[str] = []
+        for line_idx, line in enumerate(lines):
+            prefix = first_prefix if line_idx == 0 else continuation_prefix
+            available = max(1, width - len(prefix))
+
+            if line == "":
+                rendered_lines.append(
+                    self._paint_compact_line(prefix, "", text_color, prefix_color)
+                    if prefix and line_idx == 0
+                    else ""
+                )
+                continue
+
+            wrapped_lines = wrap_text(line, available, word_wrap=True)
+            for wrap_idx, wrapped in enumerate(wrapped_lines):
+                active_prefix = prefix if wrap_idx == 0 else " " * len(prefix)
+                rendered_lines.append(
+                    self._paint_compact_line(
+                        active_prefix,
+                        wrapped,
+                        text_color,
+                        prefix_color if line_idx == 0 and wrap_idx == 0 else None,
+                    )
+                )
+
+        return "\n".join(rendered_lines)
 
     def tool_result(
         self, lines: List[str], nested_width: int | None = None, wrap: bool = False
@@ -449,7 +453,7 @@ class ModernMessageRenderer:
     def error_block(
         self, title: str, message: str, nested_width: int | None = None
     ) -> str:
-        """Render error block with themed tag style.
+        """Render error block as compact status text.
 
         Args:
             title: Error title
@@ -463,28 +467,16 @@ class ModernMessageRenderer:
         if nested_width is None:
             nested_width = get_global_width()
 
-        # Split message by newlines to handle multi-line content
-        message_lines = message.split("\n")
-        lines = [f" {S.BOLD}{title}{S.RESET_BOLD}"] + [
-            f" {line}" for line in message_lines
-        ]
-        # First line gets the error icon, rest get blank tag
-        tag_chars = [" x "] + ["   "] * len(message_lines)
-
-        return TagBox.render(
-            lines=lines,
-            tag_bg=T().error[0],
-            tag_fg=T().text,
-            tag_width=3,
-            content_colors=T().error,
-            content_fg=T().text,
-            content_width=nested_width - 3,
-            tag_chars=tag_chars,
-            indent=INDENT,
+        return self._compact_lines(
+            [title] + message.split("\n"),
+            width=nested_width,
+            text_color=T().text,
+            first_prefix="✖ ",
+            prefix_color=T().error[0],
         )
 
     def warning_block(self, message: str, nested_width: int | None = None) -> str:
-        """Render warning block with themed tag style.
+        """Render warning block as compact status text.
 
         Args:
             message: Warning message (may contain newlines)
@@ -497,22 +489,12 @@ class ModernMessageRenderer:
         if nested_width is None:
             nested_width = get_global_width()
 
-        # Split message by newlines to handle multi-line content
-        message_lines = message.split("\n")
-        lines = [f" {line}" for line in message_lines]
-        # First line gets the warning icon, rest get blank tag
-        tag_chars = [" ! "] + ["   "] * (len(lines) - 1)
-
-        return TagBox.render(
-            lines=lines,
-            tag_bg=T().warning[0],
-
-            tag_width=3,
-            content_colors=T().warning,
-            content_fg=T().text_dark,
-            content_width=nested_width - 3,
-            tag_chars=tag_chars,
-            indent=INDENT,
+        return self._compact_lines(
+            message.split("\n"),
+            width=nested_width,
+            text_color=T().text,
+            first_prefix="⚠ ",
+            prefix_color=T().warning[0],
         )
 
     def thinking_indicator(
@@ -537,19 +519,16 @@ class ModernMessageRenderer:
             if tokens
             else f" thinking {seconds}s..."
         )
-        return TagBox.render(
-            lines=[text],
-            tag_bg=T().thinking_tag,
-
-            tag_width=3,
-            content_colors=T().dark,
-            content_fg=T().text_dim,
-            content_width=width - 3,
-            tag_chars=[" ~ "],
+        return self._compact_lines(
+            [text.strip()],
+            width=width,
+            text_color=T().text_dim,
+            first_prefix="~ ",
+            prefix_color=T().thinking_tag,
         )
 
     def info_block(self, message: str, width: int | None = None) -> str:
-        """Render info block with themed tag style.
+        """Render info block as compact status text.
 
         Args:
             message: Info message (may contain newlines)
@@ -562,25 +541,16 @@ class ModernMessageRenderer:
         if width is None:
             width = get_global_width()
 
-        # Split message by newlines to handle multi-line content
-        message_lines = message.split("\n")
-        lines = [f" {line}" for line in message_lines]
-        # First line gets the info icon, rest get blank tag
-        tag_chars = [" ℹ "] + ["   "] * (len(lines) - 1)
-
-        return TagBox.render(
-            lines=lines,
-            tag_bg=T().secondary[0],
-
-            tag_width=3,
-            content_colors=T().secondary,
-            content_fg=T().text_dark,
-            content_width=width - 3,
-            tag_chars=tag_chars,
+        return self._compact_lines(
+            message.split("\n"),
+            width=width,
+            text_color=T().text,
+            first_prefix="ℹ ",
+            prefix_color=T().text_dim,
         )
 
     def success_block(self, message: str, width: int | None = None) -> str:
-        """Render success block with themed tag style.
+        """Render success block as compact status text.
 
         Args:
             message: Success message (may contain newlines)
@@ -593,21 +563,12 @@ class ModernMessageRenderer:
         if width is None:
             width = get_global_width()
 
-        # Split message by newlines to handle multi-line content
-        message_lines = message.split("\n")
-        lines = [f" {line}" for line in message_lines]
-        # First line gets the success icon, rest get blank tag
-        tag_chars = [" ✔ "] + ["   "] * (len(lines) - 1)
-
-        return TagBox.render(
-            lines=lines,
-            tag_bg=T().success[0],
-
-            tag_width=3,
-            content_colors=T().success,
-            content_fg=T().text_dark,
-            content_width=width - 3,
-            tag_chars=tag_chars,
+        return self._compact_lines(
+            message.split("\n"),
+            width=width,
+            text_color=T().text,
+            first_prefix="✔ ",
+            prefix_color=T().success[0],
         )
 
     def agent_message(
@@ -636,11 +597,6 @@ class ModernMessageRenderer:
         if agent_color is None:
             agent_color = T().secondary[0]
 
-        content_lines = content.split("\n")
-        lines = [f" {line}" for line in content_lines]
-
-        tag_chars = [tag_char] + ["   "] * (len(lines) - 1)
-
         if observing:
             if agent_color is not None:
                 agent_color = (
@@ -652,15 +608,12 @@ class ModernMessageRenderer:
         else:
             fg_color = T().text
 
-        return TagBox.render(
-            lines=lines,
-            tag_bg=agent_color if isinstance(agent_color, tuple) else (100, 100, 100),
-
-            tag_width=3,
-            content_colors=T().dark,
-            content_fg=fg_color,
-            content_width=width - 3,
-            tag_chars=tag_chars,
+        return self._compact_lines(
+            content.split("\n"),
+            width=width,
+            text_color=fg_color,
+            first_prefix=f"{tag_char.strip()} ",
+            prefix_color=agent_color if isinstance(agent_color, tuple) else T().text_dim,
         )
 
 
