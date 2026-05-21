@@ -2,7 +2,7 @@
 
 This module provides comprehensive visual effects for terminal rendering,
 including gradient effects, shimmer animations, color palettes,
-and banner generation.
+and startup header generation.
 """
 
 import os
@@ -1550,7 +1550,7 @@ class StatusColorizer:
 
 
 class BannerRenderer:
-    """Handles ASCII banner creation and rendering."""
+    """Handles startup header and KMO face rendering."""
 
     # Populated after class definition (see module-level code below)
     KMO_VARIATIONS: dict[str, list[str]]
@@ -1639,132 +1639,102 @@ class BannerRenderer:
         antenna, eyes, mouth = cls._KMO_FACES[mood]
         return cls._build_kmo(antenna, eyes, mouth, style)
 
-    KOLLAB_ASCII2 = [
-        "██╗  ██╗ ██████╗ ██╗     ██╗      █████╗ ██████╗  ██████╗ ██████╗ ",
-        "██║ ██╔╝██╔═══██╗██║     ██║     ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗",
-        "█████╔╝ ██║   ██║██║     ██║     ███████║██████╔╝██║   ██║██████╔╝",
-        "██╔═██╗ ██║   ██║██║     ██║     ██╔══██║██╔══██╗██║   ██║██╔══██╗",
-        "██║  ██╗╚██████╔╝███████╗███████╗██║  ██║██████╔╝╚██████╔╝██║  ██║",
-        "╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝",
-    ]
-
-    KOLLAB_ASCII_v1 = [
-        "▒█░▄▀ █▀▀█ █░░ █░░ █▀▀█ █▀▀▄ █▀▀█ █▀▀█   █▀▀█ ▀█▀",
-        "▒█▀▄░ █░░█ █░░ █░░ █▄▄█ █▀▀▄ █░░█ █▄▄▀   █▄▄█ ░█░",
-        "▒█░▒█ ▀▀▀▀ ▀▀▀ ▀▀▀ ▀░░▀ ▀▀▀░ ▀▀▀▀ ▀░▀▀ ▄ ▀░░▀ ▄█▄",
-    ]
-    KOLLAB_ASCII_v2 = [
-        "\r ──────────────────────────────────────────────── ",
-        "\r █ ▄▀ █▀▀█ █   █   █▀▀█ █▀▀▄ █▀▀█ █▀▀█   █▀▀█ ▀█▀  ",
-        "\r █▀▄  █  █ █   █   █▄▄█ █▀▀▄ █  █ █▄▄▀   █▄▄█  █   ",
-        "\r ▀  ▀ ▀▀▀▀ ▀▀▀ ▀▀▀ ▀  ▀ ▀▀▀  ▀▀▀▀ ▀ ▀▀ ▀ ▀  ▀ ▀▀▀  ",
-        "\r ──────────────────────────────────────────────── ",
-    ]
-    KOLLAB_ASCII2 = [
-        "\r  ██╗  ██╔════════════════════════════════════════════╗",
-        "\r  ██║ ██╔╝                                            ║",
-        "\r  █████╔╝ █▀▀█ █   █   █▀▀█ █▀▀▄ █▀▀█ █▀▀█   █▀▀█ ▀█▀ ║",
-        "\r  ██╔═██╗ █  █ █   █   █▄▄█ █▀▀▄ █  █ █▄▄▀   █▄▄█  █  ║",
-        "\r  ██║  ██╗▀▀▀▀ ▀▀▀ ▀▀▀ ▀  ▀ ▀▀▀  ▀▀▀▀ ▀ ▀▀ ▀ ▀  ▀ ▀▀▀ ║",
-        "\r  ╚═╝  ╚═╩════════════════════════════════════════════╝",
-    ]
-    KOLLAB_ASCII3 = [
-        "\r ┌──────────────────────────────────────────────────┐",
-        "\r │ ▄█─●─●─█▄  █ ▄▀ █▀▀█ █   █   █▀▀█ █▀▀▄ █▀▀█ █▀▀█ │",
-        "\r │ ██ │ │ ██  █▀▄  █  █ █   █   █▄▄█ █▀▀▄ █  █ █▄▄▀ │",
-        "\r │ ●──███──●  ▀  ▀ ▀▀▀▀ ▀▀▀ ▀▀▀ ▀  ▀ ▀▀▀  ▀▀▀▀ ▀ ▀▀ │",
-        "\r │ ██ │ │ ██      Collaborative Intelligence        │",
-        "\r │ ▀█─●─●─█▀                                        │",
-        "\r └──────────────────────────────────────────────────┘",
-    ]
-
     @classmethod
     def create_kollabor_banner(
         cls, version: str = "v1.0.0", context: dict | None = None
     ) -> str:
-        """Create modern Kollab banner using design system.
+        """Create compact Kollab startup header using the design system.
 
         Args:
             version: Version string to display.
             context: Optional dict with agent, model, profile, skills, directory.
 
         Returns:
-            Formatted banner with Box styling and context info.
+            Formatted startup header with context info.
         """
-        from .design_system import Box, S, T
+        from .design_system import T
         from .terminal_state import get_global_width
 
-        box_width = get_global_width()
+        width = max(40, get_global_width())
+        border_fg = T().secondary[0]
+        panel_bg = T().dark[0]
+        panel_fg = T().text
+        panel_muted = T().text_dim
 
-        # Logo + version on the right
-        logo_w = 35  # width of the logo text
-        pad = max(2, box_width - logo_w - len(version) - 12)
+        logo_plain = "  kollab"
+        version_plain = version
+        header_gap = " " * max(1, width - len(logo_plain) - len(version_plain))
+        header = f"{logo_plain}{header_gap}{version}"
 
-        logo_lines = [
-            f"{S.BOLD}  █ ▄▀ █▀▀█ █   █   █▀▀█ █▀▀▄{S.RESET}",
-            f"{S.BOLD}  █▀▄  █  █ █   █   █▄▄█ █▀▀▄{S.RESET}",
-            f"{S.BOLD}  █  █ █▄▄█ █▄▄ █▄▄ █  █ █▄▄▀{S.RESET}{' ' * pad}{S.DIM}{version}{S.RESET_DIM}",
-        ]
+        lines = [cls._panel_border("top", width, border_fg)]
+        lines.append(cls._panel_line(header, width, panel_bg, panel_fg))
 
-        # Context info lines below logo
         if context:
-            logo_lines.append(" ")
-
             agent = context.get("agent", "")
             model = context.get("model", "")
             profile = context.get("profile", "")
-            skills = context.get("skills", 0)
+            skills = context.get("skills")
             directory = context.get("directory", "")
-
-            # Shorten home dir
-            import os
 
             home = os.path.expanduser("~")
             if directory.startswith(home):
                 directory = "~" + directory[len(home) :]
 
-            dim = S.DIM
-            rst = S.RESET_DIM
-            bld = S.BOLD
-            rb = S.RESET
-
-            info_parts = []
+            runtime_parts = []
             if agent:
-                info_parts.append(f"  {dim}agent:{rst} {bld}{agent}{rb}")
+                runtime_parts.append(f"agent {agent}")
             if model:
-                info_parts.append(f"  {dim}model:{rst} {model}")
-            elif profile:
-                info_parts.append(f"  {dim}profile:{rst} {profile}")
-            if skills:
-                info_parts.append(f"  {dim}skills:{rst} {skills}")
-            info_parts.append(f"  {dim}dir:{rst} {directory}")
+                runtime_parts.append(f"model {model}")
+            if profile:
+                runtime_parts.append(f"profile {profile}")
+            if skills is not None:
+                skill_label = "skill" if skills == 1 else "skills"
+                runtime_parts.append(f"{skills} {skill_label}")
 
-            # Arrange in two columns if wide enough
-            if box_width >= 80 and len(info_parts) >= 3:
-                mid = (len(info_parts) + 1) // 2
-                col_w = (box_width - 8) // 2
-                for i in range(mid):
-                    left = info_parts[i] if i < len(info_parts) else ""
-                    right = info_parts[i + mid] if i + mid < len(info_parts) else ""
-                    # Approximate visible length (strip ANSI for padding)
-                    import re
+            if runtime_parts:
+                runtime_line = "  " + " · ".join(runtime_parts)
+                lines.append(cls._panel_line(runtime_line, width, panel_bg, panel_fg))
 
-                    left_vis = len(re.sub(r"\033\[[0-9;]*m", "", left))
-                    padding = max(1, col_w - left_vis)
-                    logo_lines.append(f"{left}{' ' * padding}{right}")
-            else:
-                for part in info_parts:
-                    logo_lines.append(part)
+            if directory:
+                directory_line = f"  {directory}"
+                lines.append(
+                    cls._panel_line(directory_line, width, panel_bg, panel_muted)
+                )
 
-        banner = Box.render(
-            lines=logo_lines,
-            colors=T().dark,
-            fg=T().text,
-            width=box_width,
-            disable_wrapping=True,
-        )
+        lines.append(cls._panel_border("bottom", width, border_fg))
+        return "\n" + "\n".join(lines) + "\n"
 
-        return f"\n{banner}\n"
+    @staticmethod
+    def _panel_border(position: str, width: int, color: tuple[int, int, int]) -> str:
+        """Render a status-widget style half-block panel border."""
+        from .design_system import solid_fg
+
+        char = "▄" if position == "top" else "▀"
+        return solid_fg(char * width, color)
+
+    @classmethod
+    def _panel_line(
+        cls,
+        text: str,
+        width: int,
+        bg: tuple[int, int, int],
+        fg: tuple[int, int, int],
+    ) -> str:
+        """Render one high-contrast startup header line."""
+        from .design_system import solid
+
+        clipped = cls._truncate_visible(text, width)
+        padded = clipped + (" " * max(0, width - len(clipped)))
+        return solid(padded, bg, fg, width)
+
+    @staticmethod
+    def _truncate_visible(text: str, width: int) -> str:
+        """Truncate plain text to a visible terminal width."""
+        if len(text) <= width:
+            return text
+        if width <= 3:
+            return text[:width]
+        return text[: width - 3] + "..."
 
 
 # Build KMO_VARIATIONS dict from compact face data
@@ -1899,18 +1869,18 @@ class VisualEffects:
     def create_banner(
         self, version: str = "v1.0.0", context: dict | None = None
     ) -> str:
-        """Create application banner.
+        """Create application startup header.
 
         Args:
             version: Version string.
             context: Optional dict with agent, model, profile, skills, directory.
 
         Returns:
-            Formatted banner.
+            Formatted startup header.
         """
         config = self._effects_config.get("banner")
         if not config or not config.enabled:
-            return f"KOLLAB {version}\n"
+            return f"kollab console {version}\n"
 
         return self.banner_renderer.create_kollabor_banner(version, context=context)
 

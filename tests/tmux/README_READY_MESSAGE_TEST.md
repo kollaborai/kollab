@@ -39,7 +39,7 @@ Session: test_ready_message_12345
 [4/6] Capturing terminal output...
 
 --- Captured Output ---
-[Kollab banner]
+[kollab console header]
 Ready! (24 system prompt modules, 85 hooks active, 15 plugins loaded, 8 status views available) Type your message and press Enter.
 --- End Output ---
 
@@ -184,7 +184,7 @@ To manually verify the ready message:
 # Start Kollab normally
 python main.py
 
-# Look for ready message with stats after banner
+# Look for ready message with stats after the startup header
 # Should see: Ready! (24 system prompt modules, ...) Type your message and press Enter.
 ```
 

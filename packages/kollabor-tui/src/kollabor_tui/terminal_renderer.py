@@ -523,14 +523,15 @@ class TerminalRenderer:
         )
 
         # Get colors
-        shimmer_color = self._get_input_shimmer_color(input_data.is_shell_command)
+        input_border = self._get_input_shimmer_color(input_data.is_shell_command)
+        input_bg = self._get_input_base_color(input_data.is_shell_command)
         input_fg = self._get_stable_input_foreground(input_data.is_shell_command)
 
         # Render borders
         show_top = position in ("only", "first")
         show_bottom = position in ("only", "last")
         if show_top and not simple_mode:
-            lines.append(solid_fg("▄" * width, shimmer_color))
+            lines.append(solid_fg("▄" * width, input_border))
 
         # Render content lines
         cursor_char = self._get_cursor_char(simple_mode)
@@ -540,7 +541,7 @@ class TerminalRenderer:
             cursor_info,
             visible_info,
             cursor_char,
-            shimmer_color,
+            input_bg,
             input_fg,
             width,
             simple_mode,
@@ -548,7 +549,7 @@ class TerminalRenderer:
 
         # Bottom border
         if show_bottom and not simple_mode:
-            lines.append(solid_fg("▀" * width, shimmer_color))
+            lines.append(solid_fg("▀" * width, input_border))
 
     def _prepare_input_data(self) -> InputData:
         """Prepare and normalize input buffer for rendering."""
@@ -630,6 +631,16 @@ class TerminalRenderer:
 
     def _get_input_base_color(self, is_shell: bool) -> tuple[int, int, int]:
         """Get the non-animated base background color for the input box."""
+        base: Any = T().input_bg[0]
+
+        if isinstance(base, (list, tuple)) and len(base) == 3:
+            if isinstance(base[0], (list, tuple)):
+                base = base[0]
+
+        return tuple(base) if isinstance(base, (list, tuple)) else T().input_bg[0]
+
+    def _get_input_border_color(self, is_shell: bool) -> tuple[int, int, int]:
+        """Get the non-animated border/accent color for the input box."""
         if is_shell:
             base: Any = T().error[0]
         elif self.input_handler:
@@ -638,15 +649,15 @@ class TerminalRenderer:
             if self.input_handler.command_mode == CommandMode.MENU_POPUP:
                 base = T().primary[0]
             else:
-                base = T().ai_tag
+                base = T().secondary[0]
         else:
-            base = T().ai_tag
+            base = T().secondary[0]
 
         if isinstance(base, (list, tuple)) and len(base) == 3:
             if isinstance(base[0], (list, tuple)):
                 base = base[0]
 
-        return tuple(base) if isinstance(base, (list, tuple)) else T().ai_tag
+        return tuple(base) if isinstance(base, (list, tuple)) else T().primary[0]
 
     def _get_stable_input_foreground(self, is_shell: bool) -> tuple[int, int, int]:
         """Choose readable input text color once from the base background.
@@ -658,8 +669,8 @@ class TerminalRenderer:
         return T().text_on(base_color)
 
     def _get_input_shimmer_color(self, is_shell: bool) -> tuple[Any, ...]:
-        """Get the background color for input box with shimmer effect."""
-        base = self._get_input_base_color(is_shell)
+        """Get the input border color with shimmer effect."""
+        base = self._get_input_border_color(is_shell)
 
         # Apply shimmer if not idle
         is_idle = (time.time() - self._last_activity) > self._idle_timeout
@@ -694,7 +705,7 @@ class TerminalRenderer:
         cursor_info: CursorInfo,
         visible_info: VisibleInfo,
         cursor_char: str,
-        shimmer_color: tuple[Any, ...],
+        input_bg: tuple[Any, ...],
         input_fg: tuple[int, int, int],
         width: int,
         simple_mode: bool,
@@ -738,7 +749,7 @@ class TerminalRenderer:
                 if simple_mode:
                     lines.append(content.replace(str(C["cursor"]), "|"))
                 else:
-                    lines.append(solid(content, shimmer_color, input_fg, width))
+                    lines.append(solid(content, input_bg, input_fg, width))
 
     def _write(self, text: str) -> None:
         """Write text directly to terminal.

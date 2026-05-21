@@ -1270,10 +1270,11 @@ class TerminalLLMChat:
         logger.debug(f"Ready stats formatted message: '{stats_message}'")
         logger.debug(f"Ready stats item count: {ready_collector.get_count()}")
 
-        # Ready message with gradient and bold Enter
-        ready_msg = "Ready! "
+        # Compact ready line; keep startup quiet and leave the screen to work.
+        ready_msg = "ready"
         if stats_message:
-            ready_msg += f"({stats_message}) "
+            compact_stats = stats_message.replace(", ", " · ")
+            ready_msg += f" · {compact_stats}"
 
         # Get global width for proper text wrapping
         from kollabor_tui.terminal_state import get_global_terminal_state
@@ -1284,30 +1285,14 @@ class TerminalLLMChat:
         # Wrap the stats part to fit within width
         import textwrap
 
-        from .quotes import get_random_quote
+        from kollabor_tui.design_system import T, solid_fg
 
         wrapped_lines = textwrap.wrap(ready_msg.strip(), width=width)
-        tip = get_random_quote()
 
         # Build pre-formatted ready text
         output_parts = []
         for line in wrapped_lines:
-            output_parts.append(
-                self.visual_effects.apply_message_gradient(line, "dim_white")
-            )
-        output_parts.append("")
-        # Split quote from author, bold quote, dim author on next line
-        if " - " in tip:
-            quote_text, author = tip.rsplit(" - ", 1)
-            wrapped_quote = textwrap.wrap(quote_text, width=width)
-            for line in wrapped_quote:
-                output_parts.append(f"\033[1m{line}\033[0m")
-            output_parts.append(f"\033[2m  - {author}\033[0m")
-        else:
-            wrapped_tip = textwrap.wrap(tip, width=width)
-            for line in wrapped_tip:
-                output_parts.append(f"\033[1m{line}\033[0m")
-        output_parts.append("")
+            output_parts.append(solid_fg(line, T().text_dim))
 
         ready_text = "\n".join(output_parts)
         self.renderer.message_coordinator.display_raw_text(ready_text)
