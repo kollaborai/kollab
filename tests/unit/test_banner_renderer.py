@@ -3,6 +3,7 @@
 import re
 
 from kollabor_tui import terminal_state
+from kollabor_tui.design_system import T, solid_fg
 from kollabor_tui.visual_effects import BannerRenderer
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -32,7 +33,7 @@ def test_startup_banner_uses_compact_header(monkeypatch):
     assert len(plain_lines) == 5
     assert plain_lines[0] == "▄" * 72
     assert plain_lines[-1] == "▀" * 72
-    assert plain_lines[1].startswith("  kollab")
+    assert plain_lines[1].startswith("  kollab v1.2.3")
     assert "kollab console" not in plain_lines[1]
     assert "v1.2.3" in plain_lines[1]
     assert "koordinator" in plain_lines[2]
@@ -62,14 +63,15 @@ def test_startup_banner_has_contrast_panel_background(monkeypatch):
     assert "\033[0;48;" in banner
 
 
-def test_startup_banner_border_is_visible_against_panel(monkeypatch):
-    """Startup banner border uses a different color than the panel fill."""
+def test_startup_banner_border_matches_input_fill(monkeypatch):
+    """Startup banner border matches the input box fill color."""
     monkeypatch.setattr(terminal_state, "get_global_width", lambda: 72)
 
     banner = BannerRenderer.create_kollabor_banner("v1.2.3", context=None)
     lines = banner.strip("\n").splitlines()
 
-    assert lines[0] != lines[1]
+    assert lines[0] == solid_fg("▄" * 72, T().input_bg[0])
+    assert lines[-1] == solid_fg("▀" * 72, T().input_bg[0])
 
 
 def test_startup_banner_uses_full_global_width(monkeypatch):

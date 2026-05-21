@@ -33,6 +33,7 @@ from kollabor_tui.status.core_widgets import (  # noqa: E402
     render_stats,
     render_status,
 )
+from kollabor_tui.status.utils import fg as _fg  # noqa: E402
 
 # ANSI escape regex to strip color/style codes from widget output for assertions
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mGKHfJ]")
@@ -292,6 +293,12 @@ class TestRenderStatusHealth(unittest.TestCase):
         out = _strip_ansi(render_status(80, ctx, now=100.0))
 
         self.assertIn("Ready", out)
+
+    def test_ready_status_word_is_bright_white(self) -> None:
+        ctx = _make_ctx(remote_state={})
+        out = render_status(80, ctx, now=100.0)
+
+        self.assertIn(_fg("Ready", (255, 255, 255)), out)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 import re
 
+from kollabor_tui.design_system import T, solid_fg
 from kollabor_tui.message_renderer import ModernMessageRenderer
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -25,12 +26,101 @@ def test_tool_call_renders_as_compact_row():
     plain = visible(rendered)
     lines = plain.splitlines()
 
-    assert len(lines) == 2
-    assert lines[0].startswith("read ")
+    assert len(lines) == 1
+    assert lines[0].startswith("      ⌕ ")
     assert "app/api/orders/route.ts" in lines[0]
-    assert lines[1].startswith("  ↳ ")
-    assert "28 lines" in lines[1]
+    assert "➲" in lines[0]
+    assert "28 lines" in lines[0]
     assert not {"▄", "▀", "█"} & set(plain)
+
+
+def test_success_tool_summary_uses_success_green():
+    """Plain success summaries are green instead of muted gray."""
+    rendered = ModernMessageRenderer().tool_call(
+        "terminal",
+        "git add packages/kollabor-tui/...",
+        status="success",
+        nested_width=80,
+        result_summary="Success",
+    )
+
+    plain = visible(rendered)
+
+    assert ">_ git add" in plain
+    assert "terminal" not in plain
+    assert "➲ Success" in plain
+    assert solid_fg("Success", T().success[0]) in rendered
+
+
+def test_terminal_error_renders_badge_and_inline_exit_summary():
+    """Terminal failures use the same compact badge with inline red result."""
+    rendered = ModernMessageRenderer().tool_call(
+        "terminal",
+        'rg "ENGINE-DEBUG" packages/kollabor_engine/',
+        status="error",
+        nested_width=90,
+        result_summary="Error: Command exited with code 2",
+    )
+
+    plain = visible(rendered)
+
+    assert plain.startswith('      >_ rg "ENGINE-DEBUG"')
+    assert "terminal" not in plain
+    assert "➲ ✖ Exit code 2" in plain
+    assert solid_fg("✖ Exit code 2", T().error[0]) in rendered
+
+
+def test_file_write_and_hub_tools_get_operation_glyphs():
+    write_rendered = ModernMessageRenderer().tool_call(
+        "file_write",
+        'path="notes/status.md"',
+        status="success",
+        nested_width=80,
+        result_summary="Success",
+    )
+    hub_rendered = ModernMessageRenderer().tool_call(
+        "hub_msg",
+        "lapis hello",
+        status="success",
+        nested_width=80,
+        result_summary="sent",
+    )
+
+    assert visible(write_rendered).startswith("      ✎ notes/status.md")
+    assert solid_fg("✎", T().user_tag) in write_rendered
+    assert visible(hub_rendered).startswith("      ✉ lapis hello")
+    assert solid_fg("✉", T().ai_tag) in hub_rendered
+
+
+def test_common_internal_operations_have_text_mode_glyphs():
+    renderer = ModernMessageRenderer()
+    cases = [
+        ("file_create", 'path="notes/new.md"', "✚ notes/new.md"),
+        ("file_edit", 'path="notes/new.md"', "✐ notes/new.md"),
+        ("file_delete", 'path="notes/new.md"', "✕ notes/new.md"),
+        ("file_move", 'path="notes/new.md"', "↦ notes/new.md"),
+        ("file_list", "notes", "☷ notes"),
+        ("hub_agents", "online", "◎ online"),
+        ("mcp_tool", "server tool", "⌘ server tool"),
+        ("state_update", "ready", "↻ ready"),
+        ("task_update", "plan", "☑ plan"),
+    ]
+
+    for name, args, expected in cases:
+        rendered = renderer.tool_call(name, args, "success", nested_width=80)
+        plain = visible(rendered)
+
+        assert plain.startswith(f"      {expected}")
+        assert "[" not in plain
+        assert "]" not in plain
+
+
+def test_tool_result_body_is_dimmed_and_indented():
+    """Raw tool output is visually secondary to the final answer."""
+    rendered = ModernMessageRenderer().tool_result(["raw output"])
+
+    assert visible(rendered) == "      raw output"
+    assert solid_fg("raw output", T().text_dim) in rendered
 
 
 def test_user_message_renders_as_compact_row():
@@ -43,7 +133,8 @@ def test_user_message_renders_as_compact_row():
     plain = visible(rendered)
     lines = plain.splitlines()
 
-    assert lines == ["▌ investigate why /api/orders p99 jumped"]
+    assert lines == [" ▌ investigate why /api/orders p99 jumped"]
+    assert "\033[0;48;" not in rendered
     assert not {"▄", "▀", "█"} & set(plain)
 
 
@@ -57,7 +148,9 @@ def test_response_block_renders_as_compact_plain_lines():
     plain = visible(rendered)
     lines = plain.splitlines()
 
-    assert lines == ["Plan updated", "", "Read app/api/orders/route.ts"]
+    assert lines == [" ֎ Plan updated", "", "   Read app/api/orders/route.ts"]
+    assert "\033[0;48;" not in rendered
+    assert solid_fg("Plan updated", T().assistant_text) in rendered
     assert not {"▄", "▀", "█"} & set(plain)
 
 
@@ -68,6 +161,33 @@ def test_info_block_renders_as_compact_status_row():
     plain = visible(rendered)
 
     assert plain == "ℹ Ready"
+    assert "\033[48;" not in rendered
+    assert not {"▄", "▀", "█"} & set(plain)
+
+
+def test_native_read_file_tool_is_normalized_to_file_read():
+    rendered = ModernMessageRenderer().tool_call(
+        "read_file",
+        'path="packages/kollabor-engine/src/kollabor_engine/auth.py"',
+        status="success",
+        nested_width=100,
+        result_summary="Read 52 lines",
+    )
+
+    plain = visible(rendered)
+
+    assert plain == (
+        "      ⌕ packages/kollabor-engine/src/kollabor_engine/auth.py"
+        " ➲ Read 52 lines"
+    )
+    assert "\033[48;" not in rendered
+
+
+def test_turn_timing_info_row_has_no_background_if_rendered_directly():
+    rendered = ModernMessageRenderer().info_block("turn took 8.9s", width=80)
+    plain = visible(rendered)
+
+    assert plain == "ℹ turn took 8.9s"
     assert "\033[48;" not in rendered
     assert not {"▄", "▀", "█"} & set(plain)
 
@@ -92,3 +212,36 @@ def test_error_block_renders_as_compact_status_row():
     assert plain == "✖ Error\n  attach failed"
     assert "\033[48;" not in rendered
     assert not {"▄", "▀", "█"} & set(plain)
+
+
+def test_agent_message_uses_agent_colored_text_and_diamond_marker():
+    agent_color = (80, 140, 240)
+    rendered = ModernMessageRenderer().agent_message(
+        "lapis -> sapphire\nlapis here.",
+        agent_color=agent_color,
+        tag_char=" > ",
+        width=80,
+    )
+
+    plain = visible(rendered)
+
+    assert plain.splitlines()[0] == " ◆ lapis -> sapphire"
+    assert plain.splitlines()[1] == "   lapis here."
+    assert "\033[0;48;" not in rendered
+    assert solid_fg("lapis -> sapphire", agent_color) in rendered
+    assert solid_fg("lapis here.", agent_color) in rendered
+
+
+def test_observed_agent_message_uses_hollow_diamond_marker():
+    rendered = ModernMessageRenderer().agent_message(
+        "sapphire -> lapis\nstanding by.",
+        agent_color=(90, 150, 240),
+        tag_char=" ~ ",
+        observing=True,
+        width=80,
+    )
+
+    plain = visible(rendered)
+
+    assert plain.splitlines()[0] == " ◇ sapphire -> lapis"
+    assert "\033[0;48;" not in rendered

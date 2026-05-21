@@ -126,6 +126,12 @@ class TestTheme(unittest.TestCase):
         self.assertTrue(hasattr(theme, "ai_tag"))
         self.assertIsInstance(theme.ai_tag, tuple)
 
+    def test_theme_has_assistant_text(self):
+        """Assistant text has a readable foreground separate from success green."""
+        theme = T()
+        self.assertTrue(hasattr(theme, "assistant_text"))
+        self.assertIsInstance(theme.assistant_text, tuple)
+
     def test_theme_has_tool_tag(self):
         """Test that theme has tool_tag attribute."""
         theme = T()
@@ -168,10 +174,26 @@ class TestTheme(unittest.TestCase):
     def test_dark_theme_uses_graphite_ember_palette(self):
         """Default active theme is compact graphite with ember accents."""
         self.assert_graphite_ember_palette(THEMES["dark"])
+        self.assertNotEqual(THEMES["dark"].assistant_text, THEMES["dark"].success[0])
+
+    def test_dark_assistant_text_is_dim_white_not_blue(self):
+        """Assistant text in dark mode is muted white, not the old blue."""
+        theme = THEMES["dark"]
+
+        self.assertGreaterEqual(min(theme.assistant_text), 175)
+        self.assertLessEqual(max(theme.assistant_text) - min(theme.assistant_text), 18)
 
     def test_lime_theme_uses_graphite_ember_palette(self):
         """Lime alias keeps the compact graphite and ember palette."""
         self.assert_graphite_ember_palette(THEMES["lime"])
+
+    def test_light_theme_uses_dark_foreground_for_light_terminals(self):
+        """Light mode keeps foreground readable on light terminal backgrounds."""
+        theme = THEMES["light"]
+
+        self.assertLess(max(theme.text), 80)
+        self.assertLess(max(theme.assistant_text), 150)
+        self.assertGreater(min(theme.dark[0]), 230)
 
 
 class TestStyleConstants(unittest.TestCase):
