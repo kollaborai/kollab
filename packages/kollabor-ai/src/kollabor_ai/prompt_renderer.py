@@ -19,6 +19,7 @@ Hub features depend on the hub plugin being active via the event bus.
 
 import logging
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -863,9 +864,29 @@ class PromptRenderer:
         try:
             logger.debug(f"Executing trender command: {command}")
 
+            # Security: avoid bare shell=True. Try list-form execution for
+            # simple commands; fall back to explicit /bin/sh -c only when the
+            # command contains shell metacharacters (pipes, redirects, etc.)
+            # that require shell interpretation.  Trender commands originate
+            # from developer-authored system-prompt templates, not user input,
+            # but hardening the surface prevents accidental escalation.
+            _SHELL_META = re.compile(r'[|>&;`$()]')
+
+            if _SHELL_META.search(command):
+                # Command needs shell interpretation (e.g. pipes).
+                # Use explicit /bin/sh -c instead of bare shell=True.
+                cmd_args: list[str] | str = ["/bin/sh", "-c", command]
+            else:
+                try:
+                    cmd_args = shlex.split(command)
+                except ValueError:
+                    # shlex failed (unlikely for well-formed commands) —
+                    # fall back to explicit shell invocation.
+                    cmd_args = ["/bin/sh", "-c", command]
+
             result = subprocess.run(
-                command,
-                shell=True,
+                cmd_args,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
