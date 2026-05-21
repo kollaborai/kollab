@@ -134,6 +134,24 @@ class SystemCommandHandler(BaseCommandHandler):
         )
         self.command_registry.register_command(permissions_command)
 
+        # Register /mode command
+        mode_command = CommandDefinition(
+            name="mode",
+            description="Switch terminal contrast mode for dark or light backgrounds",
+            handler=self.handle_mode,
+            plugin_name="system",
+            category=CommandCategory.UI,
+            mode=CommandMode.INSTANT,
+            aliases=["contrast"],
+            icon="[MODE]",
+            cli_hidden=False,
+            subcommands=[
+                SubcommandInfo("dark", "", "Use light text for dark terminal backgrounds"),
+                SubcommandInfo("light", "", "Use dark text for light terminal backgrounds"),
+            ],
+        )
+        self.command_registry.register_command(mode_command)
+
         # Register /version command
         version_command = CommandDefinition(
             name="version",
@@ -243,6 +261,55 @@ class SystemCommandHandler(BaseCommandHandler):
             return CommandResult(
                 success=False,
                 message=f"Error opening configuration: {str(e)}",
+                display_type="error",
+            )
+
+    async def handle_mode(self, command: SlashCommand) -> CommandResult:
+        """Handle /mode command for terminal contrast theme switching."""
+        try:
+            from kollabor_tui.design_system import THEMES, get_theme, set_theme
+
+            if isinstance(command.args, list):
+                requested = command.args[0].lower() if command.args else ""
+            elif isinstance(command.args, str):
+                requested = command.args.strip().lower()
+            else:
+                requested = ""
+
+            allowed = {"dark", "light"}
+            if not requested:
+                current = get_theme().name
+                return CommandResult(
+                    success=True,
+                    message=(
+                        f"mode: {current}\n"
+                        "usage: /mode dark | /mode light\n"
+                        "  dark  light text for black/dark terminal backgrounds\n"
+                        "  light dark text for white/light terminal backgrounds"
+                    ),
+                    display_type="info",
+                )
+
+            if requested not in allowed or requested not in THEMES:
+                return CommandResult(
+                    success=False,
+                    message="unknown mode. use: /mode dark or /mode light",
+                    display_type="error",
+                )
+
+            set_theme(requested)
+            return CommandResult(
+                success=True,
+                message=f"mode set to {requested}",
+                display_type="success",
+                data={"mode": requested},
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error in mode command: {e}")
+            return CommandResult(
+                success=False,
+                message=f"Error setting mode: {e}",
                 display_type="error",
             )
 

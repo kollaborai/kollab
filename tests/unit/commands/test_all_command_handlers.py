@@ -154,6 +154,44 @@ class TestSystemCommandHandler(unittest.TestCase):
         assert isinstance(result, CommandResult)
         assert not result.success  # no state_service -> graceful failure
 
+    def test_register_commands_includes_contrast_mode(self):
+        registry = MagicMock()
+        handler = self._make_handler()
+        handler.command_registry = registry
+
+        handler.register_commands()
+
+        names = [call.args[0].name for call in registry.register_command.call_args_list]
+        assert "mode" in names
+
+    def test_mode_dark_light_switches_theme(self):
+        from kollabor_tui.design_system import T, set_theme
+
+        original_name = T().name
+        handler = self._make_handler()
+
+        try:
+            result = _safe_run(handler.handle_mode(_make_slash_command("light")))
+            _assert_result(result)
+            assert result.success
+            assert T().name == "light"
+
+            result = _safe_run(handler.handle_mode(_make_slash_command("dark")))
+            _assert_result(result)
+            assert result.success
+            assert T().name == "dark"
+        finally:
+            set_theme(original_name)
+
+    def test_mode_rejects_unknown_value(self):
+        handler = self._make_handler()
+
+        result = _safe_run(handler.handle_mode(_make_slash_command("neon")))
+        _assert_result(result)
+
+        assert not result.success
+        assert "/mode dark" in result.message
+
     def test_status_modal_includes_attach_runtime_state(self):
         class StateService:
             async def get_system_info(self):

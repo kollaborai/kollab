@@ -20,6 +20,7 @@ RESERVED_COMMANDS: Set[str] = {
     "agent",
     "skill",
     "model",
+    "mode",
     "cd",
 }
 
@@ -328,6 +329,7 @@ class SlashCommandRegistry:
             List of matching command definitions.
         """
         query_lower = query.lower()
+        exact_matches = []
         name_matches = []
         alias_matches = []
         substring_matches = []
@@ -344,6 +346,15 @@ class SlashCommandRegistry:
         for command_def in all_commands.values():
             # Skip hidden commands in search
             if command_def.hidden:
+                continue
+
+            # Priority 0: Exact name or alias match
+            if command_def.name.lower() == query_lower:
+                exact_matches.append(command_def)
+                continue
+
+            if any(alias.lower() == query_lower for alias in command_def.aliases):
+                exact_matches.append(command_def)
                 continue
 
             # Priority 1: Name starts with query (prefix match on name)
@@ -375,7 +386,9 @@ class SlashCommandRegistry:
 
         # Return matches in priority order: name matches first, then alias matches, then substrings
         # For command menu filtering, prioritize exact prefix matches
-        if name_matches:
+        if exact_matches:
+            return sorted(exact_matches, key=lambda cmd: cmd.name)
+        elif name_matches:
             return sorted(name_matches, key=lambda cmd: cmd.name)
         elif alias_matches:
             return sorted(alias_matches, key=lambda cmd: cmd.name)
