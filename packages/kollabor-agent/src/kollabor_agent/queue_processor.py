@@ -823,6 +823,7 @@ class QueueProcessor:
                     thinking_duration=thinking_duration,
                     response=clean_response,
                     tool_results=None,
+                    thinking_content=thinking_blocks,
                 )
 
             # Step 6: Execute native tools (batch via native_tools_handler)
