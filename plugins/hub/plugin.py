@@ -5572,8 +5572,8 @@ class HubPlugin(BasePlugin):
         Routes through display_message_sequence with type "agent" so the
         renderer's agent_message() method handles all TagBox rendering.
 
-        Direct messages: bright, > tag
-        Observed messages: dimmed tag color, ~ tag
+        Direct messages: bright colored ◆ marker
+        Observed messages: dimmed colored ◇ marker
         """
         renderer = self.event_bus.get_service("renderer") if self.event_bus else None
         if not renderer or not hasattr(renderer, "message_coordinator"):
@@ -5581,7 +5581,7 @@ class HubPlugin(BasePlugin):
 
         color = self._get_agent_color(from_name)
         display_content = f"{from_name} -> {to_name}\n{content}"
-        tag_char = " ~ " if observing else " > "
+        tag_char = " ◇ " if observing else " ◆ "
 
         try:
             renderer.message_coordinator.display_message_sequence(
