@@ -192,7 +192,7 @@ Kollab auto-detects common provider environment variables:
 
 | Environment Variable | Provider | Notes |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | Anthropic | Claude models |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | Anthropic | Claude models and Anthropic-compatible gateways |
 | `OPENAI_API_KEY` | OpenAI | GPT models |
 | `GEMINI_API_KEY` | Google | Gemini models |
 | `OPENROUTER_API_KEY` | OpenRouter | Gateway to many providers |
@@ -211,6 +211,15 @@ Provider-specific model env vars are also supported for auto-detected profiles:
 ```bash
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 export OPENROUTER_MODEL="deepseek/deepseek-v3.2"
+kollab
+```
+
+Anthropic-compatible gateways can use the Claude Code-style env names:
+
+```bash
+export ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
+export ANTHROPIC_AUTH_TOKEN="<your-token>"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="glm-4.7"
 kollab
 ```
 

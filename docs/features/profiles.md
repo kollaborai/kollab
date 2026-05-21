@@ -456,7 +456,7 @@ When provider env vars are set, ephemeral auto-profiles are created:
 
 | Env Var | Profile Name | Provider | Model |
 |---------|--------------|----------|-------|
-| `ANTHROPIC_API_KEY` | anthropic-auto | anthropic | claude-sonnet-4-6 |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | anthropic-auto | anthropic | claude-sonnet-4-6 |
 | `OPENAI_API_KEY` | openai-auto | openai | gpt-5.4 |
 | `AZURE_OPENAI_API_KEY` | azure-auto | azure_openai | gpt-5.4 |
 | `GEMINI_API_KEY` | gemini-auto | gemini | gemini-3.1-pro-preview |

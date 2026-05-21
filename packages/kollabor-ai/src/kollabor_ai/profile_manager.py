@@ -40,6 +40,7 @@ def _keyring_get(key_name: str) -> Optional[str]:
     """
     try:
         import keyring
+
         from kollabor_ai.providers.security import APIKeyManager
 
         return keyring.get_password(APIKeyManager.SERVICE_NAME, key_name)
@@ -54,6 +55,7 @@ def _keyring_set(key_name: str, value: str) -> bool:
     """
     try:
         import keyring
+
         from kollabor_ai.providers.security import APIKeyManager
 
         keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
@@ -106,6 +108,7 @@ class LLMProfile:
     streaming: bool = True  # Enable streaming responses
     supports_tools: bool = True  # Enable tool/function calling
     auth_type: str = ""  # "oauth" for OAuth tokens, empty for api_key
+    api_key_from_env: bool = False
 
     def _get_env_key(self, field: str) -> str:
         """Generate env var key for this profile and field.
@@ -292,6 +295,8 @@ class LLMProfile:
 
         # 4. Plaintext key in config -- try to auto-migrate to keyring (once)
         if raw:
+            if self.api_key_from_env:
+                return raw
             if not getattr(self, '_keyring_migrated', False):
                 migrated = _keyring_set(self.name, raw)
                 if migrated:
@@ -478,6 +483,7 @@ class LLMProfile:
             streaming=data.get("streaming", True),
             supports_tools=data.get("supports_tools", True),
             auth_type=data.get("auth_type", ""),
+            api_key_from_env=data.get("api_key_from_env", False),
         )
 
 
@@ -497,11 +503,13 @@ class ProfileManager:
     PROVIDER_ENV_MAP: List[Dict[str, Any]] = [
         {
             "env_var": "ANTHROPIC_API_KEY",
+            "env_vars": ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
             "model_env": "ANTHROPIC_MODEL",
+            "model_envs": ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"],
             "provider": "anthropic",
             "model": "claude-sonnet-4-6",
             "profile_name": "anthropic-auto",
-            "description": "Auto-detected from ANTHROPIC_API_KEY",
+            "description": "Auto-detected from Anthropic-compatible env vars",
             "base_url_env": "ANTHROPIC_BASE_URL",
         },
         {
@@ -670,6 +678,33 @@ class ProfileManager:
         """The env var name that triggered auto-detection, or None."""
         return self._auto_detected_source
 
+    @staticmethod
+    def _provider_env_names(provider_info: Dict[str, Any]) -> List[str]:
+        """Return provider API key env var names in priority order."""
+        names = provider_info.get("env_vars")
+        if names:
+            return list(names)
+        env_var = provider_info.get("env_var")
+        return [env_var] if env_var else []
+
+    @staticmethod
+    def _provider_model_env_names(provider_info: Dict[str, Any]) -> List[str]:
+        """Return provider model env var names in priority order."""
+        names = provider_info.get("model_envs")
+        if names:
+            return list(names)
+        model_env = provider_info.get("model_env")
+        return [model_env] if model_env else []
+
+    @staticmethod
+    def _first_set_env(names: List[str]) -> tuple[Optional[str], str]:
+        """Return the first non-empty env var from names."""
+        for name in names:
+            value = os.environ.get(name, "").strip()
+            if value:
+                return name, value
+        return None, ""
+
     def _detect_env_provider(self) -> None:
         """Auto-detect LLM providers from standard env vars.
 
@@ -708,8 +743,9 @@ class ProfileManager:
         first_registered_env: Optional[str] = None
 
         for provider_info in self.PROVIDER_ENV_MAP:
-            env_var = provider_info["env_var"]
-            api_key = os.environ.get(env_var, "").strip()
+            env_var, api_key = self._first_set_env(
+                self._provider_env_names(provider_info)
+            )
             if not api_key:
                 continue
 
@@ -724,18 +760,21 @@ class ProfileManager:
 
             # Build auto-profile
             profile_name = provider_info["profile_name"]
-            model_env = provider_info.get("model_env", "")
-            model = (
-                os.environ.get(model_env, "").strip()
-                if model_env
-                else ""
-            ) or provider_info["model"]
+            model_env, model = self._first_set_env(
+                self._provider_model_env_names(provider_info)
+            )
+            model = model or provider_info["model"]
             profile_data = {
                 "provider": provider_info["provider"],
                 "model": model,
                 "api_key": api_key,
-                "description": provider_info["description"],
+                "description": provider_info.get(
+                    "description",
+                    f"Auto-detected from {env_var}",
+                ),
             }
+            if api_key:
+                profile_data["api_key_from_env"] = True
 
             # Azure needs base_url from AZURE_OPENAI_ENDPOINT
             if requires_env and provider_info["provider"] == "azure_openai":
@@ -943,17 +982,20 @@ class ProfileManager:
             if loaded is None:
                 continue
 
-            env_api_key = os.environ.get(provider_info["env_var"], "").strip()
+            _, env_api_key = self._first_set_env(
+                self._provider_env_names(provider_info)
+            )
             if env_api_key:
                 loaded.api_key = env_api_key
+                loaded.api_key_from_env = True
 
-            model_env = provider_info.get("model_env")
-            if model_env:
-                env_model = os.environ.get(model_env, "").strip()
-                if env_model:
-                    loaded.model = env_model
-                elif env_api_key:
-                    loaded.model = provider_info["model"]
+            _, env_model = self._first_set_env(
+                self._provider_model_env_names(provider_info)
+            )
+            if env_model:
+                loaded.model = env_model
+            elif env_api_key:
+                loaded.model = provider_info["model"]
 
             base_url_env = provider_info.get("base_url_env")
             if base_url_env:

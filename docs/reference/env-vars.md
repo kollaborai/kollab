@@ -173,18 +173,18 @@ Some providers have legacy env var names that still work:
 - `KOLLAB_CLAUDE_API_KEY`, `KOLLAB_CLAUDE_TOKEN` — Anthropic key
 - `KOLLAB_API_KEY` — generic fallback
 
-Auto-detected provider profiles can also read provider-native model overrides:
+Auto-detected provider profiles can also read provider-native aliases:
 
-| API key env var | Model env var |
-|-----------------|---------------|
-| `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
-| `OPENAI_API_KEY` | `OPENAI_MODEL` |
-| `AZURE_OPENAI_API_KEY` | `AZURE_OPENAI_MODEL` |
-| `GEMINI_API_KEY` | `GEMINI_MODEL` |
-| `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` |
-| `XAI_API_KEY` | `XAI_MODEL` |
-| `ZAI_API_KEY` | `ZAI_MODEL` |
-| `MOONSHOT_API_KEY` | `MOONSHOT_MODEL` |
+| API key env var | Model env var | Notes |
+|-----------------|---------------|-------|
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` | `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL` | `ANTHROPIC_BASE_URL` overrides the Anthropic endpoint for compatible gateways |
+| `OPENAI_API_KEY` | `OPENAI_MODEL` | |
+| `AZURE_OPENAI_API_KEY` | `AZURE_OPENAI_MODEL` | requires `AZURE_OPENAI_ENDPOINT` |
+| `GEMINI_API_KEY` | `GEMINI_MODEL` | |
+| `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` | |
+| `XAI_API_KEY` | `XAI_MODEL` | |
+| `ZAI_API_KEY` | `ZAI_MODEL` | native Z.AI OpenAI-compatible profile |
+| `MOONSHOT_API_KEY` | `MOONSHOT_MODEL` | |
 
 Example:
 
