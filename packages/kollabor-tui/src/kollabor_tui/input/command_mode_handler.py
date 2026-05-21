@@ -445,8 +445,13 @@ class CommandModeHandler:
             if self.command_menu_active:
                 selected_item = self.command_menu_renderer.get_selected_command()
                 if selected_item:
+                    typed_command_string = self._exact_typed_command_string(
+                        self.buffer_manager.content, selected_item
+                    )
+                    if typed_command_string:
+                        command_string = typed_command_string
                     # Check if it's a subcommand
-                    if selected_item.get("is_subcommand"):
+                    elif selected_item.get("is_subcommand"):
                         parent_name = selected_item.get("parent_name", "")
                         subcommand_name = selected_item.get("subcommand_name", "")
                         subcommand_args = selected_item.get("subcommand_args", "")
@@ -539,6 +544,35 @@ class CommandModeHandler:
         except Exception as e:
             logger.error(f"Error executing command: {e}")
             await self.exit_command_mode()
+
+    def _exact_typed_command_string(
+        self, buffer_content: str, selected_item: Dict[str, Any]
+    ) -> Optional[str]:
+        """Return typed command when it exactly names a command different from selection."""
+        if selected_item.get("is_subcommand"):
+            return None
+
+        typed_name = self._typed_command_name(buffer_content)
+        if not typed_name or typed_name == selected_item.get("name"):
+            return None
+
+        get_command = getattr(self.command_registry, "get_command", None)
+        if not callable(get_command):
+            return None
+
+        if get_command(typed_name):
+            return buffer_content
+
+        return None
+
+    @staticmethod
+    def _typed_command_name(buffer_content: str) -> Optional[str]:
+        """Extract the command token from the current slash buffer."""
+        stripped = buffer_content.strip()
+        if not stripped.startswith("/") or stripped == "/":
+            return None
+
+        return stripped[1:].split(None, 1)[0].lower()
 
     async def execute_command_string(self, command_string: str) -> bool:
         """Execute a slash command directly from a command string.

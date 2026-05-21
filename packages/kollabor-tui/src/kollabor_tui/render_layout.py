@@ -139,8 +139,10 @@ class ThinkingAnimationManager:
         completion_msg = None
 
         if self.start_time:
-            duration = time.time() - self.start_time
-            completion_msg = f"Thought for {duration:.1f} seconds"
+            # Temporarily hide the visible/logged turn timing row while the
+            # conversation UI uses blank spacing for separation.
+            # duration = time.time() - self.start_time
+            # completion_msg = f"turn took {duration:.1f}s"
             self.start_time = None
 
         self.messages.clear()

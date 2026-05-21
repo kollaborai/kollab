@@ -469,7 +469,7 @@ class MessageDisplayCoordinator:
 
         Example:
             coordinator.display_message_sequence([
-                ("system", "Thought for 2.1 seconds", {}),
+                ("spacer", "", {}),
                 ("assistant", "Hello! How can I help you?", {})
             ])
         """
@@ -652,7 +652,10 @@ class MessageDisplayCoordinator:
                         filtered_content = content
 
                 # Route to renderer based on message type
-                if message_type == "system":
+                if message_type == "spacer":
+                    self._output_rendered("", "spacer")
+
+                elif message_type == "system":
                     if not filtered_content.strip():
                         return
                     display_type = kwargs.get("display_type", "info")

@@ -75,6 +75,7 @@ class MessageDisplayService:
         thinking_duration: float,
         response: str,
         show_thinking_threshold: float = 0.1,
+        thinking_content: Optional[List[str] | str] = None,
     ) -> None:
         """Display thinking duration and assistant response atomically.
 
@@ -82,6 +83,7 @@ class MessageDisplayService:
             thinking_duration: Time spent thinking in seconds
             response: Assistant response content
             show_thinking_threshold: Minimum duration to show thinking message
+            thinking_content: Provider-supplied reasoning/thinking content
         """
         # Use the unified display method for consistency
         self.display_complete_response(
@@ -90,6 +92,7 @@ class MessageDisplayService:
             tool_results=[],
             original_tools=[],
             show_thinking_threshold=show_thinking_threshold,
+            thinking_content=thinking_content,
         )
 
     def display_tool_results(
@@ -325,6 +328,7 @@ class MessageDisplayService:
         original_tools: Optional[List[Dict]] = None,
         show_thinking_threshold: float = 0.1,
         skip_response_content: bool = False,
+        thinking_content: Optional[List[str] | str] = None,
     ) -> None:
         """Display complete response with thinking, content, and tools atomically.
 
@@ -339,14 +343,18 @@ class MessageDisplayService:
             original_tools: List of original tool data for command extraction (optional)
             show_thinking_threshold: Minimum duration to show thinking message
             skip_response_content: Skip displaying response content (for streaming mode)
+            thinking_content: Provider-supplied reasoning/thinking content
         """
         message_sequence: list[tuple[str, str, dict]] = []
         pipe_mode = getattr(self.renderer, "pipe_mode", False)
 
-        # Add thinking duration if meaningful (suppress in pipe mode)
+        # Add a little separation after long turns (suppress in pipe mode).
+        # Temporarily hide the visible timing/reasoning row while we tune the UI:
+        # status_message = self._build_turn_status_message(
+        #     thinking_duration, thinking_content
+        # )
         if thinking_duration > show_thinking_threshold and not pipe_mode:
-            thought_message = f"Thought for {thinking_duration:.1f} seconds"
-            message_sequence.append(("system", thought_message, {}))
+            message_sequence.append(("spacer", "", {}))
 
         # Add assistant response if present and not skipped (for streaming mode)
         if response.strip() and not skip_response_content:
@@ -397,6 +405,41 @@ class MessageDisplayService:
             logger.debug(
                 f"Displayed complete response with {len(message_sequence)} messages atomically"
             )
+
+    @staticmethod
+    def _build_turn_status_message(
+        thinking_duration: float,
+        thinking_content: Optional[List[str] | str] = None,
+        preview_limit: int = 120,
+    ) -> str:
+        """Build the compact turn-timing row shown before a response."""
+        preview = MessageDisplayService._format_reasoning_preview(
+            thinking_content, preview_limit
+        )
+        if preview:
+            return f"reasoning {thinking_duration:.1f}s · {preview}"
+        return f"turn took {thinking_duration:.1f}s"
+
+    @staticmethod
+    def _format_reasoning_preview(
+        thinking_content: Optional[List[str] | str],
+        preview_limit: int = 120,
+    ) -> str:
+        if not thinking_content:
+            return ""
+
+        if isinstance(thinking_content, str):
+            parts = [thinking_content]
+        else:
+            parts = [part for part in thinking_content if part]
+
+        preview = " ".join(" ".join(parts).split())
+        if not preview:
+            return ""
+
+        if len(preview) <= preview_limit:
+            return preview
+        return preview[: max(preview_limit - 3, 0)].rstrip() + "..."
 
     def get_display_stats(self) -> Dict[str, int]:
         """Get display operation statistics.

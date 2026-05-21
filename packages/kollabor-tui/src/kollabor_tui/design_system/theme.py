@@ -47,6 +47,7 @@ class Theme:
         warning: Warning color gradient (list of RGB tuples)
         user_tag: User tag color (RGB tuple)
         ai_tag: AI tag color (RGB tuple)
+        assistant_text: Assistant response text color (RGB tuple)
         tool_tag: Tool tag color (RGB tuple)
         thinking_tag: Thinking tag color (RGB tuple)
         code_bg: Code block background color (RGB tuple)
@@ -93,6 +94,7 @@ class Theme:
         # Solid colors (RGB tuples)
         self.user_tag = colors.get("user_tag", (50, 200, 220))
         self.ai_tag = colors.get("ai_tag", (80, 180, 50))
+        self.assistant_text = colors.get("assistant_text", self.ai_tag)
         self.tool_tag = colors.get("tool_tag", (50, 140, 180))
         self.thinking_tag = colors.get("thinking_tag", (200, 140, 40))
         self.code_bg = colors.get("code_bg", (25, 25, 25))
@@ -123,7 +125,8 @@ THEMES = {
         input_bg=[(20, 23, 27), (16, 19, 23), (12, 15, 19)],
         dark=[(18, 20, 22), (12, 14, 17), (8, 10, 12)],
         user_tag=(248, 108, 43),
-        ai_tag=(116, 210, 137),
+        ai_tag=(145, 170, 255),
+        assistant_text=(188, 194, 202),
         tool_tag=(236, 130, 70),
         thinking_tag=(190, 135, 74),
         code_bg=(9, 11, 14),
@@ -143,6 +146,7 @@ THEMES = {
         dark=[(32, 36, 42), (24, 27, 32), (16, 18, 22)],
         user_tag=(40, 180, 200),
         ai_tag=(60, 200, 180),
+        assistant_text=(150, 215, 235),
         tool_tag=(50, 120, 180),
         thinking_tag=(60, 140, 180),
         success=[(40, 160, 140), (50, 180, 160), (60, 200, 180)],
@@ -160,6 +164,7 @@ THEMES = {
         dark=[(40, 35, 35), (30, 26, 26), (20, 18, 18)],
         user_tag=(220, 120, 80),
         ai_tag=(180, 100, 160),
+        assistant_text=(230, 170, 220),
         tool_tag=(200, 80, 120),
         thinking_tag=(240, 160, 80),
         success=[(120, 180, 100), (140, 200, 120), (160, 220, 140)],
@@ -175,6 +180,7 @@ THEMES = {
         dark=[(35, 35, 35), (25, 25, 25), (15, 15, 15)],
         user_tag=(200, 200, 200),
         ai_tag=(160, 160, 160),
+        assistant_text=(200, 200, 200),
         tool_tag=(140, 140, 140),
         thinking_tag=(180, 180, 180),
         success=[(140, 180, 140), (160, 200, 160), (180, 220, 180)],
@@ -190,7 +196,8 @@ THEMES = {
         input_bg=[(20, 23, 27), (16, 19, 23), (12, 15, 19)],
         dark=[(18, 20, 22), (12, 14, 17), (8, 10, 12)],
         user_tag=(248, 108, 43),
-        ai_tag=(116, 210, 137),
+        ai_tag=(145, 170, 255),
+        assistant_text=(188, 194, 202),
         tool_tag=(236, 130, 70),
         thinking_tag=(190, 135, 74),
         code_bg=(9, 11, 14),
@@ -200,6 +207,27 @@ THEMES = {
         text=(236, 240, 244),
         text_dim=(145, 153, 164),
         text_dark=(10, 12, 15),
+    ),
+    "light": Theme(
+        "light",
+        primary=[(210, 88, 36), (190, 74, 30), (166, 62, 26)],
+        primary_dark=[(116, 50, 28), (92, 40, 24), (68, 30, 20)],
+        secondary=[(228, 232, 238), (218, 223, 230), (208, 214, 222)],
+        response_bg=[(250, 251, 252), (244, 246, 248), (238, 241, 245)],
+        input_bg=[(248, 250, 252), (240, 244, 248), (232, 237, 244)],
+        dark=[(246, 248, 251), (238, 242, 247), (230, 235, 242)],
+        user_tag=(198, 82, 32),
+        ai_tag=(48, 78, 168),
+        assistant_text=(62, 68, 78),
+        tool_tag=(178, 96, 40),
+        thinking_tag=(145, 96, 36),
+        code_bg=(236, 240, 246),
+        success=[(26, 112, 58), (38, 132, 72), (50, 150, 88)],
+        error=[(176, 48, 52), (198, 64, 68), (220, 82, 84)],
+        warning=[(166, 100, 28), (188, 116, 34), (210, 134, 44)],
+        text=(25, 30, 38),
+        text_dim=(92, 102, 116),
+        text_dark=(250, 250, 250),
     ),
 }
 
@@ -263,6 +291,11 @@ def _load_custom_themes():
                     ),
                     user_tag=tuple(theme_data.get("user_tag", [50, 200, 220])),
                     ai_tag=tuple(theme_data.get("ai_tag", [80, 180, 50])),
+                    assistant_text=tuple(
+                        theme_data.get(
+                            "assistant_text", theme_data.get("ai_tag", [80, 180, 50])
+                        )
+                    ),
                     tool_tag=tuple(theme_data.get("tool_tag", [50, 140, 180])),
                     thinking_tag=tuple(theme_data.get("thinking_tag", [200, 140, 40])),
                     code_bg=tuple(theme_data.get("code_bg", [25, 25, 25])),

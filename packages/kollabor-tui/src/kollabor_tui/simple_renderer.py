@@ -12,6 +12,13 @@ Suitable for pipe mode, accessibility, or terminals with no color support.
 import logging
 from typing import List, Optional
 
+from kollabor_tui.clean_renderer import (
+    _clean_tool_detail,
+    _format_tool_summary,
+    _normalize_tool_label,
+    _tool_badge,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,10 +46,17 @@ class SimpleRenderer:
         nested_width: Optional[int] = None,
         result_summary: Optional[str] = None,
     ) -> str:
-        status_char = {"running": "~", "success": "+", "error": "x"}.get(status, "~")
-        line = f"[{status_char}] {name}({args})"
-        if result_summary:
-            line += f"\n    {result_summary}"
+        label = _normalize_tool_label(name)
+        detail = _clean_tool_detail(label, args.strip()) or label
+        summary = _format_tool_summary(status, result_summary)
+        if summary is None and status == "running":
+            summary = "running..."
+        elif summary is None and status == "error":
+            summary = "error"
+
+        line = f"      {_tool_badge(label)} {detail}"
+        if summary:
+            line += f" ➲ {summary}"
         return line
 
     def tool_result(
@@ -80,8 +94,8 @@ class SimpleRenderer:
         observing=False,
         width=None,
     ) -> str:
-        prefix = "~" if observing else ">"
-        return f"[{prefix}] {content}"
+        prefix = "◇" if observing else "◆"
+        return f" {prefix} {content}"
 
     def success_block(self, message: str, width: Optional[int] = None) -> str:
         return f"ok: {message}"

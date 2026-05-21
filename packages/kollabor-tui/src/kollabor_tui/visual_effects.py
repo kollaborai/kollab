@@ -1656,18 +1656,24 @@ class BannerRenderer:
         from .terminal_state import get_global_width
 
         width = max(40, get_global_width())
-        border_fg = T().secondary[0]
+        border_fg = T().input_bg[0]
         panel_bg = T().dark[0]
         panel_fg = T().text
         panel_muted = T().text_dim
 
         logo_plain = "  kollab"
-        version_plain = version
-        header_gap = " " * max(1, width - len(logo_plain) - len(version_plain))
-        header = f"{logo_plain}{header_gap}{version}"
 
         lines = [cls._panel_border("top", width, border_fg)]
-        lines.append(cls._panel_line(header, width, panel_bg, panel_fg))
+        lines.append(
+            cls._panel_header_line(
+                logo_plain,
+                version,
+                width,
+                panel_bg,
+                panel_fg,
+                panel_muted,
+            )
+        )
 
         if context:
             agent = context.get("agent", "")
@@ -1711,6 +1717,32 @@ class BannerRenderer:
 
         char = "▄" if position == "top" else "▀"
         return solid_fg(char * width, color)
+
+    @classmethod
+    def _panel_header_line(
+        cls,
+        name: str,
+        version: str,
+        width: int,
+        bg: tuple[int, int, int],
+        name_fg: tuple[int, int, int],
+        version_fg: tuple[int, int, int],
+    ) -> str:
+        """Render the startup header with a muted inline version."""
+        from .design_system import solid
+
+        name_text = cls._truncate_visible(name, width)
+        remaining = max(0, width - len(name_text))
+        version_text = ""
+        if remaining > 1:
+            version_text = cls._truncate_visible(f" {version}", remaining)
+        padding = " " * max(0, width - len(name_text) - len(version_text))
+
+        return (
+            solid(name_text, bg, name_fg)
+            + solid(version_text, bg, version_fg)
+            + solid(padding, bg, name_fg)
+        )
 
     @classmethod
     def _panel_line(
@@ -1880,7 +1912,7 @@ class VisualEffects:
         """
         config = self._effects_config.get("banner")
         if not config or not config.enabled:
-            return f"kollab console {version}\n"
+            return f"kollab {version}\n"
 
         return self.banner_renderer.create_kollabor_banner(version, context=context)
 

@@ -28,6 +28,11 @@ def _get_file_path(args: Dict) -> str:
     return args.get("file_path") or args.get("file") or args.get("path") or ""
 
 
+def _is_read_like_tool_name(tool_name: str) -> bool:
+    normalized = tool_name.lower().replace("-", "_")
+    return normalized in {"read", "readfile", "file_read", "read_file"}
+
+
 # =============================================================================
 # EXTRACTED FROM: kollabor/llm/message_display_service.py
 # Original lines: 167-249
@@ -76,7 +81,7 @@ def format_tool_header(result: Any, tool_data: Optional[Dict] = None) -> str:
                 tool_name = words[-1] if words else "mcp_tool"
 
         # For Read-like tools, show file path with line info
-        if tool_name.lower() in ("read", "file_read", "readfile"):
+        if _is_read_like_tool_name(tool_name):
             file_path = _get_file_path(arguments)
             offset = arguments.get("offset")
             limit = arguments.get("limit")
@@ -329,7 +334,7 @@ def extract_tool_info(result: Any, tool_data: Optional[Dict] = None) -> Tuple[st
         # Format arguments as readable string
         if arguments:
             # For file read, show just the path
-            if tool_name.lower() in ("read", "file_read", "readfile"):
+            if _is_read_like_tool_name(tool_name):
                 return (tool_name, truncate_tool_args(_get_file_path(arguments)))
             # For other tools, show key args
             arg_parts = []
@@ -423,7 +428,7 @@ def extract_tool_name_args(
                 tool_name = words[-1] if words else "mcp_tool"
 
         # Format arguments
-        if tool_name.lower() in ("read", "file_read", "readfile"):
+        if _is_read_like_tool_name(tool_name):
             return (tool_name, truncate_tool_args(_get_file_path(arguments)))
         elif arguments:
             arg_parts = []
@@ -530,6 +535,11 @@ def get_tool_result_summary(result: Any, tool_data: Optional[Dict] = None) -> st
     if result.success:
         output_lines = result.output.count("\n") + 1 if result.output else 0
         output_chars = len(result.output) if result.output else 0
+        first_line = result.output.strip().splitlines()[0] if result.output else ""
+
+        if first_line.lower().startswith("error:"):
+            suffix = "..." if len(first_line) > 80 else ""
+            return f"{first_line[:80]}{suffix}"
 
         if result.tool_type == "terminal" and result.output:
             return f"Read {output_lines} lines ({output_chars} chars)"

@@ -643,15 +643,8 @@ class TerminalRenderer:
         """Get the non-animated border/accent color for the input box."""
         if is_shell:
             base: Any = T().error[0]
-        elif self.input_handler:
-            from kollabor_events.models import CommandMode
-
-            if self.input_handler.command_mode == CommandMode.MENU_POPUP:
-                base = T().primary[0]
-            else:
-                base = T().secondary[0]
         else:
-            base = T().secondary[0]
+            base = self._get_input_base_color(False)
 
         if isinstance(base, (list, tuple)) and len(base) == 3:
             if isinstance(base[0], (list, tuple)):
@@ -672,6 +665,9 @@ class TerminalRenderer:
         """Get the input border color with shimmer effect."""
         base = self._get_input_border_color(is_shell)
 
+        if not is_shell:
+            return base
+
         # Apply shimmer if not idle
         is_idle = (time.time() - self._last_activity) > self._idle_timeout
         if is_idle:
@@ -691,12 +687,12 @@ class TerminalRenderer:
         if simple_mode:
             return "|"
         if is_idle:
-            return str(C["cursor"])
+            return str(C["cursor_block"])
 
         if now - self._cursor_last_blink >= self._cursor_blink_rate:
             self._cursor_visible = not self._cursor_visible
             self._cursor_last_blink = now
-        return str(C["cursor"]) if self._cursor_visible else " "
+        return str(C["cursor_block"]) if self._cursor_visible else " "
 
     def _render_input_content(
         self,

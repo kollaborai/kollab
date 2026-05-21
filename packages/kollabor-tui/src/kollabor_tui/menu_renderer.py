@@ -137,7 +137,11 @@ class CommandMenuRenderer:
         """
         try:
             self.menu_active = True
-            self.current_commands = self._sort_commands_by_category(commands)
+            self.current_commands = (
+                list(commands)
+                if filter_text.strip()
+                else self._sort_commands_by_category(commands)
+            )
             self.filter_text = filter_text
             self.selected_index = 0
             self.scroll_offset = 0  # Reset scroll when menu opens
@@ -202,7 +206,11 @@ class CommandMenuRenderer:
             if not self.menu_active:
                 return
 
-            self.current_commands = self._sort_commands_by_category(commands)
+            self.current_commands = (
+                list(commands)
+                if filter_text.strip()
+                else self._sort_commands_by_category(commands)
+            )
             self.filter_text = filter_text
 
             # Build flattened menu items (commands + subcommands)
@@ -664,40 +672,22 @@ class CommandMenuRenderer:
         line_width = self._get_menu_width()
 
         if is_selected:
-            # SELECTED: Highlighted with design system colors
-            # Layout: [glow] [/name] [description] [aliases]
-
-            # Calculate available space
+            # SELECTED: one solid surface so slash search does not look segmented.
             name_part = f"/{name}"
-            glow_width = 4
-            name_width = len(name_part) + 2
 
-            # Build alias hint if available
             alias_hint = ""
             alias_len = 0
             if aliases:
                 alias_str = " ".join(f"/{a}" for a in aliases[:2])
-                alias_hint = solid_fg(f" also: {alias_str}", T().text_dim)
+                alias_hint = f" also: {alias_str}"
                 alias_len = len(f" also: {alias_str}")
 
-            # Available for description
-            desc_area = line_width - glow_width - name_width - alias_len - 4
+            desc_area = line_width - len(name_part) - alias_len - 8
             if len(description) > desc_area:
                 description = description[: desc_area - 2] + ".."
 
-            # Build line with design system colors
-            glow_part = solid(f" {GLOW} ", T().ai_tag, T().text_dark, glow_width)
-            name_part_styled = solid(
-                f" {name_part} ", T().user_tag, T().text_dark, name_width
-            )
-            desc_part = solid(
-                f" {description.ljust(desc_area)} ",
-                T().response_bg[0],
-                T().text,
-                desc_area + 2,
-            )
-
-            line = f"{glow_part}{name_part_styled}{desc_part}{alias_hint}"
+            text = f" {GLOW} {name_part}  {description.ljust(desc_area)}{alias_hint}"
+            line = solid(text, T().input_bg[1], T().text, line_width)
             return self._normalize_line_width(line)
         else:
             # NOT SELECTED: Dimmed with dot leader

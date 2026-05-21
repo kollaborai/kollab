@@ -326,9 +326,10 @@ def _render_status(
 
         status = "Working" if is_processing else "Ready"
         color = T().warning[0] if is_processing else T().ai_tag
+        status_color = T().warning[0] if is_processing else (255, 255, 255)
         icon = _fg("*", color)
-        text = _fg(status, color)
-        text_with_health = _fg(f"{status} {health}", color)
+        text = _fg(status, status_color)
+        text_with_health = text + _fg(f" {health}", color)
         full_plain = f"* {status} {health}"
         status_plain = f"* {status}"
 
@@ -337,7 +338,7 @@ def _render_status(
         if width >= len(status_plain):
             return f"{icon} {text}"
         if width >= 2:
-            return _fg(f"*{status[0]}", color)
+            return icon + _fg(status[0], status_color)
         if width == 1:
             return icon
         return ""
