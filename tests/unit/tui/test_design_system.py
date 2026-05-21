@@ -21,6 +21,7 @@ sys.path.insert(
 )
 
 from kollabor_tui.design_system import (
+    THEMES,
     Box,
     C,
     S,
@@ -157,6 +158,20 @@ class TestTheme(unittest.TestCase):
         self.assertEqual(theme.name, "ocean")
         # Restore default
         set_theme(original_name)
+
+    def assert_graphite_ember_palette(self, theme):
+        self.assertLessEqual(max(theme.dark[0]), 22)
+        self.assertGreater(theme.primary[0][0], theme.primary[0][1])
+        self.assertGreater(theme.primary[0][0], theme.primary[0][2])
+        self.assertGreaterEqual(theme.text_dim[0], 130)
+
+    def test_dark_theme_uses_graphite_ember_palette(self):
+        """Default active theme is compact graphite with ember accents."""
+        self.assert_graphite_ember_palette(THEMES["dark"])
+
+    def test_lime_theme_uses_graphite_ember_palette(self):
+        """Lime alias keeps the compact graphite and ember palette."""
+        self.assert_graphite_ember_palette(THEMES["lime"])
 
 
 class TestStyleConstants(unittest.TestCase):

@@ -144,6 +144,14 @@ class TestTerminalState(unittest.TestCase):
         self.assertIsInstance(width, int)
         self.assertGreater(width, 0)
 
+    def test_default_global_width_caps_wide_terminals(self):
+        """Default UI width stays compact on wide terminals."""
+        ts = TerminalState()
+        ts.capabilities.width = 180
+        ts._cached_global_width = None
+
+        self.assertEqual(ts.get_global_width(), 104)
+
 
 if __name__ == "__main__":
     unittest.main()

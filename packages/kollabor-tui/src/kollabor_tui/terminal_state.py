@@ -152,7 +152,7 @@ class TerminalState:
         self._global_width_mode: str = "80%"  # Will be read from config
         self._global_width_offset: int = 4  # Default: terminal_width - 4
         self._global_width_min: int = 40  # Minimum width
-        self._global_width_max: Optional[int] = None  # Maximum width (None = no cap)
+        self._global_width_max: Optional[int] = 104  # Compact default cap
         self._cached_global_width: Optional[int] = None
 
         # State tracking
@@ -497,7 +497,11 @@ class TerminalState:
                 "terminal.global_width_offset", 4
             )
             self._global_width_min = self._config.get("terminal.global_width_min", 40)
-            self._global_width_max = self._config.get("terminal.global_width_max", None)
+            raw_max = self._config.get("terminal.global_width_max", 104)
+            if raw_max in (None, "", 0, "0"):
+                self._global_width_max = None
+            else:
+                self._global_width_max = int(raw_max)
             logger.debug(
                 f"Global width config loaded: mode={self._global_width_mode}, offset={self._global_width_offset}"
             )
