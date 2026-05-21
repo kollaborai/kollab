@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from kollabor_tui.design_system import set_theme
+from kollabor_tui.design_system import T, set_theme
 from kollabor_tui.status.system_monitor import (
     color_threshold,
     format_system_metric,
@@ -20,86 +20,90 @@ class TestColorThreshold(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        # Use lime theme for consistent testing
+        # Use lime theme for consistent testing.
         set_theme("lime")
+        self.success = T().success[0]
+        self.warning = T().warning[0]
+        self.error = T().error[0]
+        self.dimmed = T().text_dim
 
     def test_green_threshold_healthy_range(self):
         """Test that values <70% return green (success) color."""
         # Boundary cases
-        self.assertEqual(color_threshold(0), (60, 180, 80))  # 0%
-        self.assertEqual(color_threshold(1), (60, 180, 80))  # 1%
-        self.assertEqual(color_threshold(50), (60, 180, 80))  # 50%
-        self.assertEqual(color_threshold(69), (60, 180, 80))  # 69%
+        self.assertEqual(color_threshold(0), self.success)  # 0%
+        self.assertEqual(color_threshold(1), self.success)  # 1%
+        self.assertEqual(color_threshold(50), self.success)  # 50%
+        self.assertEqual(color_threshold(69), self.success)  # 69%
 
         # Float values
-        self.assertEqual(color_threshold(45.5), (60, 180, 80))
-        self.assertEqual(color_threshold(69.99), (60, 180, 80))
+        self.assertEqual(color_threshold(45.5), self.success)
+        self.assertEqual(color_threshold(69.99), self.success)
 
     def test_yellow_threshold_elevated_range(self):
         """Test that values 70-89% return yellow (warning) color."""
         # Boundary cases
-        self.assertEqual(color_threshold(70), (200, 140, 40))  # 70%
-        self.assertEqual(color_threshold(75), (200, 140, 40))  # 75%
-        self.assertEqual(color_threshold(80), (200, 140, 40))  # 80%
-        self.assertEqual(color_threshold(89), (200, 140, 40))  # 89%
+        self.assertEqual(color_threshold(70), self.warning)  # 70%
+        self.assertEqual(color_threshold(75), self.warning)  # 75%
+        self.assertEqual(color_threshold(80), self.warning)  # 80%
+        self.assertEqual(color_threshold(89), self.warning)  # 89%
 
         # Float values
-        self.assertEqual(color_threshold(70.0), (200, 140, 40))
-        self.assertEqual(color_threshold(89.99), (200, 140, 40))
+        self.assertEqual(color_threshold(70.0), self.warning)
+        self.assertEqual(color_threshold(89.99), self.warning)
 
     def test_red_threshold_critical_range(self):
         """Test that values >=90% return red (error) color."""
         # Boundary cases
-        self.assertEqual(color_threshold(90), (180, 60, 60))  # 90%
-        self.assertEqual(color_threshold(95), (180, 60, 60))  # 95%
-        self.assertEqual(color_threshold(99), (180, 60, 60))  # 99%
-        self.assertEqual(color_threshold(100), (180, 60, 60))  # 100%
+        self.assertEqual(color_threshold(90), self.error)  # 90%
+        self.assertEqual(color_threshold(95), self.error)  # 95%
+        self.assertEqual(color_threshold(99), self.error)  # 99%
+        self.assertEqual(color_threshold(100), self.error)  # 100%
 
         # Float values
-        self.assertEqual(color_threshold(90.0), (180, 60, 60))
-        self.assertEqual(color_threshold(99.9), (180, 60, 60))
+        self.assertEqual(color_threshold(90.0), self.error)
+        self.assertEqual(color_threshold(99.9), self.error)
 
     def test_none_returns_dimmed(self):
         """Test that None value returns dimmed text color."""
         result = color_threshold(None)
-        self.assertEqual(result, (120, 120, 120))  # T().text_dim
+        self.assertEqual(result, self.dimmed)
 
     def test_negative_values_return_dimmed(self):
         """Test that negative values return dimmed text color."""
-        self.assertEqual(color_threshold(-1), (120, 120, 120))
-        self.assertEqual(color_threshold(-100), (120, 120, 120))
-        self.assertEqual(color_threshold(-0.5), (120, 120, 120))
+        self.assertEqual(color_threshold(-1), self.dimmed)
+        self.assertEqual(color_threshold(-100), self.dimmed)
+        self.assertEqual(color_threshold(-0.5), self.dimmed)
 
     def test_values_over_100_return_dimmed(self):
         """Test that values >100 return dimmed text color."""
-        self.assertEqual(color_threshold(101), (120, 120, 120))
-        self.assertEqual(color_threshold(150), (120, 120, 120))
-        self.assertEqual(color_threshold(100.5), (120, 120, 120))
+        self.assertEqual(color_threshold(101), self.dimmed)
+        self.assertEqual(color_threshold(150), self.dimmed)
+        self.assertEqual(color_threshold(100.5), self.dimmed)
 
     def test_string_numeric_values_handled(self):
         """Test that numeric strings are converted correctly."""
-        self.assertEqual(color_threshold("50"), (60, 180, 80))  # String number
-        self.assertEqual(color_threshold("75.5"), (200, 140, 40))  # String float
-        self.assertEqual(color_threshold("95"), (180, 60, 60))  # String int
+        self.assertEqual(color_threshold("50"), self.success)  # String number
+        self.assertEqual(color_threshold("75.5"), self.warning)  # String float
+        self.assertEqual(color_threshold("95"), self.error)  # String int
 
     def test_non_numeric_strings_return_dimmed(self):
         """Test that non-numeric strings return dimmed text color."""
-        self.assertEqual(color_threshold("invalid"), (120, 120, 120))
-        self.assertEqual(color_threshold("N/A"), (120, 120, 120))
-        self.assertEqual(color_threshold(""), (120, 120, 120))
+        self.assertEqual(color_threshold("invalid"), self.dimmed)
+        self.assertEqual(color_threshold("N/A"), self.dimmed)
+        self.assertEqual(color_threshold(""), self.dimmed)
 
     def test_nan_returns_dimmed(self):
         """Test that NaN values return dimmed text color."""
         import math
 
         result = color_threshold(float("nan"))
-        self.assertEqual(result, (120, 120, 120))
+        self.assertEqual(result, self.dimmed)
         self.assertTrue(math.isnan(float("nan")))
 
     def test_inf_returns_dimmed(self):
         """Test that infinity values return dimmed text color."""
-        self.assertEqual(color_threshold(float("inf")), (120, 120, 120))
-        self.assertEqual(color_threshold(float("-inf")), (120, 120, 120))
+        self.assertEqual(color_threshold(float("inf")), self.dimmed)
+        self.assertEqual(color_threshold(float("-inf")), self.dimmed)
 
 
 class TestGetStatusLabel(unittest.TestCase):
