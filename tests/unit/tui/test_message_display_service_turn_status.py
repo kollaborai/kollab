@@ -17,7 +17,7 @@ def _messages_from(service: MessageDisplayService) -> list[tuple[str, str, dict]
     return service.message_coordinator.display_message_sequence.call_args.args[0]
 
 
-def test_turn_status_inserts_spacing_without_visible_timing():
+def test_turn_status_hidden_without_injected_spacer():
     renderer = DummyRenderer()
     service = MessageDisplayService(renderer)
 
@@ -28,8 +28,7 @@ def test_turn_status_inserts_spacing_without_visible_timing():
 
     messages = _messages_from(service)
 
-    assert messages[0] == ("spacer", "", {})
-    assert messages[1] == ("assistant", "done", {})
+    assert messages == [("assistant", "done", {})]
 
 
 def test_turn_status_hides_reasoning_preview_for_now():
@@ -44,7 +43,7 @@ def test_turn_status_hides_reasoning_preview_for_now():
 
     messages = _messages_from(service)
 
-    assert messages[0] == ("spacer", "", {})
+    assert messages == [("assistant", "done", {})]
 
 
 def test_turn_status_suppressed_in_pipe_mode():

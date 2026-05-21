@@ -63,15 +63,15 @@ def test_startup_banner_has_contrast_panel_background(monkeypatch):
     assert "\033[0;48;" in banner
 
 
-def test_startup_banner_border_matches_input_fill(monkeypatch):
-    """Startup banner border matches the input box fill color."""
+def test_startup_banner_border_matches_panel_background(monkeypatch):
+    """Startup banner border blends into the header panel background."""
     monkeypatch.setattr(terminal_state, "get_global_width", lambda: 72)
 
     banner = BannerRenderer.create_kollabor_banner("v1.2.3", context=None)
     lines = banner.strip("\n").splitlines()
 
-    assert lines[0] == solid_fg("▄" * 72, T().input_bg[0])
-    assert lines[-1] == solid_fg("▀" * 72, T().input_bg[0])
+    assert lines[0] == solid_fg("▄" * 72, T().dark[0])
+    assert lines[-1] == solid_fg("▀" * 72, T().dark[0])
 
 
 def test_startup_banner_uses_full_global_width(monkeypatch):

@@ -405,22 +405,15 @@ class TestMessageDisplayCoordination(unittest.TestCase):
         # Test the message sequence building logic
         message_sequence = []
 
-        # Simulate thinking duration > 0.1
-        thinking_duration = 0.5
         response = "Test response content"
-
-        if thinking_duration > 0.1:
-            message_sequence.append(("spacer", "", {}))
 
         if response.strip():
             message_sequence.append(("assistant", response, {}))
 
         # Verify sequence structure
-        self.assertEqual(len(message_sequence), 2)
-        self.assertEqual(message_sequence[0][0], "spacer")
-        self.assertEqual(message_sequence[1][0], "assistant")
-        self.assertEqual(message_sequence[0][1], "")
-        self.assertEqual(message_sequence[1][1], response)
+        self.assertEqual(len(message_sequence), 1)
+        self.assertEqual(message_sequence[0][0], "assistant")
+        self.assertEqual(message_sequence[0][1], response)
 
 
 class TestLLMServiceHookIntegration(unittest.TestCase):
