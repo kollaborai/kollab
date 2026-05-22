@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-engine"
-version = "0.5.10"
+version = "0.5.11"
 description = "Kollab AI engine - HTTP/SSE server wrapping kollabor-ai and kollabor-agent"
 readme = "README.md"
 requires-python = ">=3.12"
