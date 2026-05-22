@@ -243,6 +243,11 @@ class ProfileWizardConfig:
 # =============================================================================
 
 
+def create_profile_wizard(profile_manager, config_manager=None):
+    """Factory function to create a ProfileCreationWizard instance."""
+    return ProfileCreationWizard(profile_manager, config_manager)
+
+
 class ProfileCreationWizard:
     """Wizard for creating OpenAI/LLM profiles with validation and testing."""
 

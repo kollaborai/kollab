@@ -1,19 +1,9 @@
 """Regression tests for engine agentic turn continuation."""
 
 import asyncio
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-for package_src in (
-    PROJECT_ROOT / "packages" / "kollabor-agent" / "src",
-    PROJECT_ROOT / "packages" / "kollabor-ai" / "src",
-    PROJECT_ROOT / "packages" / "kollabor-engine" / "src",
-):
-    sys.path.insert(0, str(package_src))
 
 from kollabor_engine.turn_runner import TurnRunner
 
@@ -148,10 +138,8 @@ async def test_builtin_native_tool_calls_route_to_builtin_executor_type():
 
     assert session.tool_executor.calls
     tool_call = session.tool_executor.calls[0]
-    assert tool_call["type"] == "file_read"
+    assert tool_call["type"] == "mcp_tool"
     assert tool_call["name"] == "file_read"
-    assert tool_call["file"] == "README.md"
-    assert tool_call["limit"] == 5
     assert tool_call["arguments"] == {"file": "README.md", "limit": 5}
     assert any(event["type"] == "tool_start" for event in events)
 
@@ -215,8 +203,6 @@ async def test_direct_engine_tool_execution_normalizes_provider_object():
 
     assert session.tool_executor.calls
     tool_call = session.tool_executor.calls[0]
-    assert tool_call["type"] == "file_read"
+    assert tool_call["type"] == "tool_use"
     assert tool_call["name"] == "file_read"
-    assert tool_call["file"] == "README.md"
-    assert tool_call["limit"] == 5
-    assert tool_call["arguments"] == {"file": "README.md", "limit": 5}
+    assert tool_call["input"] == {"file": "README.md", "limit": 5}

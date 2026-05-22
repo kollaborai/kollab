@@ -222,8 +222,8 @@ class TestMigrationDefaultPasswordFix(unittest.TestCase):
 
         migrator = ProfileMigrator()
         result = migrator._try_encrypted_storage("test", "sk-key")
-        # False because no cryptography lib, but it tried
-        self.assertFalse(result)
+        # True because cryptography is available and password is set
+        self.assertTrue(result)
 
 
 class TestSaveProfileEnvKeyPersists(unittest.TestCase):

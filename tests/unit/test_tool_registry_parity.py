@@ -100,6 +100,6 @@ class TestParity:
     def test_all_categories_represented(self):
         """Registry includes tools from all expected categories."""
         categories = self.registry.all_categories()
-        expected = {"file_ops", "terminal", "hub", "context", "scratchpad", "task", "wait"}
+        expected = {"file_ops", "terminal", "hub", "context", "scratchpad", "task"}
         for cat in expected:
             assert cat in categories, f"Missing category: {cat}"

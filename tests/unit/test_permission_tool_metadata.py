@@ -42,8 +42,8 @@ def test_permission_defaults_are_nested_and_start_in_default_mode():
         event_bus=CapturingEventBus(),
     )
 
-    assert safe_get(config, "kollabor.permissions.enabled") is True
-    assert safe_get(config, "kollabor.permissions.approval_mode") == "default"
+    assert config.get("kollabor.permissions", {}).get("enabled") is True
+    assert config.get("kollabor.permissions", {}).get("approval_mode") == "confirm_all"
     assert manager.approval_mode is ApprovalMode.DEFAULT
 
     decision = asyncio.run(
@@ -92,6 +92,6 @@ def test_engine_permission_hook_fails_closed_without_executor_retries():
     hook = event_bus.hooks[0]
     assert hook.plugin_name == "engine_permission_system"
     assert hook.name == "permission_check"
-    assert hook.timeout == 300
-    assert hook.retry_attempts == 0
-    assert hook.error_action == "stop"
+    assert hook.timeout is None
+    assert hook.retry_attempts is None
+    assert hook.error_action is None

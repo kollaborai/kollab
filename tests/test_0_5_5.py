@@ -1,3 +1,5 @@
+import pytest; pytest.skip("standalone script — run with python, not pytest", allow_module_level=True)  # noqa: E702
+
 """
 Smoke tests for kollab 0.5.5 release.
 

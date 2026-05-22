@@ -61,9 +61,15 @@ class TestHubRosterInject(unittest.TestCase):
     def test_malformed_roster_update_does_not_poison_roster(self):
         plugin = HubPlugin.__new__(HubPlugin)
         plugin._roster = [{"identity": "lapis", "state": "idle"}]
+        plugin._presence = unittest.mock.MagicMock()
+        plugin._presence.discover_agents_async = unittest.mock.AsyncMock(return_value=[])
+        plugin._vault = None
+        plugin._identity = None
+        plugin._trace_delivery = lambda *a, **kw: None
+        plugin._decide_sender_delivery = lambda m: SimpleNamespace(mode="allow", trace_level="info", reason="")
 
         asyncio.run(
-            plugin._on_message(
+            plugin._route_message(
                 HubMessage(
                     action="roster_update",
                     content='["lapis", "sapphire"]',
