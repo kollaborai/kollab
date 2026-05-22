@@ -8,7 +8,7 @@ addopts = "-p no:warnings"
 
 [project]
 name = "kollab"
-version = "0.5.9"
+version = "0.5.10"
 description = "Terminal AI workspace with hooks, plugins, providers, and multi-agent collaboration"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -48,15 +48,15 @@ classifiers = [
 dependencies = [
     "aiohttp>=3.10.11",
     "httpx>=0.27.0",
-    "kollabor-agent>=0.5.9",
-    "kollabor-ai>=0.5.9",
-    "kollabor-config>=0.5.9",
-    "kollabor-events>=0.5.9",
-    "kollabor-plugins>=0.5.9",
-    "kollabor-engine>=0.5.9",
-    "kollabor-rpc>=0.5.9",
-    "kollabor-tui>=0.5.9",
-    "kollabor-webui>=0.5.9",
+    "kollabor-agent>=0.5.10",
+    "kollabor-ai>=0.5.10",
+    "kollabor-config>=0.5.10",
+    "kollabor-events>=0.5.10",
+    "kollabor-plugins>=0.5.10",
+    "kollabor-engine>=0.5.10",
+    "kollabor-rpc>=0.5.10",
+    "kollabor-tui>=0.5.10",
+    "kollabor-webui>=0.5.10",
     "pyyaml>=6.0",
     "psutil>=5.9.0",
     "packaging>=23.0",
