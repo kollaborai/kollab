@@ -124,6 +124,20 @@ def format_tool_header(result: Any, tool_data: Optional[Dict] = None) -> str:
             return f"{indicator} {result.tool_type}({truncate_tool_args(first_val)})"
         return f"{indicator} {result.tool_type}()"
     else:
+        # Fallback: try tool_data for name/arguments before showing raw call ID
+        if tool_data:
+            tool_name = tool_data.get("name", result.tool_type or "tool")
+            arguments = tool_data.get("arguments", {})
+            if arguments:
+                arg_parts = []
+                for k, v in list(arguments.items())[:2]:
+                    v_str = str(v)
+                    if len(v_str) > 30:
+                        v_str = v_str[:27] + "..."
+                    arg_parts.append(f'{k}="{v_str}"')
+                args_display = ", ".join(arg_parts)
+                return f"{indicator} {tool_name}({truncate_tool_args(args_display)})"
+            return f"{indicator} {tool_name}()"
         return f"{indicator} {result.tool_type}({truncate_tool_args(result.tool_id)})"
 
 
@@ -369,6 +383,19 @@ def extract_tool_info(result: Any, tool_data: Optional[Dict] = None) -> Tuple[st
         )
         return (f"malformed_{operation}", "")
 
+    # Fallback: try tool_data for name/arguments before showing raw call ID
+    if tool_data:
+        tool_name = tool_data.get("name", result.tool_type or "tool")
+        arguments = tool_data.get("arguments", {})
+        if arguments:
+            arg_parts = []
+            for k, v in list(arguments.items())[:2]:
+                if isinstance(v, str) and len(v) > 30:
+                    v = v[:30] + "..."
+                arg_parts.append(f"{k}={v}")
+            args_str = ", ".join(arg_parts)
+            return (tool_name, truncate_tool_args(args_str))
+        return (tool_name, "")
     return (
         result.tool_type or "tool",
         truncate_tool_args(result.tool_id or ""),
@@ -454,6 +481,20 @@ def extract_tool_name_args(
         return (f"malformed_{operation}", "")
 
     else:
+        # Fallback: try tool_data for name/arguments before showing raw call ID
+        if tool_data:
+            tool_name = tool_data.get("name", result.tool_type or "tool")
+            arguments = tool_data.get("arguments", {})
+            if arguments:
+                arg_parts = []
+                for k, v in list(arguments.items())[:2]:
+                    v_str = str(v)
+                    if len(v_str) > 40:
+                        v_str = v_str[:37] + "..."
+                    arg_parts.append(f'{k}="{v_str}"')
+                args_str = ", ".join(arg_parts)
+                return (tool_name, truncate_tool_args(args_str))
+            return (tool_name, "")
         return (
             result.tool_type or "tool",
             truncate_tool_args(result.tool_id or ""),
