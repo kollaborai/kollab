@@ -12,6 +12,8 @@ import time
 from typing import Dict, List, Tuple
 
 from kollabor_agent.runtime import AgentRuntime
+from kollabor_tui.color_contrast import readable_agent_color
+from kollabor_tui.design_system import T
 
 from .presence import get_presence_dir
 from .vault import find_active_stream, get_vaults_dir
@@ -35,12 +37,21 @@ def _color(identity: str) -> Tuple[int, int, int]:
 
     gem = GEM_BY_NAME.get(identity)
     if gem:
-        return gem.color_rgb
-    base = identity.rsplit("-", 1)[0] if "-" in identity else identity
-    gem = GEM_BY_NAME.get(base)
-    if gem:
-        return gem.color_rgb
-    return _FALLBACK_COLORS[hash(identity) % len(_FALLBACK_COLORS)]
+        raw_color = gem.color_rgb
+    else:
+        base = identity.rsplit("-", 1)[0] if "-" in identity else identity
+        gem = GEM_BY_NAME.get(base)
+        if gem:
+            raw_color = gem.color_rgb
+        else:
+            raw_color = _FALLBACK_COLORS[hash(identity) % len(_FALLBACK_COLORS)]
+
+    return readable_agent_color(
+        raw_color,
+        background=T().dark[0],
+        target=T().text,
+        muted_target=T().text_dim,
+    )
 
 
 def _fg(text: str, r: int, g: int, b: int) -> str:

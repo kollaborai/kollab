@@ -146,8 +146,12 @@ class SystemCommandHandler(BaseCommandHandler):
             icon="[MODE]",
             cli_hidden=False,
             subcommands=[
-                SubcommandInfo("dark", "", "Use light text for dark terminal backgrounds"),
-                SubcommandInfo("light", "", "Use dark text for light terminal backgrounds"),
+                SubcommandInfo(
+                    "dark", "", "Use light text for dark terminal backgrounds"
+                ),
+                SubcommandInfo(
+                    "light", "", "Use dark text for light terminal backgrounds"
+                ),
             ],
         )
         self.command_registry.register_command(mode_command)
@@ -298,11 +302,33 @@ class SystemCommandHandler(BaseCommandHandler):
                 )
 
             set_theme(requested)
+            config_service = self._get_mode_config_service()
+            persisted = False
+            if config_service is not None:
+                saved = config_service.save_key(
+                    "kollabor.ui.theme",
+                    requested,
+                    save_target="global",
+                )
+                if not saved:
+                    return CommandResult(
+                        success=False,
+                        message=(f"mode set to {requested}, but failed to save it"),
+                        display_type="warning",
+                        data={"mode": requested, "persisted": False},
+                    )
+                persisted = True
+
+            message = (
+                f"mode set to {requested} and saved"
+                if persisted
+                else f"mode set to {requested} for this session"
+            )
             return CommandResult(
                 success=True,
-                message=f"mode set to {requested}",
+                message=message,
                 display_type="success",
-                data={"mode": requested},
+                data={"mode": requested, "persisted": persisted},
             )
 
         except Exception as e:
@@ -312,6 +338,24 @@ class SystemCommandHandler(BaseCommandHandler):
                 message=f"Error setting mode: {e}",
                 display_type="error",
             )
+
+    def _get_mode_config_service(self):
+        """Return the ConfigService used to persist terminal contrast mode."""
+        if self._config_manager is not None and hasattr(
+            self._config_manager, "save_key"
+        ):
+            return self._config_manager
+
+        llm_service = self.llm_service
+        config_service = getattr(llm_service, "config", None)
+        if config_service is not None and hasattr(config_service, "save_key"):
+            return config_service
+
+        config_manager = self.event_bus.get_service("config_manager")
+        if config_manager is not None and hasattr(config_manager, "save_key"):
+            return config_manager
+
+        return None
 
     async def handle_status(self, command: SlashCommand) -> CommandResult:
         """Handle /status command.
@@ -824,8 +868,7 @@ class SystemCommandHandler(BaseCommandHandler):
         ]
         for check in checks:
             line = (
-                f"  {icon[check['status']]} {check['name']:<18} "
-                f"{check['detail']}"
+                f"  {icon[check['status']]} {check['name']:<18} " f"{check['detail']}"
             )
             lines.append(line.rstrip())
             if check["fix"]:

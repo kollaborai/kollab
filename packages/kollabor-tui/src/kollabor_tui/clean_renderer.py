@@ -14,6 +14,7 @@ import re
 import shlex
 from typing import List, Optional
 
+from kollabor_tui.color_contrast import readable_agent_color
 from kollabor_tui.design_system import S, T, solid, solid_fg, wrap_text
 from kollabor_tui.design_system.border_style import get_border_style
 from kollabor_tui.terminal_state import get_global_width
@@ -70,8 +71,8 @@ def _plain_rows(
     """Render compact rows with a foreground-colored icon only."""
     output: List[str] = []
     line_width = width or get_global_width()
-    continuation_prefix = continuation_prefix if continuation_prefix is not None else (
-        " " * len(prefix)
+    continuation_prefix = (
+        continuation_prefix if continuation_prefix is not None else (" " * len(prefix))
     )
 
     for line_idx, line in enumerate(lines):
@@ -375,7 +376,9 @@ def _tool_headline(
     prefix = solid_fg(symbol, symbol_color) + " "
     available_for_text = max(1, width - len(symbol) - 1)
     if not detail:
-        return prefix + solid_fg(_truncate_plain(label, available_for_text), label_color)
+        return prefix + solid_fg(
+            _truncate_plain(label, available_for_text), label_color
+        )
 
     available = max(1, available_for_text - len(label) - 1)
     return (
@@ -500,9 +503,7 @@ class CleanRenderer:
     def info_block(self, message: str, width: Optional[int] = None) -> str:
         # Temporarily keep timing/reasoning rows plain if they reach this renderer.
         # MessageDisplayService currently converts them into blank spacer rows.
-        return _plain_rows(
-            message.split("\n"), "ℹ ", T().text_dim, T().text_dim, width
-        )
+        return _plain_rows(message.split("\n"), "ℹ ", T().text_dim, T().text_dim, width)
 
     def success_block(self, message: str, width: Optional[int] = None) -> str:
         return _plain_rows(
@@ -519,14 +520,18 @@ class CleanRenderer:
     ) -> str:
         if agent_color is None:
             agent_color = T().secondary[0]
-        if observing:
-            agent_color = tuple(max(c // 3, 15) for c in agent_color)
         prefix = _agent_marker(tag_char, observing)
-        text_color = agent_color
+        text_color = readable_agent_color(
+            agent_color,
+            background=T().dark[0],
+            target=T().text,
+            muted_target=T().text_dim,
+            observing=observing,
+        )
         return _plain_rows(
             content.split("\n"),
             prefix,
-            agent_color,
+            text_color,
             text_color,
             width,
         )

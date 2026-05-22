@@ -18,14 +18,14 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-# Matches all ANSI escape sequences (CSI, OSC, and single-char Fe sequences)
-_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;]*[mA-Za-z]?|\][^\x07]*\x07?|[^[])")
-
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
 
 logger = logging.getLogger(__name__)
+
+# Matches all ANSI escape sequences (CSI, OSC, and single-char Fe sequences)
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;]*[mA-Za-z]?|\][^\x07]*\x07?|[^[])")
 
 
 class HubConsoleAltView(AltView):
@@ -369,10 +369,10 @@ class HubConsoleAltView(AltView):
                 gem = GEM_BY_NAME.get(ident)
                 if gem and is_selected:
                     bg = gem.color_rgb
-                    fg = theme.text_dark
+                    fg = theme.text_on(bg) if hasattr(theme, "text_on") else theme.text
                 elif is_selected:
                     bg = theme.primary[0]
-                    fg = theme.text_dark
+                    fg = theme.text_on(bg) if hasattr(theme, "text_on") else theme.text
                 else:
                     bg = theme.dark[0]
                     fg = theme.text_dim if state == "idle" else theme.text
@@ -416,7 +416,9 @@ class HubConsoleAltView(AltView):
                 # Truncate to right_width visible chars
                 if vis_len > right_width:
                     kept, count = [], 0
-                    for tok in re.split(r"(\x1b(?:\[[0-9;]*[mA-Za-z]?|\][^\x07]*\x07?|[^[]]))", line):
+                    for tok in re.split(
+                        r"(\x1b(?:\[[0-9;]*[mA-Za-z]?|\][^\x07]*\x07?|[^[]]))", line
+                    ):
                         if _ANSI_RE.fullmatch(tok):
                             kept.append(tok)
                         else:

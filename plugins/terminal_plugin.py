@@ -37,11 +37,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
 def _filter_env(env: dict) -> dict:
     """Remove sensitive environment variables before passing to child processes."""
     sensitive_patterns = (
-        "API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "AUTH",
+        "API_KEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "CREDENTIAL",
+        "AUTH",
     )
     filtered = {}
     for key, value in env.items():
@@ -52,7 +56,7 @@ def _filter_env(env: dict) -> dict:
     return filtered
 
 
-
+@dataclass
 class TerminalSession:
     """Represents a managed terminal session backed by subprocess.Popen."""
 
@@ -637,7 +641,11 @@ Aliases: /t, /term, /tmux"""
             return {
                 "success": result.success,
                 "output": cleaned,
-                "error": "" if result.success else f"Command exited with code {result.exit_code}",
+                "error": (
+                    ""
+                    if result.success
+                    else f"Command exited with code {result.exit_code}"
+                ),
                 "exit_code": result.exit_code,
             }
 
@@ -713,7 +721,7 @@ Aliases: /t, /term, /tmux"""
                 "message": (
                     f"Background session '{name}' started (running in background). "
                     f"Use /terminal view {name} to check output, "
-                    f"or <terminal-output name=\"{name}\" /> to capture recent lines."
+                    f'or <terminal-output name="{name}" /> to capture recent lines.'
                 ),
             }
 

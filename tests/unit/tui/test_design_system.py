@@ -40,6 +40,22 @@ from kollabor_tui.design_system import (
 )
 
 
+def contrast_ratio(fg: tuple[int, int, int], bg: tuple[int, int, int]) -> float:
+    def channel(value: int) -> float:
+        scaled = value / 255
+        return (
+            scaled / 12.92 if scaled <= 0.04045 else ((scaled + 0.055) / 1.055) ** 2.4
+        )
+
+    def luminance(color: tuple[int, int, int]) -> float:
+        r, g, b = (channel(value) for value in color)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    light = max(luminance(fg), luminance(bg))
+    dark = min(luminance(fg), luminance(bg))
+    return (light + 0.05) / (dark + 0.05)
+
+
 class TestTheme(unittest.TestCase):
     """Test cases for Theme system."""
 
@@ -194,6 +210,34 @@ class TestTheme(unittest.TestCase):
         self.assertLess(max(theme.text), 80)
         self.assertLess(max(theme.assistant_text), 150)
         self.assertGreater(min(theme.dark[0]), 230)
+
+    def test_dark_and_light_theme_tokens_meet_terminal_contrast(self):
+        """Core dark/light foreground tokens are readable on their backgrounds."""
+        for theme_name in ("dark", "light"):
+            theme = THEMES[theme_name]
+            bg = theme.dark[0]
+            text_tokens = {
+                "text": theme.text,
+                "text_dim": theme.text_dim,
+                "assistant_text": theme.assistant_text,
+            }
+            accent_tokens = {
+                "user_tag": theme.user_tag,
+                "ai_tag": theme.ai_tag,
+                "tool_tag": theme.tool_tag,
+                "thinking_tag": theme.thinking_tag,
+                "success": theme.success[0],
+                "error": theme.error[0],
+                "warning": theme.warning[0],
+            }
+
+            for token_name, color in text_tokens.items():
+                with self.subTest(theme=theme_name, token=token_name):
+                    self.assertGreaterEqual(contrast_ratio(color, bg), 4.5)
+
+            for token_name, color in accent_tokens.items():
+                with self.subTest(theme=theme_name, token=token_name):
+                    self.assertGreaterEqual(contrast_ratio(color, bg), 3.0)
 
 
 class TestStyleConstants(unittest.TestCase):

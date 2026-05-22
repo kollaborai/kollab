@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Design system imports for modern rendering
+from kollabor_tui.color_contrast import readable_agent_color
 from kollabor_tui.design_system import S, T, TagBox, solid, solid_fg, wrap_text
 from kollabor_tui.terminal_state import get_global_width
 
@@ -858,14 +859,13 @@ class ModernMessageRenderer:
         if agent_color is None:
             agent_color = T().secondary[0]
 
-        if observing:
-            if agent_color is not None:
-                agent_color = (
-                    max(agent_color[0] // 3, 15),
-                    max(agent_color[1] // 3, 15),
-                    max(agent_color[2] // 3, 15),
-                )
-        fg_color = agent_color if isinstance(agent_color, tuple) else T().text_dim
+        fg_color = readable_agent_color(
+            agent_color,
+            background=T().dark[0],
+            target=T().text,
+            muted_target=T().text_dim,
+            observing=observing,
+        )
 
         return self._compact_lines(
             content.split("\n"),

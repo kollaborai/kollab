@@ -28,9 +28,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Project root -- needed for plugins that call Path.cwd() at import/init time.
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)
-))))
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +83,9 @@ def _assert_result(result):
     from kollabor_events.models import CommandResult
 
     assert result is not None, "Handler returned None"
-    assert isinstance(result, (CommandResult, str)), (
-        f"Expected CommandResult or str, got {type(result).__name__}: {result!r}"
-    )
+    assert isinstance(
+        result, (CommandResult, str)
+    ), f"Expected CommandResult or str, got {type(result).__name__}: {result!r}"
     return result
 
 
@@ -180,6 +180,32 @@ class TestSystemCommandHandler(unittest.TestCase):
             _assert_result(result)
             assert result.success
             assert T().name == "dark"
+        finally:
+            set_theme(original_name)
+
+    def test_mode_persists_theme_to_global_config(self):
+        from kollabor_tui.design_system import T, set_theme
+
+        original_name = T().name
+        config = MagicMock()
+        config.save_key.return_value = True
+        handler = self._make_handler(
+            {
+                "config_manager": None,
+                "llm_service": SimpleNamespace(config=config),
+            }
+        )
+
+        try:
+            result = _safe_run(handler.handle_mode(_make_slash_command("light")))
+            _assert_result(result)
+
+            assert result.success
+            config.save_key.assert_called_once_with(
+                "kollabor.ui.theme",
+                "light",
+                save_target="global",
+            )
         finally:
             set_theme(original_name)
 
@@ -547,7 +573,9 @@ class TestModelCommandHandler(unittest.TestCase):
 
     def test_model_with_profile_manager(self):
         pm = MagicMock()
-        pm.get_current_profile.return_value = MagicMock(model="gpt-4o", provider="openai")
+        pm.get_current_profile.return_value = MagicMock(
+            model="gpt-4o", provider="openai"
+        )
         pm.list_profiles.return_value = []
         handler = self._make_handler(profile_manager=pm)
         result = _safe_run(handler.handle_model(_make_slash_command()))
@@ -619,7 +647,9 @@ class TestDirectoryCommandHandler(unittest.TestCase):
 
     def test_cd_invalid_path(self):
         handler = self._make_handler()
-        result = _safe_run(handler.handle_cd(_make_slash_command("/no/such/path/exists")))
+        result = _safe_run(
+            handler.handle_cd(_make_slash_command("/no/such/path/exists"))
+        )
         _assert_result(result)
 
 
@@ -774,12 +804,18 @@ class TestContextCompactionPlugin(unittest.TestCase):
 
     def test_compact_no_args(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_compact_command(_make_slash_command(name="compact")))
+        result = _safe_run(
+            plugin._handle_compact_command(_make_slash_command(name="compact"))
+        )
         _assert_result(result)
 
     def test_compact_status_subcommand(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_compact_command(_make_slash_command("status", name="compact")))
+        result = _safe_run(
+            plugin._handle_compact_command(
+                _make_slash_command("status", name="compact")
+            )
+        )
         _assert_result(result)
 
 
@@ -812,12 +848,16 @@ class TestSaveConversationPlugin(unittest.TestCase):
         plugin = self._make_plugin()
         # config.get() will be called; state_service for save might be needed.
         # Without llm_service / state_service the plugin returns an error str.
-        result = _safe_run(plugin._handle_save_command(_make_slash_command(name="save")))
+        result = _safe_run(
+            plugin._handle_save_command(_make_slash_command(name="save"))
+        )
         _assert_result(result)
 
     def test_save_transcript_format(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_save_command(_make_slash_command("transcript", name="save")))
+        result = _safe_run(
+            plugin._handle_save_command(_make_slash_command("transcript", name="save"))
+        )
         _assert_result(result)
 
     def test_initialize_wires_event_bus_for_state_service(self):
@@ -881,17 +921,25 @@ class TestTerminalPlugin(unittest.TestCase):
     @unittest.skip("requires live tmux session")
     def test_terminal_no_args_requires_tmux(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_tmux_command(_make_slash_command(name="terminal")))
+        result = _safe_run(
+            plugin._handle_tmux_command(_make_slash_command(name="terminal"))
+        )
         _assert_result(result)
 
     def test_terminal_list_subcommand(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_tmux_command(_make_slash_command("list", name="terminal")))
+        result = _safe_run(
+            plugin._handle_tmux_command(_make_slash_command("list", name="terminal"))
+        )
         _assert_result(result)
 
     def test_terminal_new_subcommand(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_tmux_command(_make_slash_command("new", "test-session", name="terminal")))
+        result = _safe_run(
+            plugin._handle_tmux_command(
+                _make_slash_command("new", "test-session", name="terminal")
+            )
+        )
         _assert_result(result)
 
 
@@ -934,7 +982,9 @@ class TestDeepThoughtPlugin(unittest.TestCase):
 
     def test_deep_thought_status_subcommand(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_command(_make_slash_command("status", name="think")))
+        result = _safe_run(
+            plugin._handle_command(_make_slash_command("status", name="think"))
+        )
         _assert_result(result)
 
 
@@ -968,12 +1018,16 @@ class TestAgentOrchestratorPlugin(unittest.TestCase):
 
     def test_sub_list_subcommand(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_sub_command(_make_slash_command("list", name="sub")))
+        result = _safe_run(
+            plugin._handle_sub_command(_make_slash_command("list", name="sub"))
+        )
         _assert_result(result)
 
     def test_sub_help_subcommand(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_sub_command(_make_slash_command("help", name="sub")))
+        result = _safe_run(
+            plugin._handle_sub_command(_make_slash_command("help", name="sub"))
+        )
         _assert_result(result)
         from kollabor_events.models import CommandResult
 
@@ -982,7 +1036,9 @@ class TestAgentOrchestratorPlugin(unittest.TestCase):
 
     def test_sub_unknown_subcommand(self):
         plugin = self._make_plugin()
-        result = _safe_run(plugin._handle_sub_command(_make_slash_command("bogus", name="sub")))
+        result = _safe_run(
+            plugin._handle_sub_command(_make_slash_command("bogus", name="sub"))
+        )
         _assert_result(result)
         from kollabor_events.models import CommandResult
 

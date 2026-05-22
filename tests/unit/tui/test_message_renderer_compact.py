@@ -2,15 +2,47 @@
 
 import re
 
-from kollabor_tui.design_system import T, solid_fg
+from kollabor_tui.color_contrast import readable_agent_color
+from kollabor_tui.design_system import (
+    COLOR_TRUECOLOR,
+    T,
+    get_color_mode,
+    set_color_mode,
+    set_theme,
+    solid_fg,
+)
 from kollabor_tui.message_renderer import ModernMessageRenderer
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+FG_RE = re.compile(r"\033\[38;2;(\d+);(\d+);(\d+)m")
 
 
 def visible(text: str) -> str:
     """Strip ANSI codes for shape assertions."""
     return ANSI_RE.sub("", text)
+
+
+def contrast_ratio(fg: tuple[int, int, int], bg: tuple[int, int, int]) -> float:
+    def channel(value: int) -> float:
+        scaled = value / 255
+        return (
+            scaled / 12.92 if scaled <= 0.04045 else ((scaled + 0.055) / 1.055) ** 2.4
+        )
+
+    def luminance(color: tuple[int, int, int]) -> float:
+        r, g, b = (channel(value) for value in color)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    light = max(luminance(fg), luminance(bg))
+    dark = min(luminance(fg), luminance(bg))
+    return (light + 0.05) / (dark + 0.05)
+
+
+def foreground_for(rendered: str, text: str) -> tuple[int, int, int]:
+    prefix = rendered[: rendered.index(text)]
+    matches = FG_RE.findall(prefix)
+    assert matches
+    return tuple(int(value) for value in matches[-1])
 
 
 def test_tool_call_renders_as_compact_row():
@@ -195,7 +227,9 @@ def test_turn_timing_info_row_has_no_background_if_rendered_directly():
 
 def test_success_block_renders_as_compact_status_row():
     """System success renders as a compact status row."""
-    rendered = ModernMessageRenderer().success_block("attached to koordinator", width=80)
+    rendered = ModernMessageRenderer().success_block(
+        "attached to koordinator", width=80
+    )
 
     plain = visible(rendered)
 
@@ -217,20 +251,32 @@ def test_error_block_renders_as_compact_status_row():
 
 def test_agent_message_uses_agent_colored_text_and_diamond_marker():
     agent_color = (80, 140, 240)
-    rendered = ModernMessageRenderer().agent_message(
-        "lapis -> sapphire\nlapis here.",
-        agent_color=agent_color,
-        tag_char=" > ",
-        width=80,
-    )
+    original_color_mode = get_color_mode()
+    set_color_mode(COLOR_TRUECOLOR)
+    try:
+        rendered = ModernMessageRenderer().agent_message(
+            "lapis -> sapphire\nlapis here.",
+            agent_color=agent_color,
+            tag_char=" > ",
+            width=80,
+        )
+    finally:
+        set_color_mode(original_color_mode)
 
     plain = visible(rendered)
+    rendered_color = readable_agent_color(
+        agent_color,
+        background=T().dark[0],
+        target=T().text,
+        muted_target=T().text_dim,
+    )
 
     assert plain.splitlines()[0] == " ◆ lapis -> sapphire"
     assert plain.splitlines()[1] == "   lapis here."
     assert "\033[0;48;" not in rendered
-    assert solid_fg("lapis -> sapphire", agent_color) in rendered
-    assert solid_fg("lapis here.", agent_color) in rendered
+    r, g, b = rendered_color
+    assert f"\033[38;2;{r};{g};{b}mlapis -> sapphire" in rendered
+    assert f"\033[38;2;{r};{g};{b}mlapis here." in rendered
 
 
 def test_observed_agent_message_uses_hollow_diamond_marker():
@@ -246,3 +292,24 @@ def test_observed_agent_message_uses_hollow_diamond_marker():
 
     assert plain.splitlines()[0] == " ◇ sapphire -> lapis"
     assert "\033[0;48;" not in rendered
+
+
+def test_dark_agent_color_is_lifted_for_readability():
+    original = T().name
+    original_color_mode = get_color_mode()
+    set_theme("dark")
+    set_color_mode(COLOR_TRUECOLOR)
+    try:
+        rendered = ModernMessageRenderer().agent_message(
+            "sapphire -> lapis\nstanding by.",
+            agent_color=(15, 82, 186),
+            width=100,
+        )
+
+        fg = foreground_for(rendered, "sapphire -> lapis")
+
+        assert fg != (15, 82, 186)
+        assert contrast_ratio(fg, (0, 0, 0)) >= 6.5
+    finally:
+        set_theme(original)
+        set_color_mode(original_color_mode)
