@@ -3,6 +3,7 @@
 import logging
 import os
 import secrets
+import sys
 
 from kollabor_config.config_utils import get_config_directory, resolve_global_path
 
@@ -29,7 +30,7 @@ def get_token() -> str:
 
 def validate_token(token: str) -> bool:
     # Bypass auth for tests if env var is set
-    if os.environ.get("KOLLAB_ENGINE_BYPASS_AUTH") == "1":
+    if os.environ.get("KOLLAB_ENGINE_BYPASS_AUTH") == "1" and "pytest" in sys.modules:
         return True
     # Check in-memory token first
     if _current_token and secrets.compare_digest(token, _current_token):
