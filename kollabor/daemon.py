@@ -154,7 +154,6 @@ def _run_daemon(argv: list[str], write_fd: int) -> None:
     to /dev/null. The hub plugin signals readiness via write_fd.
     """
     import asyncio
-    import signal
 
     # Rebuild argv for the child so it re-enters the normal CLI path in
     # detached mode instead of recursively trying to fork another daemon.

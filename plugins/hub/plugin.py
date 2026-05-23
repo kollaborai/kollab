@@ -4616,8 +4616,8 @@ class HubPlugin(BasePlugin):
         try:
             truncated = text[:500] if len(text) > 500 else text
             await self._bridge.send(truncated)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"bridge forward failed: {e}")
 
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
@@ -5003,15 +5003,15 @@ class HubPlugin(BasePlugin):
             try:
                 if self._task_ledger.get_active_for(sender):
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"task ledger lookup failed: {e}")
         if self._presence:
             try:
                 for peer in self._presence.scan_all_presence():
                     if peer.identity == sender and peer.current_task:
                         return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"presence scan for sender task failed: {e}")
         return False
 
     def _task_ledger_matches_report(self, content: str) -> bool:
@@ -5025,7 +5025,8 @@ class HubPlugin(BasePlugin):
             try:
                 if self._task_ledger.get(task_id):
                     return True
-            except Exception:
+            except Exception as e:
+                logger.debug(f"task ledger get failed for {task_id}: {e}")
                 continue
         return False
 
@@ -5216,8 +5217,8 @@ class HubPlugin(BasePlugin):
                         f"Ignoring malformed roster_update from "
                         f"{message.from_identity}: not a list of dicts"
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"roster update parse failed: {e}")
             return
 
         # NOTE: _exit_waiting_state() is NOT called here anymore.
@@ -5305,8 +5306,8 @@ class HubPlugin(BasePlugin):
                         kind="peer_online",
                         collapse_key=f"join:{from_name}",
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"peer online notification failed: {e}")
             elif is_departure:
                 await self._bridge_forward(f"[hub] {from_name} is going offline")
                 try:
@@ -5319,8 +5320,8 @@ class HubPlugin(BasePlugin):
                         kind="peer_offline",
                         collapse_key=f"leave:{from_name}",
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"peer offline notification failed: {e}")
                 # Release the departing agent's claims (including its
                 # hub_identity:<name> reservation) so the coordinator can
                 # respawn that identity without hitting "already reserved".
@@ -5510,8 +5511,8 @@ class HubPlugin(BasePlugin):
                                 ),
                                 subtype="hub_incoming",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"incoming message injection failed: {e}")
                     if should_trigger_llm and hud_content:
                         msg_metadata["agent_hud"] = True
                         msg_metadata["agent_hud_sources"] = ["hub"]
@@ -6003,8 +6004,8 @@ class HubPlugin(BasePlugin):
                     metadata={"source_agent": source_agent},
                 )
                 await self._deliver_to_agent(peer, msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"deliver to {peer.identity}: {e}")
 
         return data
 
@@ -6237,8 +6238,8 @@ class HubPlugin(BasePlugin):
                 api_svc = getattr(llm_svc, "api_service", None) if llm_svc else None
                 if api_svc and hasattr(api_svc, "has_pending_tool_calls"):
                     has_native_tools = api_svc.has_pending_tool_calls()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"native tool detection failed: {e}")
             if not has_native_tools:
                 data["suppress_display"] = True
 
@@ -7036,7 +7037,8 @@ class HubPlugin(BasePlugin):
 
         try:
             peers = self._presence.scan_all_presence()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"presence scan failed: {e}")
             peers = []
 
         for peer in peers:
@@ -9154,10 +9156,10 @@ class HubPlugin(BasePlugin):
                             scope=MessageScope.DIRECT.value,
                         )
                         await self._deliver_to_agent(peer, departure)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except Exception as e:
+                        logger.debug(f"departure delivery to {peer.identity}: {e}")
+            except Exception as e:
+                logger.debug(f"departure broadcast failed: {e}")
 
         # Stop socket server FIRST so peers can't reach us after
         # presence is gone (avoids confusion window).

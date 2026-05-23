@@ -46,6 +46,11 @@ def _filter_env(env: dict) -> dict:
         "PASSWORD",
         "CREDENTIAL",
         "AUTH",
+        "AWS_",
+        "AZURE_",
+        "GCP_",
+        "ANTHROPIC_",
+        "OPENAI_",
     )
     filtered = {}
     for key, value in env.items():

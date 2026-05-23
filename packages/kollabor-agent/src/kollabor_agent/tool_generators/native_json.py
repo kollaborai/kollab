@@ -6,7 +6,6 @@ Anthropic: {name, description, input_schema}
 
 from typing import Any, Dict, List
 
-from ..tool_definition import ToolDefinition
 from ..tool_registry import ToolRegistry, get_registry
 
 
