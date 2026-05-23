@@ -8025,10 +8025,28 @@ class HubPlugin(BasePlugin):
             return "config not available"
 
         hub_cfg = self.config.get("plugins", {}).get("hub", {})
-        channel = hub_cfg.get("notify_channel", "webhook")
+
+        # Use auto-detection to find the right channel
+        from .notifier import HubNotifier as _HN
+
+        temp_notifier = _HN(
+            config=self.config,
+            get_identity=lambda: "",
+            get_last_activity=lambda: 0.0,
+            get_state=lambda: "unknown",
+        )
+        channel = temp_notifier.detect_channel()
+
+        if not channel:
+            return (
+                "no notification channel detected. configure credentials:\n"
+                "  telegram: /config plugins.hub.notify_telegram_token <token>\n"
+                "            /config plugins.hub.notify_telegram_chat_id <chat_id>\n"
+                "  webhook:  /hub notify url <url>"
+            )
 
         # Build a temporary backend for testing
-        backend: "WebhookNotifier | TelegramNotifier | None" = None
+        backend = None
         if channel == "webhook":
             url = hub_cfg.get("notify_url", "")
             if not url:
@@ -8044,8 +8062,6 @@ class HubPlugin(BasePlugin):
             from .notifier import TelegramNotifier
 
             backend = TelegramNotifier(token, chat_id)
-        else:
-            return f"unknown channel: {channel}"
 
         if not backend:
             return "no notification backend configured"
@@ -8067,10 +8083,35 @@ class HubPlugin(BasePlugin):
 
         hub_cfg = self.config.get("plugins", {}).get("hub", {})
         enabled = hub_cfg.get("notify_enabled", False)
-        channel = hub_cfg.get("notify_channel", "webhook")
+        explicit_channel = hub_cfg.get("notify_channel", "")
         url = hub_cfg.get("notify_url", "")
         threshold = hub_cfg.get("notify_idle_threshold", 300)
         cooldown = hub_cfg.get("notify_cooldown", 1800)
+
+        # Auto-detect the active channel
+        from .notifier import HubNotifier as _HN
+
+        temp_notifier = _HN(
+            config=self.config,
+            get_identity=lambda: "",
+            get_last_activity=lambda: 0.0,
+            get_state=lambda: "unknown",
+        )
+        detected_channel = temp_notifier.detect_channel()
+
+        # Determine backend status
+        if self._notifier and self._notifier._backend:
+            backend_status = "active"
+        else:
+            backend_status = "none (no credentials configured)"
+
+        # Build channel display with auto-detect info
+        if explicit_channel:
+            channel_display = explicit_channel
+        elif detected_channel:
+            channel_display = f"{detected_channel} (auto-detected)"
+        else:
+            channel_display = "none (no credentials configured)"
 
         loop_status = "running" if self._notify_task else "stopped"
         url_display = url[:50] + "..." if len(url) > 50 else (url or "(not set)")
@@ -8078,7 +8119,8 @@ class HubPlugin(BasePlugin):
         return (
             f"notifications: {'enabled' if enabled else 'disabled'}\n"
             f"  loop: {loop_status}\n"
-            f"  channel: {channel}\n"
+            f"  channel: {channel_display}\n"
+            f"  backend: {backend_status}\n"
             f"  url: {url_display}\n"
             f"  idle threshold: {self._format_seconds(threshold)}\n"
             f"  cooldown: {self._format_seconds(cooldown)}"
