@@ -6247,20 +6247,26 @@ class HubPlugin(BasePlugin):
             data["turn_complete"] = True
             logger.info("ignored removed wait_for_user tag and ended turn")
 
-        # Bridge relay: forward ALL LLM responses to the bridge.
+        # Determine if this is an intermediate tool-call turn (not the final
+        # response).  Both the bridge forward and coordinator routing should
+        # skip intermediate turns to avoid duplicate / noisy messages.
+        has_pending_tool_work = bool(data.get("all_tools")) or bool(
+            data.get("has_native_tools")
+        )
+
+        # Bridge relay: forward final LLM responses to the bridge.
+        # Skip intermediate tool-call turns — only the last response in a
+        # tool loop should be forwarded to avoid flooding the bridge channel.
         # Hub messages from this agent are already forwarded at send time,
         # so only forward the cleaned text that remains after tag stripping
         # (the "natural language" part of the response).
-        if cleaned:
+        if cleaned and not has_pending_tool_work:
             await self._bridge_forward(cleaned)
 
         # Route untagged responses to coordinator if enabled. This path is
         # only for terminal/final summaries from worker agents. Native tool
         # turns can include plain text plus pending tool calls; routing those
         # intermediate progress lines wakes the coordinator repeatedly.
-        has_pending_tool_work = bool(data.get("all_tools")) or bool(
-            data.get("has_native_tools")
-        )
         turn_completed = data.get("turn_completed")
         if (
             not had_tags
