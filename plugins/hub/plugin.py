@@ -7944,8 +7944,7 @@ class HubPlugin(BasePlugin):
         if not self.config:
             return "config not available"
 
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_enabled"] = enabled
+        self.config.save_key("plugins.hub.notify_enabled", enabled)
 
         if enabled and not self._notify_task:
             # Start the loop
@@ -7980,8 +7979,7 @@ class HubPlugin(BasePlugin):
 
         if not self.config:
             return "config not available"
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_channel"] = channel
+        self.config.save_key("plugins.hub.notify_channel", channel)
 
         # Rebuild backend if notifier exists
         if self._notifier:
@@ -7996,8 +7994,7 @@ class HubPlugin(BasePlugin):
 
         if not self.config:
             return "config not available"
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_url"] = url
+        self.config.save_key("plugins.hub.notify_url", url)
 
         # Rebuild backend if notifier exists
         if self._notifier:
@@ -8018,8 +8015,7 @@ class HubPlugin(BasePlugin):
 
         if not self.config:
             return "config not available"
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_idle_threshold"] = seconds
+        self.config.save_key("plugins.hub.notify_idle_threshold", seconds)
 
         return f"notify idle threshold set to {self._format_seconds(seconds)}"
 
