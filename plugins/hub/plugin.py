@@ -4492,11 +4492,15 @@ class HubPlugin(BasePlugin):
             return
 
         platform = self.config.get("plugins.hub.bridge_platform", "telegram")
-        token = self.config.get("plugins.hub.bridge_token", "") or os.environ.get(
-            "KOLLAB_HUB_BRIDGE_TOKEN", ""
+        token = (
+            self.config.get("plugins.hub.bridge_token", "")
+            or os.environ.get("KOLLAB_HUB_BRIDGE_TOKEN", "")
+            or self.config.get("plugins.hub.notify_telegram_token", "")
         )
-        chat_id = self.config.get("plugins.hub.bridge_chat_id", "") or os.environ.get(
-            "KOLLAB_HUB_BRIDGE_CHAT_ID", ""
+        chat_id = (
+            self.config.get("plugins.hub.bridge_chat_id", "")
+            or os.environ.get("KOLLAB_HUB_BRIDGE_CHAT_ID", "")
+            or self.config.get("plugins.hub.notify_telegram_chat_id", "")
         )
         user_id = self.config.get("plugins.hub.bridge_user_id", "")
         poll_interval = self.config.get("plugins.hub.bridge_poll_interval", 2)
@@ -8135,8 +8139,14 @@ class HubPlugin(BasePlugin):
 
         enabled = self.config.get("plugins.hub.bridge_enabled", False)
         platform = self.config.get("plugins.hub.bridge_platform", "telegram")
-        has_token = bool(self.config.get("plugins.hub.bridge_token", ""))
-        has_chat = bool(self.config.get("plugins.hub.bridge_chat_id", ""))
+        has_token = bool(
+            self.config.get("plugins.hub.bridge_token", "")
+            or self.config.get("plugins.hub.notify_telegram_token", "")
+        )
+        has_chat = bool(
+            self.config.get("plugins.hub.bridge_chat_id", "")
+            or self.config.get("plugins.hub.notify_telegram_chat_id", "")
+        )
         target = self.config.get("plugins.hub.bridge_target_agent", "") or "self"
         poll_interval = self.config.get("plugins.hub.bridge_poll_interval", 2)
         loop_status = "running" if self._bridge_task else "stopped"
@@ -8167,10 +8177,14 @@ class HubPlugin(BasePlugin):
             token = (
                 self.config.get("plugins.hub.bridge_token", "") if self.config else ""
             )
+        if not token and self.config:
+            token = self.config.get("plugins.hub.notify_telegram_token", "")
         if not chat_id:
             chat_id = (
                 self.config.get("plugins.hub.bridge_chat_id", "") if self.config else ""
             )
+        if not chat_id and self.config:
+            chat_id = self.config.get("plugins.hub.notify_telegram_chat_id", "")
 
         if not token:
             lines.append("  no bot token found.")
@@ -8245,8 +8259,14 @@ class HubPlugin(BasePlugin):
             # Validate config before starting
             if not self.config:
                 return "config not available"
-            token = self.config.get("plugins.hub.bridge_token", "")
-            chat_id = self.config.get("plugins.hub.bridge_chat_id", "")
+            token = (
+                self.config.get("plugins.hub.bridge_token", "")
+                or self.config.get("plugins.hub.notify_telegram_token", "")
+            )
+            chat_id = (
+                self.config.get("plugins.hub.bridge_chat_id", "")
+                or self.config.get("plugins.hub.notify_telegram_chat_id", "")
+            )
             if not token or not chat_id:
                 return "cannot enable: bridge_token and bridge_chat_id required"
 
