@@ -138,7 +138,7 @@ async def test_builtin_native_tool_calls_route_to_builtin_executor_type():
 
     assert session.tool_executor.calls
     tool_call = session.tool_executor.calls[0]
-    assert tool_call["type"] == "mcp_tool"
+    assert tool_call["type"] == "file_read"
     assert tool_call["name"] == "file_read"
     assert tool_call["arguments"] == {"file": "README.md", "limit": 5}
     assert any(event["type"] == "tool_start" for event in events)
@@ -203,6 +203,6 @@ async def test_direct_engine_tool_execution_normalizes_provider_object():
 
     assert session.tool_executor.calls
     tool_call = session.tool_executor.calls[0]
-    assert tool_call["type"] == "tool_use"
+    assert tool_call["type"] == "file_read"
     assert tool_call["name"] == "file_read"
     assert tool_call["input"] == {"file": "README.md", "limit": 5}

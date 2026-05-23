@@ -7,7 +7,8 @@ import sys
 import time
 
 import pytest
-import requests
+
+requests = pytest.importorskip("requests")
 
 BASE_URL = "http://localhost:7433"
 
