@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 dependencies = [
-    "kollabor-engine>=0.5.10",
+    "kollabor-engine>=0.5.11",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
 ]
