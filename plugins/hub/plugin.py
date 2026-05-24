@@ -305,7 +305,7 @@ class HubPlugin(BasePlugin):
                     "dreaming_interval": 3600,
                     "dreaming_stream_depth": 100,
                     "notify_enabled": False,
-                    "notify_channel": "webhook",
+                    "notify_channel": "",
                     "notify_url": "",
                     "notify_idle_threshold": 300,
                     "notify_telegram_token": "",

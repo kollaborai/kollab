@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from plugins.hub.plugin import HubPlugin
 from plugins.hub.notifier import (
     HubNotifier,
     TelegramNotifier,
@@ -189,6 +190,17 @@ class TestDetectChannel:
         config = _make_config(notify_channel="")
         notifier = _make_notifier(config)
         assert notifier.detect_channel() is None
+
+    def test_hub_default_config_allows_telegram_auto_detection(self):
+        config = HubPlugin.get_default_config()
+        hub_cfg = config["plugins"]["hub"]
+        hub_cfg["notify_telegram_token"] = "123:ABC"
+        hub_cfg["notify_telegram_chat_id"] = "456"
+
+        notifier = _make_notifier(config)
+
+        assert notifier.detect_channel() == "telegram"
+        assert isinstance(notifier._backend, TelegramNotifier)
 
 
 # ---------------------------------------------------------------------------
