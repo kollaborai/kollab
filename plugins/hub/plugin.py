@@ -305,7 +305,7 @@ class HubPlugin(BasePlugin):
                     "dreaming_interval": 3600,
                     "dreaming_stream_depth": 100,
                     "notify_enabled": False,
-                    "notify_channel": "webhook",
+                    "notify_channel": "",
                     "notify_url": "",
                     "notify_idle_threshold": 300,
                     "notify_telegram_token": "",
@@ -4492,11 +4492,15 @@ class HubPlugin(BasePlugin):
             return
 
         platform = self.config.get("plugins.hub.bridge_platform", "telegram")
-        token = self.config.get("plugins.hub.bridge_token", "") or os.environ.get(
-            "KOLLAB_HUB_BRIDGE_TOKEN", ""
+        token = (
+            self.config.get("plugins.hub.bridge_token", "")
+            or os.environ.get("KOLLAB_HUB_BRIDGE_TOKEN", "")
+            or self.config.get("plugins.hub.notify_telegram_token", "")
         )
-        chat_id = self.config.get("plugins.hub.bridge_chat_id", "") or os.environ.get(
-            "KOLLAB_HUB_BRIDGE_CHAT_ID", ""
+        chat_id = (
+            self.config.get("plugins.hub.bridge_chat_id", "")
+            or os.environ.get("KOLLAB_HUB_BRIDGE_CHAT_ID", "")
+            or self.config.get("plugins.hub.notify_telegram_chat_id", "")
         )
         user_id = self.config.get("plugins.hub.bridge_user_id", "")
         poll_interval = self.config.get("plugins.hub.bridge_poll_interval", 2)
@@ -4612,8 +4616,8 @@ class HubPlugin(BasePlugin):
         try:
             truncated = text[:500] if len(text) > 500 else text
             await self._bridge.send(truncated)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"bridge forward failed: {e}")
 
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
@@ -4999,15 +5003,15 @@ class HubPlugin(BasePlugin):
             try:
                 if self._task_ledger.get_active_for(sender):
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"task ledger lookup failed: {e}")
         if self._presence:
             try:
                 for peer in self._presence.scan_all_presence():
                     if peer.identity == sender and peer.current_task:
                         return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"presence scan for sender task failed: {e}")
         return False
 
     def _task_ledger_matches_report(self, content: str) -> bool:
@@ -5021,7 +5025,8 @@ class HubPlugin(BasePlugin):
             try:
                 if self._task_ledger.get(task_id):
                     return True
-            except Exception:
+            except Exception as e:
+                logger.debug(f"task ledger get failed for {task_id}: {e}")
                 continue
         return False
 
@@ -5212,8 +5217,8 @@ class HubPlugin(BasePlugin):
                         f"Ignoring malformed roster_update from "
                         f"{message.from_identity}: not a list of dicts"
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"roster update parse failed: {e}")
             return
 
         # NOTE: _exit_waiting_state() is NOT called here anymore.
@@ -5301,8 +5306,8 @@ class HubPlugin(BasePlugin):
                         kind="peer_online",
                         collapse_key=f"join:{from_name}",
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"peer online notification failed: {e}")
             elif is_departure:
                 await self._bridge_forward(f"[hub] {from_name} is going offline")
                 try:
@@ -5315,8 +5320,8 @@ class HubPlugin(BasePlugin):
                         kind="peer_offline",
                         collapse_key=f"leave:{from_name}",
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"peer offline notification failed: {e}")
                 # Release the departing agent's claims (including its
                 # hub_identity:<name> reservation) so the coordinator can
                 # respawn that identity without hitting "already reserved".
@@ -5506,8 +5511,8 @@ class HubPlugin(BasePlugin):
                                 ),
                                 subtype="hub_incoming",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"incoming message injection failed: {e}")
                     if should_trigger_llm and hud_content:
                         msg_metadata["agent_hud"] = True
                         msg_metadata["agent_hud_sources"] = ["hub"]
@@ -5999,8 +6004,8 @@ class HubPlugin(BasePlugin):
                     metadata={"source_agent": source_agent},
                 )
                 await self._deliver_to_agent(peer, msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"deliver to {peer.identity}: {e}")
 
         return data
 
@@ -6233,8 +6238,8 @@ class HubPlugin(BasePlugin):
                 api_svc = getattr(llm_svc, "api_service", None) if llm_svc else None
                 if api_svc and hasattr(api_svc, "has_pending_tool_calls"):
                     has_native_tools = api_svc.has_pending_tool_calls()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"native tool detection failed: {e}")
             if not has_native_tools:
                 data["suppress_display"] = True
 
@@ -6243,20 +6248,26 @@ class HubPlugin(BasePlugin):
             data["turn_complete"] = True
             logger.info("ignored removed wait_for_user tag and ended turn")
 
-        # Bridge relay: forward ALL LLM responses to the bridge.
+        # Determine if this is an intermediate tool-call turn (not the final
+        # response).  Both the bridge forward and coordinator routing should
+        # skip intermediate turns to avoid duplicate / noisy messages.
+        has_pending_tool_work = bool(data.get("all_tools")) or bool(
+            data.get("has_native_tools")
+        )
+
+        # Bridge relay: forward final LLM responses to the bridge.
+        # Skip intermediate tool-call turns — only the last response in a
+        # tool loop should be forwarded to avoid flooding the bridge channel.
         # Hub messages from this agent are already forwarded at send time,
         # so only forward the cleaned text that remains after tag stripping
         # (the "natural language" part of the response).
-        if cleaned:
+        if cleaned and not has_pending_tool_work:
             await self._bridge_forward(cleaned)
 
         # Route untagged responses to coordinator if enabled. This path is
         # only for terminal/final summaries from worker agents. Native tool
         # turns can include plain text plus pending tool calls; routing those
         # intermediate progress lines wakes the coordinator repeatedly.
-        has_pending_tool_work = bool(data.get("all_tools")) or bool(
-            data.get("has_native_tools")
-        )
         turn_completed = data.get("turn_completed")
         if (
             not had_tags
@@ -7026,7 +7037,8 @@ class HubPlugin(BasePlugin):
 
         try:
             peers = self._presence.scan_all_presence()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"presence scan failed: {e}")
             peers = []
 
         for peer in peers:
@@ -7940,8 +7952,7 @@ class HubPlugin(BasePlugin):
         if not self.config:
             return "config not available"
 
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_enabled"] = enabled
+        self.config.save_key("plugins.hub.notify_enabled", enabled)
 
         if enabled and not self._notify_task:
             # Start the loop
@@ -7976,8 +7987,7 @@ class HubPlugin(BasePlugin):
 
         if not self.config:
             return "config not available"
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_channel"] = channel
+        self.config.save_key("plugins.hub.notify_channel", channel)
 
         # Rebuild backend if notifier exists
         if self._notifier:
@@ -7992,8 +8002,7 @@ class HubPlugin(BasePlugin):
 
         if not self.config:
             return "config not available"
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_url"] = url
+        self.config.save_key("plugins.hub.notify_url", url)
 
         # Rebuild backend if notifier exists
         if self._notifier:
@@ -8014,8 +8023,7 @@ class HubPlugin(BasePlugin):
 
         if not self.config:
             return "config not available"
-        self.config.setdefault("plugins", {}).setdefault("hub", {})
-        self.config["plugins"]["hub"]["notify_idle_threshold"] = seconds
+        self.config.save_key("plugins.hub.notify_idle_threshold", seconds)
 
         return f"notify idle threshold set to {self._format_seconds(seconds)}"
 
@@ -8025,10 +8033,28 @@ class HubPlugin(BasePlugin):
             return "config not available"
 
         hub_cfg = self.config.get("plugins", {}).get("hub", {})
-        channel = hub_cfg.get("notify_channel", "webhook")
+
+        # Use auto-detection to find the right channel
+        from .notifier import HubNotifier as _HN
+
+        temp_notifier = _HN(
+            config=self.config,
+            get_identity=lambda: "",
+            get_last_activity=lambda: 0.0,
+            get_state=lambda: "unknown",
+        )
+        channel = temp_notifier.detect_channel()
+
+        if not channel:
+            return (
+                "no notification channel detected. configure credentials:\n"
+                "  telegram: /config plugins.hub.notify_telegram_token <token>\n"
+                "            /config plugins.hub.notify_telegram_chat_id <chat_id>\n"
+                "  webhook:  /hub notify url <url>"
+            )
 
         # Build a temporary backend for testing
-        backend: "WebhookNotifier | TelegramNotifier | None" = None
+        backend = None
         if channel == "webhook":
             url = hub_cfg.get("notify_url", "")
             if not url:
@@ -8044,8 +8070,6 @@ class HubPlugin(BasePlugin):
             from .notifier import TelegramNotifier
 
             backend = TelegramNotifier(token, chat_id)
-        else:
-            return f"unknown channel: {channel}"
 
         if not backend:
             return "no notification backend configured"
@@ -8067,10 +8091,35 @@ class HubPlugin(BasePlugin):
 
         hub_cfg = self.config.get("plugins", {}).get("hub", {})
         enabled = hub_cfg.get("notify_enabled", False)
-        channel = hub_cfg.get("notify_channel", "webhook")
+        explicit_channel = hub_cfg.get("notify_channel", "")
         url = hub_cfg.get("notify_url", "")
         threshold = hub_cfg.get("notify_idle_threshold", 300)
         cooldown = hub_cfg.get("notify_cooldown", 1800)
+
+        # Auto-detect the active channel
+        from .notifier import HubNotifier as _HN
+
+        temp_notifier = _HN(
+            config=self.config,
+            get_identity=lambda: "",
+            get_last_activity=lambda: 0.0,
+            get_state=lambda: "unknown",
+        )
+        detected_channel = temp_notifier.detect_channel()
+
+        # Determine backend status
+        if self._notifier and self._notifier._backend:
+            backend_status = "active"
+        else:
+            backend_status = "none (no credentials configured)"
+
+        # Build channel display with auto-detect info
+        if explicit_channel:
+            channel_display = explicit_channel
+        elif detected_channel:
+            channel_display = f"{detected_channel} (auto-detected)"
+        else:
+            channel_display = "none (no credentials configured)"
 
         loop_status = "running" if self._notify_task else "stopped"
         url_display = url[:50] + "..." if len(url) > 50 else (url or "(not set)")
@@ -8078,7 +8127,8 @@ class HubPlugin(BasePlugin):
         return (
             f"notifications: {'enabled' if enabled else 'disabled'}\n"
             f"  loop: {loop_status}\n"
-            f"  channel: {channel}\n"
+            f"  channel: {channel_display}\n"
+            f"  backend: {backend_status}\n"
             f"  url: {url_display}\n"
             f"  idle threshold: {self._format_seconds(threshold)}\n"
             f"  cooldown: {self._format_seconds(cooldown)}"
@@ -8135,8 +8185,14 @@ class HubPlugin(BasePlugin):
 
         enabled = self.config.get("plugins.hub.bridge_enabled", False)
         platform = self.config.get("plugins.hub.bridge_platform", "telegram")
-        has_token = bool(self.config.get("plugins.hub.bridge_token", ""))
-        has_chat = bool(self.config.get("plugins.hub.bridge_chat_id", ""))
+        has_token = bool(
+            self.config.get("plugins.hub.bridge_token", "")
+            or self.config.get("plugins.hub.notify_telegram_token", "")
+        )
+        has_chat = bool(
+            self.config.get("plugins.hub.bridge_chat_id", "")
+            or self.config.get("plugins.hub.notify_telegram_chat_id", "")
+        )
         target = self.config.get("plugins.hub.bridge_target_agent", "") or "self"
         poll_interval = self.config.get("plugins.hub.bridge_poll_interval", 2)
         loop_status = "running" if self._bridge_task else "stopped"
@@ -8167,10 +8223,14 @@ class HubPlugin(BasePlugin):
             token = (
                 self.config.get("plugins.hub.bridge_token", "") if self.config else ""
             )
+        if not token and self.config:
+            token = self.config.get("plugins.hub.notify_telegram_token", "")
         if not chat_id:
             chat_id = (
                 self.config.get("plugins.hub.bridge_chat_id", "") if self.config else ""
             )
+        if not chat_id and self.config:
+            chat_id = self.config.get("plugins.hub.notify_telegram_chat_id", "")
 
         if not token:
             lines.append("  no bot token found.")
@@ -8245,8 +8305,14 @@ class HubPlugin(BasePlugin):
             # Validate config before starting
             if not self.config:
                 return "config not available"
-            token = self.config.get("plugins.hub.bridge_token", "")
-            chat_id = self.config.get("plugins.hub.bridge_chat_id", "")
+            token = (
+                self.config.get("plugins.hub.bridge_token", "")
+                or self.config.get("plugins.hub.notify_telegram_token", "")
+            )
+            chat_id = (
+                self.config.get("plugins.hub.bridge_chat_id", "")
+                or self.config.get("plugins.hub.notify_telegram_chat_id", "")
+            )
             if not token or not chat_id:
                 return "cannot enable: bridge_token and bridge_chat_id required"
 
@@ -9090,10 +9156,10 @@ class HubPlugin(BasePlugin):
                             scope=MessageScope.DIRECT.value,
                         )
                         await self._deliver_to_agent(peer, departure)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except Exception as e:
+                        logger.debug(f"departure delivery to {peer.identity}: {e}")
+            except Exception as e:
+                logger.debug(f"departure broadcast failed: {e}")
 
         # Stop socket server FIRST so peers can't reach us after
         # presence is gone (avoids confusion window).

@@ -3,7 +3,6 @@
 import asyncio
 from typing import Optional
 
-from kollabor_events.models import CommandCategory, CommandDefinition
 from kollabor_tui.modals import Modal
 from kollabor_tui.widget_showcase import get_widget_showcase
 

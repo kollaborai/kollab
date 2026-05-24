@@ -11,7 +11,6 @@ import asyncio
 import glob as _glob
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -160,7 +159,6 @@ class HubBridge:
         # Fallback: identity-named socket in the project socket dir
         identity = agent_data.get("identity")
         if identity:
-            agent_id = agent_data.get("agent_id", "")
             # Try to infer project hash from existing sockets
             socks = _glob.glob(f"/tmp/kollabor-hub/**/{identity}.sock", recursive=True)
             if socks:
@@ -279,7 +277,8 @@ class HubBridge:
         Sets the 'to' field to the agent's identity so TRIGGER_LLM_CONTINUE fires.
         Returns True if ack received, False otherwise.
         """
-        import uuid, time as _time
+        import uuid
+        import time as _time
 
         agent_data = self.get_agent(target_agent_id)
         target_identity = agent_data.get("identity", target_agent_id) if agent_data else target_agent_id
@@ -308,7 +307,8 @@ class HubBridge:
         Sets the 'to' field correctly so TRIGGER_LLM_CONTINUE fires.
         Returns True if ack received, False otherwise.
         """
-        import uuid, time as _time
+        import uuid
+        import time as _time
 
         resp = await self.query_socket_by_identity(
             identity,

@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from kollabor_agent.runtime import AgentRuntime
 
-from .models import DESIGNATION_POOL, POOL_BY_NAME, WorkSlot
+from .models import DESIGNATION_POOL, WorkSlot
 from .presence import _atomic_write, get_hub_dir
 
 logger = logging.getLogger(__name__)

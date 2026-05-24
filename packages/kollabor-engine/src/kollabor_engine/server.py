@@ -41,9 +41,10 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
         import os
+        import sys
 
         # Skip auth for tests if env var is set
-        if os.environ.get("KOLLAB_ENGINE_BYPASS_AUTH") == "1":
+        if os.environ.get("KOLLAB_ENGINE_BYPASS_AUTH") == "1" and "pytest" in sys.modules:
             return await call_next(request)
 
         # Skip auth for CORS preflight requests

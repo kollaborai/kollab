@@ -125,10 +125,44 @@ class HubNotifier:
         # Build backend from config
         self._backend: Optional[NotificationBackend] = self._build_backend()
 
-    def _build_backend(self) -> Optional[NotificationBackend]:
-        """Construct the notification backend from config."""
+    def detect_channel(self) -> Optional[str]:
+        """Auto-detect the notification channel from configured credentials.
+
+        Priority:
+          1. Explicit notify_channel setting
+          2. Telegram if notify_telegram_token is set
+          3. Webhook if notify_url is set
+          4. None (no credentials configured)
+        """
         hub_cfg = self.config.get("plugins", {}).get("hub", {})
-        channel = hub_cfg.get("notify_channel", "webhook")
+        explicit = hub_cfg.get("notify_channel", "")
+        if explicit:
+            return explicit
+
+        # Auto-detect from credentials
+        token = hub_cfg.get("notify_telegram_token", "")
+        if token:
+            return "telegram"
+
+        url = hub_cfg.get("notify_url", "")
+        if url:
+            return "webhook"
+
+        return None
+
+    def _build_backend(self) -> Optional[NotificationBackend]:
+        """Construct the notification backend from config.
+
+        Uses detect_channel() for auto-detection when no explicit
+        channel is set. Falls back gracefully when no credentials
+        are configured.
+        """
+        hub_cfg = self.config.get("plugins", {}).get("hub", {})
+        channel = self.detect_channel()
+
+        if not channel:
+            logger.info("no notification channel configured (no credentials found)")
+            return None
 
         if channel == "webhook":
             url = hub_cfg.get("notify_url", "")
