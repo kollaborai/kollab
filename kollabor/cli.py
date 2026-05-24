@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import difflib
 import logging
+import os
 import re
 import shlex
 import sys
@@ -208,7 +209,7 @@ def discover_plugin_args() -> tuple:
     """
     from pathlib import Path
 
-    from kollabor_plugins.discovery import PluginDiscovery
+    from kollabor_plugins import PluginRegistry
 
     # Determine plugins directory (same logic as application.py)
     package_dir = Path(__file__).parent.parent
@@ -216,10 +217,43 @@ def discover_plugin_args() -> tuple:
     if not plugins_dir.exists():
         plugins_dir = Path.cwd() / "plugins"
 
-    discovery = PluginDiscovery(plugins_dir)
-    plugin_classes = discovery.discover_classes_only()
+    plugin_registry = PluginRegistry(plugins_dir)
+    plugin_classes = plugin_registry.discover_classes_only()
 
-    return plugin_classes, discovery
+    return plugin_classes, plugin_registry.discovery
+
+
+def _resolve_font_dir() -> Path | None:
+    """Return a usable local font directory for rendering tools."""
+    try:
+        from fonts import get_font_dir  # type: ignore[import-not-found]
+
+        bundled_font_dir = Path(get_font_dir())
+        if bundled_font_dir.exists() and bundled_font_dir.is_dir():
+            return bundled_font_dir
+    except ImportError:
+        pass
+
+    candidates = [
+        Path(__file__).parent.parent / "fonts",
+        Path.home() / "Library" / "Fonts",
+        Path("/Library/Fonts"),
+        Path("/System/Library/Fonts"),
+        Path.home() / ".local" / "share" / "fonts",
+        Path("/usr/local/share/fonts"),
+        Path("/usr/share/fonts"),
+    ]
+
+    if sys.platform == "win32":
+        windir = os.environ.get("WINDIR")
+        if windir:
+            candidates.append(Path(windir) / "Fonts")
+
+    for font_dir in candidates:
+        if font_dir.exists() and font_dir.is_dir():
+            return font_dir
+
+    return None
 
 
 def parse_arguments(
@@ -580,7 +614,9 @@ Telegram bridge setup (run inside interactive mode):
     args, unknown = parser.parse_known_args(argv)
 
     # Validate profile persistence flags
-    if getattr(args, "make_default_profile", False) and not getattr(args, "profile", None):
+    if getattr(args, "make_default_profile", False) and not getattr(
+        args, "profile", None
+    ):
         parser.error("--default requires --profile")
 
     # --project override: propagate to env BEFORE any hub code boots
@@ -851,18 +887,11 @@ async def async_main() -> None:
 
     # Handle --font-dir: print font directory and exit
     if args.font_dir:
-        try:
-            from fonts import get_font_dir  # type: ignore[import-not-found]
-
-            print(get_font_dir())
-        except ImportError:
-            # Fallback for development mode
-            font_dir = Path(__file__).parent.parent / "fonts"
-            if font_dir.exists():
-                print(font_dir)
-            else:
-                print("Error: fonts directory not found", file=sys.stderr)
-                sys.exit(1)
+        font_dir = _resolve_font_dir()
+        if font_dir is None:
+            print("Error: no usable font directory found", file=sys.stderr)
+            sys.exit(1)
+        print(font_dir)
         return
 
     # Handle --login: run OAuth flow and exit (or continue to interactive)
@@ -1396,10 +1425,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 return
             stopped = 0
             results = await asyncio.gather(
-                *[
-                    _stop_agent_record(a, reason="stopped via CLI (all)")
-                    for a in agents
-                ]
+                *[_stop_agent_record(a, reason="stopped via CLI (all)") for a in agents]
             )
             for ok, message in results:
                 print(f"  {message}")

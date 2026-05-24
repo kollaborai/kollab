@@ -8,7 +8,7 @@ version = "0.5.11"
 description = "Web UI for Kollab Engine"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = "MIT"
 dependencies = [
     "kollabor-engine>=0.5.11",
     "fastapi>=0.115.0",

@@ -12,7 +12,7 @@ version = "0.5.11"
 description = "Terminal AI workspace with hooks, plugins, providers, and multi-agent collaboration"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "kollabor.ai Contributors"}
 ]
@@ -32,7 +32,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Chat",
@@ -91,7 +90,7 @@ include-package-data = true
 [tool.setuptools.package-data]
 kollabor = ["py.typed"]
 plugins = ["**/*.json", "**/*.yaml", "**/*.yml"]
-bundles = ["**/*.md", "**/*.json", "**/*.sh"]
+bundles = ["**/*"]
 fonts = ["*.ttf", "*.otf", "LICENSE", "README.md"]
 
 [tool.uv]

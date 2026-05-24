@@ -193,7 +193,7 @@ Common flags:
 | `--simple` | Plain text output (no boxes/colors) |
 | `--timeout <duration>` | Pipe mode timeout (30s, 5min, 1h) |
 | `--reset-config` | Reset config to defaults |
-| `--font-dir` | Print Nerd Fonts directory path |
+| `--font-dir` | Print usable local fonts directory path |
 
 Run `kollab --help` for the complete list including plugin-registered flags.
 

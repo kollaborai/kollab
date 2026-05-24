@@ -12,6 +12,25 @@ from kollabor_plugins.base import BasePlugin
 from kollabor_plugins.discovery import PluginDiscovery
 
 
+def _drop_plugins_modules() -> None:
+    for module_name in list(sys.modules):
+        if module_name == "plugins" or module_name.startswith("plugins."):
+            sys.modules.pop(module_name, None)
+
+
+def _snapshot_plugins_modules() -> dict[str, object]:
+    return {
+        module_name: module
+        for module_name, module in sys.modules.items()
+        if module_name == "plugins" or module_name.startswith("plugins.")
+    }
+
+
+def _restore_plugins_modules(snapshot: dict[str, object]) -> None:
+    _drop_plugins_modules()
+    sys.modules.update(snapshot)
+
+
 class TestPlugin(BasePlugin):
     """Test plugin for CLI argument registration."""
 
@@ -296,6 +315,53 @@ class TestDiscoverPluginArgs(unittest.TestCase):
         # Should find at least hook_monitoring_plugin
         plugin_names = [p.__name__ for p in plugin_classes]
         self.assertIn("HookMonitoringPlugin", plugin_names)
+
+
+def test_discover_plugin_args_includes_global_user_plugins(
+    tmp_path,
+    monkeypatch,
+    request,
+) -> None:
+    """Global user plugins should be able to register CLI args."""
+    snapshot = _snapshot_plugins_modules()
+    request.addfinalizer(lambda: _restore_plugins_modules(snapshot))
+
+    home = tmp_path / "home"
+    global_plugins = home / ".kollab" / "plugins"
+    global_plugins.mkdir(parents=True)
+    (global_plugins / "cli_global_plugin.py").write_text(
+        """
+class CliGlobalPlugin:
+    @staticmethod
+    def get_default_config():
+        return {"plugins": {"cli_global": {"enabled": True}}}
+
+    @staticmethod
+    def register_cli_args(parser):
+        group = parser.add_argument_group("CliGlobal")
+        group.add_argument("--global-plugin-flag", action="store_true")
+""",
+        encoding="utf-8",
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    _drop_plugins_modules()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(workspace)
+
+    from kollabor.cli import discover_plugin_args
+
+    plugin_classes, _discovery = discover_plugin_args()
+    plugin_names = [plugin_class.__name__ for plugin_class in plugin_classes]
+
+    assert "CliGlobalPlugin" in plugin_names
+    args = parse_arguments(
+        plugin_classes=plugin_classes,
+        argv=["--global-plugin-flag"],
+    )
+    assert args.global_plugin_flag is True
 
 
 if __name__ == "__main__":

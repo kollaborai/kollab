@@ -14,10 +14,8 @@ recursive-include plugins *.json
 recursive-include plugins *.yaml
 recursive-include plugins *.yml
 
-# Include bundled assets (agents, themes, widgets, layouts)
-recursive-include bundles *.json
-recursive-include bundles *.md
-recursive-include bundles *.sh
+# Include bundled assets (agents, themes, widgets, layouts, skills)
+recursive-include bundles *
 
 # Include type stubs
 recursive-include kollabor *.pyi

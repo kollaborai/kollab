@@ -84,7 +84,7 @@ execution:
   --stay                          stay interactive after CLI command
   --login PROVIDER                OAuth login (openai)
   --reset-config                  reset configs to defaults
-  --font-dir                      show path to bundled Nerd Fonts
+  --font-dir                      show path to a usable local fonts directory
   -v, --version                   show version
   -h, --help                      show help
 
