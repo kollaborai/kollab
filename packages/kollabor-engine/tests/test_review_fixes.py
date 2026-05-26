@@ -92,6 +92,34 @@ async def test_profile_routes_redact_api_key(profile_app):
 
 
 @pytest.mark.asyncio
+async def test_ready_does_not_resolve_or_migrate_api_keys(monkeypatch, bypass_auth):
+    import kollabor_ai
+    from kollabor_engine.server import create_app
+
+    class _ReadinessProfile(LLMProfile):
+        def get_api_key(self):
+            raise AssertionError("readiness must not resolve secrets")
+
+    profile = _ReadinessProfile(
+        name="secret",
+        provider="openai",
+        model="gpt-4",
+        api_key="sk-secret-value",
+    )
+    manager = SimpleNamespace(list_profiles=lambda: [profile])
+    monkeypatch.setattr(kollabor_ai, "ProfileManager", lambda: manager)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app()), base_url="http://test"
+    ) as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
+    assert response.json()["checks"]["api_credentials"] == "ok"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_profile_test_uses_api_communication_service(
     monkeypatch, bypass_auth
 ):

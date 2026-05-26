@@ -23,7 +23,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor_ai.profile_manager import (
     KEYRING_SENTINEL_PREFIX,
@@ -209,21 +209,26 @@ class TestMigrationDefaultPasswordFix(unittest.TestCase):
             result = migrator._try_encrypted_storage("test", "sk-key")
         self.assertFalse(result)
 
-    @patch.dict(
-        os.environ, {"KOLLAB_KEY_ENCRYPTION_PASSWORD": "real-password"}
-    )
+    @patch.dict(os.environ, {"KOLLAB_KEY_ENCRYPTION_PASSWORD": "real-password"})
     def test_tier2_attempts_with_explicit_password(self):
         """Tier 2 should attempt storage when password is explicitly set.
 
-        Will return False because cryptography package isn't installed,
-        but the code path should not skip due to missing password.
+        Mock storage so the assertion is not tied to whether cryptography is
+        installed in the current test environment.
         """
         from kollabor_config.migration import ProfileMigrator
 
         migrator = ProfileMigrator()
-        result = migrator._try_encrypted_storage("test", "sk-key")
-        # False because cryptography package is not installed
-        self.assertFalse(result)
+        with patch(
+            "kollabor_ai.providers.security.EncryptedFileKeyStorage"
+        ) as storage_cls:
+            storage = storage_cls.return_value
+            storage.store_key = AsyncMock(return_value=None)
+
+            result = migrator._try_encrypted_storage("test", "sk-key")
+
+        self.assertTrue(result)
+        storage.store_key.assert_awaited_once_with("test", "sk-key")
 
 
 class TestSaveProfileEnvKeyPersists(unittest.TestCase):

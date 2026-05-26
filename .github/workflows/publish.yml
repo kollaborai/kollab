@@ -53,6 +53,7 @@ jobs:
             sed -i "s/\"kollabor-rpc>=.*\"/\"kollabor-rpc>=$VERSION\"/" "$pkg"
             sed -i "s/\"kollabor-tui>=.*\"/\"kollabor-tui>=$VERSION\"/" "$pkg"
             sed -i "s/\"kollabor-engine>=.*\"/\"kollabor-engine>=$VERSION\"/" "$pkg"
+            sed -i "s/\"kollabor-webui>=.*\"/\"kollabor-webui>=$VERSION\"/" "$pkg"
           done
 
       - name: Build and publish sub-packages
@@ -96,10 +97,16 @@ jobs:
           git push origin HEAD:main
 
       - name: Update Homebrew tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
-          curl -X POST \
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured; cannot update Homebrew tap" >&2
+            exit 1
+          fi
+          curl --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ secrets.HOMEBREW_TAP_TOKEN }}" \
+            -H "Authorization: Bearer ${HOMEBREW_TAP_TOKEN}" \
             https://api.github.com/repos/kollaborai/homebrew-tap/dispatches \
             -d "{\"event_type\":\"pypi-release\",\"client_payload\":{\"version\":\"${VERSION}\"}}"
