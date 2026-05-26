@@ -2,6 +2,7 @@
 
 from kollabor_events.models import CommandMode
 from kollabor_tui.design_system import T, set_theme
+from kollabor_tui.status.utils import strip_ansi
 from kollabor_tui.terminal_renderer import TerminalRenderer
 
 
@@ -39,21 +40,59 @@ def test_slash_menu_input_keeps_solid_graphite_fill():
         set_theme(original_theme)
 
 
-def test_shell_input_keeps_error_border():
-    """Shell commands keep the warning/error border treatment."""
-    original_theme = T().name
-    set_theme("dark")
-    try:
-        renderer = TerminalRenderer()
-
-        assert renderer._get_input_border_color(is_shell=True) == T().error[0]
-    finally:
-        set_theme(original_theme)
-
-
 def test_default_input_cursor_uses_full_block_when_idle():
     """The visible cursor is a full block, not a half-height/side marker."""
     renderer = TerminalRenderer()
     renderer._last_activity = 0
 
     assert renderer._get_cursor_char(simple_mode=False) == "█"
+
+
+def test_modern_input_renders_without_block_borders():
+    """The active input line should not add top/bottom block border rows."""
+    renderer = TerminalRenderer()
+    renderer._last_activity = 0
+
+    lines: list[str] = []
+    renderer._render_input_modern(lines, position="only")
+    plain = [strip_ansi(line) for line in lines]
+
+    assert len(plain) == 1
+    assert plain[0].lstrip().startswith("❯")
+    assert not {"▄", "▀"} & set("".join(plain))
+
+
+def test_modern_input_line_has_no_background_fill():
+    """The input row should not render a full-width background fill."""
+    renderer = TerminalRenderer()
+    renderer._last_activity = 0
+
+    lines: list[str] = []
+    renderer._render_input_modern(lines, position="only")
+
+    line = lines[0]
+
+    assert "38;" in line
+    assert "48;" not in line
+
+
+def test_active_lines_keep_one_blank_separator_between_input_and_status():
+    """Removing borders still leaves one clean spacer before status widgets."""
+    renderer = TerminalRenderer()
+    renderer._last_activity = 0
+
+    class _LayoutRenderer:
+        def render(self):
+            return ["  cwd ~/dev/kollab"]
+
+    renderer.layout_renderer = _LayoutRenderer()
+
+    import asyncio
+
+    plain = [strip_ansi(line) for line in asyncio.run(renderer._build_active_lines())]
+
+    assert len(plain) == 3
+    assert plain[0].lstrip().startswith("❯")
+    assert plain[1] == ""
+    assert plain[2].startswith("  cwd")
+    assert not {"▄", "▀"} & set("".join(plain))

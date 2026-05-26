@@ -250,7 +250,7 @@ class StatusLayoutRenderer:
         """Render the complete status area.
 
         Returns:
-            List of rendered lines (including borders)
+            List of rendered status rows.
         """
         layout = self._layout_manager.get_layout()
 
@@ -282,11 +282,6 @@ class StatusLayoutRenderer:
 
         # Check if in simple mode (no borders/colors)
         simple_mode = getattr(self, "simple_mode", False)
-
-        # Top border (skip in simple mode)
-        if not simple_mode:
-            top_border = solid_fg("\u2584" * width, T().dark[0])  # ▄
-            lines.append(top_border)
 
         # Add mode indicator if navigation is active (skip in simple mode)
         if (
@@ -325,11 +320,6 @@ class StatusLayoutRenderer:
 
             if row_content:  # Only add non-empty rows
                 lines.append(row_content)
-
-        # Bottom border (skip in simple mode)
-        if not simple_mode:
-            bottom_border = solid_fg("\u2580" * width, T().dark[0])  # ▀
-            lines.append(bottom_border)
 
         return lines
 
