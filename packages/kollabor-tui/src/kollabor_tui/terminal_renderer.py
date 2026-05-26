@@ -16,7 +16,6 @@ from kollabor_tui.design_system import (
     C,
     T,
     solid,
-    solid_fg,
     wrap_text,
 )
 from kollabor_tui.message_renderer import MessageRenderer
@@ -433,7 +432,10 @@ class TerminalRenderer:
         await self._render_input_area(lines)
 
         # Status area (command menu, status modal, or status views)
-        lines.extend(await self._build_status_lines())
+        status_lines = await self._build_status_lines()
+        if lines and status_lines:
+            lines.append("")
+        lines.extend(status_lines)
 
         return lines
 
@@ -523,15 +525,8 @@ class TerminalRenderer:
         )
 
         # Get colors
-        input_border = self._get_input_shimmer_color(input_data.is_shell_command)
         input_bg = self._get_input_base_color(input_data.is_shell_command)
         input_fg = self._get_stable_input_foreground(input_data.is_shell_command)
-
-        # Render borders
-        show_top = position in ("only", "first")
-        show_bottom = position in ("only", "last")
-        if show_top and not simple_mode:
-            lines.append(solid_fg("▄" * width, input_border))
 
         # Render content lines
         cursor_char = self._get_cursor_char(simple_mode)
@@ -546,10 +541,6 @@ class TerminalRenderer:
             width,
             simple_mode,
         )
-
-        # Bottom border
-        if show_bottom and not simple_mode:
-            lines.append(solid_fg("▀" * width, input_border))
 
     def _prepare_input_data(self) -> InputData:
         """Prepare and normalize input buffer for rendering."""
