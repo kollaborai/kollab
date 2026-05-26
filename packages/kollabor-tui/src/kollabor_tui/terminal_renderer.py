@@ -429,6 +429,8 @@ class TerminalRenderer:
             lines.extend(self._build_thinking_lines())
 
         # Input area
+        if not lines or lines[-1] != "":
+            lines.append("")
         await self._render_input_area(lines)
 
         # Status area (command menu, status modal, or status views)

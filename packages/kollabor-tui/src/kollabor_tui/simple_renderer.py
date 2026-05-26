@@ -95,7 +95,7 @@ class SimpleRenderer:
         width=None,
     ) -> str:
         prefix = "◇" if observing else "◆"
-        return f" {prefix} {content}"
+        return f"\n {prefix} {content}"
 
     def success_block(self, message: str, width: Optional[int] = None) -> str:
         return f"ok: {message}"

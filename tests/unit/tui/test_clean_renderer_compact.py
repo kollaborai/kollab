@@ -225,8 +225,9 @@ def test_agent_rows_use_foreground_icon_only():
         muted_target=T().text_dim,
     )
 
-    assert plain.splitlines()[0] == " ◆ lapis -> sapphire"
-    assert plain.splitlines()[1] == "   lapis here."
+    assert plain.splitlines()[0] == ""
+    assert plain.splitlines()[1] == " ◆ lapis -> sapphire"
+    assert plain.splitlines()[2] == "   lapis here."
     assert "\033[0;48;" not in rendered
     r, g, b = rendered_color
     assert f"\033[38;2;{r};{g};{b}mlapis -> sapphire" in rendered
@@ -245,7 +246,8 @@ def test_observed_agent_rows_use_dimmed_diamond_marker():
 
     plain = visible(rendered)
 
-    assert plain.splitlines()[0] == " ◇ sapphire -> lapis"
+    assert plain.splitlines()[0] == ""
+    assert plain.splitlines()[1] == " ◇ sapphire -> lapis"
     assert "\033[0;48;" not in rendered
     assert_no_block_art(rendered)
 

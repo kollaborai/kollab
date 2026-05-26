@@ -528,7 +528,7 @@ class CleanRenderer:
             muted_target=T().text_dim,
             observing=observing,
         )
-        return _plain_rows(
+        return "\n" + _plain_rows(
             content.split("\n"),
             prefix,
             text_color,
