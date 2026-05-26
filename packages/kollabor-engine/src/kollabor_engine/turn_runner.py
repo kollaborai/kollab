@@ -8,7 +8,7 @@ from typing import Any, AsyncGenerator, Dict, List
 from kollabor_agent.tool_call_contract import normalize_native_tool_call
 
 from . import sse
-from .session import EngineSession
+from .session import EngineSession, _permission_input_payload
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +314,7 @@ class TurnRunner:
         tool_id = _tc_get(tool_call, "id", "")
         tool_name = _tc_get(tool_call, "name") or _tc_get(tool_call, "type", "unknown")
         tool_type = _tc_get(tool_call, "type", "unknown")
-        tool_input = _tc_get(tool_call, "input") or _tc_get(tool_call, "arguments", {})
+        tool_input = _permission_input_payload(tool_call)
 
         await queue.put(
             sse.tool_start(

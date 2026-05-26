@@ -39,6 +39,34 @@ _DATA_DIR = get_config_directory()
 _PERMISSION_CONFIRMATION_HOOK_TIMEOUT_SECONDS = 300
 
 
+def _permission_input_payload(tool_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the user-visible permission input payload."""
+    explicit_input = tool_data.get("input")
+    if isinstance(explicit_input, dict) and explicit_input:
+        return explicit_input
+
+    arguments = tool_data.get("arguments")
+    if isinstance(arguments, dict) and arguments:
+        return arguments
+
+    if tool_data.get("type") == "terminal":
+        payload: Dict[str, Any] = {}
+        for key in (
+            "command",
+            "cwd",
+            "background",
+            "timeout",
+            "session_name",
+            "lines",
+        ):
+            value = tool_data.get(key)
+            if value not in (None, ""):
+                payload[key] = value
+        return payload
+
+    return {}
+
+
 class EngineSession:
     """
     One conversation session. Owns all AI services.
@@ -332,7 +360,7 @@ class EngineSession:
                     tool_id=tool_id,
                     tool_name=tool_name,
                     tool_type=tool_type,
-                    input=tool_data.get("input", tool_data.get("arguments", {})),
+                    input=_permission_input_payload(tool_data),
                     risk_level=str(risk_level).lower(),
                     risk_reason=risk_reason,
                 )
@@ -345,6 +373,15 @@ class EngineSession:
             await asyncio.wait_for(event.wait(), timeout=300)
             result = self._permission_results.get(tool_id)
             scope = self._permission_scopes.get(tool_id, "once")
+            if (
+                result
+                and result.allowed
+                and scope in ("session", "trust_tool")
+                and risk_enum not in (ToolRiskLevel.HIGH, ToolRiskLevel.UNKNOWN)
+            ):
+                self.permission_manager._record_approval(
+                    tool_type, tool_name, tool_data, "session"
+                )
 
             # Emit result back to SSE stream
             if self._sse_queue:

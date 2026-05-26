@@ -3,7 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from kollabor_engine.session import EngineSession
+from kollabor_engine.session import EngineSession, _permission_input_payload
 
 from kollabor.llm.permissions.hook import PermissionHook
 from kollabor_agent.permissions.risk_assessor import RiskAssessor
@@ -62,6 +62,35 @@ def test_registry_metadata_marks_collaboration_tools_low_risk():
 
         assert result.level is ToolRiskLevel.LOW
         assert result.requires_confirmation is False
+
+
+def test_terminal_commands_use_command_risk_before_tool_definition():
+    assessor = RiskAssessor(rules=RiskAssessmentRules(), config={})
+
+    safe = assessor.assess_tool(
+        {"id": "tool-1", "type": "terminal", "name": "terminal", "command": "ls -la"}
+    )
+    dangerous = assessor.assess_tool(
+        {"id": "tool-2", "type": "terminal", "name": "terminal", "command": "rm -rf /"}
+    )
+
+    assert safe.level is ToolRiskLevel.MEDIUM
+    assert safe.reason == "Default risk for tool type 'terminal'"
+    assert dangerous.level is ToolRiskLevel.HIGH
+
+
+def test_permission_input_payload_includes_terminal_command():
+    payload = _permission_input_payload(
+        {
+            "id": "tool-1",
+            "type": "terminal",
+            "name": "terminal",
+            "command": "cat package.json",
+            "cwd": "/repo",
+        }
+    )
+
+    assert payload == {"command": "cat package.json", "cwd": "/repo"}
 
 
 def test_permission_hook_fails_closed_without_executor_retries():
