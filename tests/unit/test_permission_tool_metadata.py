@@ -42,8 +42,8 @@ def test_permission_defaults_are_nested_and_start_in_default_mode():
         event_bus=CapturingEventBus(),
     )
 
-    assert config.get("kollabor", {}).get("permissions", {}).get("enabled") is True
-    assert config.get("kollabor", {}).get("permissions", {}).get("approval_mode") == "default"
+    assert safe_get(config, "kollabor.permissions.enabled") is True
+    assert safe_get(config, "kollabor.permissions.approval_mode") == "default"
     assert manager.approval_mode is ApprovalMode.DEFAULT
 
     decision = asyncio.run(
