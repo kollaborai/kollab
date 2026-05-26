@@ -1,8 +1,12 @@
 """Configuration widget definitions for modal UI."""
 
 import importlib
+import importlib.util
 import json
 import logging
+import pkgutil
+import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -15,44 +19,224 @@ class ConfigWidgetDefinitions:
     """Defines which config values get which widgets in the modal."""
 
     @staticmethod
+    def _packaged_plugins_dir() -> Path | None:
+        module_path = Path(__file__).resolve()
+        for parent in module_path.parents:
+            candidate = parent / "plugins"
+            if candidate.is_dir() and (candidate / "__init__.py").exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _module_is_from_plugins_dir(module: Any, plugins_dir: Path) -> bool:
+        try:
+            plugins_dir = plugins_dir.resolve()
+            module_file = getattr(module, "__file__", None)
+            if module_file:
+                return Path(module_file).resolve().is_relative_to(plugins_dir)
+
+            module_paths = getattr(module, "__path__", [])
+            for module_path in module_paths:
+                resolved_path = Path(module_path).resolve()
+                if resolved_path == plugins_dir or resolved_path.is_relative_to(
+                    plugins_dir
+                ):
+                    return True
+        except Exception as e:
+            logger.debug(f"Could not verify config plugin module root: {e}")
+
+        return False
+
+    @staticmethod
+    def _drop_stale_module_cache(plugins_dir: Path, module_path: str) -> None:
+        parts = ["plugins", *module_path.split(".")]
+        stale_roots: list[str] = []
+
+        for index in range(2, len(parts) + 1):
+            module_name = ".".join(parts[:index])
+            module = sys.modules.get(module_name)
+            if module and not ConfigWidgetDefinitions._module_is_from_plugins_dir(
+                module,
+                plugins_dir,
+            ):
+                stale_roots.append(module_name)
+
+        if not stale_roots:
+            return
+
+        for module_name in list(sys.modules):
+            if any(
+                module_name == stale_root or module_name.startswith(f"{stale_root}.")
+                for stale_root in stale_roots
+            ):
+                del sys.modules[module_name]
+
+    @staticmethod
+    def _prepare_plugins_import_root(
+        plugins_dir: Path,
+        module_path: str | None = None,
+    ) -> None:
+        try:
+            plugins_dir = plugins_dir.resolve()
+
+            current_plugins = sys.modules.get("plugins")
+            if current_plugins and hasattr(current_plugins, "__path__"):
+                root_path = str(plugins_dir)
+                search_paths = [
+                    str(Path(path).resolve())
+                    for path in getattr(current_plugins, "__path__", [])
+                    if Path(path).resolve() != plugins_dir
+                ]
+                current_plugins.__path__ = [root_path, *search_paths]  # type: ignore[attr-defined]
+                if module_path:
+                    ConfigWidgetDefinitions._drop_stale_module_cache(
+                        plugins_dir,
+                        module_path,
+                    )
+                importlib.invalidate_caches()
+                return
+
+            init_file = plugins_dir / "__init__.py"
+            if init_file.exists():
+                spec = importlib.util.spec_from_file_location(
+                    "plugins",
+                    init_file,
+                    submodule_search_locations=[str(plugins_dir)],
+                )
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules["plugins"] = module
+                    spec.loader.exec_module(module)
+            else:
+                module = types.ModuleType("plugins")
+                module.__file__ = str(plugins_dir)
+                module.__path__ = [str(plugins_dir)]  # type: ignore[attr-defined]
+                sys.modules["plugins"] = module
+
+            if module_path:
+                ConfigWidgetDefinitions._drop_stale_module_cache(
+                    plugins_dir,
+                    module_path,
+                )
+            importlib.invalidate_caches()
+        except Exception as e:
+            logger.debug(f"Could not prepare config plugin import root: {e}")
+
+    @staticmethod
+    def _prepare_plugin_module_import(module_name: str) -> None:
+        plugins_dir = ConfigWidgetDefinitions._packaged_plugins_dir()
+        if plugins_dir is None or not module_name.startswith("plugins."):
+            return
+
+        ConfigWidgetDefinitions._prepare_plugins_import_root(
+            plugins_dir,
+            module_name.removeprefix("plugins."),
+        )
+
+    @staticmethod
+    def _discover_plugin_modules() -> List[tuple[str, str]]:
+        """Discover plugin modules from source checkouts and installed packages."""
+        targets: list[tuple[str, str]] = []
+
+        plugins_dir = ConfigWidgetDefinitions._packaged_plugins_dir()
+        if plugins_dir is not None:
+            ConfigWidgetDefinitions._prepare_plugins_import_root(plugins_dir)
+            covered_subdirs: set[str] = set()
+
+            for plugin_file in sorted(plugins_dir.glob("*_plugin.py")):
+                plugin_id = plugin_file.stem.replace("_plugin", "")
+                targets.append((plugin_id, f"plugins.{plugin_file.stem}"))
+                covered_subdirs.add(plugin_id)
+
+            for subdir in sorted(plugins_dir.iterdir()):
+                if not subdir.is_dir() or subdir.name.startswith(("_", ".")):
+                    continue
+                if subdir.name in covered_subdirs:
+                    continue
+                if (subdir / "plugin.py").exists():
+                    targets.append((subdir.name, f"plugins.{subdir.name}.plugin"))
+                    covered_subdirs.add(subdir.name)
+
+            return ConfigWidgetDefinitions._dedupe_plugin_targets(targets)
+
+        try:
+            import plugins as plugins_package
+        except ImportError as e:
+            logger.debug(f"Could not import plugins package: {e}")
+            return ConfigWidgetDefinitions._dedupe_plugin_targets(targets)
+
+        for module_info in pkgutil.iter_modules(plugins_package.__path__):
+            if module_info.name.startswith(("_", ".")):
+                continue
+
+            if module_info.name.endswith("_plugin"):
+                plugin_id = module_info.name.removesuffix("_plugin")
+                targets.append((plugin_id, f"plugins.{module_info.name}"))
+                continue
+
+            if module_info.ispkg:
+                plugin_module = f"plugins.{module_info.name}.plugin"
+                try:
+                    if importlib.util.find_spec(plugin_module) is not None:
+                        targets.append((module_info.name, plugin_module))
+                except (ImportError, ModuleNotFoundError, ValueError):
+                    logger.debug(f"Could not find plugin module {plugin_module}")
+
+        return ConfigWidgetDefinitions._dedupe_plugin_targets(targets)
+
+    @staticmethod
+    def _dedupe_plugin_targets(targets: List[tuple[str, str]]) -> List[tuple[str, str]]:
+        seen_plugin_ids: set[str] = set()
+        seen_modules: set[str] = set()
+        deduped: list[tuple[str, str]] = []
+
+        for plugin_id, module_name in targets:
+            if plugin_id in seen_plugin_ids or module_name in seen_modules:
+                continue
+            seen_plugin_ids.add(plugin_id)
+            seen_modules.add(module_name)
+            deduped.append((plugin_id, module_name))
+
+        return deduped
+
+    @staticmethod
+    def _find_plugin_class(
+        module: Any, require_config_widgets: bool = False
+    ) -> type | None:
+        for name in dir(module):
+            obj = getattr(module, name)
+            if (
+                isinstance(obj, type)
+                and name.endswith("Plugin")
+                and name not in ("Plugin", "BasePlugin")
+            ):
+                if require_config_widgets and not hasattr(obj, "get_config_widgets"):
+                    continue
+                return obj
+
+        return None
+
+    @staticmethod
     def get_available_plugins() -> List[Dict[str, Any]]:
         """Dynamically discover available plugins for configuration.
 
-        Scans the plugins directory for *_plugin.py files and extracts
-        metadata from each plugin class.
+        Scans the plugins package for plugin modules and extracts metadata
+        from each plugin class.
 
         Returns:
             List of plugin widget dictionaries.
         """
         plugins: list[dict[str, Any]] = []
 
-        # Find plugins directory
-        plugins_dir = Path(__file__).parent.parent.parent.parent.parent / "plugins"
-        if not plugins_dir.exists():
-            logger.warning(f"Plugins directory not found: {plugins_dir}")
-            return plugins
-
-        # Scan for plugin files
-        for plugin_file in sorted(plugins_dir.glob("*_plugin.py")):
+        for (
+            plugin_id,
+            module_name,
+        ) in ConfigWidgetDefinitions._discover_plugin_modules():
             try:
-                module_name = plugin_file.stem  # e.g., "terminal_plugin"
-                plugin_id = module_name.replace("_plugin", "")  # e.g., "terminal"
-
-                # Try to import and get metadata
                 try:
-                    module = importlib.import_module(f"plugins.{module_name}")
-
-                    # Find the plugin class (ends with "Plugin")
-                    plugin_class = None
-                    for name in dir(module):
-                        obj = getattr(module, name)
-                        if (
-                            isinstance(obj, type)
-                            and name.endswith("Plugin")
-                            and name not in ("Plugin", "BasePlugin")
-                        ):
-                            plugin_class = obj
-                            break
+                    ConfigWidgetDefinitions._prepare_plugin_module_import(module_name)
+                    module = importlib.import_module(module_name)
+                    plugin_class = ConfigWidgetDefinitions._find_plugin_class(module)
 
                     if plugin_class:
                         # Get name and description from class attributes
@@ -103,7 +287,7 @@ class ConfigWidgetDefinitions:
                     )
 
             except Exception as e:
-                logger.error(f"Error processing plugin file {plugin_file}: {e}")
+                logger.error(f"Error processing plugin {module_name}: {e}")
 
         logger.info(f"Discovered {len(plugins)} plugins for configuration")
         return plugins
@@ -173,44 +357,14 @@ class ConfigWidgetDefinitions:
         """
         sections: List[Dict[str, Any]] = []
 
-        plugins_dir = Path(__file__).parent.parent.parent.parent.parent / "plugins"
-        if not plugins_dir.exists():
-            return sections
-
-        discovery_targets: List[str] = []
-        covered_subdirs: set = set()
-
-        for plugin_file in sorted(plugins_dir.glob("*_plugin.py")):
-            module_name = f"plugins.{plugin_file.stem}"
-            discovery_targets.append(module_name)
-            subdir_name = plugin_file.stem.replace("_plugin", "")
-            covered_subdirs.add(subdir_name)
-
-        for subdir in sorted(plugins_dir.iterdir()):
-            if not subdir.is_dir() or subdir.name.startswith(("_", ".")):
-                continue
-            if subdir.name in covered_subdirs:
-                continue
-            if (subdir / "plugin.py").exists():
-                discovery_targets.append(f"plugins.{subdir.name}.plugin")
-            elif (subdir / "__init__.py").exists():
-                discovery_targets.append(f"plugins.{subdir.name}")
-
-        for module_name in discovery_targets:
+        for _, module_name in ConfigWidgetDefinitions._discover_plugin_modules():
             try:
+                ConfigWidgetDefinitions._prepare_plugin_module_import(module_name)
                 module = importlib.import_module(module_name)
-
-                plugin_class = None
-                for name in dir(module):
-                    obj = getattr(module, name)
-                    if (
-                        isinstance(obj, type)
-                        and name.endswith("Plugin")
-                        and name not in ("Plugin", "BasePlugin")
-                    ):
-                        if hasattr(obj, "get_config_widgets"):
-                            plugin_class = obj
-                            break
+                plugin_class = ConfigWidgetDefinitions._find_plugin_class(
+                    module,
+                    require_config_widgets=True,
+                )
 
                 if plugin_class is None:
                     continue

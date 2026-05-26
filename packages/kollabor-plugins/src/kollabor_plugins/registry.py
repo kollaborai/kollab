@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List, Sequence, Type
 
 from kollabor_events.dict_utils import deep_merge
 
@@ -22,19 +22,63 @@ class PluginRegistry:
     - PluginStatusCollector: Status aggregation from plugin instances
     """
 
-    def __init__(self, plugins_dir: Path) -> None:
+    def __init__(
+        self,
+        plugins_dir: Path,
+        extra_plugin_dirs: Sequence[Path] | None = None,
+    ) -> None:
         """Initialize the plugin registry with specialized components.
 
         Args:
             plugins_dir: Directory containing plugin modules.
+            extra_plugin_dirs: Additional user/project plugin roots.
         """
         self.plugins_dir = plugins_dir
-        self.discovery = PluginDiscovery(plugins_dir)
+        self.plugin_dirs = self._resolve_plugin_dirs(plugins_dir, extra_plugin_dirs)
+        self.discoveries = [
+            PluginDiscovery(plugin_dir) for plugin_dir in self.plugin_dirs
+        ]
+        self.discovery = self.discoveries[0]
         self.factory = PluginFactory()
         self.collector = PluginStatusCollector()
         logger.info(
-            f"Plugin registry initialized with specialized components: {plugins_dir}"
+            "Plugin registry initialized with specialized components: "
+            f"{', '.join(str(plugin_dir) for plugin_dir in self.plugin_dirs)}"
         )
+
+    @staticmethod
+    def _resolve_plugin_dirs(
+        plugins_dir: Path,
+        extra_plugin_dirs: Sequence[Path] | None = None,
+    ) -> List[Path]:
+        candidates = [
+            plugins_dir,
+            *(extra_plugin_dirs or []),
+            Path.home() / ".kollab" / "plugins",
+            Path.cwd() / ".kollab" / "plugins",
+        ]
+
+        resolved_dirs: list[Path] = []
+        seen: set[Path] = set()
+        for candidate in candidates:
+            resolved = candidate.expanduser().resolve()
+            if resolved in seen:
+                continue
+            if candidate == plugins_dir or resolved.exists():
+                resolved_dirs.append(candidate)
+                seen.add(resolved)
+
+        return resolved_dirs
+
+    def _merge_discovery_results(self) -> None:
+        primary = self.discovery
+
+        for discovery in self.discoveries[1:]:
+            for module_name in discovery.discovered_modules:
+                if module_name not in primary.discovered_modules:
+                    primary.discovered_modules.append(module_name)
+            primary.loaded_classes.update(discovery.loaded_classes)
+            primary.plugin_configs.update(discovery.plugin_configs)
 
     def discover_plugins(self) -> List[str]:
         """Discover available plugins in the plugins directory.
@@ -42,7 +86,11 @@ class PluginRegistry:
         Returns:
             List of discovered plugin module names.
         """
-        return self.discovery.scan_plugin_files()
+        discovered: list[str] = []
+        for discovery in self.discoveries:
+            discovered.extend(discovery.scan_plugin_files())
+        self._merge_discovery_results()
+        return discovered
 
     def load_plugin(self, module_name: str) -> None:
         """Load a plugin module and register its configuration.
@@ -54,10 +102,24 @@ class PluginRegistry:
 
     def load_all_plugins(self) -> None:
         """Discover and load all available plugins."""
-        self.discovery.discover_and_load()
+        for discovery in self.discoveries:
+            discovery.discover_and_load()
+        self._merge_discovery_results()
         logger.info(
             f"Plugin registry loaded {len(self.discovery.loaded_classes)} plugins"
         )
+
+    def discover_classes_only(self) -> List[Type]:
+        """Discover plugin classes across all configured roots."""
+        plugin_classes: list[Type] = []
+
+        for discovery in self.discoveries:
+            for plugin_class in discovery.discover_classes_only():
+                if plugin_class not in plugin_classes:
+                    plugin_classes.append(plugin_class)
+
+        self._merge_discovery_results()
+        return plugin_classes
 
     def get_merged_config(self) -> Dict[str, Any]:
         """Get merged configuration from all registered plugins.
@@ -138,6 +200,7 @@ class PluginRegistry:
         """
         return {
             "plugins_directory": str(self.plugins_dir),
+            "plugin_directories": [str(plugin_dir) for plugin_dir in self.plugin_dirs],
             "discovery_stats": self.discovery.get_discovery_stats(),
             "factory_stats": self.factory.get_factory_stats(),
             "collector_stats": self.collector.get_collector_stats(),

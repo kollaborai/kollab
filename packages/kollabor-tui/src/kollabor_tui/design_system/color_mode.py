@@ -81,13 +81,16 @@ def auto_detect_color_mode():
 
 def rgb_to_256(r, g, b):
     """Convert RGB (0-255) to 256-color palette index."""
-    # Grayscale ramp (232-255) for near-gray colors
-    if r == g == b:
-        if r < 8:
+    # Grayscale ramp (232-255) for neutral and near-neutral colors.
+    # Without this tolerance, graphite like (20, 23, 27) quantizes to
+    # palette index 17, which many terminals render as navy blue.
+    if max(r, g, b) - min(r, g, b) <= 16:
+        gray = round((r + g + b) / 3)
+        if gray < 8:
             return 16
-        if r > 248:
+        if gray > 248:
             return 231
-        return round((r - 8) / 247 * 24) + 232
+        return round((gray - 8) / 247 * 24) + 232
 
     # Color cube (16-231): 6x6x6 = 216 colors
     # Each component maps to 0-5

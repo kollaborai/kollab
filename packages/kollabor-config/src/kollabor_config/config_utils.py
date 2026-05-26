@@ -48,7 +48,9 @@ def get_global_config_path() -> Path:
 
 def get_global_config_path_candidates() -> list[Path]:
     """Return global config.json candidates in read precedence order."""
-    return [directory / "config.json" for directory in get_config_directory_candidates()]
+    return [
+        directory / "config.json" for directory in get_config_directory_candidates()
+    ]
 
 
 def get_existing_global_config_path() -> Path:
@@ -64,7 +66,8 @@ def get_local_config_path() -> Path:
 def get_local_config_path_candidates() -> list[Path]:
     """Return project-local config.json candidates in read precedence order."""
     return [
-        directory / "config.json" for directory in get_local_config_directory_candidates()
+        directory / "config.json"
+        for directory in get_local_config_directory_candidates()
     ]
 
 
@@ -236,19 +239,12 @@ def get_global_agents_dir() -> Path:
 def get_bundled_skills_dir() -> Path | None:
     """Get the bundled skills directory shipped with the package.
 
-    Checks package install path first, then cwd/bundles/skills/ for dev mode.
+    Checks package install paths and cwd/bundles/skills/ for dev mode.
 
     Returns:
         Path to bundled skills directory if it exists, None otherwise
     """
-    # Installed package: relative to this file's package root
-    package_root = Path(__file__).resolve().parent.parent.parent.parent.parent
-    bundled = package_root / "bundles" / "skills"
-    if bundled.exists():
-        return bundled
-    # Development mode: cwd
-    fallback = Path.cwd() / "bundles" / "skills"
-    return fallback if fallback.exists() else None
+    return _get_bundled_dir("skills")
 
 
 def get_global_skills_dir() -> Path:
@@ -829,9 +825,7 @@ def initialize_config(force: bool = False) -> None:
                 "level": "global",
             }
             default_config["plugins"] = default_config.get("plugins", {})
-            default_config["plugins"]["hub"] = default_config["plugins"].get(
-                "hub", {}
-            )
+            default_config["plugins"]["hub"] = default_config["plugins"].get("hub", {})
             default_config["plugins"]["hub"]["enabled"] = True
             default_config["plugins"]["hub"]["project_scoped"] = True
 
@@ -882,15 +876,8 @@ def _initialize_themes_directory(global_config_dir: Path) -> None:
     themes_dir = global_config_dir / "themes"
     themes_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find bundled themes folder
-    package_dir = Path(__file__).parent.parent.parent
-    bundled_themes_dir = package_dir / "bundles" / "themes"
-
-    if not bundled_themes_dir.exists():
-        # Fallback for development mode
-        bundled_themes_dir = Path.cwd() / "bundles" / "themes"
-
-    if not bundled_themes_dir.exists():
+    bundled_themes_dir = _get_bundled_dir("themes")
+    if bundled_themes_dir is None:
         logger.warning("No bundled themes folder found")
         return
 
@@ -914,15 +901,8 @@ def _initialize_layouts_directory(global_config_dir: Path) -> None:
     layouts_dir = global_config_dir / "layouts"
     layouts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find bundled layouts folder
-    package_dir = Path(__file__).parent.parent.parent
-    bundled_layouts_dir = package_dir / "bundles" / "layouts"
-
-    if not bundled_layouts_dir.exists():
-        # Fallback for development mode
-        bundled_layouts_dir = Path.cwd() / "bundles" / "layouts"
-
-    if not bundled_layouts_dir.exists():
+    bundled_layouts_dir = _get_bundled_dir("layouts")
+    if bundled_layouts_dir is None:
         logger.warning("No bundled layouts folder found")
         return
 
@@ -946,15 +926,8 @@ def _initialize_status_widgets_directory(global_config_dir: Path) -> None:
     widgets_dir = global_config_dir / "status-widgets"
     widgets_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find bundled widgets folder
-    package_dir = Path(__file__).parent.parent.parent
-    bundled_widgets_dir = package_dir / "bundles" / "widgets"
-
-    if not bundled_widgets_dir.exists():
-        # Fallback for development mode
-        bundled_widgets_dir = Path.cwd() / "bundles" / "widgets"
-
-    if not bundled_widgets_dir.exists():
+    bundled_widgets_dir = _get_bundled_dir("widgets")
+    if bundled_widgets_dir is None:
         logger.warning("No bundled status widgets folder found")
         # Fall back to creating a simple example if directory is empty
         if not list(widgets_dir.iterdir()):

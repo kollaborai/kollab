@@ -1,10 +1,12 @@
 """Plugin discovery for file system scanning and module loading."""
 
 import importlib
+import importlib.util
 import inspect
 import logging
 import re
 import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
@@ -197,6 +199,89 @@ class PluginDiscovery:
             logger.error(f"Error verifying loaded module {module_path}: {e}")
             return False
 
+    def _module_is_from_plugins_dir(self, module) -> bool:
+        """Return whether an imported module belongs to this discovery root."""
+        try:
+            plugins_dir = self.plugins_dir.resolve()
+            module_file = getattr(module, "__file__", None)
+            if module_file:
+                return Path(module_file).resolve().is_relative_to(plugins_dir)
+
+            module_paths = getattr(module, "__path__", [])
+            for module_path in module_paths:
+                resolved_path = Path(module_path).resolve()
+                if resolved_path == plugins_dir or resolved_path.is_relative_to(
+                    plugins_dir
+                ):
+                    return True
+        except Exception as e:
+            logger.debug(f"Could not verify plugin module root: {e}")
+
+        return False
+
+    def _drop_stale_module_cache(self, module_path: str) -> None:
+        """Drop cached modules for this plugin path when they came from another root."""
+        parts = ["plugins", *module_path.split(".")]
+        stale_roots: list[str] = []
+
+        for index in range(2, len(parts) + 1):
+            module_name = ".".join(parts[:index])
+            module = sys.modules.get(module_name)
+            if module and not self._module_is_from_plugins_dir(module):
+                stale_roots.append(module_name)
+
+        if not stale_roots:
+            return
+
+        for module_name in list(sys.modules):
+            if any(
+                module_name == stale_root or module_name.startswith(f"{stale_root}.")
+                for stale_root in stale_roots
+            ):
+                del sys.modules[module_name]
+
+    def _prepare_plugins_import_root(self, module_path: str | None = None) -> None:
+        """Make import plugins.* resolve from this discovery root."""
+        try:
+            plugins_dir = self.plugins_dir.resolve()
+
+            current_plugins = sys.modules.get("plugins")
+            if current_plugins and hasattr(current_plugins, "__path__"):
+                root_path = str(plugins_dir)
+                search_paths = [
+                    str(Path(path).resolve())
+                    for path in getattr(current_plugins, "__path__", [])
+                    if Path(path).resolve() != plugins_dir
+                ]
+                current_plugins.__path__ = [root_path, *search_paths]  # type: ignore[attr-defined]
+                if module_path:
+                    self._drop_stale_module_cache(module_path)
+                importlib.invalidate_caches()
+                return
+
+            init_file = plugins_dir / "__init__.py"
+            if init_file.exists():
+                spec = importlib.util.spec_from_file_location(
+                    "plugins",
+                    init_file,
+                    submodule_search_locations=[str(plugins_dir)],
+                )
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules["plugins"] = module
+                    spec.loader.exec_module(module)
+            else:
+                module = types.ModuleType("plugins")
+                module.__file__ = str(plugins_dir)
+                module.__path__ = [str(plugins_dir)]  # type: ignore[attr-defined]
+                sys.modules["plugins"] = module
+
+            if module_path:
+                self._drop_stale_module_cache(module_path)
+            importlib.invalidate_caches()
+        except Exception as e:
+            logger.debug(f"Could not prepare plugin import root: {e}")
+
     def scan_plugin_files(self) -> List[str]:
         """Scan the plugins directory recursively for plugin files with security validation.
 
@@ -350,6 +435,7 @@ class PluginDiscovery:
             full_module_path = f"plugins.{module_path}"
 
             try:
+                self._prepare_plugins_import_root(module_path)
                 module = importlib.import_module(full_module_path)
             except ImportError as e:
                 logger.error(f"Failed to import plugin module {module_path}: {e}")

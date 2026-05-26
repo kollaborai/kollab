@@ -64,6 +64,14 @@ class RiskAssessor:
             result = self._assess_command(command)
             if result:
                 return result
+            default_level = self._rules.tool_type_risks.get(
+                tool_type, ToolRiskLevel.UNKNOWN
+            )
+            return RiskAssessmentResult(
+                level=default_level,
+                reason=f"Default risk for tool type '{tool_type}'",
+                tool_type=tool_type,
+            )
 
         tool_definition = self._find_tool_definition(tool_type, tool_name)
         if tool_definition:
