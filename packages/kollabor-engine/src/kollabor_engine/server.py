@@ -19,6 +19,20 @@ _sessions: Dict[str, EngineSession] = {}
 _start_time = time.time()
 
 
+def _profile_has_configured_api_credentials(profile: object) -> bool:
+    """Check credential presence without resolving or migrating secrets."""
+    get_env_value = getattr(profile, "_get_env_value", None)
+    if callable(get_env_value) and get_env_value("API_KEY"):
+        return True
+
+    get_global_env_value = getattr(profile, "_get_global_env_value", None)
+    if callable(get_global_env_value) and get_global_env_value("API_KEY"):
+        return True
+
+    raw_api_key = str(getattr(profile, "api_key", "") or "").strip()
+    return bool(raw_api_key and not raw_api_key.startswith("<"))
+
+
 def get_session_registry() -> Dict[str, EngineSession]:
     return _sessions
 
@@ -172,15 +186,13 @@ def create_app() -> FastAPI:
         # Check if we have sessions (optional)
         checks["sessions"] = "ok" if _sessions else "idle"
 
-        # Verify at least one profile has valid API credentials
+        # Verify at least one profile has configured credentials. Do not call
+        # get_api_key(); that may read or migrate secrets in the OS keyring.
         api_check = "failed"
         for profile in profiles:
-            if profile.get_api_key():
-                # Verify API key format (non-empty after env var resolution)
-                api_key = profile.get_api_key()
-                if api_key and not api_key.startswith("<"):
-                    api_check = "ok"
-                    break
+            if _profile_has_configured_api_credentials(profile):
+                api_check = "ok"
+                break
         checks["api_credentials"] = api_check
 
         # Ready if profiles exist AND at least one has valid credentials

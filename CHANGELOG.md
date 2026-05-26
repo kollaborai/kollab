@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-05-26
+
+### Fixed
+
+- Fixed installed-package plugin discovery so packaged plugins and bundled
+  assets resolve correctly outside a source checkout.
+- Fixed permission SSE metadata so terminal command details are preserved for
+  approval prompts and tool-start events.
+- Fixed terminal command risk assessment so command-specific checks run before
+  generic terminal tool defaults.
+- Fixed 256-color terminal rendering so graphite input backgrounds do not fall
+  back to navy blue.
+
 ### Changed
 
 - **Agent Skills:** `Skill` loading now strictly enforces the published directory
