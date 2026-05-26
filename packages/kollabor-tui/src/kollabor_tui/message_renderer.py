@@ -867,7 +867,7 @@ class ModernMessageRenderer:
             observing=observing,
         )
 
-        return self._compact_lines(
+        return "\n" + self._compact_lines(
             content.split("\n"),
             width=width,
             text_color=fg_color,

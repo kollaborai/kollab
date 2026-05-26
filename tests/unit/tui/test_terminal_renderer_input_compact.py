@@ -91,8 +91,9 @@ def test_active_lines_keep_one_blank_separator_between_input_and_status():
 
     plain = [strip_ansi(line) for line in asyncio.run(renderer._build_active_lines())]
 
-    assert len(plain) == 3
-    assert plain[0].lstrip().startswith("❯")
-    assert plain[1] == ""
-    assert plain[2].startswith("  cwd")
+    assert len(plain) == 4
+    assert plain[0] == ""
+    assert plain[1].lstrip().startswith("❯")
+    assert plain[2] == ""
+    assert plain[3].startswith("  cwd")
     assert not {"▄", "▀"} & set("".join(plain))
