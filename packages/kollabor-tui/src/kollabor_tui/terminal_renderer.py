@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, List, Optional
 from kollabor_tui.design_system import (
     C,
     T,
-    solid,
+    solid_fg,
     wrap_text,
 )
 from kollabor_tui.message_renderer import MessageRenderer
@@ -736,7 +736,7 @@ class TerminalRenderer:
                 if simple_mode:
                     lines.append(content.replace(str(C["cursor"]), "|"))
                 else:
-                    lines.append(solid(content, input_bg, input_fg, width))
+                    lines.append(solid_fg(content, input_fg))
 
     def _write(self, text: str) -> None:
         """Write text directly to terminal.

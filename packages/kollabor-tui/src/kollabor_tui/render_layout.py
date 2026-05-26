@@ -232,7 +232,7 @@ class ThinkingAnimationManager:
         Returns:
             List of formatted display lines with TagBox styling.
         """
-        from kollabor_tui.design_system import T, TagBox
+        from kollabor_tui.design_system import T, solid_fg, wrap_text
         from kollabor_tui.terminal_state import get_global_width
 
         # Use global width as default if not specified
@@ -309,29 +309,24 @@ class ThinkingAnimationManager:
         spinner = self.get_next_frame()
         tag_char = f" {spinner} " if spinner else " ~ "
 
-        # Build tag_chars list - spinner for first line, blanks for rest
-        tag_chars = [tag_char] + ["   "] * (len(content_lines) - 1)
+        tag_width = len(tag_char)
+        content_width = max(1, width - tag_width)
+        lines = []
+        for line_idx, content_line in enumerate(content_lines):
+            wrapped_lines = wrap_text(
+                content_line, content_width, continuation_indent=0
+            )
+            for wrap_idx, wrapped in enumerate(wrapped_lines):
+                tag = tag_char if line_idx == 0 and wrap_idx == 0 else " " * tag_width
+                lines.append(solid_fg(tag, T().thinking_tag) + solid_fg(wrapped, T().text))
 
-        # Render with TagBox - thinking_v2 style from preview-modern-ui.py
-        rendered = TagBox.render(
-            lines=content_lines,
-            tag_bg=T().thinking_tag,
-            tag_width=3,
-            content_colors=T().dark,
-            content_fg=T().text,
-            content_width=width - 3,
-            tag_chars=tag_chars,
-        )
-
-        # Apply shimmer/pulse effect AFTER TagBox renders (preserves box structure)
-        # Only apply to the middle line (content), not top/bottom borders
-        lines = rendered.split("\n")
-        if apply_effect_func and len(lines) >= 3:
-            # Apply effect to content line(s) - skip first (top border) and last (bottom border)
-            for i in range(1, len(lines) - 1):
+        # Apply shimmer/pulse effect after TagBox renders so the colored content
+        # rows are preserved without reintroducing frame rows.
+        if apply_effect_func:
+            for i in range(len(lines)):
                 lines[i] = apply_effect_func(lines[i])
 
-        return lines
+        return ["", *lines, ""]
 
 
 class LayoutManager:

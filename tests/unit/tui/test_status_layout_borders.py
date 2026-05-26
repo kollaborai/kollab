@@ -32,8 +32,10 @@ def test_status_layout_renders_rows_without_block_borders():
     )
     renderer = StatusLayoutRenderer(registry, manager)
 
-    plain = [strip_ansi(line) for line in renderer.render()]
+    lines = renderer.render()
+    plain = [strip_ansi(line) for line in lines]
 
     assert len(plain) == 1
     assert "sample" in plain[0]
+    assert "\x1b[0;48;" in lines[0] or "\x1b[48;" in lines[0]
     assert not {"▄", "▀"} & set("".join(plain))

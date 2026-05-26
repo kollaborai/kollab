@@ -62,6 +62,20 @@ def test_modern_input_renders_without_block_borders():
     assert not {"▄", "▀"} & set("".join(plain))
 
 
+def test_modern_input_line_has_no_background_fill():
+    """The input row should not render a full-width background fill."""
+    renderer = TerminalRenderer()
+    renderer._last_activity = 0
+
+    lines: list[str] = []
+    renderer._render_input_modern(lines, position="only")
+
+    line = lines[0]
+
+    assert "38;" in line
+    assert "48;" not in line
+
+
 def test_active_lines_keep_one_blank_separator_between_input_and_status():
     """Removing borders still leaves one clean spacer before status widgets."""
     renderer = TerminalRenderer()
