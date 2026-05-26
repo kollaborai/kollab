@@ -31,6 +31,7 @@ from kollabor_tui.design_system import (
     get_theme,
     gradient,
     gradient_fg,
+    rgb_to_256,
     set_theme,
     smooth_gradient,
     smooth_gradient_subtle,
@@ -198,6 +199,13 @@ class TestTheme(unittest.TestCase):
 
         self.assertGreaterEqual(min(theme.assistant_text), 175)
         self.assertLessEqual(max(theme.assistant_text) - min(theme.assistant_text), 18)
+
+    def test_dark_input_bg_maps_to_graphite_in_256_color_mode(self):
+        """Near-graphite input backgrounds must not fall back to ANSI blue."""
+        color_code = rgb_to_256(*THEMES["dark"].input_bg[0])
+
+        self.assertGreaterEqual(color_code, 232)
+        self.assertNotEqual(color_code, 17)
 
     def test_lime_theme_uses_graphite_ember_palette(self):
         """Lime alias keeps the compact graphite and ember palette."""
