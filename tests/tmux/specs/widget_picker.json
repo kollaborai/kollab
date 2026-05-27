@@ -59,7 +59,7 @@
     { "action": "type", "text": "2" },
     { "action": "sleep", "seconds": 0.5 },
     { "action": "capture" },
-    { "action": "assert_contains", "pattern": "Arrows.*Nav|Description:", "description": "Picker responsive after category filter" },
+    { "action": "assert_contains", "pattern": "Up/Down.*Nav|Description:", "description": "Picker responsive after category filter" },
 
     { "action": "section", "title": "Test 10: Close picker" },
     { "action": "escape" },

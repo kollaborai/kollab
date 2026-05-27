@@ -110,46 +110,52 @@ class AltViewStackManager:
             )
             return False
 
+        created_session = False
+
         # Look up or create the session
         session = self._session_registry.get(session_name)
         if session is None:
             session = AltViewSession(altview, self.event_bus, session_name)
             self._session_registry[session_name] = session
+            created_session = True
 
-        # Emit MODAL_TRIGGER + MODAL_SHOW so the input system routes
-        # keypresses to FULLSCREEN_INPUT and the main render loop pauses.
-        await self.event_bus.emit_with_hooks(
-            EventType.MODAL_TRIGGER,
-            {
-                "trigger_source": "altview",
-                "plugin_name": session_name,
-                "mode": "fullscreen",
-                "fullscreen_plugin": True,
-            },
-            "altview_stack_manager",
-        )
-        await self.event_bus.emit_with_hooks(
-            EventType.MODAL_SHOW,
-            {
-                "type": "altview",
-                "action": session_name,
-                "source": "altview_stack_manager",
-                "plugin_name": session_name,
-            },
-            "altview_stack_manager",
-        )
-
-        # Hibernate the main render loop (zero CPU while altview is active)
-        main_loop = self._resolve_main_render_loop()
-        if main_loop and hasattr(main_loop, "hibernate"):
-            main_loop.hibernate()
-
-        # Pause refresh scheduler to prevent queued renders bursting on thaw
-        scheduler = self._resolve_scheduler()
-        if scheduler and hasattr(scheduler, "pause"):
-            scheduler.pause()
+        modal_started = False
 
         try:
+            # Emit MODAL_TRIGGER + MODAL_SHOW so the input system routes
+            # keypresses to FULLSCREEN_INPUT and the main render loop pauses.
+            await self.event_bus.emit_with_hooks(
+                EventType.MODAL_TRIGGER,
+                {
+                    "trigger_source": "altview",
+                    "plugin_name": session_name,
+                    "mode": "fullscreen",
+                    "fullscreen_plugin": True,
+                },
+                "altview_stack_manager",
+            )
+            modal_started = True
+            await self.event_bus.emit_with_hooks(
+                EventType.MODAL_SHOW,
+                {
+                    "type": "altview",
+                    "action": session_name,
+                    "source": "altview_stack_manager",
+                    "plugin_name": session_name,
+                },
+                "altview_stack_manager",
+            )
+
+            # Hibernate the main render loop (zero CPU while altview is active)
+            main_loop = self._resolve_main_render_loop()
+            if main_loop and hasattr(main_loop, "hibernate"):
+                main_loop.hibernate()
+
+            # Pause refresh scheduler to prevent queued renders bursting on thaw
+            scheduler = self._resolve_scheduler()
+            if scheduler and hasattr(scheduler, "pause"):
+                scheduler.pause()
+
             await session.enter()
             self._stack.append(session)
             logger.info(
@@ -162,40 +168,47 @@ class AltViewStackManager:
             await session.run_loop()
 
         finally:
-            await self._pop_current()
+            session_entered = session in self._stack
+            await self._pop_current(
+                session=session,
+                modal_started=modal_started,
+                session_entered=session_entered,
+            )
+            if created_session and not session_entered:
+                self._session_registry.pop(session_name, None)
 
         return True
 
-    async def _pop_current(self) -> None:
+    async def _pop_current(
+        self,
+        session: Optional[AltViewSession] = None,
+        modal_started: bool = True,
+        session_entered: bool = True,
+    ) -> None:
         """Pop the topmost session and replay its display queue if needed."""
-        if not self._stack:
-            return
+        if session is None:
+            if not self._stack:
+                await self._restore_main_ui(None, modal_started=modal_started)
+                return
+            session = self._stack[-1]
 
-        session = self._stack.pop()
+        if self._stack and self._stack[-1] is session:
+            self._stack.pop()
+        elif session in self._stack:
+            self._stack.remove(session)
 
-        await session.exit()
+        if session_entered:
+            try:
+                await session.exit()
+            except Exception as e:
+                logger.error(
+                    "AltViewStackManager: session '%s' exit failed: %s",
+                    session.session_name,
+                    e,
+                    exc_info=True,
+                )
 
-        # Resume refresh scheduler before emitting MODAL_HIDE
-        scheduler = self._resolve_scheduler()
-        if scheduler and hasattr(scheduler, "resume"):
-            scheduler.resume()
-
-        # Thaw the main render loop (was hibernated in push)
-        main_loop = self._resolve_main_render_loop()
-        if main_loop and hasattr(main_loop, "thaw"):
-            main_loop.thaw()
-
-        # Emit MODAL_HIDE so input routing returns to normal
-        # (modal_controller handles coordinator restore via its hook)
-        await self.event_bus.emit_with_hooks(
-            EventType.MODAL_HIDE,
-            {
-                "source": "altview",
-                "plugin_name": session.session_name,
-                "completed": True,
-            },
-            "altview_stack_manager",
-        )
+        await self._restore_main_ui(session.session_name, modal_started=modal_started)
 
         # Replay buffered frames if anything was captured while suspended
         if session.display_queue.frame_count > 0:
@@ -207,6 +220,53 @@ class AltViewStackManager:
             session.session_name,
             self.stack_depth,
         )
+
+    async def _restore_main_ui(
+        self, session_name: Optional[str], modal_started: bool = True
+    ) -> None:
+        """Resume main UI rendering and input routing after an altview attempt."""
+        # Resume refresh scheduler before emitting MODAL_HIDE
+        scheduler = self._resolve_scheduler()
+        if scheduler and hasattr(scheduler, "resume"):
+            scheduler.resume()
+
+        # Thaw the main render loop (was hibernated in push)
+        main_loop = self._resolve_main_render_loop()
+        if main_loop and hasattr(main_loop, "thaw"):
+            main_loop.thaw()
+
+        if not modal_started:
+            return
+
+        if self.terminal_renderer:
+            if hasattr(self.terminal_renderer, "writing_messages"):
+                self.terminal_renderer.writing_messages = False
+            if hasattr(self.terminal_renderer, "input_line_written"):
+                self.terminal_renderer.input_line_written = False
+            if hasattr(self.terminal_renderer, "last_line_count"):
+                self.terminal_renderer.last_line_count = 0
+            invalidate = getattr(self.terminal_renderer, "invalidate_render_cache", None)
+            if callable(invalidate):
+                invalidate()
+
+        # Emit MODAL_HIDE so input routing returns to normal
+        # (modal_controller handles coordinator restore via its hook)
+        try:
+            await self.event_bus.emit_with_hooks(
+                EventType.MODAL_HIDE,
+                {
+                    "source": "altview",
+                    "plugin_name": session_name or "unknown",
+                    "completed": True,
+                },
+                "altview_stack_manager",
+            )
+        except Exception as e:
+            logger.error(
+                "AltViewStackManager: MODAL_HIDE cleanup failed: %s",
+                e,
+                exc_info=True,
+            )
 
     async def _replay_frame(self, content: str) -> None:
         """Write a single replay frame to the current output target.
@@ -232,6 +292,29 @@ class AltViewStackManager:
     def get_all_sessions(self) -> Dict[str, AltViewSession]:
         """Return a copy of the session registry."""
         return dict(self._session_registry)
+
+    def get_status_sessions(self) -> List[AltViewSession]:
+        """Return sessions that should be visible in the status widget."""
+        visible: List[AltViewSession] = list(self._stack)
+
+        for session in self._session_registry.values():
+            if session in visible:
+                continue
+
+            altview = session.altview
+            metadata = altview.metadata
+            state = altview.state
+            supports_background = bool(
+                getattr(metadata, "supports_background", False)
+            )
+            has_background_tasks = bool(altview.background_tasks)
+            if supports_background and (
+                has_background_tasks
+                or state in (AltViewState.IDLE, AltViewState.COMPLETE)
+            ):
+                visible.append(session)
+
+        return visible
 
     def get_session(self, name: str) -> Optional[AltViewSession]:
         """Look up a session by name."""
