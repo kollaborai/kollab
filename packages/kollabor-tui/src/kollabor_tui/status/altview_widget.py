@@ -34,10 +34,16 @@ def render_altview_status(width: int, ctx: Optional[Any] = None) -> str:
         if not stack_manager:
             return ""
 
-        # Get all sessions from the stack manager
+        # Get only sessions that should be visible in status. The stack
+        # manager filters out closed non-background views that remain in
+        # the registry for re-entry.
         sessions = []
-        if hasattr(stack_manager, "get_all_sessions"):
+        if hasattr(stack_manager, "get_status_sessions"):
+            sessions = stack_manager.get_status_sessions()
+        elif hasattr(stack_manager, "get_all_sessions"):
             sessions = stack_manager.get_all_sessions()
+            if isinstance(sessions, dict):
+                sessions = list(sessions.values())
         elif hasattr(stack_manager, "sessions"):
             sessions = list(stack_manager.sessions.values())
 
@@ -48,8 +54,11 @@ def render_altview_status(width: int, ctx: Optional[Any] = None) -> str:
         prefix = _fg("altview:", T().ai_tag)
         fragments = []
         for session in sessions:
-            name = getattr(session, "name", str(session))
-            status = getattr(session, "status", "running")
+            if not _should_show_session(session):
+                continue
+
+            name = _session_name(session)
+            status = _session_status(session)
 
             if status == "idle" or status == "completed":
                 # Idle/completed: warn color with (idle) suffix
@@ -72,9 +81,10 @@ def render_altview_status(width: int, ctx: Optional[Any] = None) -> str:
 
         # Calculate visible length for truncation check
         visible_parts = []
-        for session in sessions:
-            name = getattr(session, "name", str(session))
-            status = getattr(session, "status", "running")
+        visible_sessions = [session for session in sessions if _should_show_session(session)]
+        for session in visible_sessions:
+            name = _session_name(session)
+            status = _session_status(session)
             if status in ("idle", "completed"):
                 visible_parts.append(f"{name}(idle)")
             else:
@@ -84,9 +94,11 @@ def render_altview_status(width: int, ctx: Optional[Any] = None) -> str:
 
         if len(visible_text) > width:
             # Truncate: show count instead of full list
-            count = len(sessions)
+            count = len(visible_sessions)
             idle_count = sum(
-                1 for s in sessions if getattr(s, "status", "") in ("idle", "completed")
+                1
+                for s in visible_sessions
+                if _session_status(s) in ("idle", "completed")
             )
             if idle_count > 0:
                 summary = f"{count} views ({idle_count} idle)"
@@ -99,6 +111,46 @@ def render_altview_status(width: int, ctx: Optional[Any] = None) -> str:
     except Exception as e:
         logger.error(f"altview widget error: {e}")
         return ""
+
+
+def _session_name(session: Any) -> str:
+    """Return a stable display name for a status session."""
+    return str(
+        getattr(
+            session,
+            "name",
+            getattr(session, "session_name", str(session)),
+        )
+    )
+
+
+def _session_status(session: Any) -> str:
+    """Normalize AltView state/status values for display."""
+    status = getattr(session, "status", None)
+    if status is None:
+        altview = getattr(session, "altview", None)
+        status = getattr(altview, "state", "running")
+
+    value = getattr(status, "value", status)
+    if value == "complete":
+        return "completed"
+    return str(value)
+
+
+def _should_show_session(session: Any) -> bool:
+    """Return True when a session is active or has background results."""
+    status = _session_status(session)
+    if status == "running":
+        return True
+
+    altview = getattr(session, "altview", None)
+    metadata = getattr(altview, "metadata", None)
+    supports_background = bool(getattr(metadata, "supports_background", False))
+    background_tasks = getattr(altview, "background_tasks", [])
+    if supports_background and (background_tasks or status in ("idle", "completed")):
+        return True
+
+    return False
 
 
 def register_altview_widget(registry: StatusWidgetRegistry) -> None:

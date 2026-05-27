@@ -64,7 +64,7 @@ class WidgetPickerAltView(AltView):
             description="Browse and add widgets to status layout",
             version="1.0.0",
             author="Kollabor",
-            category="system",
+            category="internal",
             icon="[+]",
             aliases=["widget-add"],
             supports_named_sessions=False,

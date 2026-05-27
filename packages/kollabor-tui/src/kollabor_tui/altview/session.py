@@ -58,24 +58,29 @@ class AltViewSession:
         """Enter this session. Can be called multiple times for re-entry."""
         self.display_queue.start_capture()
 
-        await self._register_input_hook()
+        try:
+            await self._register_input_hook()
 
-        if not self.renderer.setup_terminal():
-            logger.error("AltViewSession: failed to set up terminal")
-            raise RuntimeError("Terminal setup failed")
+            if not self.renderer.setup_terminal():
+                logger.error("AltViewSession: failed to set up terminal")
+                raise RuntimeError("Terminal setup failed")
 
-        if self._is_first_entry:
-            await self.altview.create_session(self.session_name)
-            self.altview._set_renderer(self.renderer)
-            await self.altview.on_enter(self.renderer)
-            self._is_first_entry = False
-        else:
-            self.altview._set_renderer(self.renderer)
-            await self.altview.on_resume()
+            if self._is_first_entry:
+                await self.altview.create_session(self.session_name)
+                self.altview._set_renderer(self.renderer)
+                await self.altview.on_enter(self.renderer)
+                self._is_first_entry = False
+            else:
+                self.altview._set_renderer(self.renderer)
+                await self.altview.on_resume()
 
-        self.altview._set_state(AltViewState.RUNNING)
-        self._entry_count += 1
-        self._running = True
+            self.altview._set_state(AltViewState.RUNNING)
+            self._entry_count += 1
+            self._running = True
+
+        except Exception:
+            await self._cleanup_runtime_state()
+            raise
 
         logger.info(
             "AltViewSession[%s]: entered (entry #%d)",
@@ -101,15 +106,55 @@ class AltViewSession:
 
         if self._render_loop is not None:
             self._render_loop.stop()
+            self._render_loop = None
 
-        await self.altview.on_suspend()
-        self.altview._set_state(AltViewState.SUSPENDED)
+        try:
+            await self.altview.on_suspend()
+        except Exception as e:
+            logger.error(
+                "AltViewSession[%s]: on_suspend failed: %s",
+                self.session_name,
+                e,
+                exc_info=True,
+            )
 
-        self.renderer.restore_terminal()
-        await self._unregister_input_hook()
-        self.display_queue.stop_capture()
+        try:
+            self.altview._set_state(AltViewState.SUSPENDED)
+        except Exception as e:
+            logger.error(
+                "AltViewSession[%s]: failed to mark suspended: %s",
+                self.session_name,
+                e,
+                exc_info=True,
+            )
+
+        await self._cleanup_runtime_state()
 
         logger.info("AltViewSession[%s]: exited (suspended)", self.session_name)
+
+    async def _cleanup_runtime_state(self) -> None:
+        """Best-effort cleanup for terminal, input hooks, and frame capture."""
+        try:
+            self.renderer.restore_terminal()
+        except Exception as e:
+            logger.error(
+                "AltViewSession[%s]: terminal restore failed: %s",
+                self.session_name,
+                e,
+                exc_info=True,
+            )
+
+        await self._unregister_input_hook()
+
+        try:
+            self.display_queue.stop_capture()
+        except Exception as e:
+            logger.error(
+                "AltViewSession[%s]: display capture cleanup failed: %s",
+                self.session_name,
+                e,
+                exc_info=True,
+            )
 
     async def destroy(self) -> None:
         """Permanently destroy this session and its plugin."""

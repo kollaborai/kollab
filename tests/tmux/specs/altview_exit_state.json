@@ -1,0 +1,39 @@
+{
+  "name": "altview-exit-state",
+  "description": "Verify exiting an AltView restores normal render/input state and hides stale altview status",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 5,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "open config altview" },
+    { "action": "slash_command", "command": "config" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "config|profile|settings|save", "description": "config altview opens" },
+
+    { "action": "section", "title": "exit config altview" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "❯|>", "description": "normal prompt returns" },
+    { "action": "assert_not_contains", "pattern": "altview:", "description": "stale altview status hidden after exit" },
+    { "action": "sleep", "seconds": 2.0 },
+
+    { "action": "section", "title": "status navigation still works" },
+    { "action": "nav_mode" },
+    { "action": "sleep", "seconds": 2.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "NAVIGATE|NAV|navigation|Navigation", "description": "status navigation reopens after altview exit" },
+
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "❯|>", "description": "prompt returns after navigation exit" }
+  ]
+}
