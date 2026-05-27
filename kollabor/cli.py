@@ -36,6 +36,7 @@ if sys.platform == "win32":
 
 # Import from the same directory
 from .application import TerminalLLMChat
+from .hub_env import hub_disabled_by_env
 from .logging import setup_bootstrap_logging
 from .version import __version__
 
@@ -1727,6 +1728,9 @@ def _hub_is_enabled() -> bool:
 
     from kollabor_config.config_utils import get_existing_global_config_path
 
+    if hub_disabled_by_env():
+        return False
+
     config_path = get_existing_global_config_path()
     if not config_path.exists():
         return True  # Default is enabled
@@ -1803,7 +1807,7 @@ def _should_use_daemon() -> bool:
     if not sys.stdin.isatty():
         return False
 
-    return True
+    return _hub_is_enabled()
 
 
 def cli_main() -> None:

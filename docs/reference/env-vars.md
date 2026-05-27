@@ -96,6 +96,20 @@ manually only when debugging or forcing behavior in a script.
 
 Values: `1`, `true`, `yes`, `on` (truthy)
 
+### KOLLAB_HUB_DISABLED
+
+Disable the hub for one process without changing saved config. This also
+skips daemon/attach auto-forking because daemon readiness uses the hub
+socket. Use this when you want a plain single-process session.
+
+```bash
+KOLLAB_HUB_DISABLED=1 kollab
+```
+
+Alias: `KOLLAB_NO_HUB=1`.
+
+Values: `1`, `true`, `yes`, `on` (truthy)
+
 
 ## Profile overrides
 

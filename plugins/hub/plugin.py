@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from kollabor.hub_env import hub_disabled_by_env
 from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.models import (
@@ -8882,6 +8883,8 @@ class HubPlugin(BasePlugin):
             return f"console error: {e}"
 
     def _is_enabled(self) -> bool:
+        if hub_disabled_by_env():
+            return False
         if self.config:
             return bool(self.config.get("plugins.hub.enabled", True))
         return True
