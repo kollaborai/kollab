@@ -72,6 +72,15 @@ dev = [
     "pytest-asyncio>=0.21.0",
 ]
 
+[dependency-groups]
+dev = [
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.7.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/kollaborai/kollab"
 Repository = "https://github.com/kollaborai/kollab"
@@ -92,15 +101,6 @@ kollabor = ["py.typed"]
 plugins = ["**/*.json", "**/*.yaml", "**/*.yml"]
 bundles = ["**/*"]
 fonts = ["*.ttf", "*.otf", "LICENSE", "README.md"]
-
-[tool.uv]
-dev-dependencies = [
-    "black>=23.0.0",
-    "mypy>=1.0.0",
-    "ruff>=0.7.0",
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-]
 
 [tool.uv.sources]
 kollabor-agent = { workspace = true }
