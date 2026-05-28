@@ -722,7 +722,7 @@ class SystemCommandHandler(BaseCommandHandler):
             connected = int(getattr(mcp, "connected_servers", 0) or 0)
             tools = int(getattr(mcp, "total_tools", 0) or 0)
             if total == 0:
-                add("warn", "mcp", "0 servers configured", "run /mcp add or /mcp show")
+                add("warn", "mcp", "0 servers configured", "run /mcp or /mcp show")
             elif connected == 0:
                 add(
                     "warn",

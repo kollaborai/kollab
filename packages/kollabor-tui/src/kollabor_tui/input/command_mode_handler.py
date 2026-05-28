@@ -311,6 +311,9 @@ class CommandModeHandler:
             elif key_press.name == "Escape":
                 await self.exit_command_mode()
                 return True
+            elif key_press.name == "Ctrl+U":
+                await self.exit_command_mode()
+                return True
 
             # Handle printable characters (for filtering)
             elif key_press.char and key_press.char.isprintable():

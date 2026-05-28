@@ -1857,7 +1857,7 @@ def register_core_widgets(registry: StatusWidgetRegistry) -> None:
         min_width=8,
         interactive=True,
         interaction_type="command",
-        command="/mcp",
+        command="/mcp show",
     )
 
     # Session Name Widget

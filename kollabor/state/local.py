@@ -92,6 +92,15 @@ class LocalStateService(StateService):
         self._context_registry: ContextRegistry | None = context_registry
         self._context_identity = context_identity
 
+    def _mcp_enabled(self) -> bool:
+        config = getattr(self._llm_service, "config", None)
+        if config is not None and hasattr(config, "get"):
+            try:
+                return bool(config.get("plugins.mcp.enabled", True))
+            except Exception:
+                return True
+        return True
+
     # === Conversation ===
 
     async def get_conversation(self) -> ConversationSnapshot:
@@ -491,6 +500,9 @@ class LocalStateService(StateService):
         (dict[tool_name, {"server": str, "definition": ...}]) and folds
         them into per-server tool counts plus aggregate totals.
         """
+        if not self._mcp_enabled():
+            return McpSnapshot()
+
         mcp_integration = getattr(self._llm_service, "mcp_integration", None)
         if mcp_integration is None:
             return McpSnapshot()
@@ -1688,6 +1700,15 @@ class LocalStateService(StateService):
         mcp_integration = getattr(self._llm_service, "mcp_integration", None)
         if mcp_integration is None:
             raise ValueError("MCP integration not available")
+
+        if not self._mcp_enabled():
+            await mcp_integration.shutdown()
+            return {
+                "configured": len(getattr(mcp_integration, "mcp_servers", {}) or {}),
+                "discovered": 0,
+                "reconnected": 0,
+                "disabled": True,
+            }
 
         if hasattr(mcp_integration, "reload_mcp_servers"):
             summary = await mcp_integration.reload_mcp_servers()

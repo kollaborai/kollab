@@ -11,6 +11,7 @@ Usage:
         render_callback=my_render_function,
         input_callback=my_input_function,
         target_fps=20.0,
+        render_on_timer=True,
         input_poll_rate=100.0
     )
 
@@ -18,6 +19,12 @@ Usage:
 """
 
 import asyncio
+import logging
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Awaitable, Callable, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def _get_loop():
@@ -27,19 +34,12 @@ def _get_loop():
     except RuntimeError:
         return asyncio.new_event_loop()
 
-import logging
-from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Awaitable, Callable, Tuple
-
-logger = logging.getLogger(__name__)
-
 
 class RenderTrigger(Enum):
     """Reasons why a render was triggered."""
 
     INPUT = "input"  # User input received
-    TIMER = "timer"  # Target FPS interval reached
+    TIMER = "timer"  # Target FPS interval reached and timer rendering is enabled
     FORCED = "forced"  # Explicitly requested
     INITIAL = "initial"  # First render
 
@@ -92,6 +92,8 @@ class EventDrivenRenderLoop:
 
     Attributes:
         target_fps: Target frames per second for periodic renders
+        render_on_timer: Render on target FPS timer ticks. Static screens should
+            leave this off and call request_render() when data changes.
         input_poll_rate: Input polling frequency in Hz (default 100)
         render_callback: Async function called to render frame
         input_callback: Async function called to check for input
@@ -105,6 +107,7 @@ class EventDrivenRenderLoop:
         target_fps: float = 20.0,
         input_poll_rate: float = 100.0,
         name: str = "RenderLoop",
+        render_on_timer: bool = True,
     ):
         """Initialize event-driven render loop.
 
@@ -118,6 +121,8 @@ class EventDrivenRenderLoop:
             target_fps: Target frames per second for periodic renders (must be > 0)
             input_poll_rate: Input polling frequency in Hz (must be > 0)
             name: Name for logging purposes
+            render_on_timer: Whether timer ticks should render even without
+                input or request_render().
 
         Raises:
             ValueError: If target_fps or input_poll_rate <= 0
@@ -133,6 +138,7 @@ class EventDrivenRenderLoop:
         self.target_fps = target_fps
         self.input_poll_rate = input_poll_rate
         self.name = name
+        self.render_on_timer = render_on_timer
 
         # Timing (safe division after validation)
         self.frame_delay = 1.0 / target_fps
@@ -152,7 +158,8 @@ class EventDrivenRenderLoop:
 
         logger.info(
             f"{name} initialized: target_fps={target_fps}, "
-            f"input_poll_rate={input_poll_rate}"
+            f"input_poll_rate={input_poll_rate}, "
+            f"render_on_timer={render_on_timer}"
         )
 
     def request_render(self):
@@ -201,7 +208,7 @@ class EventDrivenRenderLoop:
         1. Check input frequently (100Hz default)
         2. Render when:
            - Input received (instant feedback)
-           - Target FPS interval reached (periodic updates)
+           - Target FPS interval reached (if timer rendering is enabled)
            - Explicitly forced via request_render()
         3. Sleep efficiently to prevent CPU spinning
 
@@ -251,7 +258,9 @@ class EventDrivenRenderLoop:
 
                 # Determine if we should render
                 time_since_render = current_time - last_render_time
-                should_render_timer = time_since_render >= self.frame_delay
+                should_render_timer = (
+                    self.render_on_timer and time_since_render >= self.frame_delay
+                )
                 should_render_forced = self.force_render
 
                 # Render if forced OR timer elapsed (timer can trigger even if no input)

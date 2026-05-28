@@ -46,6 +46,7 @@ class HubConsoleAltView(AltView):
         super().__init__(metadata)
 
         self.target_fps = 2.0
+        self.render_on_timer = True
 
         # State
         self.agents: List[Dict[str, Any]] = []

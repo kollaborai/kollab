@@ -111,7 +111,7 @@ Type / to see the menu. Common commands:
   /save        Export conversation (markdown, jsonl, clipboard)
   /permissions Configure tool approvals
   /login       OAuth login
-  /mcp         Manage MCP servers
+  /mcp         Open MCP manager
   /resume      Resume previous conversation
   /tmux        Manage tmux sessions
   /help        Show all commands

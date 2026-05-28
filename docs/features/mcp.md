@@ -189,10 +189,14 @@ export BRAVE_API_KEY="xxx"
 
 | Command | Description |
 |---------|-------------|
-| `/mcp` | Show server status |
-| `/mcp show <server>` | Show server details and tools |
-| `/mcp add` | Add new server (interactive) |
-| `/mcp remove <server>` | Remove server |
+| `/mcp` | Open the full-screen MCP manager |
+| `/mcp setup` | Open the full-screen MCP manager |
+| `/mcp show` | Show server status |
+| `/mcp servers` | Show server status |
+| `/mcp tools [server]` | Show available tools |
+
+Inside the `/mcp` manager, `g` toggles the global MCP subsystem
+(`plugins.mcp.enabled`). Server-level actions still manage individual entries.
 
 ## Tool Execution
 
@@ -293,7 +297,7 @@ Discovered tools are stored in `tool_registry`:
 ### Tools Not Available
 
 1. Verify `"enabled": true` in config
-2. Check `/mcp` output for connection status
+2. Open `/mcp` for manager state or `/mcp show` for status output
 3. Review logs for initialization errors
 
 ### Permission Errors

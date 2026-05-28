@@ -622,7 +622,7 @@ class TerminalLLMChat:
                 setup_message = (
                     "[MCP Setup]\n"
                     "No MCP servers configured. External tools disabled.\n"
-                    "Run '/mcp setup' to configure Model Context Protocol servers."
+                    "Run '/mcp' to configure Model Context Protocol servers."
                 )
                 # Use display_thinking to show in thinking area without adding to history
                 if hasattr(self.renderer, "display_thinking"):
@@ -2353,24 +2353,26 @@ class TerminalLLMChat:
             self.system_commands.register_commands()
             logger.info("System commands registration completed")
 
-            # Register MCP commands if MCP integration is available
-            if (
-                hasattr(self, "llm_service")
-                and self.llm_service
-                and hasattr(self.llm_service, "mcp_integration")
-            ):
-                from kollabor.commands.mcp_command import register_mcp_commands
+            # Register MCP commands before AltView discovery so the /mcp
+            # manager can take bare /mcp while delegating subcommands.
+            from kollabor.commands.mcp_command import register_mcp_commands
 
-                try:
-                    self.mcp_commands = register_mcp_commands(
-                        command_registry=self.input_handler.command_registry,
-                        mcp_integration=self.llm_service.mcp_integration,
-                        renderer=self.renderer,
-                        app=self,
-                    )
-                    logger.info("MCP commands registered successfully")
-                except Exception as e:
-                    logger.warning(f"Failed to register MCP commands: {e}")
+            try:
+                llm_service = getattr(self, "llm_service", None)
+                mcp_integration = (
+                    getattr(llm_service, "mcp_integration", None)
+                    if llm_service
+                    else getattr(self, "mcp_integration", None)
+                )
+                self.mcp_commands = register_mcp_commands(
+                    command_registry=self.input_handler.command_registry,
+                    mcp_integration=mcp_integration,
+                    renderer=self.renderer,
+                    app=self,
+                )
+                logger.info("MCP commands registered successfully")
+            except Exception as e:
+                logger.warning(f"Failed to register MCP commands: {e}")
 
             stats = self.input_handler.command_registry.get_registry_stats()
             logger.info("Slash command system initialized with system commands")

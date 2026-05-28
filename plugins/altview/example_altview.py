@@ -61,6 +61,7 @@ class ExampleAltView(AltView):
 
         # Lower FPS -- this is a simple counter, not an animation
         self.target_fps = 10.0
+        self.render_on_timer = True
 
         # Persistent state (survives suspend/resume)
         self.frame_count: int = 0

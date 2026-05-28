@@ -166,7 +166,7 @@ fully migrated (works in attach mode):
   /agent set /agent clear
   /skills load /skills unload
   /permissions (all subcommands)
-  /mcp show /mcp enable /mcp disable /mcp test /mcp tools
+  /mcp show /mcp servers /mcp enable /mcp disable /mcp test /mcp tools
   /resume <id>                    (one-shot resume by id)
   /save (all formats)
   /hub status /hub whoami /hub work
@@ -363,19 +363,22 @@ type / in the input box to open the command menu.
 
 ### tools
 
+  /mcp                            open MCP manager
+    manager key: g                toggle global MCP on/off
   /mcp <sub>                      manage MCP servers
     aliases: /mcps, /servers
     show                          show MCP status
+    servers                       alias for show
     list                          alias for show
-    setup                         interactive setup wizard
+    setup                         open MCP manager
     test <server>                 test connection (state_service)
     tools [server]                show available tools (state_service)
     enable <server>               enable server (state_service)
     disable <server>              disable server (state_service)
 
-    phase 4.5 migrated enable/disable/test/tools through state_service
-    so they work in attach mode. show still does direct file read for
-    speed (safe fallback).
+    phase 4.5 migrated show/servers/enable/disable/test/tools through
+    state_service so they work in attach mode. show still has the direct
+    renderer fallback for CLI-only contexts.
 
   /widgets [name]                 interactive widget gallery
     aliases: /showcase, /storybook

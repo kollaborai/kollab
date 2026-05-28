@@ -675,19 +675,40 @@ class TestMCPCommandHandler(unittest.TestCase):
             app=app,
         )
 
-    def test_mcp_no_integration_no_args(self):
+    def test_mcp_setup_reports_manager_unavailable_without_altview(self):
         handler = self._make_handler()
-        result = _safe_run(handler.handle_mcp(_make_slash_command()))
-        _assert_result(result)
-        from kollabor_events.models import CommandResult
 
-        assert isinstance(result, CommandResult)
-        assert not result.success  # no mcp_integration -> graceful failure
+        result = _safe_run(handler.handle_mcp(_make_slash_command("setup")))
+
+        _assert_result(result)
+        assert not result.success
+        assert "Interactive MCP manager not available" in result.message
 
     def test_mcp_no_integration_show(self):
         handler = self._make_handler()
         result = _safe_run(handler.handle_mcp(_make_slash_command("show")))
         _assert_result(result)
+
+    def test_mcp_servers_alias_shows_status(self):
+        state_service = MagicMock()
+        state_service.get_mcp_state = AsyncMock(
+            return_value=SimpleNamespace(
+                total_servers=0,
+                connected_servers=0,
+                total_tools=0,
+                servers=[],
+            )
+        )
+        app = MagicMock()
+        app.event_bus = _make_event_bus({"state_service": state_service})
+
+        handler = self._make_handler(mcp_integration=MagicMock(), app=app)
+        result = _safe_run(handler.handle_mcp(_make_slash_command("servers")))
+
+        _assert_result(result)
+        state_service.get_mcp_state.assert_awaited_once()
+        assert result.success
+        assert "MCP SERVERS" in result.message
 
     def test_mcp_reload_uses_state_service(self):
         state_service = MagicMock()

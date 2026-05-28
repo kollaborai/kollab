@@ -96,9 +96,16 @@ class AltViewSession:
             target_fps=self.altview.target_fps,
             input_poll_rate=100.0,
             name=f"AltView[{self.session_name}]",
+            render_on_timer=bool(getattr(self.altview, "render_on_timer", False)),
         )
-        await self._render_loop.run()
-        self._render_loop = None
+        if hasattr(self.altview, "_set_render_loop"):
+            self.altview._set_render_loop(self._render_loop)
+        try:
+            await self._render_loop.run()
+        finally:
+            if hasattr(self.altview, "_set_render_loop"):
+                self.altview._set_render_loop(None)
+            self._render_loop = None
 
     async def exit(self) -> None:
         """Exit session. Does NOT destroy it -- can be re-entered later."""

@@ -7,7 +7,7 @@ import pytest
 
 from kollabor.altview.command_integration import AltViewCommandIntegrator
 from kollabor_events.models import EventType
-from kollabor_tui.altview.base import AltViewState
+from kollabor_tui.altview.base import AltView, AltViewMetadata, AltViewState
 from kollabor_tui.altview.session import AltViewSession
 from kollabor_tui.altview.stack_manager import AltViewStackManager
 from kollabor_tui.status.altview_widget import render_altview_status
@@ -135,6 +135,37 @@ class _HookBus:
         self.unregistered = (plugin_name, hook_name)
 
 
+class _RenderLoopSpy:
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        _RenderLoopSpy.instances.append(self)
+
+    async def run(self):
+        return True
+
+
+class _RenderableAltView(AltView):
+    def __init__(self) -> None:
+        super().__init__(
+            AltViewMetadata(
+                plugin_type="renderable-test",
+                supports_background=False,
+            )
+        )
+
+    async def on_enter(self, renderer):
+        self._renderer = renderer
+
+    async def render_frame(self, delta_time: float) -> bool:
+        return True
+
+    async def handle_input(self, key_press) -> bool:
+        return False
+
+
 @pytest.mark.asyncio
 async def test_session_exit_cleans_up_when_suspend_fails():
     altview = _AltViewForExit()
@@ -158,6 +189,46 @@ async def test_session_exit_cleans_up_when_suspend_fails():
     )
     assert session._input_hook_registered is False
     assert altview.state == AltViewState.SUSPENDED
+
+
+@pytest.mark.asyncio
+async def test_altview_sessions_disable_timer_redraws_by_default(monkeypatch):
+    _RenderLoopSpy.instances = []
+    monkeypatch.setattr(
+        "kollabor_tui.altview.session.EventDrivenRenderLoop",
+        _RenderLoopSpy,
+    )
+    altview = SimpleNamespace(target_fps=15.0)
+    session = AltViewSession(altview, _HookBus(), "static-altview")
+
+    await session.run_loop()
+
+    assert _RenderLoopSpy.instances[0].kwargs["render_on_timer"] is False
+
+
+@pytest.mark.asyncio
+async def test_altview_sessions_allow_timer_redraws_only_when_opted_in(monkeypatch):
+    _RenderLoopSpy.instances = []
+    monkeypatch.setattr(
+        "kollabor_tui.altview.session.EventDrivenRenderLoop",
+        _RenderLoopSpy,
+    )
+    altview = SimpleNamespace(target_fps=60.0, render_on_timer=True)
+    session = AltViewSession(altview, _HookBus(), "animated-altview")
+
+    await session.run_loop()
+
+    assert _RenderLoopSpy.instances[0].kwargs["render_on_timer"] is True
+
+
+def test_altview_request_render_delegates_to_render_loop():
+    altview = _RenderableAltView()
+    render_loop = SimpleNamespace(request_render=Mock())
+
+    altview._set_render_loop(render_loop)
+    altview.request_render()
+
+    render_loop.request_render.assert_called_once()
 
 
 def _status_ctx(stack_manager):

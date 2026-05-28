@@ -1,8 +1,14 @@
 """Tests for native tool-call routing in the TUI LLM path."""
 
+import sys
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "packages" / "kollabor-agent" / "src"))
 
 from kollabor_agent.native_tools_handler import NativeToolsHandler
 
@@ -22,6 +28,13 @@ class FakeProfileManager:
 
 class FakeConfig:
     def get(self, key, default=None):
+        return default
+
+
+class DisabledMcpConfig:
+    def get(self, key, default=None):
+        if key == "plugins.mcp.enabled":
+            return False
         return default
 
 
@@ -92,3 +105,36 @@ async def test_registered_mcp_native_tool_remains_mcp_tool():
     assert tool_call["type"] == "mcp_tool"
     assert tool_call["name"] == "browser_get_page"
     assert tool_call["arguments"] == {"tab": "active"}
+
+
+@pytest.mark.asyncio
+async def test_global_mcp_disabled_skips_background_discovery():
+    mcp_integration = SimpleNamespace(discover_mcp_servers=AsyncMock())
+    handler = NativeToolsHandler(
+        mcp_integration=mcp_integration,
+        profile_manager=FakeProfileManager(),
+        api_service=FakeApiService([]),
+        config=DisabledMcpConfig(),
+    )
+
+    await handler.background_discovery()
+
+    mcp_integration.discover_mcp_servers.assert_not_awaited()
+    assert handler.discovery_complete.is_set()
+    assert handler.tools is None
+
+
+@pytest.mark.asyncio
+async def test_global_mcp_disabled_skips_native_tool_loading():
+    mcp_integration = SimpleNamespace(get_tool_definitions_for_api=Mock())
+    handler = NativeToolsHandler(
+        mcp_integration=mcp_integration,
+        profile_manager=FakeProfileManager(),
+        api_service=FakeApiService([]),
+        config=DisabledMcpConfig(),
+    )
+
+    await handler.load_tools()
+
+    mcp_integration.get_tool_definitions_for_api.assert_not_called()
+    assert handler.tools is None

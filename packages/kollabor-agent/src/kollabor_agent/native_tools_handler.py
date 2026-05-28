@@ -45,6 +45,10 @@ class NativeToolsHandler:
         # Synchronization for MCP discovery (prevent race condition on first API call)
         self.discovery_complete = asyncio.Event()
 
+    def _mcp_enabled(self) -> bool:
+        """Whether the MCP subsystem is globally enabled."""
+        return bool(self.config.get("plugins.mcp.enabled", True))
+
     async def background_discovery(self) -> None:
         """Discover MCP servers in background (non-blocking).
 
@@ -53,6 +57,11 @@ class NativeToolsHandler:
         Sets discovery_complete event when finished (success or failure).
         """
         try:
+            if not self._mcp_enabled():
+                logger.info("MCP disabled in global config; skipping discovery")
+                self.tools = None
+                return
+
             discovered_servers = await self.mcp_integration.discover_mcp_servers()
             logger.info(
                 f"Background MCP discovery: found {len(discovered_servers)} servers"
@@ -80,6 +89,11 @@ class NativeToolsHandler:
         Both must be True for native tools to be loaded. When disabled,
         the LLM uses XML tags (<terminal>, <tool>, etc.) instead.
         """
+        if not self._mcp_enabled():
+            logger.info("MCP disabled in global config")
+            self.tools = None
+            return
+
         # Check global config setting
         if not self.tool_calling_enabled:
             logger.info("Native tool calling disabled in global config")
