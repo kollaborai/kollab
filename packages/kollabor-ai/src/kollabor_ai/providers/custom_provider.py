@@ -11,6 +11,7 @@ import aiohttp
 from pydantic import field_validator
 
 from .base import LLMProvider
+from .message_sanitizer import strip_local_message_metadata
 from .models import (
     ProviderConfig,
     ProviderType,
@@ -100,7 +101,7 @@ class CustomProvider(LLMProvider):
 
         payload = {
             "model": self.config.model,
-            "messages": messages,
+            "messages": strip_local_message_metadata(messages),
             "stream": stream,
         }
 

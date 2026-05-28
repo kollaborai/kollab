@@ -59,3 +59,11 @@ def test_pyproject_license_metadata_uses_spdx_strings() -> None:
 
         assert license_value in (None, "MIT"), pyproject_path
         assert "License :: OSI Approved :: MIT License" not in classifiers
+
+
+def test_kollabor_ai_declares_keyring_dependency_for_secret_sentinels() -> None:
+    pyproject_path = ROOT / "packages" / "kollabor-ai" / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    dependencies = pyproject["project"].get("dependencies", [])
+
+    assert any(dep.lower().startswith("keyring") for dep in dependencies)

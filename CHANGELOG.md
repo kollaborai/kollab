@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-05-28
+
+### Fixed
+
+- Fixed provider requests so local-only agent HUD metadata stays in local logs
+  but is stripped before payloads are sent to OpenAI, Anthropic, OpenRouter, and
+  custom provider APIs.
+- Fixed OpenAI Responses tool output handling so oversized function outputs are
+  capped before hitting the API's per-string payload limit.
+- Fixed installed `kollab` environments that use keyring-backed profile secrets
+  by declaring the `keyring` dependency in `kollabor-ai`.
+
 ## [0.5.13] - 2026-05-27
 
 ### Added

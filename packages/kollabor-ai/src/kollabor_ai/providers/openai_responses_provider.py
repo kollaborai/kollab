@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
 from .errors import AuthenticationError, ProviderError, map_openai_error
+from .message_sanitizer import strip_local_message_metadata_from_message
 from .models import (
     OpenAIResponsesConfig,
     ProviderConfig,
@@ -36,6 +37,17 @@ from .openai_responses_transformer import OpenAIResponsesTransformer
 from .registry import register_provider
 
 logger = logging.getLogger(__name__)
+
+RESPONSES_TOOL_OUTPUT_MAX_CHARS = 10_485_760
+
+
+def _cap_function_call_output(output: str) -> str:
+    if len(output) <= RESPONSES_TOOL_OUTPUT_MAX_CHARS:
+        return output
+
+    suffix = f"\n[output truncated for Responses API: {len(output)} chars total]"
+    prefix_len = max(RESPONSES_TOOL_OUTPUT_MAX_CHARS - len(suffix), 0)
+    return output[:prefix_len] + suffix
 
 
 @register_provider(ProviderType.OPENAI_RESPONSES)
@@ -510,7 +522,9 @@ class OpenAIResponsesProvider(LLMProvider):
                     {
                         "type": "function_call_output",
                         "call_id": msg.get("tool_call_id", ""),
-                        "output": msg.get("content", ""),
+                        "output": _cap_function_call_output(
+                            str(msg.get("content", ""))
+                        ),
                     }
                 )
             elif role == "assistant" and "tool_calls" in msg:
@@ -535,8 +549,15 @@ class OpenAIResponsesProvider(LLMProvider):
                             "arguments": func.get("arguments", "{}"),
                         }
                     )
+            elif role in ("user", "assistant", "developer"):
+                input_messages.append(
+                    {
+                        "role": role,
+                        "content": msg.get("content", ""),
+                    }
+                )
             else:
-                input_messages.append(msg)
+                input_messages.append(strip_local_message_metadata_from_message(msg))
 
         # Add instructions (codex backend requires this field)
         if instructions:
@@ -634,7 +655,7 @@ class OpenAIResponsesProvider(LLMProvider):
         return {
             "type": "function_call_output",
             "call_id": tool_call_id,
-            "output": output,
+            "output": _cap_function_call_output(output),
         }
 
     async def _parse_sse_stream(

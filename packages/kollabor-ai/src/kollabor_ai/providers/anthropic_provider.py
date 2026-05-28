@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
 from .errors import map_anthropic_error
+from .message_sanitizer import strip_local_message_metadata_from_message
 from .models import (
     AnthropicConfig,
     ProviderType,
@@ -393,7 +394,9 @@ class AnthropicProvider(LLMProvider):
                 # `content` in place and the raw log looks like duplicate
                 # data was sent when the API actually received one merged
                 # message.
-                anthropic_messages.append(dict(msg))
+                anthropic_messages.append(
+                    strip_local_message_metadata_from_message(msg)
+                )
 
         # Merge consecutive same-role messages (Anthropic requires alternating roles)
         # This happens when multiple tool results create multiple "user" messages
