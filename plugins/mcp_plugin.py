@@ -77,7 +77,12 @@ class MCPPlugin:
             from kollabor.commands.mcp_command import register_mcp_commands
 
             if command_registry:
-                # Register commands even without MCP integration - users need /mcp setup
+                existing = command_registry.get_command("mcp")
+                if existing and getattr(existing, "plugin_name", "") == "altview_integrator":
+                    self.logger.info("MCP command already owned by AltView manager")
+                    return
+
+                # Register commands even without MCP integration - users need /mcp
                 # Phase 4.5 step 10: pass event_bus via a lightweight app-like
                 # object so _get_state_service can look up state_service. The
                 # previous `app=None` prevented state_service access and broke

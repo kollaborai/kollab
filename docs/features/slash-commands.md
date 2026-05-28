@@ -37,7 +37,7 @@ Use arrow keys to navigate, Enter to execute.
 | `/save` | - | Save conversation (transcript, markdown, jsonl, clipboard) |
 | `/profile` | `/prof`, `/llm` | Manage LLM profiles (list, set, create) |
 | `/permissions` | `/perms`, `/security` | Manage permission modes |
-| `/mcp` | - | Manage MCP servers (show, add, remove) |
+| `/mcp` | `/mcps`, `/servers` | Open the MCP manager |
 | `/resume` | - | Resume previous conversation |
 | `/terminal` | `/tmux`, `/t` | Manage tmux sessions |
 | `/login` | - | OAuth login for providers |
@@ -54,11 +54,14 @@ Many commands support subcommands:
 /profile set claude → Switches to claude profile
 /profile create   → Create new profile
 
-/mcp              → Shows server status
+/mcp              → Opens MCP manager
 /mcp show         → Shows server details
-/mcp add          → Add new server
-/mcp remove       → Remove server
+/mcp servers      → Shows server details
+/mcp setup        → Opens MCP manager
+/mcp tools        → Shows available tools
 ```
+
+In the MCP manager, press `g` to toggle global MCP on/off.
 
 ## Command Categories
 

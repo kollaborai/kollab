@@ -80,6 +80,10 @@ class AltView(ABC):
 
         # frame rate control -- subclasses can override
         self.target_fps: float = 20.0
+        # Static AltViews should redraw through request_render() on input/data
+        # changes. Animated/live views can opt into timer frames explicitly.
+        self.render_on_timer: bool = False
+        self._render_loop: Optional[Any] = None
 
         logger.info("AltView created: %s", metadata.plugin_type)
 
@@ -99,6 +103,15 @@ class AltView(ABC):
     def renderer(self) -> Optional[Any]:
         """The renderer assigned to this view."""
         return self._renderer
+
+    def _set_render_loop(self, render_loop: Optional[Any]) -> None:
+        """Attach the active render loop for request_render delegation."""
+        self._render_loop = render_loop
+
+    def request_render(self) -> None:
+        """Ask the active AltView render loop for an immediate redraw."""
+        if self._render_loop and hasattr(self._render_loop, "request_render"):
+            self._render_loop.request_render()
 
     @property
     def background_tasks(self) -> List[asyncio.Task]:

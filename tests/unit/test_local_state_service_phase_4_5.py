@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from kollabor.state import (
@@ -113,6 +114,52 @@ def _make_llm_service(*, with_inject: bool = True) -> MagicMock:
         if hasattr(llm, "inject_system_message"):
             del llm.inject_system_message
     return llm
+
+
+# === MCP global enable ===
+
+
+class TestMcpGlobalEnabled(unittest.IsolatedAsyncioTestCase):
+    async def test_get_mcp_state_is_empty_when_global_mcp_is_disabled(self) -> None:
+        llm = _make_llm_service()
+        llm.config = MagicMock()
+        llm.config.get.return_value = False
+        llm.mcp_integration = SimpleNamespace(
+            server_connections={"github": SimpleNamespace(initialized=True)},
+            tool_registry={"repo_search": {"server": "github"}},
+        )
+        svc = LocalStateService(
+            llm_service=llm,
+            profile_manager=MagicMock(),
+        )
+
+        snap = await svc.get_mcp_state()
+
+        self.assertEqual(snap.total_servers, 0)
+        self.assertEqual(snap.total_tools, 0)
+        self.assertEqual(snap.connected_servers, 0)
+
+    async def test_reload_mcp_servers_shutdowns_when_global_mcp_is_disabled(
+        self,
+    ) -> None:
+        llm = _make_llm_service()
+        llm.config = MagicMock()
+        llm.config.get.return_value = False
+        mcp = SimpleNamespace(
+            mcp_servers={"github": {"enabled": True}},
+            shutdown=AsyncMock(),
+        )
+        llm.mcp_integration = mcp
+        svc = LocalStateService(
+            llm_service=llm,
+            profile_manager=MagicMock(),
+        )
+
+        summary = await svc.reload_mcp_servers()
+
+        mcp.shutdown.assert_awaited_once()
+        self.assertTrue(summary["disabled"])
+        self.assertEqual(summary["reconnected"], 0)
 
 
 # === Agents ===

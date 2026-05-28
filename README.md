@@ -317,9 +317,12 @@ launch files, and experimental DNS-style identity and trust commands. Start with
 
 ```text
 /permissions
+/mcp
 /mcp show
-/mcp add
 ```
+
+Inside `/mcp`, press `g` to toggle the global MCP subsystem, or manage
+individual configured servers with the per-server actions.
 
 MCP tools run through the same approval system as native tools. See
 [docs/features/permissions.md](docs/features/permissions.md) and
@@ -356,7 +359,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/terminal` | Manage terminal sessions |
 | `/permissions` | Configure tool approval modes |
 | `/login` | Run provider login flows |
-| `/mcp` | Manage MCP servers |
+| `/mcp` | Open the MCP manager |
 | `/resume` | Resume a previous conversation |
 | `/config` | Open the settings editor |
 | `/help` | Show available commands |

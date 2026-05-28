@@ -2,8 +2,9 @@
 
 from kollabor.commands.registry import SlashCommandRegistry
 from kollabor.commands.system_commands.plugin import SystemCommandsPlugin
-from kollabor_events.models import CommandResult
+from kollabor_events.models import CommandMode, CommandResult
 from kollabor_tui.input.command_mode_handler import CommandModeHandler
+from kollabor_tui.key_parser import KeyPress, KeyType
 
 
 class BufferManager:
@@ -91,3 +92,38 @@ def test_mode_exact_search_does_not_include_model():
     SystemCommandsPlugin(command_registry=registry, event_bus=EventBus()).register_commands()
 
     assert [command.name for command in registry.search_commands("mode")] == ["mode"]
+
+
+def test_ctrl_u_exits_command_mode_and_clears_menu():
+    """Clearing a slash menu should not leave hidden command-mode state behind."""
+    import asyncio
+
+    menu = CommandMenuRenderer({"name": "mcp"})
+    handler = CommandModeHandler(
+        buffer_manager=BufferManager("/mcp"),
+        renderer=None,
+        event_bus=EventBus(),
+        command_registry=CommandRegistry(),
+        command_executor=CommandExecutor(),
+        command_menu_renderer=menu,
+        slash_parser=SlashParser(),
+    )
+    handler.command_mode = CommandMode.MENU_POPUP
+    handler.command_menu_active = True
+
+    handled = asyncio.run(
+        handler.handle_menu_popup_keypress(
+            KeyPress(
+                name="Ctrl+U",
+                code=21,
+                type=KeyType.CONTROL,
+                modifiers={"ctrl": True},
+            )
+        )
+    )
+
+    assert handled
+    assert handler.command_mode == CommandMode.NORMAL
+    assert handler.command_menu_active is False
+    assert handler.buffer_manager.content == ""
+    assert menu.hidden is True

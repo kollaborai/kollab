@@ -50,6 +50,7 @@ class LoginAltView(AltView):
         super().__init__(metadata)
 
         self.target_fps = 10.0
+        self.render_on_timer = True
 
         # OAuth state
         self._stage: str = "init"

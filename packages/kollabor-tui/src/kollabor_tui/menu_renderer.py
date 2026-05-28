@@ -521,11 +521,9 @@ class CommandMenuRenderer:
                 f"{_make_fg(T().text)}{desc}{RESET}"
             )
         else:
-            # Unselected subcommand - dimmed
-            line = (
-                f"      {_make_fg(T().secondary[1])}{cmd_padded}{RESET} "
-                f"{solid_fg(desc, T().text_dim)}"
-            )
+            text = f"      {cmd_padded} {desc}"
+            width = self._get_menu_width()
+            line = solid(text.ljust(width), T().dark[0], T().text, width)
 
         return self._normalize_line_width(line)
 
@@ -690,7 +688,8 @@ class CommandMenuRenderer:
             line = solid(text, T().input_bg[1], T().text, line_width)
             return self._normalize_line_width(line)
         else:
-            # NOT SELECTED: Dimmed with dot leader
+            # NOT SELECTED: keep a solid surface so terminal wallpaper never
+            # bleeds through and lowers contrast.
             name_str = f"/{name}"
             name_col_width = 14
 
@@ -702,10 +701,11 @@ class CommandMenuRenderer:
             # Dot leader
             dots = DOT * max(2, name_col_width - len(name_str))
 
-            line = (
-                f"   {solid(f' {name_str} ', T().dark[0], T().secondary[1], name_col_width)}"
-                f" {solid_fg(f'{dots} {description}', T().text_dim)}"
+            text = (
+                f"   {name_str.ljust(name_col_width)} "
+                f"{dots} {description}"
             )
+            line = solid(text.ljust(line_width), T().dark[0], T().text, line_width)
             return self._normalize_line_width(line)
 
     def _display_menu_overlay(self, menu_lines: List[str]) -> None:

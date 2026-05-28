@@ -44,6 +44,7 @@ class HubFeedAltView(AltView):
         super().__init__(metadata)
 
         self.target_fps = 1.0
+        self.render_on_timer = True
         self._feed: Any = None
         self._scroll_offset = 0
 

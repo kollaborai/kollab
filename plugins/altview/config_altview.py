@@ -255,6 +255,48 @@ class ConfigAltView(AltView):
                     count += 1
         return count
 
+    def _visible_window(
+        self, widget_heights: List[int], available_height: int
+    ) -> tuple[int, int]:
+        """Return the first/last visible widget indices around selection."""
+        if not widget_heights:
+            return (0, 0)
+
+        count = len(widget_heights)
+        available_height = max(1, available_height)
+        selected = max(0, min(self._sel_widget, count - 1))
+        offset = max(0, min(self._scroll_offset, count - 1))
+
+        if selected < offset:
+            offset = selected
+
+        def last_visible_from(start: int) -> int:
+            used = 0
+            last = start
+            for index in range(start, count):
+                height = max(1, widget_heights[index])
+                if used + height > available_height and index > start:
+                    break
+                used += height
+                last = index
+                if used >= available_height:
+                    break
+            return last
+
+        last_visible = last_visible_from(offset)
+        if selected > last_visible:
+            offset = selected
+            used = max(1, widget_heights[selected])
+            while offset > 0:
+                previous_height = max(1, widget_heights[offset - 1])
+                if used + previous_height > available_height:
+                    break
+                offset -= 1
+                used += previous_height
+            last_visible = last_visible_from(offset)
+
+        return (offset, last_visible)
+
     # -- rendering ----------------------------------------------------------
 
     async def render_frame(self, delta_time: float) -> bool:
@@ -391,41 +433,20 @@ class ConfigAltView(AltView):
         available = height - (y - top) - 1
         widget_heights = [len(lines) for lines in rendered_widgets]
 
-        # Scroll: ensure selected widget is visible
-        if self._sel_widget < self._scroll_offset:
-            self._scroll_offset = self._sel_widget
-
-        # Calculate how many widgets fit from scroll_offset
-        visible_height = 0
-        last_visible = self._scroll_offset
-        for i in range(self._scroll_offset, len(rendered_widgets)):
-            h = widget_heights[i]
-            if visible_height + h > available and i > self._scroll_offset:
-                break
-            visible_height += h
-            last_visible = i
-
-        if self._sel_widget > last_visible:
-            # Scroll forward to make selected visible
-            self._scroll_offset = self._sel_widget
-            # Re-calculate from new offset
-            visible_height = 0
-            for i in range(self._scroll_offset, len(rendered_widgets)):
-                h = widget_heights[i]
-                if visible_height + h > available and i > self._scroll_offset:
-                    break
-                visible_height += h
-
-        self._scroll_offset = max(0, self._scroll_offset)
+        self._scroll_offset, last_visible = self._visible_window(
+            widget_heights, available
+        )
 
         # Render visible widgets
+        rendered_height = 0
         for wi in range(self._scroll_offset, len(rendered_widgets)):
             lines = rendered_widgets[wi]
-            if y - top + len(lines) > available:
+            if rendered_height + len(lines) > available and wi > self._scroll_offset:
                 break
             for line in lines:
                 self._renderer.write_at(2, y, line, "")
                 y += 1
+            rendered_height += len(lines)
 
         # Scroll indicator
         if len(vis_widgets) > last_visible - self._scroll_offset + 1:

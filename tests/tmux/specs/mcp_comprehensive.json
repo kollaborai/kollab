@@ -31,11 +31,11 @@
     { "action": "clear_input" },
     { "action": "sleep", "seconds": 0.3 },
 
-    { "action": "section", "title": "Test 3: /mcp setup - wizard available" },
-    { "action": "slash_command", "command": "mcp", "subcommand": "setup" },
+    { "action": "section", "title": "Test 3: /mcp - manager available" },
+    { "action": "slash_command", "command": "mcp" },
     { "action": "sleep", "seconds": 1 },
     { "action": "capture" },
-    { "action": "assert_contains", "pattern": "Setup|Wizard|Server|config|MCP", "description": "/mcp setup activates" },
+    { "action": "assert_contains", "pattern": "MCP Manager|mcp:on|g global", "description": "/mcp activates manager with global toggle" },
     { "action": "escape" },
     { "action": "sleep", "seconds": 0.5 },
 

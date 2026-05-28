@@ -71,6 +71,7 @@ class AltViewCommandIntegrator:
         self._stack_manager: Optional["AltViewStackManager"] = None
         self._plugin_classes: Dict[str, Type] = {}
         self._plugin_instances: Dict[str, object] = {}
+        self._command_delegates: Dict[str, CommandDefinition] = {}
 
         logger.info("AltView command integrator initialized")
 
@@ -212,24 +213,39 @@ class AltViewCommandIntegrator:
 
             self._plugin_classes[plugin_name] = plugin_class
 
+            existing_command = self.command_registry.get_command(plugin_name)
+
+            # The MCP AltView intentionally owns bare /mcp while preserving the
+            # existing /mcp subcommands through the prior command handler.
+            if plugin_name == "mcp" and existing_command is not None:
+                self._command_delegates[plugin_name] = existing_command
+                self.command_registry.unregister_command(plugin_name)
+                logger.info("AltView command '%s' replacing existing command", plugin_name)
+
             # Skip if command already registered (e.g. by fullscreen_integrator)
-            if self.command_registry.get_command(plugin_name):
+            elif existing_command is not None:
                 logger.debug(
                     "Skipping AltView command '%s' - already registered",
                     plugin_name,
                 )
                 return True
 
+            delegate = self._command_delegates.get(plugin_name)
             command_def = CommandDefinition(
                 name=plugin_name,
-                aliases=getattr(metadata, "aliases", None) or [],
+                aliases=(
+                    getattr(delegate, "aliases", None)
+                    or getattr(metadata, "aliases", None)
+                    or []
+                ),
                 description=metadata.description,
-                category=CommandCategory.CUSTOM,
+                category=getattr(delegate, "category", CommandCategory.CUSTOM),
                 mode=CommandMode.ALTVIEW,
                 handler=self._create_plugin_handler(plugin_name),
                 icon=getattr(metadata, "icon", ""),
                 plugin_name="altview_integrator",
                 cli_hidden=False,
+                subcommands=getattr(delegate, "subcommands", None) or [],
             )
 
             success = self.command_registry.register_command(command_def)
@@ -269,16 +285,30 @@ class AltViewCommandIntegrator:
         async def handler(command):
             """Handle command execution for AltView plugin."""
             try:
+                args = getattr(command, "args", None) or []
+                delegate = self._command_delegates.get(plugin_name)
+                if (
+                    plugin_name == "mcp"
+                    and delegate is not None
+                    and args
+                    and str(args[0]).lower() != "setup"
+                ):
+                    return await delegate.handler(command)
+
                 stack_mgr = self._get_stack_manager()
 
-                session_name = self._parse_session_name(command, plugin_name)
+                session_name = (
+                    "mcp"
+                    if plugin_name == "mcp"
+                    else self._parse_session_name(command, plugin_name)
+                )
                 altview = self._get_or_create_altview(plugin_name, session_name)
                 mcp_manager = None
 
                 if hasattr(altview, "set_app") and self.app:
                     altview.set_app(self.app)
 
-                if plugin_name == "mcp-wizard" and hasattr(altview, "set_config"):
+                if plugin_name == "mcp" and hasattr(altview, "set_config"):
                     mcp_manager = (
                         getattr(self.app, "mcp_manager", None) if self.app else None
                     )
@@ -287,54 +317,34 @@ class AltViewCommandIntegrator:
                     example_config = mcp_manager.load_example_config() or {}
                     current_config = mcp_manager.load_config() or {}
                     altview.set_config(example_config, current_config)
+                    if hasattr(altview, "set_context"):
+                        event_bus = getattr(self.app, "event_bus", None) if self.app else None
+                        state_service = (
+                            event_bus.get_service("state_service")
+                            if event_bus and hasattr(event_bus, "get_service")
+                            else None
+                        )
+                        llm_service = (
+                            getattr(self.app, "llm_service", None) if self.app else None
+                        )
+                        mcp_integration = None
+                        if self.app:
+                            mcp_integration = getattr(
+                                llm_service, "mcp_integration", None
+                            ) or getattr(self.app, "mcp_integration", None)
+                        altview.set_context(
+                            mcp_manager=mcp_manager,
+                            state_service=state_service,
+                            mcp_integration=mcp_integration,
+                            config_service=self.config,
+                            event_bus=event_bus,
+                            app=self.app,
+                        )
 
                 if hasattr(altview, "set_managers"):
                     altview.set_managers(self.config, self.profile_manager)
 
                 await stack_mgr.push(altview, session_name)
-
-                if plugin_name == "mcp-wizard":
-                    selected_servers = getattr(altview, "selected_servers", {}) or {}
-                    if selected_servers:
-                        if mcp_manager is None:
-                            mcp_manager = (
-                                getattr(self.app, "mcp_manager", None)
-                                if self.app
-                                else None
-                            )
-                            if mcp_manager is None:
-                                mcp_manager = MCPManager(
-                                    mcp_dir=resolve_global_path("mcp")
-                                )
-                        current_config = mcp_manager.load_config() or {}
-                        configured_servers = self._merge_existing_mcp_env(
-                            selected_servers, current_config
-                        )
-                        new_config = {"servers": configured_servers}
-                        mcp_manager.save_config(new_config)
-                        server_count = len(selected_servers)
-                        server_label = "server" if server_count == 1 else "servers"
-                        missing_env = self._find_missing_mcp_env(configured_servers)
-                        detail = ""
-                        if missing_env:
-                            detail = (
-                                f" {len(missing_env)} environment value(s) still "
-                                "need to be filled in before those servers can run."
-                            )
-                        return CommandResult(
-                            success=True,
-                            message=(
-                                f"Configured {server_count} MCP {server_label} and "
-                                f"saved to disk.{detail}"
-                            ),
-                            display_type="success",
-                        )
-
-                    return CommandResult(
-                        success=True,
-                        message="MCP wizard cancelled; no changes saved",
-                        display_type="info",
-                    )
 
                 return CommandResult(
                     success=True,
@@ -351,49 +361,6 @@ class AltViewCommandIntegrator:
                 )
 
         return handler
-
-    def _merge_existing_mcp_env(
-        self,
-        selected_servers: Dict[str, Dict],
-        current_config: Dict,
-    ) -> Dict[str, Dict]:
-        """Preserve existing MCP env values when the AltView wizard saves.
-
-        The AltView wizard only handles server selection; it does not
-        collect API keys. When a user re-saves an already configured
-        server, keep any existing env values instead of replacing them
-        with example placeholders.
-        """
-        current_servers = current_config.get("servers", {})
-        configured_servers: Dict[str, Dict] = {}
-
-        for server_name, server_config in selected_servers.items():
-            configured = dict(server_config)
-            existing_env = current_servers.get(server_name, {}).get("env", {})
-            if existing_env:
-                env = dict(configured.get("env", {}))
-                for key, existing_value in existing_env.items():
-                    candidate = env.get(key)
-                    if existing_value and (
-                        candidate is None or str(candidate).endswith("-here")
-                    ):
-                        env[key] = existing_value
-                configured["env"] = env
-            configured_servers[server_name] = configured
-
-        return configured_servers
-
-    def _find_missing_mcp_env(self, configured_servers: Dict[str, Dict]) -> List[str]:
-        """Return missing or placeholder env entries without exposing values."""
-        missing: List[str] = []
-        for server_name, server_config in configured_servers.items():
-            env = server_config.get("env", {})
-            if not isinstance(env, dict):
-                continue
-            for key, value in env.items():
-                if not value or str(value).endswith("-here"):
-                    missing.append(f"{server_name}.{key}")
-        return missing
 
     def _parse_session_name(self, command, plugin_name: str) -> str:
         """Extract session name from command args or generate one.

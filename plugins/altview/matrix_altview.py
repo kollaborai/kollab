@@ -1,15 +1,6 @@
 """Matrix rain effect as an AltView plugin."""
 
 import asyncio
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 import logging
 from typing import Any
 
@@ -18,6 +9,14 @@ from kollabor_tui.fullscreen.components.matrix_components import MatrixRenderer
 from kollabor_tui.key_parser import KeyPress
 
 logger = logging.getLogger(__name__)
+
+
+def _get_loop():
+    """Return the running event loop, or create one if none is running."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.new_event_loop()
 
 
 class MatrixAltView(AltView):
@@ -41,6 +40,7 @@ class MatrixAltView(AltView):
         super().__init__(metadata)
 
         self.target_fps: float = 60.0
+        self.render_on_timer = True
 
         self._matrix_renderer: MatrixRenderer | None = None
         self._start_time: float = 0.0

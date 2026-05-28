@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-05-27
+
+### Added
+
+- Added a full-screen `/mcp` manager for browsing configured and available MCP
+  servers, toggling servers, adding template servers, deleting configured
+  servers, testing, reloading, filtering, and inspecting tools/env status.
+- Added a global MCP on/off toggle inside the `/mcp` manager and wired startup,
+  reload, and native tool loading to respect the global setting.
+
+### Fixed
+
+- Fixed AltView flicker by making fullscreen views render on input, data, or
+  resize by default while live/animated views explicitly opt into timer redraws.
+- Fixed slash command submenu contrast so dim rows remain readable over the
+  terminal background.
+- Fixed long `/config` menus so the selected setting stays visible while
+  scrolling through off-screen items.
+
 ## [0.5.12] - 2026-05-26
 
 ### Fixed

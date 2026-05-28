@@ -1,7 +1,7 @@
-"""MCP (Model Context Protocol) management command with setup wizard.
+"""MCP (Model Context Protocol) management command with AltView manager fallback.
 
 Provides slash command interface for:
-- Interactive setup wizard for MCP configuration
+- Interactive MCP manager compatibility message
 - Viewing MCP server status
 - Listing available MCP tools
 - Managing MCP server connections (enable/disable)
@@ -479,7 +479,7 @@ class MCPCommandHandler:
             aliases=["mcps", "servers"],
             subcommands=[
                 SubcommandInfo(
-                    "setup", "", "Interactive setup wizard for MCP configuration"
+                    "setup", "", "Open interactive MCP manager"
                 ),
                 SubcommandInfo("list", "", "Show MCP status (alias for show)"),
                 SubcommandInfo(
@@ -488,6 +488,7 @@ class MCPCommandHandler:
                 SubcommandInfo("enable", "<server>", "Enable a specific MCP server"),
                 SubcommandInfo("disable", "<server>", "Disable a specific MCP server"),
                 SubcommandInfo("show", "", "Show MCP status panel"),
+                SubcommandInfo("servers", "", "Show MCP status (alias for show)"),
                 SubcommandInfo("reload", "", "Reload MCP config and reconnect servers"),
                 SubcommandInfo("tools", "[server]", "Show available MCP tools"),
             ],
@@ -507,26 +508,12 @@ class MCPCommandHandler:
         """
         args = command.args
 
-        # Setup wizard works without mcp_integration
-        if args and args[0].lower() == "setup":
-            return await self._run_setup_wizard()
-
-        # Other commands require mcp_integration
-        if not self.mcp_integration:
-            return CommandResult(
-                success=False,
-                message="MCP integration not available.\n\nRun /mcp setup to configure MCP servers.",
-                display_type="warning",
-            )
-
         if not args:
-            # Show help text followed by status
-            help_text = self._get_help_text()
-            status_result = await self._show_status()
-            combined = help_text + "\n\n" + status_result.message
-            return CommandResult(
-                success=True, message=combined, display_type="info"
-            )
+            return self._manager_unavailable_result()
+
+        # Compatibility alias; the AltView /mcp owner opens the manager in normal TUI use.
+        if args[0].lower() == "setup":
+            return self._manager_unavailable_result()
 
         subcommand = args[0].lower()
 
@@ -541,7 +528,7 @@ class MCPCommandHandler:
         elif subcommand == "disable":
             server_name = args[1] if len(args) > 1 else None
             return await self._toggle_server(server_name, enable=False)
-        elif subcommand in ("show", "status"):
+        elif subcommand in ("show", "status", "servers"):
             return await self._show_status()
         elif subcommand == "reload":
             return await self._reload_servers()
@@ -555,33 +542,16 @@ class MCPCommandHandler:
                 display_type="error",
             )
 
-    async def _run_setup_wizard(self) -> CommandResult:
-        """Run the interactive MCP setup wizard.
-
-        Returns:
-            Command execution result
-        """
-        try:
-            wizard = MCPSetupWizard(self.renderer, self.mcp_manager)
-            result = await wizard.run()
-
-            # Hot reload MCP servers after setup
-            if self.mcp_integration:
-                await self.mcp_integration.discover_mcp_servers()
-
-            # Convert dict result to CommandResult if needed
-            if isinstance(result, dict):
-                return CommandResult(
-                    success=result.get("success", True),
-                    message=str(
-                        result.get("output", result.get("message", "Setup complete"))
-                    ),
-                    display_type="success" if result.get("success", True) else "error",
-                )
-            return result
-        except Exception as e:
-            logger.error(f"Error running setup wizard: {e}")
-            return CommandResult(success=False, message=str(e), display_type="error")
+    def _manager_unavailable_result(self) -> CommandResult:
+        """Return the fallback message when the AltView manager is not registered."""
+        return CommandResult(
+            success=False,
+            message=(
+                "Interactive MCP manager not available in this runtime.\n\n"
+                "Use /mcp show for status, or run /mcp inside the TUI."
+            ),
+            display_type="warning",
+        )
 
     async def _reload_servers(self) -> CommandResult:
         """Reload MCP configuration and reconnect configured servers."""
@@ -698,7 +668,7 @@ class MCPCommandHandler:
                 success=False,
                 message=(
                     f"Server '{server_name}' not found in configuration.\n\n"
-                    f"{e}\n\nUse /mcp setup to configure MCP servers."
+                    f"{e}\n\nUse /mcp to configure MCP servers."
                 ),
                 display_type="error",
             )
@@ -965,18 +935,21 @@ class MCPCommandHandler:
         """
         return """MCP Command Usage:
 
-/mcp setup         - Interactive setup wizard for MCP configuration
+/mcp               - Open the interactive MCP manager
+/mcp setup         - Open the interactive MCP manager
 /mcp list          - List all MCP servers and their status
 /mcp test <server> - Test connection to a specific server
 /mcp enable <x>    - Enable a specific MCP server
 /mcp disable <x>   - Disable a specific MCP server
 /mcp show          - Show MCP status panel
+/mcp servers       - Show MCP status panel
 /mcp reload        - Reload MCP config and reconnect servers
 /mcp tools         - Show available MCP tools
 /mcp tools <x>     - Show tools from specific server
 
 Examples:
-  /mcp setup              - Run the setup wizard
+  /mcp                    - Open the MCP manager
+  /mcp setup              - Open the MCP manager
   /mcp test github        - Test GitHub server connection
   /mcp enable filesystem  - Enable filesystem server
   /mcp disable brave      - Disable Brave Search server
