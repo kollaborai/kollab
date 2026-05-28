@@ -508,6 +508,17 @@ class TestOpenAIResponsesProviderFormatToolResult:
 
         assert json.loads(tool_result["output"]) == result
 
+    def test_format_tool_result_caps_oversized_output(self, provider_config):
+        """The helper should obey Responses API's function output limit too."""
+        provider = OpenAIResponsesProvider(provider_config)
+        max_output_chars = 10_485_760
+        oversized_output = "x" * (max_output_chars + 30)
+
+        tool_result = provider._format_tool_result("call_001", oversized_output)
+
+        assert len(tool_result["output"]) == max_output_chars
+        assert "truncated" in tool_result["output"]
+
 
 class TestOpenAIResponsesProviderPrepareRequest:
     """Test request preparation."""
@@ -524,6 +535,58 @@ class TestOpenAIResponsesProviderPrepareRequest:
         assert request["stream"] is False
         assert "input" in request
         assert isinstance(request["input"], list)
+
+    def test_prepare_request_strips_local_metadata_from_input(self, provider_config):
+        """Local-only message metadata must not be sent to Responses API."""
+        provider = OpenAIResponsesProvider(provider_config)
+        messages = [
+            {
+                "role": "user",
+                "content": "<agent_hud>\n+ done\n</agent_hud>",
+                "agent_hud": True,
+                "agent_hud_sources": ["hub"],
+            },
+            {
+                "role": "assistant",
+                "content": "ack",
+                "agent_hud_sources": ["pending"],
+            },
+        ]
+
+        request = provider._prepare_request(messages, tools=None, stream=False)
+
+        assert request["input"] == [
+            {
+                "role": "user",
+                "content": "<agent_hud>\n+ done\n</agent_hud>",
+            },
+            {"role": "assistant", "content": "ack"},
+        ]
+
+    def test_prepare_request_caps_tool_output_at_responses_limit(
+        self, provider_config
+    ):
+        """Responses API rejects function_call_output strings above 10MB."""
+        provider = OpenAIResponsesProvider(provider_config)
+        max_output_chars = 10_485_760
+        oversized_output = "x" * (max_output_chars + 30)
+
+        request = provider._prepare_request(
+            [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_001",
+                    "content": oversized_output,
+                }
+            ],
+            tools=None,
+            stream=False,
+        )
+
+        output = request["input"][0]["output"]
+        assert len(output) == max_output_chars
+        assert output.endswith("]")
+        assert "truncated" in output
 
     def test_prepare_request_with_system_message(self, provider_config):
         """Test that system message is extracted to instructions."""

@@ -70,6 +70,30 @@ class AnthropicProviderMutationTests(unittest.TestCase):
         self.assertIsInstance(wire_messages[0]["content"], list)
         self.assertEqual(len(wire_messages[0]["content"]), 3)
 
+    def test_prepare_request_strips_agent_hud_metadata_for_api(self):
+        messages = [
+            {
+                "role": "user",
+                "content": "<agent_hud>\n+ done\n</agent_hud>",
+                "agent_hud": True,
+                "agent_hud_sources": ["hub"],
+            }
+        ]
+
+        request = self.provider._prepare_request(messages)
+
+        self.assertEqual(
+            request["messages"],
+            [
+                {
+                    "role": "user",
+                    "content": "<agent_hud>\n+ done\n</agent_hud>",
+                }
+            ],
+        )
+        self.assertTrue(messages[0]["agent_hud"])
+        self.assertEqual(messages[0]["agent_hud_sources"], ["hub"])
+
 
 if __name__ == "__main__":
     unittest.main()

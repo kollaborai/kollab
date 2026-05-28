@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
 from .errors import map_openai_error
+from .message_sanitizer import strip_local_message_metadata
 from .models import (
     OpenRouterConfig,
     ProviderConfig,
@@ -240,7 +241,7 @@ class OpenRouterProvider(LLMProvider):
             # Build request parameters
             request_params = {
                 "model": self.model,
-                "messages": messages,
+                "messages": strip_local_message_metadata(messages),
                 "temperature": self.config.temperature,
                 "max_tokens": effective_max,
             }
@@ -331,7 +332,7 @@ class OpenRouterProvider(LLMProvider):
             # Build request parameters
             request_params = {
                 "model": self.model,
-                "messages": messages,
+                "messages": strip_local_message_metadata(messages),
                 "temperature": self.config.temperature,
                 "max_tokens": effective_max,
                 "stream": True,

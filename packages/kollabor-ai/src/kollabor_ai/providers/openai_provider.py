@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
 from .errors import map_openai_error
+from .message_sanitizer import strip_local_message_metadata
 from .models import (
     OpenAIConfig,
     ProviderType,
@@ -318,7 +319,7 @@ class OpenAIProvider(LLMProvider):
         """
         params: Dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": strip_local_message_metadata(messages),
             "stream": stream,
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
