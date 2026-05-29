@@ -3,6 +3,8 @@ include README.md
 include LICENSE
 include CLAUDE.md
 include requirements.txt
+include CHANGELOG.md
+include kollabor/updates/CHANGELOG.md
 
 # Include all markdown files in docs
 recursive-include docs *.md

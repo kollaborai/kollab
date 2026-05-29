@@ -67,3 +67,15 @@ def test_kollabor_ai_declares_keyring_dependency_for_secret_sentinels() -> None:
     dependencies = pyproject["project"].get("dependencies", [])
 
     assert any(dep.lower().startswith("keyring") for dep in dependencies)
+
+
+def test_packaged_updates_changelog_matches_root_changelog() -> None:
+    root_changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    package_changelog = (ROOT / "kollabor" / "updates" / "CHANGELOG.md").read_text(
+        encoding="utf-8"
+    )
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    package_data = pyproject["tool"]["setuptools"]["package-data"]["kollabor"]
+
+    assert package_changelog == root_changelog
+    assert "updates/CHANGELOG.md" in package_data
