@@ -188,6 +188,12 @@ class ConfigService:
             "plugins.hub.enabled": True,
             "plugins.hub.project_scoped": True,
             "plugins.context_service.hub_broadcast_enabled": True,
+            "kollabor.updates.check_enabled": True,
+            "kollabor.updates.auto_update_enabled": False,
+            "kollabor.updates.check_interval_hours": 24,
+            "kollabor.updates.github_repo": "kollaborai/kollab",
+            "kollabor.updates.timeout_seconds": 5,
+            "kollabor.updates.include_prereleases": False,
             "kollabor.llm.default_agent": {
                 "name": "koordinator",
                 "level": "global",

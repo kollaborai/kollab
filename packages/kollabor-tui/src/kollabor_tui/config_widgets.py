@@ -557,6 +557,12 @@ class ConfigWidgetDefinitions:
                             "config_path": "application.version",
                             "help": "Application version (read-only, from pyproject.toml)",
                         },
+                        {
+                            "type": "checkbox",
+                            "label": "Auto Update Kollab",
+                            "config_path": "kollabor.updates.auto_update_enabled",
+                            "help": "Automatically update Kollab when a newer release is available",
+                        },
                     ],
                 },
                 {

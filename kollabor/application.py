@@ -29,7 +29,7 @@ from .llm import LLMService
 from .llm.permissions.attach_bridge import AttachPermissionBridge
 from .logging import setup_from_config
 from .state.widget_state import WidgetState
-from .updates import VersionCheckService
+from .updates import AutoUpdateResult, VersionCheckService, run_auto_update
 from .version import __version__
 
 logger = logging.getLogger(__name__)
@@ -1308,6 +1308,36 @@ class TerminalLLMChat:
 
             # Display notification if newer version available
             if release_info:
+                if self.config.get("kollabor.updates.auto_update_enabled", False):
+                    update_result: AutoUpdateResult = await asyncio.to_thread(
+                        run_auto_update
+                    )
+                    if update_result.success:
+                        update_msg = (
+                            f"\033[1;32mAuto-update complete:\033[0m "
+                            f"v{release_info.version} is installed "
+                            f"via {update_result.method}.\n"
+                            "\033[2;36mrestart Kollab to use the new version.\033[0m"
+                        )
+                        self.renderer.message_coordinator.display_raw_text(update_msg)
+                        logger.info(
+                            "Auto-update complete: %s via %s",
+                            release_info.version,
+                            update_result.method,
+                        )
+                        return
+
+                    update_msg = (
+                        f"\033[1;31mAuto-update failed:\033[0m "
+                        f"v{release_info.version} is available "
+                        f"(current: v{__version__})\n"
+                        f"\033[2;36mRelease:\033[0m {release_info.url}\n"
+                        f"\033[2m{update_result.message}\033[0m"
+                    )
+                    self.renderer.message_coordinator.display_raw_text(update_msg)
+                    logger.warning("Auto-update failed: %s", update_result.message)
+                    return
+
                 update_msg = (
                     f"\033[1;33mUpdate available:\033[0m "
                     f"v{release_info.version} is now available "
