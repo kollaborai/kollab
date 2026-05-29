@@ -1538,18 +1538,31 @@ def render_session(width: int, ctx: Optional[WidgetContext]) -> str:
     """
     try:
         session_name = "unknown"
+
+        # Resolve the local conversation_manager session id.
+        local_session = "unknown"
         if ctx and ctx.llm_service:
             conversation_manager = getattr(
                 ctx.llm_service, "conversation_manager", None
             )
             if conversation_manager:
-                session_name = getattr(
+                local_session = getattr(
                     conversation_manager, "current_session_id", "unknown"
                 )
 
-        # Attach mode fallback
-        if session_name == "unknown" and ctx and ctx.remote_state:
-            session_name = ctx.remote_state.get("session", "unknown")
+        # In attach mode the local conversation_manager is a headless stub whose
+        # id has nothing to do with the daemon -- the daemon's real session id
+        # arrives over the wire as remote_state["session"]. Prefer that so the
+        # widget name matches the daemon's live .jsonl (see #26). Fall back to
+        # the local id only before the first state sync (remote_state empty).
+        is_attach = ctx and getattr(ctx, "is_attach_mode", False) is True
+        if is_attach:
+            remote_session = ""
+            if ctx and ctx.remote_state:
+                remote_session = ctx.remote_state.get("session", "") or ""
+            session_name = remote_session or local_session
+        else:
+            session_name = local_session
 
         # Strip timestamp prefix if present (format: YYMMDDHHMM-name-name)
         # Session names are like "2601231430-quantum-spark"
