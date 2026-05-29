@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .git_update import run_source_update
+from .git_update import _current_source_root, run_source_update
 
 
 @dataclass
@@ -28,11 +28,6 @@ def _run_cmd(*args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
-
-
-def _current_package_root() -> Path:
-    """Return the package checkout root when running from source."""
-    return Path(__file__).resolve().parents[2]
 
 
 def _looks_like_source_checkout(repo_root: Path) -> bool:
@@ -76,7 +71,7 @@ def run_auto_update(repo_root: Path | None = None) -> AutoUpdateResult:
     packages try common isolated installers first, then fall back to the
     current Python environment.
     """
-    root = (repo_root or _current_package_root()).resolve()
+    root = (repo_root or _current_source_root()).resolve()
     if _looks_like_source_checkout(root):
         source_result = run_source_update(repo_root=root)
         return AutoUpdateResult(
