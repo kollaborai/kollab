@@ -351,7 +351,26 @@ class AltViewCommandIntegrator:
                 if hasattr(altview, "set_managers"):
                     altview.set_managers(self.config, self.profile_manager)
 
+                # push() blocks until the view exits. After it returns, resume
+                # a selected session if the browser picked one (no-op for views
+                # without get_resume_session). Shared with the fullscreen browser.
                 await stack_mgr.push(altview, session_name)
+
+                event_bus = getattr(self.app, "event_bus", None) if self.app else None
+                if event_bus is not None:
+                    from kollabor.llm.session_resume import (
+                        resume_selected_session,
+                    )
+
+                    outcome = await resume_selected_session(
+                        self.app, event_bus, altview
+                    )
+                    if not outcome.success:
+                        return CommandResult(
+                            success=False,
+                            message=outcome.error or "Failed to resume session",
+                            display_type="error",
+                        )
 
                 return CommandResult(
                     success=True,

@@ -75,9 +75,20 @@ class FullScreenCommandIntegrator:
 
         registered_count = 0
 
+        # Plugins superseded by an AltView replacement: skip them here so the
+        # AltView version (which pauses the render loop to prevent flicker)
+        # wins the command instead of being shadowed by registration order.
+        superseded_by_altview = {"conversations_plugin"}
+
         # Scan for Python files in fullscreen directory
         for plugin_file in fullscreen_dir.glob("*.py"):
             if plugin_file.name.startswith("__"):
+                continue
+            if plugin_file.stem in superseded_by_altview:
+                logger.info(
+                    f"Skipping fullscreen plugin '{plugin_file.stem}' "
+                    "- superseded by AltView version"
+                )
                 continue
 
             try:
@@ -252,113 +263,24 @@ class FullScreenCommandIntegrator:
                 success = await self._fullscreen_manager.launch_plugin(plugin_name)
 
                 if success:
-                    # Check if plugin wants to trigger an action after exit
-                    # (e.g., conversations plugin resuming a selected session)
-                    if hasattr(plugin_instance, "get_resume_session"):
-                        resume_session = plugin_instance.get_resume_session()
-                        if resume_session and self.app:
-                            session_id = resume_session.get("session_id")
-                            if session_id:
-                                logger.info(f"Resuming session: {session_id}")
-                                # Trigger session resume via app
-                                if (
-                                    hasattr(self.app, "llm_service")
-                                    and self.app.llm_service
-                                ):
-                                    conv_mgr = self.app.llm_service.conversation_manager
-                                    if conv_mgr:
-                                        # Auto-save current conversation
-                                        if conv_mgr.messages:
-                                            conv_mgr.save_conversation()
+                    # Resume a selected session if the browser picked one.
+                    # Shared with the AltView conversations browser.
+                    from kollabor.llm.session_resume import (
+                        resume_selected_session,
+                    )
 
-                                        # Load session data into conversation_manager
-                                        if not conv_mgr.load_session(session_id):
-                                            from kollabor_events.models import (
-                                                CommandResult,
-                                            )
-
-                                            return CommandResult(
-                                                success=False,
-                                                message=f"Failed to load session: {session_id}",
-                                                display_type="error",
-                                            )
-
-                                        # Create fresh session name for the resumed conversation
-                                        from kollabor_ai import generate_session_name
-
-                                        new_session_id = generate_session_name()
-                                        conv_mgr.current_session_id = new_session_id
-
-                                        # Build ConversationMessage list and set on llm_service
-                                        from kollabor_events.data_models import (
-                                            ConversationMessage,
-                                        )
-
-                                        llm_service = self.app.llm_service
-
-                                        loaded_messages = []
-                                        display_messages = []
-                                        for msg in conv_mgr.messages:
-                                            role = msg.get("role", "user")
-                                            content = msg.get("content", "")
-                                            loaded_messages.append(
-                                                ConversationMessage(
-                                                    role=role, content=content
-                                                )
-                                            )
-                                            if role in ("user", "assistant"):
-                                                display_messages.append(
-                                                    {"role": role, "content": content}
-                                                )
-
-                                        llm_service.conversation_history = (
-                                            loaded_messages
-                                        )
-                                        if hasattr(llm_service, "session_stats"):
-                                            llm_service.session_stats["messages"] = len(
-                                                loaded_messages
-                                            )
-
-                                        # Display loaded conversation via ADD_MESSAGE event
-                                        header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
-                                        success_msg = f"[ok] Resumed: {new_session_id}. Continue below."
-                                        all_messages = (
-                                            [{"role": "system", "content": header}]
-                                            + display_messages
-                                            + [
-                                                {
-                                                    "role": "system",
-                                                    "content": success_msg,
-                                                }
-                                            ]
-                                        )
-
-                                        from kollabor_events.models import EventType
-
-                                        await self.event_bus.emit_with_hooks(
-                                            EventType.ADD_MESSAGE,
-                                            {
-                                                "messages": all_messages,
-                                                "options": {
-                                                    "show_loading": True,
-                                                    "loading_message": "Loading conversation...",
-                                                    "log_messages": False,
-                                                    "add_to_history": False,
-                                                    "display_messages": True,
-                                                },
-                                            },
-                                            "conversations_plugin",
-                                        )
-
-                                        from kollabor_events.models import CommandResult
-
-                                        return CommandResult(
-                                            success=True,
-                                            message="",
-                                            display_type="success",
-                                        )
+                    outcome = await resume_selected_session(
+                        self.app, self.event_bus, plugin_instance
+                    )
 
                     from kollabor_events.models import CommandResult
+
+                    if not outcome.success:
+                        return CommandResult(
+                            success=False,
+                            message=outcome.error or "Failed to resume session",
+                            display_type="error",
+                        )
 
                     return CommandResult(
                         success=True,
