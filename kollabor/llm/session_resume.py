@@ -119,7 +119,15 @@ async def resume_session_id(
             session_id=session_id,
         )
 
-    _render_resume_result(renderer, result if isinstance(result, dict) else {})
+    rendered = _render_resume_result(renderer, result if isinstance(result, dict) else {})
+    if not rendered:
+        # The daemon swapped history successfully, but we had no message
+        # coordinator to show it (pipe mode/tests, or a misconfigured renderer).
+        # Log it so a silent no-render does not masquerade as a clean resume.
+        logger.warning(
+            "resume %s: state swapped but no message_coordinator to render result",
+            session_id,
+        )
     return ResumeOutcome(success=True, resumed=True, session_id=session_id)
 
 
