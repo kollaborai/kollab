@@ -1070,55 +1070,19 @@ class ResumeConversationPlugin:
         attach mode because state_service has the same interface on
         both sides.
         """
-        state_service = None
-        if self.event_bus and hasattr(self.event_bus, "get_service"):
-            state_service = self.event_bus.get_service("state_service")
-        if state_service is None:
+        # Route through the shared daemon-resume path (also used by the
+        # conversations browsers) so there is one source of truth for
+        # "resume this session + render it".
+        from kollabor.llm.session_resume import resume_session_id
+
+        outcome = await resume_session_id(self.event_bus, self.renderer, session_id)
+        if not outcome.success:
             return CommandResult(
                 success=False,
-                message="State service not available -- cannot resume.",
+                message=outcome.error or "Failed to resume session",
                 display_type="error",
             )
-
-        try:
-            result = await state_service.resume_conversation(session_id)
-        except ValueError as e:
-            return CommandResult(
-                success=False,
-                message=f"Failed to resume session: {e}",
-                display_type="error",
-            )
-        except Exception as e:
-            self.logger.error(f"state_service.resume_conversation failed: {e}")
-            return CommandResult(
-                success=False,
-                message=f"Error resuming conversation: {e}",
-                display_type="error",
-            )
-
-        # Render the result through the message coordinator. The daemon
-        # did the work of swapping history in place (via clear+extend)
-        # and returned the display-ready metadata.
-        header = result.get("header", f"--- Resumed: {session_id} ---")
-        success_msg = result.get("success_message", "[ok] Resumed. Continue below.")
-        messages = result.get("messages", [])
-
-        if self.renderer and self.renderer.message_coordinator:
-            display_sequence: List[tuple] = [("system", header, {})]
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    continue
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if role in ("user", "assistant"):
-                    display_sequence.append((role, content, {}))
-            display_sequence.append(("system", success_msg, {}))
-            self.renderer.message_coordinator.display_message_sequence(display_sequence)
-            return CommandResult(success=True, message="", display_type="success")
-
-        # Fall-through when no renderer (pipe mode, tests): return the
-        # success message as plain text.
-        return CommandResult(success=True, message=success_msg, display_type="success")
+        return CommandResult(success=True, message="", display_type="success")
 
     async def _handle_resume_options(self, args: List[str]) -> CommandResult:
         """Handle additional resume options and filters.

@@ -1,22 +1,27 @@
 """Shared session-resume logic for conversation browsers.
 
 Both the fullscreen (`ConversationsPlugin`) and AltView (`ConversationsAltView`)
-conversation browsers let the user pick a past session to resume. The actual
-resume work -- load the session into the conversation manager, mint a fresh
-session id, push the loaded history onto the live llm_service, and replay it to
-the screen via ``ADD_MESSAGE`` -- is identical between them. It lives here so
-neither command integrator has to depend on the other.
+conversation browsers let the user pick a past session to resume. So does the
+`/resume <id>` command. All three drive the SAME daemon-side operation:
+``state_service.resume_conversation(session_id)`` loads the session into the
+daemon's conversation manager, swaps the live ``conversation_history`` (so the
+next API turn continues with it), and returns display-ready metadata. The
+caller renders that metadata via the message coordinator.
 
-Process note: this runs in whichever process executes the command. In daemon
-mode that is the daemon, where ``app.llm_service.conversation_manager`` lives,
-and the ``ADD_MESSAGE`` emit streams to the attach client like any other output.
+Why daemon-side and not a local emit: in attach mode the browser runs in the
+client process, but the client never registers the ADD_MESSAGE handler -- a
+client-side emit silently does nothing, and loading history into the client's
+headless conversation manager leaves the daemon's state stale. Routing through
+``state_service`` makes the DAEMON do the load+swap (verified: the resumed
+messages appear in the next turn's wire request) and the rendered result streams
+to the client like any other output. Works identically in local and attach mode.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -26,114 +31,108 @@ class ResumeOutcome:
     """Result of a resume attempt, for the caller to wrap in a CommandResult."""
 
     success: bool
-    # None when there was nothing to resume (user quit the browser without
-    # selecting). Callers treat this as a no-op success, not a failure.
+    # resumed=False with success=True means there was nothing to resume (the
+    # user quit the browser without selecting). Callers treat it as a no-op.
     resumed: bool = False
     session_id: Optional[str] = None
-    new_session_id: Optional[str] = None
     error: Optional[str] = None
 
 
-async def resume_selected_session(app: Any, event_bus: Any, browser: Any) -> ResumeOutcome:
-    """Resume the session a conversation browser selected, if any.
+def _selected_session_id(browser: Any) -> Optional[str]:
+    """Pull the selected session id from a conversation browser, if any."""
+    if not hasattr(browser, "get_resume_session"):
+        return None
+    resume_session = browser.get_resume_session()
+    if not resume_session:
+        return None
+    return resume_session.get("session_id")
+
+
+def _render_resume_result(renderer: Any, result: dict) -> bool:
+    """Render the daemon's resume result via the message coordinator.
+
+    Returns True if it was rendered, False if no usable renderer was available
+    (pipe mode / tests). Mirrors the /resume command's render path so all three
+    surfaces show resumed conversations identically.
+    """
+    coordinator = getattr(renderer, "message_coordinator", None) if renderer else None
+    if coordinator is None:
+        return False
+
+    header = result.get("header", "--- Resumed ---")
+    success_msg = result.get("success_message", "[ok] Resumed. Continue below.")
+    messages = result.get("messages", [])
+
+    display_sequence: List[Tuple[str, str, dict]] = [("system", header, {})]
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role in ("user", "assistant"):
+            display_sequence.append((role, content, {}))
+    display_sequence.append(("system", success_msg, {}))
+    coordinator.display_message_sequence(display_sequence)
+    return True
+
+
+async def resume_session_id(
+    event_bus: Any, renderer: Any, session_id: str
+) -> ResumeOutcome:
+    """Resume a specific session id via the daemon, then render the result.
+
+    The single source of truth for "resume this session and show it" -- shared
+    by the conversation browsers and the `/resume <id>` command so there is one
+    daemon-routed path, not several copies.
 
     Args:
-        app: The application instance (provides ``llm_service``).
-        event_bus: Event bus used to emit ``ADD_MESSAGE`` for display.
-        browser: The conversation browser plugin/view. Must expose
-            ``get_resume_session() -> Optional[dict]`` returning a payload with
-            a ``session_id`` key when the user selected a session.
+        event_bus: Event bus exposing ``get_service('state_service')``.
+        renderer: A renderer with a ``message_coordinator`` for display. May be
+            None (pipe mode); the resume still happens, just unrendered.
+        session_id: The session to resume.
 
     Returns:
-        ResumeOutcome. ``resumed=False`` with ``success=True`` means the user
-        did not pick anything -- a clean no-op, not an error.
+        ResumeOutcome.
     """
-    if not hasattr(browser, "get_resume_session"):
-        return ResumeOutcome(success=True, resumed=False)
-
-    resume_session = browser.get_resume_session()
-    if not resume_session or not app:
-        return ResumeOutcome(success=True, resumed=False)
-
-    session_id = resume_session.get("session_id")
-    if not session_id:
-        return ResumeOutcome(success=True, resumed=False)
-
-    if not (hasattr(app, "llm_service") and app.llm_service):
-        return ResumeOutcome(success=True, resumed=False)
-
-    conv_mgr = app.llm_service.conversation_manager
-    if not conv_mgr:
-        return ResumeOutcome(success=True, resumed=False)
-
-    logger.info(f"Resuming session: {session_id}")
-
-    # Auto-save current conversation before swapping it out.
-    if conv_mgr.messages:
-        conv_mgr.save_conversation()
-
-    # Load the selected session into the conversation manager.
-    if not conv_mgr.load_session(session_id):
+    state_service = None
+    if event_bus is not None and hasattr(event_bus, "get_service"):
+        state_service = event_bus.get_service("state_service")
+    if state_service is None:
         return ResumeOutcome(
             success=False,
-            error=f"Failed to load session: {session_id}",
+            error="State service not available -- cannot resume.",
             session_id=session_id,
         )
 
-    # Mint a fresh session id so the resumed conversation does not overwrite
-    # the original on save.
-    from kollabor_ai import generate_session_name
+    logger.info("Resuming session via state_service: %s", session_id)
+    try:
+        result = await state_service.resume_conversation(session_id)
+    except ValueError as e:
+        return ResumeOutcome(
+            success=False, error=f"Failed to resume session: {e}", session_id=session_id
+        )
+    except Exception as e:  # noqa: BLE001 - surface any RPC/daemon failure to the user
+        logger.error("state_service.resume_conversation failed: %s", e)
+        return ResumeOutcome(
+            success=False,
+            error=f"Error resuming conversation: {e}",
+            session_id=session_id,
+        )
 
-    new_session_id = generate_session_name()
-    conv_mgr.current_session_id = new_session_id
+    _render_resume_result(renderer, result if isinstance(result, dict) else {})
+    return ResumeOutcome(success=True, resumed=True, session_id=session_id)
 
-    # Push the loaded history onto the live llm_service and collect the
-    # user/assistant turns for display.
-    from kollabor_events.data_models import ConversationMessage
 
-    llm_service = app.llm_service
-    loaded_messages = []
-    display_messages = []
-    for msg in conv_mgr.messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        loaded_messages.append(ConversationMessage(role=role, content=content))
-        if role in ("user", "assistant"):
-            display_messages.append({"role": role, "content": content})
+async def resume_browser_selection(
+    event_bus: Any, renderer: Any, browser: Any
+) -> ResumeOutcome:
+    """Resume whatever session a conversation browser selected, if any.
 
-    llm_service.conversation_history = loaded_messages
-    if hasattr(llm_service, "session_stats"):
-        llm_service.session_stats["messages"] = len(loaded_messages)
-
-    # Replay the loaded conversation to the screen via ADD_MESSAGE.
-    header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
-    success_msg = f"[ok] Resumed: {new_session_id}. Continue below."
-    all_messages = (
-        [{"role": "system", "content": header}]
-        + display_messages
-        + [{"role": "system", "content": success_msg}]
-    )
-
-    from kollabor_events.models import EventType
-
-    await event_bus.emit_with_hooks(
-        EventType.ADD_MESSAGE,
-        {
-            "messages": all_messages,
-            "options": {
-                "show_loading": True,
-                "loading_message": "Loading conversation...",
-                "log_messages": False,
-                "add_to_history": False,
-                "display_messages": True,
-            },
-        },
-        "conversations_resume",
-    )
-
-    return ResumeOutcome(
-        success=True,
-        resumed=True,
-        session_id=session_id,
-        new_session_id=new_session_id,
-    )
+    Thin wrapper over :func:`resume_session_id` that first pulls the selection
+    off the browser. No-op (success, resumed=False) when nothing was selected.
+    Shared by the altview and fullscreen conversation browsers.
+    """
+    session_id = _selected_session_id(browser)
+    if not session_id:
+        return ResumeOutcome(success=True, resumed=False)
+    return await resume_session_id(event_bus, renderer, session_id)

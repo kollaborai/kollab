@@ -353,17 +353,18 @@ class AltViewCommandIntegrator:
 
                 # push() blocks until the view exits. After it returns, resume
                 # a selected session if the browser picked one (no-op for views
-                # without get_resume_session). Shared with the fullscreen browser.
+                # without get_resume_session). Routes through state_service so the
+                # daemon owns the load+swap; works in attach mode. Shared with the
+                # fullscreen browser and /resume.
                 await stack_mgr.push(altview, session_name)
 
-                event_bus = getattr(self.app, "event_bus", None) if self.app else None
-                if event_bus is not None:
+                if hasattr(altview, "get_resume_session"):
                     from kollabor.llm.session_resume import (
-                        resume_selected_session,
+                        resume_browser_selection,
                     )
 
-                    outcome = await resume_selected_session(
-                        self.app, event_bus, altview
+                    outcome = await resume_browser_selection(
+                        self.event_bus, self.terminal_renderer, altview
                     )
                     if not outcome.success:
                         return CommandResult(

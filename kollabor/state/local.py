@@ -1946,12 +1946,32 @@ class LocalStateService(StateService):
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
 
-        # Generate a fresh session id for the resumed conversation.
+        # Generate a fresh session id for the resumed conversation, then move the
+        # session id across all three subsystems in lockstep (#26 cause B):
+        #   - conversation_manager.current_session_id (in-memory state)
+        #   - conversation_logger.session_id (names the live append-only .jsonl)
+        #   - api_service session id
+        # Setting only conv_mgr leaves new turns appending to the ORIGINAL .jsonl
+        # and the widget showing a name with no matching file. We do NOT call
+        # conv_mgr.reset_session here because that wipes the messages we just
+        # loaded -- we set the id directly to preserve the resumed history.
         try:
             from kollabor_ai.session_naming import generate_session_name
 
             new_session_id = generate_session_name()
             conv_mgr.current_session_id = new_session_id
+
+            conv_logger = getattr(conv_mgr, "conversation_logger", None) or getattr(
+                llm, "conversation_logger", None
+            )
+            if conv_logger is not None and hasattr(conv_logger, "reset_session"):
+                conv_logger.reset_session(new_session_id)
+
+            api_service = getattr(llm, "api_service", None) or getattr(
+                llm, "api_communication_service", None
+            )
+            if api_service is not None and hasattr(api_service, "set_session_id"):
+                api_service.set_session_id(new_session_id)
         except Exception as e:
             logger.debug(f"resume: session naming error: {e}")
             new_session_id = session_id  # fall back to reused id
