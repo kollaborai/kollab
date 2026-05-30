@@ -1167,9 +1167,13 @@ class ResumeConversationPlugin:
             message=f"Showing {len(filtered_conversations)} filtered conversations",
             ui_config=UIConfig(
                 type="modal",
-                title=modal_definition["title"],
-                width=modal_definition["width"],
-                height=modal_definition["height"],
+                title=modal_definition.get("title", "Conversations"),
+                width=modal_definition.get("width"),
+                height=(
+                    int(modal_definition["height"])
+                    if modal_definition.get("height")
+                    else None
+                ),
                 modal_config=modal_definition,
             ),
             display_type="modal",
