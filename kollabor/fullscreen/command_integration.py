@@ -263,14 +263,15 @@ class FullScreenCommandIntegrator:
                 success = await self._fullscreen_manager.launch_plugin(plugin_name)
 
                 if success:
-                    # Resume a selected session if the browser picked one.
-                    # Shared with the AltView conversations browser.
+                    # Resume a selected session if the browser picked one. Routes
+                    # through state_service (daemon owns the load+swap; works in
+                    # attach mode). Shared with the AltView browser and /resume.
                     from kollabor.llm.session_resume import (
-                        resume_selected_session,
+                        resume_browser_selection,
                     )
 
-                    outcome = await resume_selected_session(
-                        self.app, self.event_bus, plugin_instance
+                    outcome = await resume_browser_selection(
+                        self.event_bus, self.terminal_renderer, plugin_instance
                     )
 
                     from kollabor_events.models import CommandResult
