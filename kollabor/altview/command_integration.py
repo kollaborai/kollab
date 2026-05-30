@@ -72,6 +72,7 @@ class AltViewCommandIntegrator:
         self._plugin_classes: Dict[str, Type] = {}
         self._plugin_instances: Dict[str, object] = {}
         self._command_delegates: Dict[str, CommandDefinition] = {}
+        self._single_session_plugins: set[str] = set()
 
         logger.info("AltView command integrator initialized")
 
@@ -201,6 +202,8 @@ class AltViewCommandIntegrator:
                 return False
 
             plugin_name = metadata.plugin_type
+            if not getattr(metadata, "supports_named_sessions", True):
+                self._single_session_plugins.add(plugin_name)
 
             # Skip internal plugins (they're invoked by other plugins, not the user)
             if getattr(metadata, "category", "") == "internal":
@@ -220,7 +223,9 @@ class AltViewCommandIntegrator:
             if plugin_name == "mcp" and existing_command is not None:
                 self._command_delegates[plugin_name] = existing_command
                 self.command_registry.unregister_command(plugin_name)
-                logger.info("AltView command '%s' replacing existing command", plugin_name)
+                logger.info(
+                    "AltView command '%s' replacing existing command", plugin_name
+                )
 
             # Skip if command already registered (e.g. by fullscreen_integrator)
             elif existing_command is not None:
@@ -298,8 +303,8 @@ class AltViewCommandIntegrator:
                 stack_mgr = self._get_stack_manager()
 
                 session_name = (
-                    "mcp"
-                    if plugin_name == "mcp"
+                    plugin_name
+                    if plugin_name in self._single_session_plugins
                     else self._parse_session_name(command, plugin_name)
                 )
                 altview = self._get_or_create_altview(plugin_name, session_name)
@@ -318,7 +323,9 @@ class AltViewCommandIntegrator:
                     current_config = mcp_manager.load_config() or {}
                     altview.set_config(example_config, current_config)
                     if hasattr(altview, "set_context"):
-                        event_bus = getattr(self.app, "event_bus", None) if self.app else None
+                        event_bus = (
+                            getattr(self.app, "event_bus", None) if self.app else None
+                        )
                         state_service = (
                             event_bus.get_service("state_service")
                             if event_bus and hasattr(event_bus, "get_service")
@@ -344,7 +351,26 @@ class AltViewCommandIntegrator:
                 if hasattr(altview, "set_managers"):
                     altview.set_managers(self.config, self.profile_manager)
 
+                # push() blocks until the view exits. After it returns, resume
+                # a selected session if the browser picked one (no-op for views
+                # without get_resume_session). Shared with the fullscreen browser.
                 await stack_mgr.push(altview, session_name)
+
+                event_bus = getattr(self.app, "event_bus", None) if self.app else None
+                if event_bus is not None:
+                    from kollabor.llm.session_resume import (
+                        resume_selected_session,
+                    )
+
+                    outcome = await resume_selected_session(
+                        self.app, event_bus, altview
+                    )
+                    if not outcome.success:
+                        return CommandResult(
+                            success=False,
+                            message=outcome.error or "Failed to resume session",
+                            display_type="error",
+                        )
 
                 return CommandResult(
                     success=True,
@@ -439,6 +465,7 @@ class AltViewCommandIntegrator:
             self.command_registry.unregister_command(metadata.plugin_type)
 
             del self._plugin_classes[plugin_name]
+            self._single_session_plugins.discard(plugin_name)
 
             # Remove all session instances for this plugin
             to_remove = [

@@ -48,11 +48,6 @@ def is_project_scoped() -> bool:
     )
 
 
-def _encode_path(path: Path) -> str:
-    """Match the encoder used for ~/.kollab/projects/<encoded>/."""
-    return encode_project_path(path)
-
-
 @lru_cache(maxsize=1)
 def resolve_project_root() -> Path:
     """Resolve project root using the precedence documented in the module.
@@ -84,7 +79,7 @@ def resolve_project_root() -> Path:
 
 def resolve_project_id() -> str:
     """Encoded project identifier suitable for path segments."""
-    return _encode_path(resolve_project_root())
+    return encode_project_path(resolve_project_root())
 
 
 def get_project_hub_dir() -> Path:

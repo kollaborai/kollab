@@ -105,6 +105,12 @@ The base config is divided into sections:
 ```json
 {
   "kollabor": {
+    "updates": {
+      "check_enabled": true,
+      "auto_update_enabled": false,
+      "check_interval_hours": 24,
+      "github_repo": "kollaborai/kollab"
+    },
     "llm": {
       "auto_detect_provider": true,
       "max_history": 90,
@@ -148,6 +154,35 @@ The config system uses dot notation for nested access:
 config.get("kollabor.llm.max_history", 90)
 config.get("terminal.render_fps", 20)
 ```
+
+## Updates
+
+Kollab checks GitHub releases in the background during startup. By default it
+only prints a notification when a newer release exists.
+
+Enable automatic installs from `/config` → Application Settings → Auto Update
+Kollab, or set:
+
+```json
+{
+  "kollabor": {
+    "updates": {
+      "auto_update_enabled": true
+    }
+  }
+}
+```
+
+Automatic updates use the active install style when possible:
+
+- source checkouts: safe fast-forward Git update plus editable reinstall
+- `uv tool`: `uv tool upgrade kollab`
+- `pipx`: `pipx upgrade kollab`
+- Homebrew: `brew upgrade kollab`
+- pip fallback: current Python runs `python -m pip install --upgrade kollab`
+
+Restart Kollab after an automatic update so the running process picks up the new
+version.
 
 ## Project Data Directory
 

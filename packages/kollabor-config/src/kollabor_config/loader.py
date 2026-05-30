@@ -477,6 +477,14 @@ class ConfigLoader:
                 "description": "AI Edition",
             },
             "kollabor": {
+                "updates": {
+                    "check_enabled": True,
+                    "auto_update_enabled": False,
+                    "check_interval_hours": 24,
+                    "github_repo": "kollaborai/kollab",
+                    "timeout_seconds": 5,
+                    "include_prereleases": False,
+                },
                 "llm": {
                     # Note: api_url, api_token, model, temperature, timeout are now in profiles
                     # See kollabor.llm.profiles.* for LLM connection settings

@@ -47,17 +47,18 @@ class VersionCheckService:
     - Never blocks application startup
 
     Configuration keys:
-        core.updates.check_enabled (bool): Enable update checking
-        core.updates.check_interval_hours (int): Cache TTL in hours
-        core.updates.github_repo (str): Repository path (owner/repo)
-        core.updates.timeout_seconds (int): HTTP request timeout
-        core.updates.include_prereleases (bool): Include pre-release versions
+        kollabor.updates.check_enabled (bool): Enable update checking
+        kollabor.updates.auto_update_enabled (bool): Install updates automatically
+        kollabor.updates.check_interval_hours (int): Cache TTL in hours
+        kollabor.updates.github_repo (str): Repository path (owner/repo)
+        kollabor.updates.timeout_seconds (int): HTTP request timeout
+        kollabor.updates.include_prereleases (bool): Include pre-release versions
 
     Cache keys (stored in config):
-        core.updates.last_check_timestamp (int): Unix timestamp of last check
-        core.updates.cached_latest_version (str): Cached version string
-        core.updates.cached_release_url (str): Cached release URL
-        core.updates.cached_release_name (str): Cached release name
+        kollabor.updates.last_check_timestamp (int): Unix timestamp of last check
+        kollabor.updates.cached_latest_version (str): Cached version string
+        kollabor.updates.cached_release_url (str): Cached release URL
+        kollabor.updates.cached_release_name (str): Cached release name
     """
 
     def __init__(self, config, current_version: str):

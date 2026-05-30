@@ -97,7 +97,7 @@ packages = {find = {where = [".", "packages/kollabor-ai/src", "packages/kollabor
 include-package-data = true
 
 [tool.setuptools.package-data]
-kollabor = ["py.typed"]
+kollabor = ["py.typed", "updates/CHANGELOG.md"]
 plugins = ["**/*.json", "**/*.yaml", "**/*.yml"]
 bundles = ["**/*"]
 fonts = ["*.ttf", "*.otf", "LICENSE", "README.md"]

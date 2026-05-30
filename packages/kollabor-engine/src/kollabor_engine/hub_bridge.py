@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from kollabor_config.config_utils import (
-    encode_project_path,
     get_config_directory_candidates,
     get_project_data_dir_candidates,
 )
@@ -25,11 +24,6 @@ logger = logging.getLogger(__name__)
 
 STALE_THRESHOLD_SECONDS = 60
 CACHE_TTL_SECONDS = 5
-
-
-def _encode_project_path(path: Path) -> str:
-    """Match the encoder used for ~/.kollab/projects/<encoded>/."""
-    return encode_project_path(path)
 
 
 def _current_project_presence_dir() -> Optional[Path]:
