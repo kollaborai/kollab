@@ -340,7 +340,13 @@ class ConversationsAltView(AltView):
 
         for msg in self.messages:
             role = msg.get("role", "unknown")
-            content = msg.get("full_content", "") or msg.get("preview", "")
+            # Prefer the untruncated display_content (includes tool calls, #25);
+            # fall back to the older capped fields.
+            content = (
+                msg.get("display_content")
+                or msg.get("full_content", "")
+                or msg.get("preview", "")
+            )
 
             # Role header
             role_display = f"[{role}]"

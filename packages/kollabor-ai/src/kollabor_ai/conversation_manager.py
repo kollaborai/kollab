@@ -16,6 +16,59 @@ from kollabor_ai.session_naming import generate_branch_name, generate_session_na
 logger = logging.getLogger(__name__)
 
 
+def _legacy_content_string(blocks: List[Any]) -> str:
+    """Reproduce the historical flattening EXACTLY: ``blocks[0].get("text","")``.
+
+    The API/context path (resume -> conversation_history -> model) consumes the
+    ``content`` string, so it must stay byte-for-byte what it was before #25.
+    This deliberately keeps the old quirk (a tool_use-first turn yields "")
+    rather than "improving" it -- changing what the model sees on resume is out
+    of scope for a display fix and would need separate verification.
+    """
+    first = blocks[0] if blocks else {}
+    return first.get("text", "") if isinstance(first, dict) else ""
+
+
+def _render_content_blocks(blocks: List[Any]) -> str:
+    """Render a content-block list to display text, preserving tool calls.
+
+    Text blocks are emitted as-is; tool_use blocks become a readable
+    ``[tool: <name>] <args>`` line so the conversation browser shows tool
+    calls instead of silently dropping everything after the first text
+    block. Display only -- never fed to the model (see #25).
+    """
+    parts: List[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = block.get("text", "")
+            if text:
+                parts.append(text)
+        elif btype == "tool_use":
+            name = block.get("name", "tool")
+            args = block.get("input", "")
+            if isinstance(args, dict):
+                # Compact one-line summary of the arguments.
+                summary = ", ".join(
+                    f"{k}={_short_repr(v)}" for k, v in args.items()
+                )
+            else:
+                summary = _short_repr(args)
+            parts.append(f"[tool: {name}]" + (f" {summary}" if summary else ""))
+        elif btype == "tool_result":
+            # Tool results live on user turns; show a marker.
+            parts.append("[tool result]")
+    return "\n".join(parts)
+
+
+def _short_repr(value: Any, limit: int = 80) -> str:
+    """One-line, length-capped repr of a tool argument value for display."""
+    text = str(value).replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class ConversationManager:
     """Manage conversation state and history.
 
@@ -701,15 +754,26 @@ class ConversationManager:
                         summary = data.get("summary", {})
                         metadata["topics"] = summary.get("themes", [])
                     elif msg_type in ("user", "assistant"):
-                        content = data.get("message", {}).get("content", "")
-                        if isinstance(content, list) and content:
-                            content = content[0].get("text", "")
+                        raw_content = data.get("message", {}).get("content", "")
+                        # `content` stays the plain text string the API/context
+                        # path depends on (first text block, as before). A
+                        # separate `display_content` preserves tool_use blocks so
+                        # the conversation browser can show them -- see #25. Do
+                        # NOT fold tool markers into `content`: that feeds
+                        # conversation_history on resume and would change what is
+                        # sent to the model.
+                        content = raw_content
+                        display_content = raw_content
+                        if isinstance(raw_content, list) and raw_content:
+                            content = _legacy_content_string(raw_content)
+                            display_content = _render_content_blocks(raw_content)
                         msg_uuid = data.get("uuid") or str(uuid4())
                         messages.append(
                             {
                                 "uuid": msg_uuid,
                                 "role": data.get("message", {}).get("role", msg_type),
                                 "content": content,
+                                "display_content": display_content,
                                 "timestamp": data.get("timestamp"),
                                 "parent_uuid": None,
                                 "metadata": {},
@@ -884,10 +948,11 @@ class ConversationManager:
             if not self.load_session(session_id):
                 return []
 
-            # Extract message previews
+            # Extract message previews. Prefer display_content (preserves tool
+            # calls, see #25); fall back to the plain content string.
             message_list = []
             for i, msg in enumerate(self.messages):
-                content = msg.get("content", "")
+                content = msg.get("display_content") or msg.get("content", "")
                 # Get first line, truncate if needed
                 first_line = content.split("\n")[0][:60]
                 if len(content.split("\n")[0]) > 60:
@@ -903,6 +968,9 @@ class ConversationManager:
                         "full_content": content[
                             :200
                         ],  # First 200 chars for hover/detail
+                        # Untruncated display text (text + tool calls) for the
+                        # message-viewer pane; see #25.
+                        "display_content": content,
                     }
                 )
 
