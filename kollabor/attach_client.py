@@ -2,9 +2,8 @@
 
 .. deprecated::
     This is the LEGACY standalone attach client. It runs as a bare
-    terminal viewer outside the main Kollab application (launched from
-    cli.py `_handle_cli_attach`). The primary attach path is now the
-    in-app proxy mode implemented by
+    terminal viewer outside the main Kollab application. The primary
+    attach path is now the in-app proxy mode implemented by
     `TerminalLLMChat._initialize_attach_proxy()` in
     `kollabor/application.py`, which provides richer features:
 
@@ -73,6 +72,7 @@ import select
 import sys
 import termios
 import tty
+import warnings
 from typing import Any, Dict, List, Optional
 
 
@@ -85,6 +85,13 @@ class AttachClient:
         identity: str,
         interactive: bool = False,
     ):
+        warnings.warn(
+            "AttachClient is the legacy standalone attach client; "
+            "use TerminalLLMChat._initialize_attach_proxy() for canonical "
+            "in-app attach behavior.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.socket_path = socket_path
         self.identity = identity
         self.interactive = interactive
