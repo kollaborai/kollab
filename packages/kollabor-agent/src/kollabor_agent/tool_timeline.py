@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+TIMELINE_METADATA_KEY = "timeline"
+
 
 @dataclass(frozen=True)
 class ToolTimelineEvent:
@@ -52,17 +54,58 @@ class ToolTimeline:
         detail: str = "",
         success: bool | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
-        self.record(
-            ToolTimelineEvent(
-                phase=phase,
-                tool_id=tool_id,
-                tool_type=tool_type,
-                detail=detail,
-                success=success,
-                metadata=metadata or {},
-            )
+    ) -> ToolTimelineEvent:
+        event = ToolTimelineEvent(
+            phase=phase,
+            tool_id=tool_id,
+            tool_type=tool_type,
+            detail=detail,
+            success=success,
+            metadata=metadata or {},
         )
+        self.record(event)
+        return event
 
     def to_dicts(self) -> list[dict[str, Any]]:
         return [event.to_dict() for event in self._events]
+
+
+def timeline_event_dict(
+    phase: str,
+    *,
+    tool_id: str,
+    tool_type: str,
+    detail: str = "",
+    success: bool | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create a serializable timeline event without storing it globally."""
+    return ToolTimelineEvent(
+        phase=phase,
+        tool_id=tool_id,
+        tool_type=tool_type,
+        detail=detail,
+        success=success,
+        metadata=metadata or {},
+    ).to_dict()
+
+
+def summarize_timeline_events(events: list[dict[str, Any]], limit: int = 8) -> str:
+    """Render compact timeline lines for conversation/debug replay."""
+    if not events:
+        return ""
+
+    visible = events[-limit:]
+    lines: list[str] = []
+    hidden_count = len(events) - len(visible)
+    if hidden_count > 0:
+        lines.append(f"... {hidden_count} earlier timeline events")
+
+    for event in visible:
+        phase = str(event.get("phase", "event")).replace("_", " ")
+        detail = str(event.get("detail", "")).strip()
+        if detail:
+            lines.append(f"{phase}: {detail}")
+        else:
+            lines.append(phase)
+    return "\n".join(lines)

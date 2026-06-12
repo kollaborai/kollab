@@ -555,6 +555,30 @@ def get_result_summary_modern(result: Any, tool_data: Optional[Dict] = None) -> 
     return get_tool_result_summary(result, tool_data)
 
 
+def format_tool_timeline(result: Any, max_events: int = 8) -> List[str]:
+    """Format compact timeline lines from result metadata."""
+    metadata = getattr(result, "metadata", {}) or {}
+    events = metadata.get("timeline") or []
+    if not isinstance(events, list) or not events:
+        return []
+
+    visible_events = events[-max_events:]
+    lines: List[str] = ["timeline:"]
+    hidden_count = len(events) - len(visible_events)
+    if hidden_count > 0:
+        lines.append(f"  ... {hidden_count} earlier events")
+
+    for event in visible_events:
+        if not isinstance(event, dict):
+            continue
+        phase = str(event.get("phase", "event")).replace("_", " ")
+        detail = str(event.get("detail", "")).strip()
+        line = f"{phase}: {detail}" if detail else phase
+        lines.append(f"  {truncate_tool_args(line, max_length=100)}")
+
+    return lines
+
+
 # =============================================================================
 # EXTRACTED FROM: kollabor/llm/message_display_service.py
 # Original lines: 579-621

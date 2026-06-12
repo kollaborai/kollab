@@ -28,6 +28,7 @@ from kollabor_config.config_utils import (
 from kollabor_events.models import EventType
 
 from .runtime import get_agent_tool_scope
+from .tool_timeline import timeline_event_dict
 
 if TYPE_CHECKING:
     from kollabor_events.bus import EventBus
@@ -990,6 +991,7 @@ class MCPIntegration:
         tool_name: str,
         params: Dict[str, Any],
         timeout: float | None = None,
+        include_timeline: bool = False,
     ) -> Dict[str, Any]:
         """Execute an MCP tool call using proper MCP protocol.
 
@@ -997,21 +999,54 @@ class MCPIntegration:
             tool_name: Name of the tool to execute
             params: Parameters for the tool
             timeout: Optional per-call timeout in seconds
+            include_timeline: Include private timeline metadata for callers
+                that can persist or render it.
 
         Returns:
             Tool execution result
         """
+        timeline_events: list[dict[str, Any]] = []
+
+        def record_timeline(
+            phase: str,
+            detail: str = "",
+            *,
+            success: bool | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            timeline_events.append(
+                timeline_event_dict(
+                    phase,
+                    tool_id=tool_name,
+                    tool_type="mcp_tool",
+                    detail=detail,
+                    success=success,
+                    metadata=metadata,
+                )
+            )
+
+        def with_timeline(result: Dict[str, Any]) -> Dict[str, Any]:
+            if include_timeline and timeline_events:
+                result["_timeline"] = list(timeline_events)
+            return result
+
+        record_timeline("mcp_started", tool_name)
+
         if tool_name not in self.tool_registry:
-            return {
-                "error": f"Tool '{tool_name}' not found",
-                "available_tools": list(self.tool_registry.keys()),
-            }
+            record_timeline("mcp_lookup_failed", tool_name, success=False)
+            return with_timeline(
+                {
+                    "error": f"Tool '{tool_name}' not found",
+                    "available_tools": list(self.tool_registry.keys()),
+                }
+            )
 
         tool_info = self.tool_registry[tool_name]
         server_name = tool_info["server"]
 
         if not tool_info["enabled"]:
-            return {"error": f"Tool '{tool_name}' is disabled"}
+            record_timeline("mcp_disabled", tool_name, success=False)
+            return with_timeline({"error": f"Tool '{tool_name}' is disabled"})
 
         # Emit tool call pre event
         if self.event_bus:
@@ -1028,13 +1063,31 @@ class MCPIntegration:
             server_config = self.mcp_servers.get(server_name, {})
             command = server_config.get("command")
             if command:
+                record_timeline(
+                    "mcp_reconnect",
+                    server_name,
+                    metadata={"server": server_name, "command": command},
+                )
                 await self._connect_and_list_tools(server_name, command)
                 connection = self.server_connections.get(server_name)
+                if connection and connection.initialized:
+                    record_timeline(
+                        "mcp_reconnected",
+                        server_name,
+                        success=True,
+                        metadata={"server": server_name},
+                    )
 
             if not connection or not connection.initialized:
                 error_result = {
                     "error": f"No active connection to server '{server_name}'"
                 }
+                record_timeline(
+                    "mcp_reconnect_failed",
+                    server_name,
+                    success=False,
+                    metadata={"server": server_name},
+                )
                 # Emit error event
                 if self.event_bus:
                     await self.event_bus.emit_with_hooks(
@@ -1042,11 +1095,17 @@ class MCPIntegration:
                         {"server_name": server_name, "error": "No active connection"},
                         source="mcp_integration",
                     )
-                return error_result
+                return with_timeline(error_result)
 
         try:
             result = await connection.call_tool(tool_name, params, timeout=timeout)
             logger.info(f"Executed MCP tool: {tool_name}")
+            record_timeline(
+                "mcp_result",
+                tool_name,
+                success=True,
+                metadata={"server": server_name},
+            )
 
             # Emit tool call post event
             if self.event_bus:
@@ -1060,11 +1119,40 @@ class MCPIntegration:
                     source="mcp_integration",
                 )
 
-            return result
+            return with_timeline(result)
+        except MCPRequestTimeoutError as e:
+            logger.error(f"MCP tool {tool_name} timed out: {e}")
+
+            error_result = {"error": str(e)}
+            record_timeline(
+                "mcp_timeout",
+                str(e),
+                success=False,
+                metadata={"server": server_name, "timeout": timeout},
+            )
+
+            if self.event_bus:
+                await self.event_bus.emit_with_hooks(
+                    EventType.MCP_SERVER_ERROR,
+                    {
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "error": str(e),
+                    },
+                    source="mcp_integration",
+                )
+
+            return with_timeline(error_result)
         except Exception as e:
             logger.error(f"Failed to execute MCP tool {tool_name}: {e}")
 
             error_result = {"error": str(e)}
+            record_timeline(
+                "mcp_error",
+                str(e),
+                success=False,
+                metadata={"server": server_name},
+            )
 
             # Emit error event
             if self.event_bus:
@@ -1078,7 +1166,7 @@ class MCPIntegration:
                     source="mcp_integration",
                 )
 
-            return error_result
+            return with_timeline(error_result)
 
     async def _execute_stdio_tool(
         self, server_config: Dict, tool_name: str, params: Dict
