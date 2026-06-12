@@ -191,6 +191,7 @@ def _make_plugin_with_history(history: List[ConversationMessage], keep_recent=6)
     # Wire up a fake llm_service with the history
     llm_service = MagicMock()
     llm_service.conversation_history = history
+    llm_service.session_stats = {"input_tokens": 80_000, "output_tokens": 0}
     plugin._llm_service = llm_service
 
     # Mock session
@@ -311,6 +312,55 @@ class TestCompactionIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             violations, [], "violations at keep_recent=4:\n" + "\n".join(violations)
         )
+
+
+class TestCompactCommandApply(unittest.IsolatedAsyncioTestCase):
+    """Manual /compact preview and apply command behavior."""
+
+    async def test_preview_snapshot_is_reused_and_apply_preserves_new_messages(self):
+        history = _build_realistic_history()
+        plugin = _make_plugin_with_history(history, keep_recent=6)
+
+        before_preview = list(history)
+        preview = await plugin._handle_compact_command(MagicMock(args=["preview"]))
+
+        self.assertEqual(history, before_preview)
+        self.assertIn("preserved:", preview)
+        self.assertIn("removed:", preview)
+        self.assertIn("pinned:", preview)
+        self.assertIn("token delta:", preview)
+        self.assertIn("source:         preview", preview)
+
+        late_message = _msg("user", "this arrived after preview")
+        history.append(late_message)
+
+        with patch.object(
+            plugin, "_call_summarization_llm", new_callable=AsyncMock
+        ) as mock_llm:
+            mock_llm.return_value = FAKE_SUMMARY
+
+            result = await plugin._handle_compact_command(MagicMock(args=["apply"]))
+
+        self.assertIn("compact apply:", result)
+        self.assertIn("source:         preview", result)
+        self.assertIn("messages:", result)
+        self.assertIs(history[-1], late_message)
+        self.assertLess(len(history), len(before_preview) + 1)
+
+    async def test_confirm_alias_applies_fresh_snapshot_without_preview(self):
+        history = _build_realistic_history()
+        plugin = _make_plugin_with_history(history, keep_recent=4)
+
+        with patch.object(
+            plugin, "_call_summarization_llm", new_callable=AsyncMock
+        ) as mock_llm:
+            mock_llm.return_value = FAKE_SUMMARY
+
+            result = await plugin._handle_compact_command(MagicMock(args=["confirm"]))
+
+        self.assertIn("compact apply:", result)
+        self.assertIn("source:         fresh", result)
+        self.assertLess(len(history), 20)
 
 
 # ---------------------------------------------------------------------------
