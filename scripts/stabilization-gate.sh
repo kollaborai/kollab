@@ -30,4 +30,4 @@ python -m pytest \
   tests/unit/tui/test_permission_prompt_render.py \
   tests/test_hub_rpc_integration.py
 
-tests/tmux/fresh_daemon_doctor_smoke.sh
+tests/tmux/runtime_smoke.sh
