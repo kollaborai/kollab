@@ -8473,22 +8473,228 @@ class HubPlugin(BasePlugin):
             for slot in pending[:5]:
                 lines.append(f"  [{slot.id}] {slot.task[:60]}")
 
-        lines.extend(self._format_cockpit_lines())
+        lines.extend(self._format_cockpit_lines(agents))
         return "\n".join(lines)
 
-    def _format_cockpit_lines(self) -> list[str]:
+    def _format_cockpit_lines(
+        self, agents: Optional[List[AgentRuntime]] = None
+    ) -> list[str]:
         lines: list[str] = ["", "cockpit:"]
-        if self._task_ledger:
-            pending_replies = self._task_ledger.pending_replies()
-            lines.append(f"  pending replies: {len(pending_replies)}")
-        else:
-            lines.append("  pending replies: unavailable")
-        try:
-            trace_path = self._delivery_trace().path
-            lines.append(f"  delivery trace: {trace_path}")
-        except Exception:
-            lines.append("  delivery trace: unavailable")
+        agents = list(agents or [])
+        lines.extend(self._format_cockpit_roster_lines(agents))
+        lines.extend(self._format_cockpit_task_lines())
+        lines.extend(self._format_cockpit_dns_lines())
+        lines.extend(self._format_cockpit_delivery_lines())
         return lines
+
+    def _format_cockpit_roster_lines(
+        self, agents: List[AgentRuntime]
+    ) -> list[str]:
+        if not agents:
+            return [
+                "  roster: unavailable",
+                "  coordinator: unknown",
+            ]
+
+        coordinator = next(
+            (a.identity for a in agents if getattr(a, "is_coordinator", False)),
+            "",
+        )
+        waiting = sum(1 for a in agents if getattr(a, "state", "") == "waiting")
+        with_tasks = sum(1 for a in agents if getattr(a, "current_task", ""))
+        lines = [
+            f"  roster: {len(agents)} agent(s)",
+            f"  coordinator: {coordinator or 'not elected'}",
+        ]
+        lines.append(f"  roster state: waiting={waiting} assigned={with_tasks}")
+        return lines
+
+    def _format_cockpit_task_lines(self) -> list[str]:
+        ledger = getattr(self, "_task_ledger", None)
+        if not ledger:
+            return [
+                "  pending replies: unavailable",
+                "  expected replies: unavailable",
+                "  current assignments: unavailable",
+            ]
+
+        try:
+            pending_replies = ledger.pending_replies()
+        except Exception as e:
+            logger.debug("hub cockpit pending replies failed: %s", e)
+            pending_replies = []
+
+        lines = [
+            f"  pending replies: {len(pending_replies)}",
+            f"  expected replies: {len(pending_replies)} pending",
+        ]
+        for item in pending_replies[:5]:
+            message_id = self._trim_cockpit_text(item.get("message_id"), 18)
+            task_id = self._trim_cockpit_text(item.get("task_id"), 18)
+            assignee = self._trim_cockpit_text(item.get("assignee"), 24)
+            requested_by = self._trim_cockpit_text(item.get("requested_by"), 24)
+            due = self._format_pending_reply_due(item)
+            lines.append(
+                f"    {message_id} task {task_id} -> {assignee}"
+                f" requested by {requested_by}{due}"
+            )
+        if len(pending_replies) > 5:
+            lines.append(f"    ... {len(pending_replies) - 5} more")
+
+        try:
+            active_cards = [
+                c for c in ledger.get_all()
+                if getattr(c, "status", "") in {"active", "qa_review"}
+            ]
+        except Exception as e:
+            logger.debug("hub cockpit assignments failed: %s", e)
+            active_cards = []
+
+        lines.append(f"  current assignments: {len(active_cards)} active")
+        for card in sorted(
+            active_cards,
+            key=lambda c: (-getattr(c, "priority", 0), getattr(c, "id", "")),
+        )[:5]:
+            directive = self._trim_cockpit_text(getattr(card, "directive", ""), 50)
+            lines.append(
+                f"    {card.id} {card.assigner}->{card.assignee}"
+                f" p{card.priority} {card.status}: {directive}"
+            )
+        if len(active_cards) > 5:
+            lines.append(f"    ... {len(active_cards) - 5} more")
+        return lines
+
+    def _format_cockpit_dns_lines(self) -> list[str]:
+        registry = getattr(self, "_dns_registry", None)
+        if not registry:
+            return [
+                "  stale endpoints: unavailable",
+                "  mesh approvals: unavailable",
+            ]
+
+        try:
+            records = registry.get_all()
+        except Exception as e:
+            logger.debug("hub cockpit dns summary failed: %s", e)
+            return [
+                "  stale endpoints: unavailable",
+                "  mesh approvals: unavailable",
+            ]
+
+        stale_records = [
+            r for r in records
+            if getattr(r, "endpoint_state", "fresh") != "fresh"
+            or bool(getattr(r, "is_stale", False))
+        ]
+        rejected = sum(
+            1 for r in records if getattr(r, "approval_state", "") == "rejected"
+        )
+        pending = sum(
+            1 for r in records if getattr(r, "approval_state", "") == "pending"
+        )
+
+        lines = [f"  stale endpoints: {len(stale_records)}"]
+        for record in stale_records[:5]:
+            designation = self._trim_cockpit_text(
+                getattr(record, "designation", "unknown"),
+                28,
+            )
+            endpoint_state = getattr(record, "endpoint_state", "unknown")
+            approval_state = getattr(record, "approval_state", "unknown")
+            parts = [endpoint_state]
+            if approval_state == "rejected":
+                parts.append("rejected")
+            elif approval_state not in {"approved", "auto_approved"}:
+                parts.append(approval_state)
+            line = f"    {designation}: {', '.join(parts)}"
+            last_seen = getattr(record, "last_endpoint_seen", 0.0)
+            if last_seen:
+                line += f", last endpoint {self._format_age_since(last_seen)}"
+            lines.append(line)
+        if len(stale_records) > 5:
+            lines.append(f"    ... {len(stale_records) - 5} more")
+        lines.append(f"  mesh approvals: pending={pending} rejected={rejected}")
+        return lines
+
+    def _format_cockpit_delivery_lines(self) -> list[str]:
+        try:
+            summary = self._delivery_trace().summary(recent_limit=5)
+        except Exception as e:
+            logger.debug("hub cockpit delivery summary failed: %s", e)
+            return [
+                "  delivery decisions: unavailable",
+                "  quarantine/reject: unavailable",
+                "  delivery trace: unavailable",
+            ]
+
+        counts = summary.get("counts", {})
+        total = int(summary.get("total", 0))
+        delivered = int(counts.get("socket_send_succeeded", 0))
+        queued = sum(
+            int(count)
+            for event, count in counts.items()
+            if str(event).startswith("queued_")
+        )
+        quarantined = int(counts.get("quarantined", 0))
+        rejected = int(counts.get("rejected", 0))
+
+        lines = [f"  delivery decisions: {total} event(s)"]
+        lines.append(
+            "    "
+            f"delivered={delivered} queued={queued} "
+            f"quarantined={quarantined} rejected={rejected}"
+        )
+        lines.append(
+            f"  quarantine/reject: quarantined={quarantined}"
+            f" rejected={rejected}"
+        )
+
+        recent = list(summary.get("recent", []))
+        if recent:
+            lines.append("    recent decisions:")
+            for item in recent:
+                event = self._trim_cockpit_text(item.get("event"), 28)
+                message_id = self._trim_cockpit_text(item.get("message_id"), 18)
+                sender = self._trim_cockpit_text(item.get("sender"), 24)
+                target = self._trim_cockpit_text(item.get("target"), 24)
+                detail = self._trim_cockpit_text(item.get("detail"), 60)
+                lines.append(
+                    f"      {event} {message_id} {sender}->{target}: {detail}"
+                )
+        else:
+            lines.append("    recent decisions: none")
+
+        lines.append(f"  delivery trace: {summary.get('path', 'unavailable')}")
+        return lines
+
+    def _format_pending_reply_due(self, item: Dict[str, Any]) -> str:
+        created_at = float(item.get("created_at") or 0)
+        deadline = float(item.get("deadline_seconds") or 0)
+        if not created_at or not deadline:
+            return ""
+        remaining = int((created_at + deadline) - time.time())
+        if remaining >= 0:
+            return f" due in {self._format_duration(remaining)}"
+        return f" overdue {self._format_duration(abs(remaining))}"
+
+    def _format_age_since(self, ts: float) -> str:
+        return f"{self._format_duration(max(0, time.time() - ts))} ago"
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = int(seconds)
+        if seconds < 60:
+            return f"{seconds}s"
+        if seconds < 3600:
+            return f"{seconds // 60}m"
+        return f"{seconds // 3600}h{(seconds % 3600) // 60}m"
+
+    @staticmethod
+    def _trim_cockpit_text(value: Any, limit: int) -> str:
+        text = str(value if value is not None else "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
 
     def _format_whoami(self) -> str:
         if not self._identity:

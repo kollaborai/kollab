@@ -6,6 +6,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -100,3 +101,43 @@ class DeliveryTrace:
         }
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def summary(self, *, recent_limit: int = 5) -> dict[str, Any]:
+        """Return compact counts and capped recent decisions."""
+        counts: dict[str, int] = {}
+        recent: list[dict[str, Any]] = []
+        total = 0
+
+        if not self.path.exists():
+            return {
+                "path": str(self.path),
+                "total": 0,
+                "counts": counts,
+                "recent": recent,
+            }
+
+        with open(self.path, encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+
+                event = str(payload.get("event") or "unknown")
+                counts[event] = counts.get(event, 0) + 1
+                total += 1
+                recent.append(payload)
+                if len(recent) > recent_limit:
+                    recent.pop(0)
+
+        return {
+            "path": str(self.path),
+            "total": total,
+            "counts": counts,
+            "recent": recent,
+        }
