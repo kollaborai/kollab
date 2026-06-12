@@ -40,6 +40,7 @@ from .models import POOL_BY_NAME, POOL_IDENTITIES, AgentState, HubMessage, Messa
 from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir
+from .runtime import HubRuntimeCallbacks, HubRuntimeServices
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .task_ledger import TaskLedger
@@ -204,6 +205,7 @@ class HubPlugin(BasePlugin):
         self._election: Optional[CoordinatorElection] = None
         self._socket_server: Optional[AgentSocketServer] = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
+        self._hub_runtime = HubRuntimeServices()
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
 
@@ -3642,102 +3644,25 @@ class HubPlugin(BasePlugin):
             if self._identity.is_coordinator and self._election:
                 self._election.update_identity(self._identity)
 
-            # Create + start socket server NOW that we know the identity.
-            # Socket file is named by identity (jarvis.sock, not a53d186b.sock).
-            self._socket_server = AgentSocketServer(
-                self._identity.agent_id,
-                self._on_message_received,
-                on_get_output=self._get_output_lines,
-                on_shutdown=self._on_remote_shutdown,
-                on_input_inject=self._inject_attacher_input,
-                socket_name=self._identity.identity,
-            )
-            self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
-            self._socket_server._identity_info = self._identity  # type: ignore[assignment]
-
-            # === RPC server (phase 1 of daemon transparency refactor) ===
-            # Instantiate RpcServer and install it on the socket server so
-            # _handle_connection and _recv_input can dispatch "rpc_request"
-            # frames to it. Phase 2 will register more handlers (StateService
-            # operations) on this same instance from other subsystems.
-            #
-            # Local import: kollabor_rpc is in a sibling package and importing
-            # it at module top can create cycles depending on load order.
-            # plugin.py already uses this pattern for signal_daemon_ready
-            # below — see the `from kollabor.daemon import signal_daemon_ready`
-            # local import just after start().
-            import os as _os
-            import time as _time
-
             try:
-                from kollabor_rpc import RpcServer
-            except ImportError:
-                RpcServer = None  # type: ignore[misc,assignment]
-                logger.debug("kollabor_rpc not installed, RPC disabled (attach mode unavailable)")
-
-            if RpcServer is not None:
-                _rpc_started_at = _time.monotonic()
-
-                self._rpc_server = RpcServer()
-                self._socket_server._rpc_server = self._rpc_server  # type: ignore[assignment]
-                if self.event_bus:
-                    self.event_bus.register_service("rpc_server", self._rpc_server)
-
-                async def _rpc_ping(params: dict) -> dict:
-                    """Phase 1 proof-of-life handler."""
-                    identity_str = ""
-                    if self._identity is not None:
-                        identity_str = getattr(self._identity, "identity", "") or ""
-                    return {
-                        "status": "ok",
-                        "daemon_pid": _os.getpid(),
-                        "uptime": _time.monotonic() - _rpc_started_at,
-                        "identity": identity_str,
-                    }
-
-                self._rpc_server.register("ping", _rpc_ping)
-                logger.info("rpc server initialized, ping registered")
-
-                # === State RPC handlers (phase 2) ===
-                state_service = (
-                    self.event_bus.get_service("state_service") if self.event_bus else None
+                runtime_handles = await self._hub_runtime.start_socket_runtime(
+                    identity=self._identity,
+                    display_tap=self._display_tap,
+                    event_bus=self.event_bus,
+                    callbacks=HubRuntimeCallbacks(
+                        on_message=self._on_message_received,
+                        on_get_output=self._get_output_lines,
+                        on_shutdown=self._on_remote_shutdown,
+                        on_input_inject=self._inject_attacher_input,
+                    ),
                 )
-                if state_service is not None:
-                    try:
-                        from kollabor.state import register_state_handlers
-
-                        register_state_handlers(self._rpc_server, state_service)
-                        logger.info("state rpc handlers registered from hub plugin path")
-                    except Exception as e:
-                        logger.warning(
-                            f"failed to register state rpc handlers from hub: {e}"
-                        )
-                    try:
-                        if hasattr(state_service, "set_context_identity"):
-                            state_service.set_context_identity(self._identity.identity)
-                    except Exception as e:
-                        logger.debug(f"failed to push context identity: {e}")
-                else:
-                    logger.debug(
-                        "state_service not yet on event bus, state rpc handlers deferred"
-                    )
-
-            try:
-                socket_path = await self._socket_server.start()
-                self._identity.socket_path = socket_path
+                self._socket_server = runtime_handles.socket_server
+                self._rpc_server = runtime_handles.rpc_server
             except RuntimeError as e:
                 logger.error(f"socket_server.start failed: {e}")
                 self.enabled = False
                 self._started = False
                 return
-
-            # Signal daemon-ready if running in fork-daemon mode
-            try:
-                from kollabor.daemon import signal_daemon_ready
-
-                signal_daemon_ready(socket_path)
-            except Exception:
-                pass  # Not in daemon mode, or import failed
 
             # Initialize vault for this identity (if enabled by agent config)
             _vault_enabled = True
@@ -3937,7 +3862,7 @@ class HubPlugin(BasePlugin):
                 self._identity.session_log = str(llm_svc.conversation_logger.session_file)
 
             # Publish presence
-            self._presence.publish()
+            self._hub_runtime.publish_presence(self._presence)
 
             # Register as service so status widgets can find us
             if self.event_bus:
@@ -5545,6 +5470,12 @@ class HubPlugin(BasePlugin):
                     )
             except Exception as e:
                 logger.error(f"Hub message trigger failed: {e}")
+
+    async def _on_message(self, message: HubMessage) -> None:
+        """Compatibility wrapper for older socket/test callback paths."""
+        if not hasattr(self, "_seen_messages"):
+            self._seen_messages = collections.OrderedDict()
+        await self._on_message_received(message)
 
     # Fallback colors when identity isn't in the gem pool
     _FALLBACK_COLORS = [
