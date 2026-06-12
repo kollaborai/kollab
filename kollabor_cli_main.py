@@ -12,10 +12,12 @@ package_dir = Path(__file__).parent.absolute()
 
 def _prepend_dev_workspace_paths(repo_root: Path = package_dir) -> None:
     """Prefer this checkout's workspace packages when running from source."""
-    paths = [repo_root]
     packages_dir = repo_root / "packages"
-    if packages_dir.exists():
-        paths.extend(sorted(packages_dir.glob("kollabor-*/src")))
+    if not packages_dir.exists():
+        return
+
+    paths = [repo_root]
+    paths.extend(sorted(packages_dir.glob("kollabor-*/src")))
 
     for path in reversed(paths):
         if path.exists():
