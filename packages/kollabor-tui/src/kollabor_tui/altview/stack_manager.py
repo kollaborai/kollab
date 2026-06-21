@@ -111,6 +111,7 @@ class AltViewStackManager:
             return False
 
         created_session = False
+        did_hibernate = False  # Track if we actually hibernated for proper restore
 
         # Look up or create the session
         session = self._session_registry.get(session_name)
@@ -146,22 +147,33 @@ class AltViewStackManager:
                 "altview_stack_manager",
             )
 
+            # Check if this altview is background-compatible (coexists with main UI)
+            background_compatible = bool(
+                getattr(altview.metadata, "background_compatible", False)
+            )
+
             # Hibernate the main render loop (zero CPU while altview is active)
+            # Skip hibernation for background-compatible views (e.g., terminal monitoring)
             main_loop = self._resolve_main_render_loop()
             if main_loop and hasattr(main_loop, "hibernate"):
-                main_loop.hibernate()
+                if not background_compatible:
+                    main_loop.hibernate()
+                    did_hibernate = True
 
             # Pause refresh scheduler to prevent queued renders bursting on thaw
+            # Skip pausing for background-compatible views
             scheduler = self._resolve_scheduler()
             if scheduler and hasattr(scheduler, "pause"):
-                scheduler.pause()
+                if not background_compatible:
+                    scheduler.pause()
 
             await session.enter()
             self._stack.append(session)
             logger.info(
-                "AltViewStackManager: pushed '%s' (depth=%d)",
+                "AltViewStackManager: pushed '%s' (depth=%d, background_compatible=%s)",
                 session_name,
                 self.stack_depth,
+                background_compatible,
             )
 
             # Blocks until the user exits this view
@@ -173,6 +185,7 @@ class AltViewStackManager:
                 session=session,
                 modal_started=modal_started,
                 session_entered=session_entered,
+                did_hibernate=did_hibernate,
             )
             if created_session and not session_entered:
                 self._session_registry.pop(session_name, None)
@@ -184,6 +197,7 @@ class AltViewStackManager:
         session: Optional[AltViewSession] = None,
         modal_started: bool = True,
         session_entered: bool = True,
+        did_hibernate: bool = False,
     ) -> None:
         """Pop the topmost session and replay its display queue if needed."""
         if session is None:
@@ -208,7 +222,9 @@ class AltViewStackManager:
                     exc_info=True,
                 )
 
-        await self._restore_main_ui(session.session_name, modal_started=modal_started)
+        await self._restore_main_ui(
+            session.session_name, modal_started=modal_started, did_hibernate=did_hibernate
+        )
 
         # Replay buffered frames if anything was captured while suspended
         if session.display_queue.frame_count > 0:
@@ -222,18 +238,22 @@ class AltViewStackManager:
         )
 
     async def _restore_main_ui(
-        self, session_name: Optional[str], modal_started: bool = True
+        self, session_name: Optional[str], modal_started: bool = True, did_hibernate: bool = False
     ) -> None:
         """Resume main UI rendering and input routing after an altview attempt."""
         # Resume refresh scheduler before emitting MODAL_HIDE
+        # Only resume if we actually paused it (i.e., not background-compatible)
         scheduler = self._resolve_scheduler()
         if scheduler and hasattr(scheduler, "resume"):
-            scheduler.resume()
+            if did_hibernate:
+                scheduler.resume()
 
         # Thaw the main render loop (was hibernated in push)
+        # Only thaw if we actually hibernated (i.e., not background-compatible)
         main_loop = self._resolve_main_render_loop()
         if main_loop and hasattr(main_loop, "thaw"):
-            main_loop.thaw()
+            if did_hibernate:
+                main_loop.thaw()
 
         if not modal_started:
             return
