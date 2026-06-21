@@ -7,11 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-06-20
+
 ### Added
 
 - Added a `/updates` AltView with version numbers on the left and release notes
   on the right, backed by the local changelog so installed and source users can
   browse recent changes in-terminal.
+
+### Fixed
+
+- Fixed kollab crashing on launch with a raw, confusing traceback when obsolete
+  Python-2-era backport packages (`typing`, `dataclasses`, `asyncio`, `pathlib`,
+  `uuid`, ...) are installed in the same interpreter and shadow the standard
+  library. A startup preflight now detects the offending packages before any
+  kollab import and prints an actionable message naming them and the exact
+  `pip uninstall` fix, then exits cleanly instead of dumping a traceback.
+
+### Changed
+
+- Recommend `pipx install kollab` as the primary install method in the README so
+  kollab lands in its own isolated virtualenv and avoids polluted-interpreter
+  startup failures; `pip install kollab` remains supported as a secondary option.
 
 ## [0.5.14] - 2026-05-28
 
