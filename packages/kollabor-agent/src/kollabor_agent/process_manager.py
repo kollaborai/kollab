@@ -764,7 +764,7 @@ class ProcessManager:
                 if exit_code is not None and exit_code != 0:
                     logger.error(f"process {mp.name} crashed (exit_code={exit_code})")
                     mp.state = ProcessState.CRASHED
-                    mp.last_crash = time._time()
+                    mp.last_crash = time.time()
                     mp.restart_count += 1
 
                     opened = self._circuit.record_failure(mp.name)
