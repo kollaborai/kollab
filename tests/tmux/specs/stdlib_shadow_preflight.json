@@ -1,0 +1,40 @@
+{
+  "name": "stdlib-shadow-preflight",
+  "description": "Startup preflight detects stdlib-shadowing backport packages (typing, asyncio, ...) and exits with an actionable message instead of a raw traceback (issue #32)",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "section", "title": "Setup: throwaway venv with a stdlib-shadowing backport" },
+    {
+      "action": "shell",
+      "description": "Poison a throwaway venv with a typing backport, then launch kollab through it",
+      "show": true,
+      "command": "set -u; ROOT=$(mktemp -d); VENV=\"$ROOT/venv\"; python3 -m venv --without-pip \"$VENV\" >/dev/null 2>&1 || { echo 'PREFLIGHT_TEST: venv creation failed'; exit 0; }; SP=$(echo \"$VENV\"/lib/python*/site-packages); if [ ! -d \"$SP\" ]; then echo 'PREFLIGHT_TEST: site-packages not found'; rm -rf \"$ROOT\"; exit 0; fi; printf 'raise ImportError(\"Python 2 typing backport: incompatible with this interpreter\")\\n' > \"$SP/typing.py\"; OUT=$(\"$VENV/bin/python\" \"$PWD/main.py\" smoke 2>&1); RC=$?; rm -rf \"$ROOT\"; echo '----- kollab launch output -----'; echo \"$OUT\"; echo \"----- PREFLIGHT_EXIT=$RC -----\""
+    },
+
+    { "action": "section", "title": "Test 1: actionable message naming the offender" },
+    { "action": "assert_contains", "pattern": "incompatible packages detected", "description": "Preflight banner shown" },
+    { "action": "assert_contains", "pattern": "shadow the standard library", "description": "Explains the stdlib-shadow cause" },
+    { "action": "assert_contains", "pattern": "typing", "description": "Names the offending module" },
+
+    { "action": "section", "title": "Test 2: exact fix offered" },
+    { "action": "assert_contains", "pattern": "pip uninstall.*typing", "description": "Exact uninstall command" },
+    { "action": "assert_contains", "pattern": "pipx install kollab", "description": "Recommends pipx isolation" },
+
+    { "action": "section", "title": "Test 3: clean exit, no raw traceback" },
+    { "action": "assert_contains", "pattern": "PREFLIGHT_EXIT=1", "description": "Exited non-zero" },
+    { "action": "assert_not_contains", "pattern": "Traceback \\(most recent call last\\)", "description": "No raw traceback leaked" },
+    { "action": "assert_not_contains", "pattern": "ImportError: Python 2 typing backport", "description": "Underlying import never reached" },
+
+    { "action": "section", "title": "Test 4: healthy environment still launches" },
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "incompatible packages detected", "description": "No false positive in a clean interpreter" }
+  ]
+}
