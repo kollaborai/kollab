@@ -177,8 +177,19 @@ kollab
 Python package managers:
 
 ```bash
-uv tool install kollab
 pipx install kollab
+```
+
+`pipx` is the recommended installer: it puts kollab in its own isolated
+virtualenv, which sidesteps a class of startup failure where obsolete
+stdlib-backport packages (`typing`, `asyncio`, `dataclasses`, `pathlib`, ...)
+left in a shared interpreter shadow the standard library and crash kollab on
+launch. `uv tool install kollab` isolates the same way.
+
+`pip install kollab` also works, but installs into the active interpreter and so
+inherits whatever is already there:
+
+```bash
 pip install kollab
 ```
 
