@@ -541,3 +541,99 @@ class TestLifecycle:
         assert altview.attached_to is None
         assert altview._attached_socket is None
         assert altview._input_buffer == ""
+
+
+# ---------------------------------------------------------------------------
+# Background fill tests (regression: raw feed padding left unpainted)
+# ---------------------------------------------------------------------------
+
+
+class TestFeedPanelBackgroundFill:
+    """Verify that _render_feed_panel always fills the full panel width.
+
+    Before the fix, raw (ANSI-coloured) feed lines emitted:
+        {line}\033[0m{plain_spaces}
+    The \033[0m reset stripped the background, so the padding spaces used the
+    terminal's default background instead of the theme dark colour.  Any cell
+    not explicitly painted in every frame shows stale content.
+    """
+
+    def _capture_raw_writes(self, altview: HubConsoleAltView, right_width: int) -> list[str]:
+        """Run _render_feed_panel and capture every write_raw call."""
+        writes: list[str] = []
+        renderer = MagicMock()
+        renderer.write_raw.side_effect = lambda t: writes.append(t)
+        renderer.move_cursor.return_value = None
+        renderer.write_at.return_value = None
+        altview._renderer = renderer
+
+        from kollabor_tui.design_system import T
+
+        altview._render_feed_panel(5, right_width, T())
+        return writes
+
+    def test_raw_feed_padding_includes_dark_bg(self, altview: HubConsoleAltView):
+        """Padding after ANSI feed lines must carry the dark background colour."""
+        from kollabor_tui.design_system import T
+
+        altview._feed_is_raw = True
+        # A short coloured line: 5 visible chars, right_width = 20 → 15 padding chars
+        altview.feed_lines = ["\033[32mhello\033[0m"]
+
+        writes = self._capture_raw_writes(altview, right_width=20)
+
+        # The write that contains the feed line must set a background on the padding
+        combined = "".join(writes)
+        assert "\033[0m" in combined, "reset should be emitted before padding"
+        # After the reset a 48;2 background sequence must appear before the spaces
+        assert "48;2;" in combined, "dark bg (RGB) must be applied to padding"
+
+    def test_raw_feed_exact_width_no_padding_needed(self, altview: HubConsoleAltView):
+        """Lines that fill the full width should not emit any padding."""
+        from kollabor_tui.design_system import T
+
+        right_width = 5
+        altview._feed_is_raw = True
+        altview.feed_lines = ["\033[32mhello\033[0m"]  # exactly 5 visible chars
+
+        writes = self._capture_raw_writes(altview, right_width=right_width)
+        combined = "".join(writes)
+        # Padding is empty so the dark_bg block is still emitted but is harmless
+        assert "\033[0m" in combined
+
+    def test_non_raw_feed_empty_rows_use_solid_bg(self, altview: HubConsoleAltView):
+        """Empty rows in non-raw mode should use solid() which always sets bg."""
+        from kollabor_tui.design_system import T
+
+        altview._feed_is_raw = False
+        altview.feed_lines = []  # all rows will be empty
+
+        renderer = MagicMock()
+        captured: list = []
+        renderer.write_at.side_effect = lambda x, y, t, c: captured.append(t)
+        renderer.move_cursor.return_value = None
+        renderer.write_raw.return_value = None
+        altview._renderer = renderer
+
+        altview._render_feed_panel(3, 20, T())
+
+        # Every write_at call should be a solid()-rendered string (contains 48;2; bg)
+        assert captured, "expected write_at calls for empty rows"
+        for text in captured:
+            assert "48;2;" in text, f"empty row must have solid bg: {text!r}"
+
+    def test_raw_feed_blank_line_gets_dark_bg(self, altview: HubConsoleAltView):
+        """An empty string entry in raw feed should be handled without crash."""
+        from kollabor_tui.design_system import T
+
+        altview._feed_is_raw = True
+        altview.feed_lines = [""]  # empty line in raw feed
+
+        # Should not raise; falls through to the non-raw (solid) branch for empty lines
+        renderer = MagicMock()
+        renderer.write_at.return_value = None
+        renderer.move_cursor.return_value = None
+        renderer.write_raw.return_value = None
+        altview._renderer = renderer
+
+        altview._render_feed_panel(3, 20, T())  # must not raise

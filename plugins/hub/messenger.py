@@ -8,12 +8,47 @@ import secrets
 import socket
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+# --- Durable inbox bounds ---
+# Max messages kept on disk per inbox. Oldest are evicted at write time.
+INBOX_MAX_SIZE: int = 50
+# Messages older than this (seconds) are silently discarded on read.
+INBOX_TTL_SECS: int = 7 * 86400  # 7 days
+# Max messages replayed to a reconnecting agent per mailbox poll cycle.
+# When the inbox exceeds this, a summary is prepended and only the newest
+# INBOX_MAX_REPLAY messages are returned.
+INBOX_MAX_REPLAY: int = 20
 
 from .models import HubMessage
 from .presence import _atomic_write, get_messages_dir, get_socket_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
+    """Evict the oldest messages from an inbox directory if it exceeds max_size.
+
+    Called by send_to_file after each write so inboxes can never grow
+    unboundedly even when an agent is offline for a long time.
+    """
+    try:
+        files = sorted(msg_dir.glob("*.json"))
+        excess = len(files) - max_size
+        if excess <= 0:
+            return
+        for f in files[:excess]:
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+        logger.info(
+            f"Inbox prune: evicted {excess} oldest message(s) from "
+            f"{msg_dir.name!r} (limit={max_size})"
+        )
+    except Exception as e:
+        logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
 
 
 class AgentSocketServer:
@@ -1076,7 +1111,11 @@ class AgentMessenger:
 
     @staticmethod
     async def send_to_file(target_agent_id: str, message: HubMessage) -> None:
-        """Fallback: write message to agent's filesystem mailbox."""
+        """Fallback: write message to agent's filesystem mailbox.
+
+        After writing, prunes the inbox to INBOX_MAX_SIZE entries (oldest
+        first) so a flood of messages can never grow an inbox unboundedly.
+        """
         msg_dir = get_messages_dir() / target_agent_id
         msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -1086,44 +1125,172 @@ class AgentMessenger:
         _atomic_write(msg_dir / filename, message.to_dict())
         logger.info(f"Wrote message to mailbox: {filename}")
 
+        # Enforce inbox size bound — evict oldest if over limit
+        _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+
     @staticmethod
-    def read_mailbox(agent_id: str) -> List[HubMessage]:
-        """Read and consume messages from filesystem mailbox."""
+    def read_mailbox(agent_id: str, max_replay: int = 0) -> List[HubMessage]:
+        """Read and consume messages from filesystem mailbox.
+
+        Args:
+            agent_id: Agent identity or agent_id to read from.
+            max_replay: If > 0, cap the number of messages returned to this
+                many (newest first). When the inbox exceeds ``max_replay`` a
+                synthetic ``inbox_summary`` message is prepended so the
+                recipient knows how many they missed without being flooded.
+                Expired messages (older than INBOX_TTL_SECS) are silently
+                discarded regardless of this limit.
+        """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
             return []
 
-        messages = []
+        now = time.time()
+        messages: List[HubMessage] = []
+        expired_count = 0
+
         for f in sorted(msg_dir.glob("*.json")):
+            data: Dict[str, Any] = {}
             try:
                 with open(f) as fh:
                     data = json.load(fh)
+            except Exception as e:
+                logger.warning(f"Bad mailbox message {f}: {e}")
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+                continue
+
+            # Silently discard TTL-expired messages
+            ts = data.get("timestamp", 0) or 0
+            if ts and (now - float(ts)) > INBOX_TTL_SECS:
+                expired_count += 1
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+                continue
+
+            try:
                 msg = HubMessage.from_dict(data)
                 messages.append(msg)
             except Exception as e:
-                logger.warning(f"Bad mailbox message {f}: {e}")
+                logger.warning(f"Failed to parse mailbox message {f}: {e}")
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
                 continue
-            # Only delete after successful parse
+
+            # Delete after successful parse
             try:
                 f.unlink()
             except Exception:
                 pass
+
+        if expired_count:
+            logger.info(
+                f"Discarded {expired_count} TTL-expired inbox message(s) for {agent_id}"
+            )
+
+        total = len(messages)
+
+        if max_replay > 0 and total > max_replay:
+            # Collect unique senders from the full set for the summary
+            senders: List[str] = list(
+                dict.fromkeys(
+                    m.from_identity or m.from_agent
+                    for m in messages
+                    if m.from_identity or m.from_agent
+                )
+            )
+            sender_str = ", ".join(senders[:5])
+            if len(senders) > 5:
+                sender_str += f" and {len(senders) - 5} more"
+
+            summary_content = (
+                f"[offline inbox] {total} message(s) arrived while offline"
+                f" (senders: {sender_str or 'unknown'}). "
+                f"Showing most recent {max_replay}. "
+                f"Older messages have been dropped to prevent flooding."
+            )
+            summary = HubMessage(
+                action="inbox_summary",
+                from_identity="hub",
+                content=summary_content,
+                # timestamp=0 ensures this summary sorts before all real
+                # messages when read_mailboxes does its chronological sort.
+                timestamp=0.0,
+                metadata={
+                    "total": total,
+                    "showing": max_replay,
+                    "senders": senders,
+                    "dropped": total - max_replay,
+                },
+            )
+            logger.info(
+                f"Inbox replay bounded for {agent_id}: {total} total, "
+                f"replaying last {max_replay}"
+            )
+            return [summary] + messages[-max_replay:]
+
         return messages
 
     @staticmethod
-    def read_mailboxes(agent_keys: List[str]) -> List[HubMessage]:
+    def read_mailboxes(agent_keys: List[str], max_replay: int = 0) -> List[HubMessage]:
         """Read and consume mailboxes for all durable addresses.
 
         Agents get a fresh agent_id on restart, but their hub identity
         stays stable. Reading both prevents offline messages from being
         stranded in the old session's mailbox.
+
+        Args:
+            agent_keys: List of agent_id and identity strings to drain.
+            max_replay: Forwarded to read_mailbox — caps per-inbox replay.
         """
         messages: List[HubMessage] = []
         seen: set[str] = set()
         for key in dict.fromkeys(k for k in agent_keys if k):
-            for msg in AgentMessenger.read_mailbox(key):
+            for msg in AgentMessenger.read_mailbox(key, max_replay=max_replay):
                 if msg.id in seen:
                     continue
                 seen.add(msg.id)
                 messages.append(msg)
         return sorted(messages, key=lambda msg: msg.timestamp)
+
+    @staticmethod
+    def get_inbox_count(identity: str) -> int:
+        """Return the number of pending messages in an identity's inbox.
+
+        Does NOT consume (delete) the messages.  Safe to call at any time.
+        """
+        msg_dir = get_messages_dir() / identity
+        if not msg_dir.exists():
+            return 0
+        try:
+            return sum(1 for _ in msg_dir.glob("*.json"))
+        except Exception:
+            return 0
+
+    @staticmethod
+    def get_all_inbox_counts() -> Dict[str, int]:
+        """Return {identity: count} for every non-empty offline inbox.
+
+        Used by the coordinator to surface "agent X has N pending" in
+        the hub status view.  Non-destructive (does not consume messages).
+        """
+        messages_dir = get_messages_dir()
+        if not messages_dir.exists():
+            return {}
+        counts: Dict[str, int] = {}
+        try:
+            for d in messages_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                count = sum(1 for _ in d.glob("*.json"))
+                if count > 0:
+                    counts[d.name] = count
+        except Exception:
+            pass
+        return counts

@@ -146,22 +146,32 @@ class AltViewStackManager:
                 "altview_stack_manager",
             )
 
+            # Check if this altview is background-compatible (coexists with main UI)
+            background_compatible = bool(
+                getattr(getattr(altview, "metadata", None), "background_compatible", False)
+            )
+
             # Hibernate the main render loop (zero CPU while altview is active)
+            # Skip hibernation for background-compatible views (e.g., terminal monitoring)
             main_loop = self._resolve_main_render_loop()
             if main_loop and hasattr(main_loop, "hibernate"):
-                main_loop.hibernate()
+                if not background_compatible:
+                    main_loop.hibernate()
 
             # Pause refresh scheduler to prevent queued renders bursting on thaw
+            # Skip pausing for background-compatible views
             scheduler = self._resolve_scheduler()
             if scheduler and hasattr(scheduler, "pause"):
-                scheduler.pause()
+                if not background_compatible:
+                    scheduler.pause()
 
             await session.enter()
             self._stack.append(session)
             logger.info(
-                "AltViewStackManager: pushed '%s' (depth=%d)",
+                "AltViewStackManager: pushed '%s' (depth=%d, background_compatible=%s)",
                 session_name,
                 self.stack_depth,
+                background_compatible,
             )
 
             # Blocks until the user exits this view
@@ -224,13 +234,18 @@ class AltViewStackManager:
     async def _restore_main_ui(
         self, session_name: Optional[str], modal_started: bool = True
     ) -> None:
-        """Resume main UI rendering and input routing after an altview attempt."""
+        """Resume main UI rendering and input routing after an altview attempt.
+
+        Always thaws/resumes: for a background-compatible view that never
+        hibernated this is a harmless no-op, but it guarantees the main UI is
+        never left frozen on any exit or failure path.
+        """
         # Resume refresh scheduler before emitting MODAL_HIDE
         scheduler = self._resolve_scheduler()
         if scheduler and hasattr(scheduler, "resume"):
             scheduler.resume()
 
-        # Thaw the main render loop (was hibernated in push)
+        # Thaw the main render loop (no-op if it was never hibernated)
         main_loop = self._resolve_main_render_loop()
         if main_loop and hasattr(main_loop, "thaw"):
             main_loop.thaw()

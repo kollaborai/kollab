@@ -321,7 +321,7 @@ class SubprocessStrategy(SpawnStrategy):
         cwd = request.cwd or str(Path.cwd())
         env = request.env
         if env is None:
-            env = os.environ.copy()
+            env = self._filter_env(os.environ.copy())
 
         try:
             proc = subprocess.Popen(
@@ -385,6 +385,35 @@ class SubprocessStrategy(SpawnStrategy):
                     pipe.close()
                 except Exception:
                     pass
+
+    @staticmethod
+    def _filter_env(env: dict) -> dict:
+        """Strip sensitive variables before handing the environment to a child process.
+
+        Matches the pattern used in terminal_plugin.py and shell_executor.py.
+        Any key whose upper-case form contains one of the sensitive patterns is
+        dropped.  Callers that need to pass specific credentials should set them
+        explicitly via SpawnRequest.env rather than relying on inheritance from
+        the parent environment.
+        """
+        _SENSITIVE = (
+            "API_KEY",
+            "SECRET",
+            "TOKEN",
+            "PASSWORD",
+            "CREDENTIAL",
+            "AUTH",
+            "AWS_",
+            "AZURE_",
+            "GCP_",
+            "ANTHROPIC_",
+            "OPENAI_",
+        )
+        return {
+            k: v
+            for k, v in env.items()
+            if not any(pat in k.upper() for pat in _SENSITIVE)
+        }
 
     def is_alive(self, handle: Any) -> bool:
         proc: subprocess.Popen = handle
@@ -764,7 +793,7 @@ class ProcessManager:
                 if exit_code is not None and exit_code != 0:
                     logger.error(f"process {mp.name} crashed (exit_code={exit_code})")
                     mp.state = ProcessState.CRASHED
-                    mp.last_crash = time._time()
+                    mp.last_crash = time.time()
                     mp.restart_count += 1
 
                     opened = self._circuit.record_failure(mp.name)

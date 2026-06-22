@@ -229,6 +229,86 @@ class TestMessageHandler(unittest.TestCase):
         self.assertEqual(result["status"], "coalesced")
         coord.create_background_task.assert_not_called()
 
+    # ------------------------------------------------------------------ #
+    # Regression: background terminal stalls user message delivery         #
+    # (2026-06-20)                                                         #
+    # ------------------------------------------------------------------ #
+
+    def test_hub_continue_drains_queue_after_completion(self):
+        """_hub_continue() must schedule _process_queue() when user messages
+        arrived in processing_queue while is_processing was held.
+
+        Regression: process_user_input() skips launching _process_queue()
+        when is_processing is True. If _hub_continue() finishes without
+        re-checking the queue, those messages are silently dropped.
+        """
+
+        async def run():
+            # Conversation history must be non-empty for handle_llm_continue
+            # to proceed past its early-exit guard.
+            self.coordinator.conversation_history.append(
+                type("obj", (object,), {"role": "user", "content": "hello"})()
+            )
+
+            # Use a real asyncio.Queue so .empty() / .qsize() behave correctly.
+            real_queue = asyncio.Queue()
+            self.coordinator._queue_processor.processing_queue = real_queue
+
+            # Override _process_queue so calling it returns a plain object
+            # (not a coroutine) — avoids "coroutine never awaited" warnings
+            # while still letting us assert create_background_task was called.
+            self.coordinator._process_queue = MagicMock(return_value=object())
+
+            # Step 1 — fire handle_llm_continue; it schedules _hub_continue().
+            await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
+            self.assertTrue(self.coordinator.create_background_task.called)
+
+            hub_coro = self.coordinator.create_background_task.call_args[0][0]
+            self.coordinator.create_background_task.reset_mock()
+
+            # Step 2 — a user message lands in the queue (simulates the user
+            # typing while _hub_continue() is running).
+            real_queue.put_nowait("reply from user during hub continue")
+
+            # Step 3 — actually run _hub_continue() to completion.
+            await hub_coro
+
+            # Step 4 — the fix must have called create_background_task once
+            # more, this time to drain the processing_queue.
+            self.assertTrue(
+                self.coordinator.create_background_task.called,
+                "_hub_continue() must restart _process_queue() when "
+                "processing_queue has messages after releasing is_processing",
+            )
+
+        self.loop.run_until_complete(run())
+
+    def test_hub_continue_no_drain_when_queue_empty(self):
+        """_hub_continue() must NOT spawn a spurious _process_queue() task
+        when processing_queue is already empty after the turn completes."""
+
+        async def run():
+            self.coordinator.conversation_history.append(
+                type("obj", (object,), {"role": "user", "content": "hello"})()
+            )
+
+            # Empty queue.
+            self.coordinator._queue_processor.processing_queue = asyncio.Queue()
+            self.coordinator._process_queue = MagicMock(return_value=object())
+
+            await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
+            hub_coro = self.coordinator.create_background_task.call_args[0][0]
+            self.coordinator.create_background_task.reset_mock()
+
+            await hub_coro
+
+            self.assertFalse(
+                self.coordinator.create_background_task.called,
+                "_hub_continue() must not spawn _process_queue() when queue is empty",
+            )
+
+        self.loop.run_until_complete(run())
+
 
 if __name__ == "__main__":
     unittest.main()

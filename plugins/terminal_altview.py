@@ -44,6 +44,7 @@ class TerminalAltView(AltView):
             aliases=[],
             supports_named_sessions=False,
             supports_background=False,
+            background_compatible=True,
         )
         super().__init__(metadata)
 

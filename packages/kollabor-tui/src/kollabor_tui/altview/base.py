@@ -45,6 +45,7 @@ class AltViewMetadata:
         aliases: Alternative names that can activate this view.
         supports_named_sessions: Whether multiple named sessions are allowed.
         supports_background: Whether background tasks continue when suspended.
+        background_compatible: Whether the view can coexist with main UI (no hibernation).
     """
 
     plugin_type: str
@@ -56,6 +57,7 @@ class AltViewMetadata:
     aliases: list = field(default_factory=list)
     supports_named_sessions: bool = True
     supports_background: bool = False
+    background_compatible: bool = False
 
 
 class AltView(ABC):

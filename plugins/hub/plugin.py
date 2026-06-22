@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 
 STOP_GRACE_SECONDS = 1.5
 STOP_TERM_SECONDS = 1.0
+STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
 
@@ -285,6 +286,15 @@ class HubPlugin(BasePlugin):
 
         # Message deduplication (LRU via OrderedDict, capped at 1000)
         self._seen_messages: collections.OrderedDict = collections.OrderedDict()
+
+        # Content dedup: TTL dict keyed by MD5("from_identity:content").
+        # Guards against verbatim duplicates produced by concurrent agent
+        # processes that share an identity but have independent per-process
+        # _recent_hub_msgs dicts.  Also catches any future producer-side
+        # double-send that generates two different message IDs with the same
+        # payload.  Entries older than _CONTENT_DEDUP_WINDOW seconds are
+        # pruned inline on each receive.
+        self._seen_content_hashes: Dict[str, float] = {}  # hash -> receive_ts
 
         # Synchronize conversation_history appends across async paths
         self._history_lock = asyncio.Lock()
@@ -3587,13 +3597,19 @@ class HubPlugin(BasePlugin):
 
             # Get identity
             # Priority: CLI --as > agent.json identity > config > auto-assign
-            preferred = ""
-            if (
+            #
+            # explicit_as is True only when --as was passed on the command line.
+            # It enables the hard spawn guard (issue #38): if the desired
+            # identity is held by a live process, we refuse to start rather
+            # than silently picking a different identity.
+            explicit_as: bool = bool(
                 self._cli_args
                 and hasattr(self._cli_args, "as_identity")
                 and self._cli_args.as_identity
-            ):
-                preferred = self._cli_args.as_identity
+            )
+            preferred = ""
+            if explicit_as:
+                preferred = self._cli_args.as_identity  # type: ignore[union-attr]
             else:
                 if active_agent:
                     # Use agent's identity field, or fall back to agent name
@@ -3633,9 +3649,45 @@ class HubPlugin(BasePlugin):
                         stale_file.unlink(missing_ok=True)
                         PresenceManager._cleanup_agent_socket(holder)
                         taken = [t for t in taken if t != preferred]
+                    elif explicit_as:
+                        # Spawn guard (issue #38): caller explicitly requested
+                        # this identity via --as, but a live process already
+                        # owns it.  Hard-refuse rather than silently shadow it —
+                        # duplicate processes share the same work queue, same
+                        # mailbox, and will double-execute tasks and double-send
+                        # messages even when content dedup is in place.
+                        import os as _os
+                        import sys as _sys
+
+                        _sys.stderr.write(
+                            f"\n[hub] SPAWN GUARD (issue #38): identity "
+                            f"'{preferred}' is already running "
+                            f"(pid={holder.pid}, "
+                            f"socket={holder.socket_path or 'unknown'}).\n"
+                            f"  Attach to it:  kollab --attach {preferred}\n"
+                            f"  Stop it:       kollab --hub stop {preferred}\n\n"
+                        )
+                        _sys.stderr.flush()
+                        logger.error(
+                            "spawn guard: refusing duplicate spawn of '%s' "
+                            "(holder pid=%s) — issue #38",
+                            preferred,
+                            holder.pid,
+                        )
+                        _os._exit(1)
 
             self._identity.identity = self._designator.assign(taken, preferred)
             self._identity.state = AgentState.IDLE.value
+
+            # TOCTOU race guard (issue #38): publish a preliminary presence
+            # record immediately after identity is assigned.  Concurrent
+            # starting processes calling discover_agents() will see our PID
+            # and identity in the file and skip this identity in their own
+            # assign() call.  The final self._presence.publish() at the end
+            # of _start_hub() overwrites this with the socket_path once the
+            # server is up.  If we crash before that, the stale file has our
+            # real PID so the next startup_scan() cleans it up automatically.
+            self._presence.publish()
 
             # Update coordinator state now that identity is populated
             # (try_become_coordinator runs before identity assignment)
@@ -3936,7 +3988,9 @@ class HubPlugin(BasePlugin):
             if llm_svc and hasattr(llm_svc, "conversation_logger") and llm_svc.conversation_logger:
                 self._identity.session_log = str(llm_svc.conversation_logger.session_file)
 
-            # Publish presence
+            # Final presence publish: overwrites the preliminary record written
+            # just after identity assignment (issue #38 TOCTOU guard) with the
+            # full record that now includes socket_path and session_log.
             self._presence.publish()
 
             # Register as service so status widgets can find us
@@ -4270,23 +4324,101 @@ class HubPlugin(BasePlugin):
             self._display_tap.publish({"type": "state_snapshot", **payload})
 
     async def _mailbox_loop(self) -> None:
-        """Check filesystem mailbox for messages."""
+        """Check filesystem mailbox for messages.
+
+        Passes max_replay to read_mailboxes so a reconnecting agent that
+        accumulated many offline messages receives a bounded replay (newest N)
+        with a summary header prepended — never the full uncontrolled flood.
+
+        When a bounded replay batch is detected (inbox_summary present as
+        the first message), the entire batch is coalesced into ONE
+        system-message injection via _deliver_inbox_batch instead of
+        calling _on_message_received per message.
+        """
         poll_interval = 5
         if self.config:
             poll_interval = self.config.get("plugins.hub.mailbox_poll_interval", 5)
+        from .messenger import INBOX_MAX_REPLAY
         while True:
             try:
                 await asyncio.sleep(poll_interval)
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
-                        [self._identity.agent_id, self._identity.identity]
+                        [self._identity.agent_id, self._identity.identity],
+                        max_replay=INBOX_MAX_REPLAY,
                     )
-                    for msg in messages:
-                        await self._on_message_received(msg)
+                    if messages:
+                        await self._deliver_inbox_batch(messages)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
+        """Deliver a batch of offline inbox messages.
+
+        When the batch starts with an inbox_summary (bounded replay), the
+        whole batch is coalesced into a single system-message injection so
+        the LLM receives one clean block instead of N separate injections.
+
+        Single messages and small batches without a summary go through the
+        normal per-message _on_message_received path so existing live-delivery
+        behaviour is preserved.
+        """
+        if messages and messages[0].action == "inbox_summary":
+            await self._inject_inbox_replay(messages)
+        else:
+            for msg in messages:
+                await self._on_message_received(msg)
+
+    async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
+        """Coalesce a bounded inbox replay into a single injected block.
+
+        messages[0] must be the inbox_summary; messages[1:] are the replayed
+        messages (newest INBOX_MAX_REPLAY at most).
+
+        Falls back to per-message _on_message_received delivery if
+        inject_system_message is unavailable (e.g. during tests or when the
+        LLM service hasn't initialised yet).
+        """
+        summary = messages[0]
+        replay_msgs = messages[1:]
+
+        lines: List[str] = [summary.content, ""]
+        for msg in replay_msgs:
+            sender = msg.from_identity or msg.from_agent or "?"
+            if msg.timestamp:
+                ts = time.strftime("%H:%M", time.localtime(msg.timestamp))
+            else:
+                ts = "?"
+            content_preview = (msg.content or "")[:300]
+            lines.append(f"[{ts}] {sender}: {content_preview}")
+
+        block = "\n".join(lines)
+
+        llm = None
+        if self.event_bus is not None:
+            try:
+                llm = self.event_bus.get_service("llm_service")
+            except Exception:
+                pass
+
+        if llm is not None and hasattr(llm, "inject_system_message"):
+            try:
+                await llm.inject_system_message(block, subtype="inbox_replay")
+                logger.info(
+                    "Injected inbox replay block: %d message(s) shown "
+                    "(%s total queued)",
+                    len(replay_msgs),
+                    summary.metadata.get("total", "?"),
+                )
+                return
+            except Exception as exc:
+                logger.debug("inbox replay injection failed: %s", exc)
+
+        # Fallback: individual delivery (no inject_system_message)
+        for msg in replay_msgs:
+            await self._on_message_received(msg)
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
@@ -4915,6 +5047,11 @@ class HubPlugin(BasePlugin):
             logger.info(f"Announced to {peer.identity}")
 
     _HUB_WAKE_DEDUPE_TTL = 120.0
+    # Incoming content-dedup window: drop verbatim duplicates (same sender +
+    # content) that arrive within this many seconds of each other.  30 s is
+    # long enough to catch concurrent-process double-sends (≤ 1 s apart) but
+    # short enough to allow legitimate re-sends (e.g. a retry after a restart).
+    _CONTENT_DEDUP_WINDOW = 30.0
     _ACK_MARKERS = (
         "got it",
         "confirmed",
@@ -5113,7 +5250,9 @@ class HubPlugin(BasePlugin):
             ]
         )
 
-    def _register_hub_wake_candidate(self, message: HubMessage) -> Optional[str]:
+    def _register_hub_wake_candidate(
+        self, message: HubMessage, *, skip_fingerprint: bool = False
+    ) -> Optional[str]:
         now = time.time()
         self._prune_hub_wake_cache(now)
         msg_id = getattr(message, "id", "") or ""
@@ -5121,7 +5260,7 @@ class HubPlugin(BasePlugin):
             return "duplicate message id"
 
         fingerprint = self._hub_wake_fingerprint(message)
-        if fingerprint in self._hub_wake_seen_fingerprints:
+        if not skip_fingerprint and fingerprint in self._hub_wake_seen_fingerprints:
             return "duplicate report fingerprint"
 
         if msg_id:
@@ -5161,7 +5300,20 @@ class HubPlugin(BasePlugin):
         )
         wake_reason = "actionable" if has_actionable_evidence else "default intended"
 
-        duplicate_reason = self._register_hub_wake_candidate(message)
+        # Direct addressed REQUEST messages (task assignments / manual wakes /
+        # explicit requests sent to this agent) must always wake the recipient
+        # even if near-identical content was seen recently — they are deliberate
+        # re-sends, not broadcast storms.  Keep msg-id dedup (true redelivery
+        # guard) always.  Narrow to requests only: duplicate direct REPORTS
+        # (koordinator's repeated "task complete / commits" messages) must still
+        # dedup to wake once — that's the anti-storm contract for reports.
+        is_direct = message.scope == MessageScope.DIRECT.value
+        skip_fp = is_direct and self._has_request_evidence(
+            message.content, message.metadata or {}
+        )
+        duplicate_reason = self._register_hub_wake_candidate(
+            message, skip_fingerprint=skip_fp
+        )
         if duplicate_reason:
             return HubWakeDecision("observe", False, duplicate_reason)
 
@@ -5221,6 +5373,43 @@ class HubPlugin(BasePlugin):
             except Exception as e:
                 logger.debug(f"roster update parse failed: {e}")
             return
+
+        # Content dedup: two concurrent processes with the same identity (or any
+        # other producer-side double-send) can create distinct message IDs but
+        # identical payloads.  The message-id dedup above only catches exact
+        # retransmissions.  Here we hash (sender, content) and drop any
+        # verbatim duplicate that arrives within _CONTENT_DEDUP_WINDOW seconds.
+        # Control-plane actions (above) are exempt — they return early before
+        # this block and don't render in the UI or wake the LLM.
+        #
+        # EXEMPT: direct addressed messages (scope=DIRECT, to=this agent) with
+        # a *different* msg_id are deliberate re-sends from the coordinator (e.g.
+        # retrying a wake for a stuck peer — bug #39).  The msg_id dedup above
+        # already catches true retransmissions (same id); a new id means the
+        # sender intentionally created a new message and it must reach us.
+        _my_identity = self._identity.identity if self._identity else ""
+        _is_direct_to_me = (
+            message.scope == MessageScope.DIRECT.value
+            and message.to == _my_identity
+        )
+        _now = time.time()
+        _content_key = f"{message.from_identity}:{message.content}"
+        _content_hash = hashlib.md5(_content_key.encode()).hexdigest()
+        # Prune stale entries inline (avoids a background task)
+        self._seen_content_hashes = {
+            k: v
+            for k, v in self._seen_content_hashes.items()
+            if _now - v < self._CONTENT_DEDUP_WINDOW
+        }
+        if not _is_direct_to_me and _content_hash in self._seen_content_hashes:
+            logger.debug(
+                "Dedup: dropping duplicate content from %s "
+                "(same payload within %.0fs window)",
+                message.from_identity,
+                self._CONTENT_DEDUP_WINDOW,
+            )
+            return
+        self._seen_content_hashes[_content_hash] = _now
 
         # NOTE: _exit_waiting_state() is NOT called here anymore.
         # It moves to the TRIGGER_LLM_CONTINUE decision block below,
@@ -7594,7 +7783,12 @@ class HubPlugin(BasePlugin):
             if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
                 self._presence.cleanup_agent(agent)
                 return "killed (SIGTERM after graceful timeout)"
-            return "stop timed out (pid still alive)"
+            if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+                agent, timeout=STOP_KILL_SECONDS
+            ):
+                self._presence.cleanup_agent(agent)
+                return "killed (SIGKILL — was unresponsive)"
+            return "stop timed out (pid survived SIGKILL)"
 
         killed = self._force_kill_agent(agent)
         if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
@@ -7605,7 +7799,13 @@ class HubPlugin(BasePlugin):
             self._presence.cleanup_agent(agent)
             return "already dead, cleaned up"
 
-        return "failed (pid still alive)"
+        if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+            agent, timeout=STOP_KILL_SECONDS
+        ):
+            self._presence.cleanup_agent(agent)
+            return "killed (SIGKILL fallback)"
+
+        return "failed (pid survived SIGKILL)"
 
     async def _wait_for_agent_exit(self, agent, timeout: float = 5.0) -> bool:
         """Wait until an agent pid is no longer alive."""
@@ -7649,6 +7849,26 @@ class HubPlugin(BasePlugin):
             return False
         except PermissionError:
             logger.warning(f"No permission to kill pid {pid}")
+            return False
+
+    def _hard_kill_agent(self, agent) -> bool:
+        """Send SIGKILL (uncatchable) as the absolute last resort.
+
+        A wedged event loop swallows the graceful shutdown *and* SIGTERM, so
+        without this a hung agent (e.g. a stuck coordinator) survives a full
+        stop sequence. SIGKILL cannot be caught or deferred.
+        """
+        pid = getattr(agent, "pid", 0)
+        if not pid:
+            return False
+        try:
+            os.kill(pid, signal.SIGKILL)
+            logger.info(f"Sent SIGKILL to {agent.identity} (pid {pid})")
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            logger.warning(f"No permission to SIGKILL pid {pid}")
             return False
 
     async def _handle_agents_command(self) -> str:
@@ -8488,6 +8708,16 @@ class HubPlugin(BasePlugin):
             lines.append(f"  delivery trace: {trace_path}")
         except Exception:
             lines.append("  delivery trace: unavailable")
+        # Offline inbox counts — coordinator awareness of pending messages
+        try:
+            inbox_counts = AgentMessenger.get_all_inbox_counts()
+            if inbox_counts:
+                parts = ", ".join(
+                    f"{k}({v})" for k, v in sorted(inbox_counts.items())
+                )
+                lines.append(f"  offline inboxes: {parts}")
+        except Exception:
+            pass
         return lines
 
     def _format_whoami(self) -> str:

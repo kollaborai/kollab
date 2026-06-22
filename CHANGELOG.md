@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.16] - 2026-06-21
+
+### Added
+
+- Durable per-agent message inbox: messages for an offline agent are persisted and
+  replayed as a single bounded catch-up block when it reconnects, so agents no longer
+  lose project context after a crash or restart.
+- Hub spawn guard: refuses to start a second live process for an identity that is
+  already running, preventing duplicate agents that double-execute actions.
+
+### Fixed
+
+- `kollab --hub stop` (and `/hub stop`) now escalate to SIGKILL, so a wedged or
+  unresponsive coordinator is reliably reaped instead of squatting its slot.
+- Fixed a lost-wakeup race where user messages enqueued while the hub was mid-continue
+  were never drained, leaving the agent idle with the message unprocessed.
+- Addressed, actionable hub messages now always wake an idle recipient; the wake dedup
+  no longer suppresses a deliberate re-send (only true redelivery and broadcasts dedup).
+- AltView panel backgrounds now paint fully to the panel edges instead of leaking the
+  terminal default background.
+- AltView exit-state cleanup always restores the main UI on every exit and failure path,
+  and no longer crashes on a view without metadata.
+
+### Security
+
+- Spawned subprocesses no longer inherit the full parent environment by default;
+  sensitive variables (API keys, tokens, secrets) are filtered unless explicitly passed.
+
 ## [0.5.15] - 2026-06-20
 
 ### Added
