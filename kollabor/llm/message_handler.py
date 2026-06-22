@@ -373,6 +373,25 @@ class MessageHandler:
                             break
                 finally:
                     qp.is_processing = False
+                    # User messages arrive via process_user_input(), which
+                    # enqueues them to processing_queue but SKIPS creating
+                    # _process_queue() when is_processing is True.  After
+                    # _hub_continue() releases is_processing, nobody restarts
+                    # the queue — those messages sit permanently unprocessed
+                    # (the "background terminal stalls user message delivery"
+                    # bug, 2026-06-20).  Re-launch _process_queue() here so
+                    # any messages that piled up while we held is_processing
+                    # get consumed immediately.
+                    if not qp.processing_queue.empty() and not qp.cancel_processing:
+                        logger.info(
+                            "hub_continue: draining %d user message(s) from queue "
+                            "that arrived while is_processing was held",
+                            qp.processing_queue.qsize(),
+                        )
+                        coord.create_background_task(
+                            coord._process_queue(),
+                            name="process_queue_drain_after_hub_continue",
+                        )
 
             if coord.is_processing:
                 # Coalesce: only one pending retry at a time. Peer messages

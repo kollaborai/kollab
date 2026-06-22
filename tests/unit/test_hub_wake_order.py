@@ -151,5 +151,134 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Standing by", hud)
 
 
+    # ------------------------------------------------------------------ #
+    # Regression: addressed messages must always wake (#39)               #
+    # ------------------------------------------------------------------ #
+
+    async def _make_plugin_for_wake(self, identity="sapphire"):
+        """Minimal HubPlugin wired for _decide_hub_wake / _on_message_received tests."""
+        llm_service = FakeLLMService()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._task_ledger = None
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity=identity,
+            state="waiting",
+            waiting_since=1.0,
+            cooldown_until=2.0,
+            waiting_reason="standing by",
+        )
+        return plugin, llm_service, event_bus
+
+    async def test_re_sent_addressed_request_wakes_within_ttl(self):
+        """A coordinator re-sending a near-identical direct request to a
+        stuck peer must still fire a wake — even inside the 120s fingerprint
+        TTL.  Bug #39: the 2nd send was silently suppressed."""
+        plugin, llm_service, event_bus = await self._make_plugin_for_wake()
+
+        wake_msg = HubMessage(
+            action="message",
+            from_agent="koordinator-id",
+            from_identity="koordinator",
+            to="sapphire",
+            content="please investigate plugins/hub/plugin.py and report findings",
+            scope=MessageScope.DIRECT.value,
+            id="msg-wake-1",
+        )
+        resend = HubMessage(
+            action="message",
+            from_agent="koordinator-id",
+            from_identity="koordinator",
+            to="sapphire",
+            # Near-identical content — same fingerprint under old code.
+            content="please investigate plugins/hub/plugin.py and report findings",
+            scope=MessageScope.DIRECT.value,
+            id="msg-wake-2",  # different message id — not a redelivery
+        )
+
+        await plugin._on_message_received(wake_msg)
+        first_emits = len(event_bus.emitted)
+        self.assertGreater(first_emits, 0, "first send must emit TRIGGER_LLM_CONTINUE")
+
+        # Re-send within TTL with a different msg_id (deliberate retry).
+        await plugin._on_message_received(resend)
+        self.assertGreater(
+            len(event_bus.emitted),
+            first_emits,
+            "re-sent addressed request must emit another TRIGGER_LLM_CONTINUE "
+            "even though content fingerprint matches the first message",
+        )
+
+    async def test_same_msg_id_redelivery_still_deduped(self):
+        """Exact same message id arriving twice must be suppressed (true
+        redelivery guard must remain intact after the #39 fix)."""
+        plugin, llm_service, event_bus = await self._make_plugin_for_wake()
+
+        msg = HubMessage(
+            action="message",
+            from_agent="koordinator-id",
+            from_identity="koordinator",
+            to="sapphire",
+            content="investigate plugins/hub/plugin.py and report findings",
+            scope=MessageScope.DIRECT.value,
+            id="msg-dedup-1",
+        )
+
+        await plugin._on_message_received(msg)
+        first_emits = len(event_bus.emitted)
+        self.assertGreater(first_emits, 0)
+
+        # Deliver the exact same msg_id again (network redelivery).
+        await plugin._on_message_received(msg)
+        self.assertEqual(
+            len(event_bus.emitted),
+            first_emits,
+            "duplicate msg_id must be suppressed — not wake again",
+        )
+
+    async def test_broadcast_spam_still_fingerprint_deduped(self):
+        """Repeated broadcasts with the same content must NOT pile up wakes —
+        the anti-storm fingerprint guard must remain active for broadcasts."""
+        plugin, llm_service, event_bus = await self._make_plugin_for_wake()
+
+        broadcast_content = "team standup: share your status"
+        for i in range(3):
+            await plugin._on_message_received(
+                HubMessage(
+                    action="message",
+                    from_agent="koordinator-id",
+                    from_identity="koordinator",
+                    to="sapphire",
+                    content=broadcast_content,
+                    scope=MessageScope.BROADCAST.value,
+                    id=f"msg-broadcast-{i}",
+                )
+            )
+
+        # Only the first broadcast should have caused a wake emission; the
+        # rest are fingerprint-deduped.
+        wake_count = sum(
+            1
+            for _, data, _ in event_bus.emitted
+            if data.get("wake") or data.get("source") == "hub"
+        )
+        # Conservatively: total TRIGGER_LLM_CONTINUE emissions must be at
+        # most 1 for identical broadcast spam (fingerprint dedup active).
+        from kollabor_events import EventType
+
+        llm_continue_count = sum(
+            1 for evt, _, _ in event_bus.emitted if evt == EventType.TRIGGER_LLM_CONTINUE
+        )
+        self.assertLessEqual(
+            llm_continue_count,
+            1,
+            "broadcast fingerprint dedup must suppress repeat wakes from "
+            "identical broadcast content",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

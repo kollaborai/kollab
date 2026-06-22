@@ -13,11 +13,15 @@ Features:
 """
 
 import logging
+import re
 from typing import Any
 
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import T, solid
 from kollabor_tui.key_parser import KeyPress
+
+# ANSI escape sequence pattern for measuring visible line width
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;]*[mA-Za-z]?|\][^\x07]*\x07?|[^[])")
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +100,25 @@ class HubFeedAltView(AltView):
             if len(feed_lines) > content_height:
                 feed_lines = feed_lines[-content_height:]
 
+        dr, dg, db = theme.dark[0]
+        dark_bg = f"\033[48;2;{dr};{dg};{db}m"
         for i in range(content_height):
             row = i + 1
             if i < len(feed_lines):
                 line = feed_lines[i]
-                self.renderer.write_raw(f"\033[{row + 1};1H{line}")
+                # Pad each feed line to full terminal width with the dark
+                # background so that the area to the right of any content does
+                # not bleed through to the terminal's default background.
+                vis_len = len(_ANSI_RE.sub("", line))
+                padding = max(0, width - vis_len)
+                self.renderer.write_raw(
+                    f"\033[{row + 1};1H{line}\033[0m{dark_bg}{' ' * padding}\033[0m"
+                )
             else:
-                self.renderer.write_raw(f"\033[{row + 1};1H{' ' * width}")
+                # Empty row: fill with dark bg so terminal default doesn't show.
+                self.renderer.write_raw(
+                    f"\033[{row + 1};1H{dark_bg}{' ' * width}\033[0m"
+                )
 
         # Footer
         footer = " Esc: exit | Up/Down: scroll "

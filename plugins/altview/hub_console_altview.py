@@ -272,9 +272,11 @@ class HubConsoleAltView(AltView):
         self._render_agent_sidebar(content_height, theme)
         self._render_feed_panel(content_height, right_width, theme)
 
-        # Separator
+        # Separator — paint bg=dark fg=primary so the cell background matches the
+        # theme instead of bleeding through with terminal-default colors.
+        sep_char = solid(str(C["line_v"]), theme.dark[0], theme.primary[0], 1)
         for row in range(2, 2 + content_height):
-            self.renderer.write_at(self.left_width, row, C["line_v"], "")
+            self.renderer.write_at(self.left_width, row, sep_char, "")
 
         # Footer
         self._render_footer(width, height, theme)
@@ -432,9 +434,13 @@ class HubConsoleAltView(AltView):
                     vis_len = right_width
 
                 padding = " " * (right_width - vis_len)
-                # Write content with agent's own ANSI colors, no bg override
+                # Write content with agent's own ANSI colors; fill the remaining
+                # width with the theme dark background so no raw terminal default
+                # shows through on the right side of the panel.
+                dr, dg, db = theme.dark[0]
+                dark_bg = f"\033[48;2;{dr};{dg};{db}m"
                 self.renderer.move_cursor(x_offset, row)
-                self.renderer.write_raw(f"{line}\033[0m{padding}")
+                self.renderer.write_raw(f"{line}\033[0m{dark_bg}{padding}\033[0m")
             else:
                 plain = line[:right_width].ljust(right_width)
                 self.renderer.write_at(

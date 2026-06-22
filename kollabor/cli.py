@@ -42,6 +42,7 @@ from .version import __version__
 
 STOP_GRACE_SECONDS = 1.5
 STOP_TERM_SECONDS = 1.0
+STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 
 
 def parse_timeout(timeout_str: str) -> int:
@@ -1325,6 +1326,22 @@ async def _handle_cli_hub(hub_args: list) -> None:
             except Exception:
                 pass
 
+    async def _hard_kill(pid: int, desig: str) -> tuple[bool, str]:
+        """Final SIGKILL fallback. Uncatchable, so a wedged event loop that
+        swallowed the graceful shutdown *and* SIGTERM still dies here. This is
+        what lets `stop all` reap a hung coordinator instead of giving up."""
+        if not pid:
+            return False, f"failed to stop {desig} (no pid)"
+        try:
+            os.kill(pid, 9)  # SIGKILL
+        except (OSError, ProcessLookupError):
+            _cleanup_presence_for_pid(pid)
+            return True, f"stopped {desig}"
+        if await _wait_for_pid_exit(pid, timeout=STOP_KILL_SECONDS):
+            _cleanup_presence_for_pid(pid)
+            return True, f"stopped {desig} (SIGKILL — was unresponsive)"
+        return False, f"failed to stop {desig} (pid {pid} survived SIGKILL)"
+
     async def _stop_agent_record(agent: dict, reason: str) -> tuple[bool, str]:
         desig = agent.get("identity", "?")
         sock = agent.get("socket_path", "")
@@ -1349,7 +1366,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 _cleanup_presence_for_pid(pid)
                 return True, f"stopped {desig} (SIGTERM after graceful timeout)"
 
-            return False, f"failed to stop {desig} (pid still alive)"
+            return await _hard_kill(pid, desig)
 
         if pid:
             try:
@@ -1361,6 +1378,8 @@ async def _handle_cli_hub(hub_args: list) -> None:
             if await _wait_for_pid_exit(pid, timeout=STOP_TERM_SECONDS):
                 _cleanup_presence_for_pid(pid)
                 return True, f"stopped {desig} (SIGTERM fallback)"
+
+            return await _hard_kill(pid, desig)
 
         return False, f"failed to stop {desig}"
 

@@ -111,7 +111,6 @@ class AltViewStackManager:
             return False
 
         created_session = False
-        did_hibernate = False  # Track if we actually hibernated for proper restore
 
         # Look up or create the session
         session = self._session_registry.get(session_name)
@@ -149,7 +148,7 @@ class AltViewStackManager:
 
             # Check if this altview is background-compatible (coexists with main UI)
             background_compatible = bool(
-                getattr(altview.metadata, "background_compatible", False)
+                getattr(getattr(altview, "metadata", None), "background_compatible", False)
             )
 
             # Hibernate the main render loop (zero CPU while altview is active)
@@ -158,7 +157,6 @@ class AltViewStackManager:
             if main_loop and hasattr(main_loop, "hibernate"):
                 if not background_compatible:
                     main_loop.hibernate()
-                    did_hibernate = True
 
             # Pause refresh scheduler to prevent queued renders bursting on thaw
             # Skip pausing for background-compatible views
@@ -185,7 +183,6 @@ class AltViewStackManager:
                 session=session,
                 modal_started=modal_started,
                 session_entered=session_entered,
-                did_hibernate=did_hibernate,
             )
             if created_session and not session_entered:
                 self._session_registry.pop(session_name, None)
@@ -197,7 +194,6 @@ class AltViewStackManager:
         session: Optional[AltViewSession] = None,
         modal_started: bool = True,
         session_entered: bool = True,
-        did_hibernate: bool = False,
     ) -> None:
         """Pop the topmost session and replay its display queue if needed."""
         if session is None:
@@ -222,9 +218,7 @@ class AltViewStackManager:
                     exc_info=True,
                 )
 
-        await self._restore_main_ui(
-            session.session_name, modal_started=modal_started, did_hibernate=did_hibernate
-        )
+        await self._restore_main_ui(session.session_name, modal_started=modal_started)
 
         # Replay buffered frames if anything was captured while suspended
         if session.display_queue.frame_count > 0:
@@ -238,22 +232,23 @@ class AltViewStackManager:
         )
 
     async def _restore_main_ui(
-        self, session_name: Optional[str], modal_started: bool = True, did_hibernate: bool = False
+        self, session_name: Optional[str], modal_started: bool = True
     ) -> None:
-        """Resume main UI rendering and input routing after an altview attempt."""
+        """Resume main UI rendering and input routing after an altview attempt.
+
+        Always thaws/resumes: for a background-compatible view that never
+        hibernated this is a harmless no-op, but it guarantees the main UI is
+        never left frozen on any exit or failure path.
+        """
         # Resume refresh scheduler before emitting MODAL_HIDE
-        # Only resume if we actually paused it (i.e., not background-compatible)
         scheduler = self._resolve_scheduler()
         if scheduler and hasattr(scheduler, "resume"):
-            if did_hibernate:
-                scheduler.resume()
+            scheduler.resume()
 
-        # Thaw the main render loop (was hibernated in push)
-        # Only thaw if we actually hibernated (i.e., not background-compatible)
+        # Thaw the main render loop (no-op if it was never hibernated)
         main_loop = self._resolve_main_render_loop()
         if main_loop and hasattr(main_loop, "thaw"):
-            if did_hibernate:
-                main_loop.thaw()
+            main_loop.thaw()
 
         if not modal_started:
             return

@@ -55,7 +55,54 @@ def test_stop_peer_waits_after_shutdown_ack_then_sigterms(monkeypatch):
     asyncio.run(run_test())
 
 
-def test_stop_peer_does_not_cleanup_if_pid_survives_sigterm(monkeypatch):
+def test_stop_peer_escalates_to_sigkill_when_sigterm_fails(monkeypatch):
+    """A wedged agent that survives graceful shutdown + SIGTERM must be
+    SIGKILLed and cleaned up — this is what lets `stop all` reap a hung
+    coordinator instead of leaving it squatting the slot."""
+
+    async def run_test():
+        plugin = HubPlugin()
+        plugin._presence = FakePresence()
+        agent = SimpleNamespace(
+            identity="sapphire",
+            pid=5678,
+            socket_path="/tmp/sapphire.sock",
+            agent_id="agent-sapphire",
+        )
+
+        async def signal_shutdown(socket_path, reason="", timeout=3.0):
+            return True
+
+        # grace wait -> False, SIGTERM wait -> False, SIGKILL wait -> True
+        wait_results = iter([False, False, True])
+
+        async def wait_for_exit(agent, timeout=5.0):
+            return next(wait_results)
+
+        hard_kills = []
+
+        monkeypatch.setattr(
+            "plugins.hub.plugin.AgentMessenger.signal_shutdown",
+            signal_shutdown,
+        )
+        monkeypatch.setattr(plugin, "_wait_for_agent_exit", wait_for_exit)
+        monkeypatch.setattr(plugin, "_force_kill_agent", lambda agent: True)
+        monkeypatch.setattr(
+            plugin, "_hard_kill_agent", lambda agent: hard_kills.append(agent.pid) or True
+        )
+
+        result = await plugin._stop_peer_agent(agent, reason="test")
+
+        assert result == "killed (SIGKILL — was unresponsive)"
+        assert hard_kills == [5678]
+        assert plugin._presence.cleaned == ["sapphire"]
+
+    asyncio.run(run_test())
+
+
+def test_stop_peer_reports_failure_only_if_pid_survives_sigkill(monkeypatch):
+    """If even SIGKILL doesn't land, report failure and do NOT cleanup."""
+
     async def run_test():
         plugin = HubPlugin()
         plugin._presence = FakePresence()
@@ -70,7 +117,7 @@ def test_stop_peer_does_not_cleanup_if_pid_survives_sigterm(monkeypatch):
             return True
 
         async def wait_for_exit(agent, timeout=5.0):
-            return False
+            return False  # never exits, even after SIGKILL
 
         monkeypatch.setattr(
             "plugins.hub.plugin.AgentMessenger.signal_shutdown",
@@ -78,10 +125,11 @@ def test_stop_peer_does_not_cleanup_if_pid_survives_sigterm(monkeypatch):
         )
         monkeypatch.setattr(plugin, "_wait_for_agent_exit", wait_for_exit)
         monkeypatch.setattr(plugin, "_force_kill_agent", lambda agent: True)
+        monkeypatch.setattr(plugin, "_hard_kill_agent", lambda agent: True)
 
         result = await plugin._stop_peer_agent(agent, reason="test")
 
-        assert result == "stop timed out (pid still alive)"
+        assert result == "stop timed out (pid survived SIGKILL)"
         assert plugin._presence.cleaned == []
 
     asyncio.run(run_test())
