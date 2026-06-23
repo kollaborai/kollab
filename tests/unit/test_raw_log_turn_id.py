@@ -98,6 +98,15 @@ class TurnIdLinkageTests(unittest.IsolatedAsyncioTestCase):
         # Length matches a uuid4 string ("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
         self.assertEqual(len(self.svc.last_turn_id), 36)
 
+    async def test_raw_log_accepts_string_directory(self):
+        """The headless engine passes raw_conversations_dir as a string."""
+        self.svc.raw_conversations_dir = str(self.tmpdir)
+
+        await self.svc.call_llm([{"role": "user", "content": "hi"}])
+
+        entries = self._read_entries()
+        self.assertEqual(len(entries), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from kollabor_ai.profile_manager import LLMProfile
@@ -51,7 +52,9 @@ class APICommunicationService:
             profile: LLM profile with configuration (resolves env vars -> config -> defaults)
         """
         self.config = config
-        self.raw_conversations_dir = raw_conversations_dir
+        self.raw_conversations_dir = (
+            Path(raw_conversations_dir) if raw_conversations_dir else None
+        )
 
         # Initialize from profile (resolves env vars through profile's getter methods)
         self.update_from_profile(profile)
@@ -1054,7 +1057,8 @@ class APICommunicationService:
 
             # Write to session-specific raw log file
             raw_file = (
-                self.raw_conversations_dir / f"{self.current_session_id}_raw.jsonl"
+                Path(self.raw_conversations_dir)
+                / f"{self.current_session_id}_raw.jsonl"
             )
             with open(raw_file, "a") as f:
                 f.write(json.dumps(interaction.to_dict(), default=str) + "\n")

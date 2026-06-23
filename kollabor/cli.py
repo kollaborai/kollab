@@ -1780,6 +1780,7 @@ def _should_use_daemon() -> bool:
         "--org",
         "-h",
         "--help",
+        "-v",
         "--version",
         "--reset-config",
         "--update",
