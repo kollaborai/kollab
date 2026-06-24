@@ -87,9 +87,10 @@ class TestFindSplitPoint(unittest.TestCase):
         preview = self.plugin._build_compact_preview()
 
         self.assertIn("compact preview:", preview)
-        self.assertIn("preserved:", preview)
-        self.assertIn("removed:", preview)
-        self.assertIn("pinned:", preview)
+        self.assertIn("preserved:      2 recent", preview)
+        self.assertIn("removed:        2 summarized", preview)
+        self.assertIn("pinned:         1 hub/task", preview)
+        self.assertIn("token delta:    ~2K removed", preview)
         self.assertEqual(len(history), 6)
 
     # ---- basic cases (no tool calls) ----
