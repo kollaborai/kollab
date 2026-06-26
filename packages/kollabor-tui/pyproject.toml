@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-tui"
-version = "0.5.18"
+version = "0.5.19"
 description = "Terminal UI primitives for Kollabor: design system, key parsing, terminal state, visual effects"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "kollabor-events>=0.5.18",
+    "kollabor-events>=0.5.19",
 ]
 
 [tool.hatch.build.targets.wheel]

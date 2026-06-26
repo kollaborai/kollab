@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-events"
-version = "0.5.18"
+version = "0.5.19"
 description = "Event bus and hook system for Kollabor"
 readme = "README.md"
 requires-python = ">=3.12"
