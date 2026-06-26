@@ -83,6 +83,17 @@ class FileOperationsExecutor:
             "file_operations.max_create_size_mb", 5
         )
         self.max_read_size_mb = self._get_config("file_operations.max_read_size_mb", 10)
+        # Cap a single read's RETURNED output so one big file can't blow the
+        # model context window. A full dump of a large file (e.g. a ~9.5k-line
+        # module ≈ 95k tokens) plus the system prompt, tool schemas, and the
+        # max_tokens budget can exceed the provider window — the call then comes
+        # back empty (stop_reason=model_context_window_exceeded). These bound the
+        # text injected into conversation history, independent of the on-disk
+        # size limit above. Set either to 0 to disable that bound.
+        self.max_read_lines = self._get_config("file_operations.max_read_lines", 2000)
+        self.max_read_output_chars = self._get_config(
+            "file_operations.max_read_output_chars", 80000
+        )
         self.create_parent_directories = self._get_config(
             "file_operations.create_parent_directories", True
         )
@@ -1257,6 +1268,62 @@ class FileOperationsExecutor:
             return None
         return self.event_bus.get_service("context_service")
 
+    def _cap_read_output(
+        self, content: str, filepath: str, total_lines: int, start_line: int = 0
+    ) -> Tuple[str, str]:
+        """Cap a read's returned text so one file can't blow the context window.
+
+        Reading a whole large file dumps its full content into conversation
+        history. Combined with the system prompt, tool schemas, and the
+        max_tokens budget that can exceed the provider context window, and the
+        next API call returns empty (stop_reason=model_context_window_exceeded),
+        bricking the session. Truncate here and tell the agent exactly which
+        commands to use to fetch the rest surgically.
+
+        Args:
+            content: Text about to be returned to the model.
+            filepath: File being read (used in the guidance message).
+            total_lines: Total line count of the file on disk.
+            start_line: 0-indexed line the returned slice starts at, so the
+                guidance can suggest the correct next offset.
+
+        Returns:
+            (possibly_truncated_content, guidance_note). guidance_note is ""
+            when nothing was truncated.
+        """
+        max_lines = self.max_read_lines
+        max_chars = self.max_read_output_chars
+        full_chars = len(content)
+        truncated = False
+
+        if max_lines and content.count("\n") + 1 > max_lines:
+            content = "\n".join(content.split("\n")[:max_lines])
+            truncated = True
+
+        if max_chars and len(content) > max_chars:
+            content = content[:max_chars]
+            newline = content.rfind("\n")
+            if newline > 0:
+                content = content[:newline]
+            truncated = True
+
+        if not truncated:
+            return content, ""
+
+        shown = content.count("\n") + 1
+        next_offset = start_line + shown
+        full_tokens_k = max(1, full_chars // 3500)
+        # Describe the next action by tool + params rather than a literal tag,
+        # so it reads correctly whether the agent calls tools natively
+        # (file_read / file_grep) or via XML (<read> / <grep>).
+        note = (
+            f"\n\n[truncated — showing {shown} of {total_lines} lines]\n"
+            f"The full file is ~{full_tokens_k}K tokens; loading it whole would "
+            f"consume that much of your context window, so it was capped here. "
+            f"To continue, read this file again with offset={next_offset}, "
+            f"limit={max_lines} — or grep it for the specific part you need."
+        )
+        return content, note
 
     def _execute_read(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute read file operation.
@@ -1354,11 +1421,14 @@ class FileOperationsExecutor:
             display_start = start_line + 1
             display_end = start_line + line_count
 
+            content, note = self._cap_read_output(
+                content, filepath, total_lines, start_line=start_line
+            )
             return {
                 "success": True,
                 "output": (
                     f"✓ Read {line_count} lines from {filepath} "
-                    f"(lines {display_start}-{display_end}):\n\n{content}"
+                    f"(lines {display_start}-{display_end}):\n\n{content}{note}"
                 ),
             }
 
@@ -1377,9 +1447,12 @@ class FileOperationsExecutor:
                 content = "\n".join(selected_lines)
                 line_count = len(selected_lines)
 
+                content, note = self._cap_read_output(
+                    content, filepath, total_lines, start_line=start_line
+                )
                 return {
                     "success": True,
-                    "output": f"✓ Read {line_count} lines from {filepath} (lines {lines_spec}):\n\n{content}",
+                    "output": f"✓ Read {line_count} lines from {filepath} (lines {lines_spec}):\n\n{content}{note}",
                 }
             except Exception as e:
                 return {
@@ -1387,9 +1460,21 @@ class FileOperationsExecutor:
                     "error": f"Invalid line specification '{lines_spec}': {str(e)}",
                 }
 
+        content, note = self._cap_read_output(content, filepath, total_lines)
+        if note:
+            # Truncated: report what was actually returned, not the file's full
+            # length, so the UI summary and the model both see the real size.
+            # Keep "Read <n> lines from <path>" contiguous for path extraction.
+            shown = content.count("\n") + 1
+            header = (
+                f"✓ Read {shown} lines from {filepath} "
+                f"(lines 1-{shown}, truncated from {total_lines}):"
+            )
+        else:
+            header = f"✓ Read {total_lines} lines from {filepath}:"
         return {
             "success": True,
-            "output": f"✓ Read {total_lines} lines from {filepath}:\n\n{content}",
+            "output": f"{header}\n\n{content}{note}",
         }
 
     def _execute_grep(self, operation: Dict[str, Any]) -> Dict[str, Any]:

@@ -49,7 +49,18 @@ class ProviderConfig(BaseModel):
     base_url: Optional[str] = None
     model: str = Field(..., min_length=1)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=128000, ge=1)
+    # Max OUTPUT tokens to request. The old default (128000) reserved most of
+    # the context window for output that's never more than a few thousand
+    # tokens, leaving almost no room for input — large reads then tripped the
+    # provider window and the call came back empty. Interactive/agent responses
+    # fit comfortably in 16k; override per-profile for big-generation tasks.
+    max_tokens: int = Field(default=16384, ge=1)
+    # Total context window (input + output) the model accepts. The budget guard
+    # trims history against this before sending so a request can't exceed the
+    # window. Normally set from the model registry at config-creation time; this
+    # default is only the fallback for an unknown model — kept conservative
+    # (200k, the common floor) so an unknown model can't silently over-send.
+    context_window: int = Field(default=200000, ge=1)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     timeout: Optional[float] = Field(default=120.0, ge=0)
     extra_headers: Optional[Dict[str, str]] = None

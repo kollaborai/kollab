@@ -372,7 +372,7 @@ class ConversationManager:
         with open(filepath, "w") as f:
             json.dump(conversation_data, f, indent=2)
 
-        logger.info(f"Saved conversation to: {filepath}")
+        logger.debug(f"Saved conversation to: {filepath}")
         return filepath
 
     def load_conversation(self, filepath: Path) -> bool:

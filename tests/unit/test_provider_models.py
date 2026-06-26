@@ -51,7 +51,12 @@ class TestProviderConfig:
         assert config.api_key == "test-key-123"
         assert config.model == "gpt-4"
         assert config.temperature == 0.7
-        assert config.max_tokens == 128000
+        # Output reserve: kept modest so it can't eat the context window. The
+        # budget guard scales the effective request against context_window.
+        assert config.max_tokens == 16384
+        # Conservative fallback window; the real per-model value comes from the
+        # registry at config-creation time.
+        assert config.context_window == 200000
 
     def test_custom_temperature(self):
         """Test custom temperature in valid range."""

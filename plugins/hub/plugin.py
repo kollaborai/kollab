@@ -34,9 +34,24 @@ from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
-from .messaging_bridge import BridgeManager, IncomingMessage, MessagingBridge
+from .messaging_bridge import (
+    BRIDGE_CONFLICT_BACKOFF,
+    BridgeConflictError,
+    BridgeManager,
+    BridgePollLock,
+    IncomingMessage,
+    MessagingBridge,
+)
 from .messenger import AgentMessenger, AgentSocketServer
-from .models import POOL_BY_NAME, POOL_IDENTITIES, AgentState, HubMessage, MessageScope
+from .models import (
+    COORDINATOR_IDENTITY,
+    POOL_BY_NAME,
+    POOL_IDENTITIES,
+    AgentState,
+    HubMessage,
+    MessageScope,
+    desired_bundle_for_identity,
+)
 from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir
@@ -243,6 +258,9 @@ class HubPlugin(BasePlugin):
         self._autosave_task: Optional[asyncio.Task] = None
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
+        # True when this session owns the inbound poll; False on standby
+        # (another session polls the shared token). See _messaging_bridge_loop.
+        self._bridge_polling: bool = False
         self._hub_cron_jobs: List[HubCronJob] = []
         self._recent_hub_msgs: Dict[str, float] = {}  # hash -> timestamp
         self._hub_wake_seen_ids: collections.OrderedDict[str, float] = (
@@ -3561,6 +3579,69 @@ class HubPlugin(BasePlugin):
                 lambda: asyncio.ensure_future(_safe_start())
             )
 
+    async def _reconcile_agent_bundle(self, bundle: str) -> None:
+        """Switch the active agent bundle to match this agent's hub role.
+
+        Routes through the state service (set_active_agent +
+        rebuild_system_prompt + tool-scope sync) so the new bundle's prompt
+        and tools take effect before the first LLM turn — the same path the
+        ``/agent`` command and resume use. Best-effort: any failure leaves
+        the already-loaded bundle in place and is logged, never raised, so a
+        reconcile problem can't abort hub startup.
+
+        Args:
+            bundle: Target agent bundle name (e.g. "koordinator", "coder").
+        """
+        identity = self._identity.identity if self._identity else "?"
+        try:
+            state_service = (
+                self.event_bus.get_service("state_service")
+                if self.event_bus
+                else None
+            )
+            if state_service is not None and hasattr(state_service, "set_agent"):
+                await state_service.set_agent(bundle)
+                # Keep the hub identity's cached bundle name in sync so the
+                # presence record / dashboards report the real bundle, not the
+                # one loaded at startup.
+                if self._identity:
+                    self._identity.name = bundle
+                logger.info(
+                    f"Reconciled agent bundle to '{bundle}' for hub role "
+                    f"(identity={identity})"
+                )
+                return
+
+            # Fallback: no state service (e.g. attach mode). Apply directly.
+            agent_mgr = (
+                self.event_bus.get_service("agent_manager")
+                if self.event_bus
+                else None
+            )
+            if agent_mgr and agent_mgr.set_active_agent(bundle):
+                llm = (
+                    self.event_bus.get_service("llm_service")
+                    if self.event_bus
+                    else None
+                )
+                if llm is not None and hasattr(llm, "rebuild_system_prompt"):
+                    import inspect as _inspect
+
+                    result = llm.rebuild_system_prompt()
+                    if _inspect.iscoroutine(result):
+                        await result
+                if self._identity:
+                    self._identity.name = bundle
+                logger.info(
+                    f"Reconciled agent bundle to '{bundle}' via fallback "
+                    f"(identity={identity})"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to reconcile agent bundle to '{bundle}' "
+                f"(identity={identity}): {e}"
+            )
+
     async def _start_hub(self) -> None:
         """Start hub services (called after all plugins init)."""
         if self._started or self._starting or not self._identity:
@@ -3607,9 +3688,22 @@ class HubPlugin(BasePlugin):
                 and hasattr(self._cli_args, "as_identity")
                 and self._cli_args.as_identity
             )
+            # explicit_agent is True only when --agent was passed. It marks the
+            # bundle as a deliberate user choice, so the role-based bundle
+            # reconcile below leaves it untouched.
+            explicit_agent: bool = bool(
+                self._cli_args and getattr(self._cli_args, "agent", None)
+            )
             preferred = ""
             if explicit_as:
                 preferred = self._cli_args.as_identity  # type: ignore[union-attr]
+            elif is_coordinator and not explicit_agent:
+                # Flock winner claims the koordinator identity. The default
+                # bundle is no longer "koordinator" (demoted to a normal
+                # agent), so nothing else would claim it — without this the
+                # winner would grab a gem identity and every
+                # `identity == "koordinator"` coordinator check would fail.
+                preferred = COORDINATOR_IDENTITY
             else:
                 if active_agent:
                     # Use agent's identity field, or fall back to agent name
@@ -3688,6 +3782,29 @@ class HubPlugin(BasePlugin):
             # server is up.  If we crash before that, the stale file has our
             # real PID so the next startup_scan() cleans it up automatically.
             self._presence.publish()
+
+            # --- Reconcile agent bundle to hub role ---
+            # The koordinator orchestrator bundle belongs ONLY to the elected
+            # coordinator. A plain `kollab` launch loads the demoted default
+            # bundle, then the flock winner becomes "koordinator" while the
+            # rest take gem identities — so swap each agent to the bundle its
+            # identity should run (koordinator -> koordinator, gems -> their
+            # pool agent_type, e.g. "coder"). Skipped only when the user
+            # pinned a bundle with --agent; --as pins the *identity*, not the
+            # bundle, so `kollab --as lapis` must still demote lapis off the
+            # koordinator bundle. No-op when the bundle already matches.
+            # Runs AFTER the preliminary publish above so the identity is
+            # claimed before the (slower) system-prompt rebuild, keeping the
+            # TOCTOU window tight; re-publishes so presence shows the real
+            # bundle name rather than the one loaded at startup.
+            if not explicit_agent:
+                desired_bundle = desired_bundle_for_identity(self._identity.identity)
+                current_bundle = (
+                    getattr(active_agent, "name", "") if active_agent else ""
+                )
+                if desired_bundle and desired_bundle != current_bundle:
+                    await self._reconcile_agent_bundle(desired_bundle)
+                    self._presence.publish()
 
             # Update coordinator state now that identity is populated
             # (try_become_coordinator runs before identity assignment)
@@ -4650,22 +4767,61 @@ class HubPlugin(BasePlugin):
         if not bridge:
             return
 
-        # Connect
+        # Connect (validates token via getMe, inits client). getMe and
+        # sendMessage carry no singleton constraint, so every session connects
+        # and can send immediately -- only the inbox poll must be a singleton.
         connected = await bridge.connect()
         if not connected:
             logger.error(f"messaging bridge ({platform}) failed to connect")
             return
 
         self._bridge = bridge
+
+        # Machine-global poll lock keyed on the token (see BridgePollLock).
+        # The hub elects a coordinator per project, so multiple kollab sessions
+        # in different repos each elect their own coordinator and would each
+        # poll the same bot token -> HTTP 409. This lock ensures exactly one
+        # process across the machine owns the inbox; the rest stand by (ready
+        # to take over on holder death) while still able to send.
+        from kollabor_config.config_utils import get_config_directory
+
+        poll_lock = BridgePollLock(f"{platform}:{token}", get_config_directory())
+        standby_interval = max(int(poll_interval), 15)
+        conflict_logged = False
+        was_standby = False
+
         logger.info(
-            f"messaging bridge loop started ({platform}, "
-            f"poll every {poll_interval}s)"
+            f"messaging bridge connected ({platform}); "
+            f"contending for inbound poll lock"
         )
 
         try:
             while True:
                 try:
+                    if not poll_lock.acquire():
+                        # Another session owns the inbox. We can still send;
+                        # retry so we take over if that session exits.
+                        if not was_standby:
+                            logger.info(
+                                f"messaging bridge ({platform}) on standby "
+                                f"(another session owns the inbox); "
+                                f"retry every {standby_interval}s"
+                            )
+                            was_standby = True
+                        self._bridge_polling = False
+                        await asyncio.sleep(standby_interval)
+                        continue
+
+                    if was_standby:
+                        logger.info(
+                            f"messaging bridge ({platform}) acquired inbox; "
+                            f"polling every {poll_interval}s"
+                        )
+                        was_standby = False
+                    self._bridge_polling = True
+
                     messages = await bridge.poll()
+                    conflict_logged = False
                     for msg in messages:
                         await self._handle_bridge_incoming(msg)
                     # poll() already blocks via long-polling (30s for telegram).
@@ -4675,6 +4831,19 @@ class HubPlugin(BasePlugin):
                         await asyncio.sleep(poll_interval)
                 except asyncio.CancelledError:
                     raise
+                except BridgeConflictError:
+                    # We hold the lock but the platform still reports another
+                    # consumer on this token (e.g. an external tool, or a stale
+                    # session mid-handoff). Keep the lock so no other kollab
+                    # session piles on, but back off hard and log once.
+                    if not conflict_logged:
+                        logger.warning(
+                            f"messaging bridge ({platform}) inbound conflict "
+                            f"(HTTP 409): another consumer is polling this "
+                            f"token; backing off {BRIDGE_CONFLICT_BACKOFF}s"
+                        )
+                        conflict_logged = True
+                    await asyncio.sleep(BRIDGE_CONFLICT_BACKOFF)
                 except Exception as e:
                     logger.debug(f"bridge poll error: {e}")
                     await asyncio.sleep(poll_interval)
@@ -4682,6 +4851,8 @@ class HubPlugin(BasePlugin):
         except asyncio.CancelledError:
             pass
         finally:
+            self._bridge_polling = False
+            poll_lock.release()
             await bridge.disconnect()
             self._bridge = None
 
@@ -8418,11 +8589,18 @@ class HubPlugin(BasePlugin):
         poll_interval = self.config.get("plugins.hub.bridge_poll_interval", 2)
         loop_status = "running" if self._bridge_task else "stopped"
         connected = "yes" if self._bridge else "no"
+        if not self._bridge_task:
+            inbox = "n/a"
+        elif self._bridge_polling:
+            inbox = "polling (this session owns the inbox)"
+        else:
+            inbox = "standby (another session owns the inbox)"
 
         return (
             f"messaging bridge: {'enabled' if enabled else 'disabled'}\n"
             f"  loop: {loop_status}\n"
             f"  connected: {connected}\n"
+            f"  inbox: {inbox}\n"
             f"  platform: {platform}\n"
             f"  token: {'set' if has_token else '(not set)'}\n"
             f"  chat_id: {'set' if has_chat else '(not set)'}\n"

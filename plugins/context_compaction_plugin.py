@@ -563,13 +563,47 @@ class ContextCompactionPlugin(BasePlugin):
 
         return 0
 
+    def _estimate_history_tokens(
+        self, history: List[ConversationMessage]
+    ) -> int:
+        """Estimate tokens for the conversation about to be sent.
+
+        The API-reported count lags by one request and reads 0 after a
+        context-window overflow, so on its own it lets an over-budget
+        conversation slip through without ever triggering compaction.
+        Estimating from current message content (~3 chars/token, deliberately
+        conservative) lets compaction react to a single turn that just added a
+        large payload, before that oversized request goes out.
+        """
+        total_chars = 0
+        for msg in history:
+            content = getattr(msg, "content", "") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            total_chars += len(content)
+        return total_chars // 3
+
     def _resolve_context_window(self) -> Optional[int]:
         """Resolve the context window size from the active model/provider.
 
-        Checks the model name against bundles/data/models.json (prefix match,
-        longest prefix wins), then falls back to provider_defaults.
-        Returns None if neither can be resolved.
+        Prefers the live provider config (which carries the model's window with
+        any per-profile override), then the model registry
+        (bundles/data/models.json, longest-prefix match), then
+        provider_defaults. Returns None only if none resolve.
         """
+        # The live provider config is authoritative — it holds the window the
+        # request is actually bounded by, so a model that isn't in the static
+        # registry resolves correctly instead of falling back to a too-small
+        # default and never triggering compaction.
+        try:
+            api_service = getattr(self._llm_service, "api_service", None)
+            cfg = getattr(getattr(api_service, "_provider", None), "config", None)
+            window = getattr(cfg, "context_window", None)
+            if window:
+                return int(window)
+        except Exception:
+            pass
+
         if not self._profile_manager:
             return None
 
@@ -643,8 +677,14 @@ class ContextCompactionPlugin(BasePlugin):
         a 2-message conversation with a huge system prompt, and also
         prevents token-blind compaction from agent chatter.
         """
-        # Gate 1: token count
-        prompt_tokens = self._get_prompt_tokens()
+        # Gate 1: token count. Use the larger of the API-reported count
+        # (accurate, but from the PREVIOUS request and 0 after an overflow) and
+        # a fresh estimate of the history about to be sent. The estimate is what
+        # lets compaction react to a turn that just added a large payload,
+        # before that oversized request goes out.
+        prompt_tokens = max(
+            self._get_prompt_tokens(), self._estimate_history_tokens(history)
+        )
         token_threshold = self._get_token_threshold()
         if prompt_tokens < token_threshold:
             return False
@@ -697,7 +737,57 @@ class ContextCompactionPlugin(BasePlugin):
             self._compaction_in_progress = True
             self._compaction_task = asyncio.ensure_future(self._run_compaction())
 
+        self._maybe_emit_budget_hud(history)
+
         return data
+
+    def _maybe_emit_budget_hud(self, history: List[ConversationMessage]) -> None:
+        """Periodically show the agent how full its context window is.
+
+        Every N turns, queue a one-line budget readout into the agent HUD so the
+        model gets a heads-up before it runs out of room. Uses the real
+        API-reported token count when available (estimate only as a fallback),
+        and the resolved per-model window.
+        """
+        every = int(
+            self.config.get("plugins.context_compaction.budget_hud_every_n_turns", 5)
+        )
+        if every <= 0:
+            return
+        count = getattr(self, "_turns_since_budget_hud", 0) + 1
+        if count < every:
+            self._turns_since_budget_hud = count
+            return
+        self._turns_since_budget_hud = 0
+
+        svc = self._llm_service
+        if not (svc and hasattr(svc, "queue_agent_hud")):
+            return
+        window = self._resolve_context_window()
+        if not window:
+            return
+
+        reported = self._get_prompt_tokens()
+        used = reported if reported > 0 else self._estimate_history_tokens(history)
+        pct = int(used * 100 / window)
+        used_k, window_k = used // 1000, window // 1000
+        if pct >= 85:
+            body = (
+                f"{used_k}K / {window_k}K tokens ({pct}%) — nearly full; "
+                "wrap up or /compact soon"
+            )
+        elif pct >= 70:
+            body = (
+                f"{used_k}K / {window_k}K tokens ({pct}%) — getting full; "
+                "prefer grep over whole-file reads"
+            )
+        else:
+            body = f"{used_k}K / {window_k}K tokens ({pct}%)"
+
+        try:
+            svc.queue_agent_hud(section="context", label="budget", content=body)
+        except Exception:
+            pass
 
     async def _apply_pending_compaction(
         self, data: Dict[str, Any], event

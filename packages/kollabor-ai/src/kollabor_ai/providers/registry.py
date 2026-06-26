@@ -465,6 +465,24 @@ def create_config_from_profile(
     if timeout and timeout > 0:
         base_fields["timeout"] = timeout
 
+    # Bound the context-budget guard to the model's real window: an explicit
+    # profile value wins, otherwise resolve it from the model registry by
+    # name/provider. Falls through to the config default if unresolved.
+    context_window = profile.get("context_window")
+    if context_window:
+        base_fields["context_window"] = int(context_window)
+    else:
+        try:
+            from kollabor_ai.model_registry import resolve_context_window
+
+            resolved = resolve_context_window(
+                base_fields["model"], provider_type.value
+            )
+            if resolved:
+                base_fields["context_window"] = resolved
+        except Exception:  # registry is best-effort; never block config creation
+            pass
+
     # API key is required for cloud providers, optional for custom
     api_key = profile.get("api_key") or profile.get("api_token", "")
     if not api_key and provider_type != ProviderType.CUSTOM:

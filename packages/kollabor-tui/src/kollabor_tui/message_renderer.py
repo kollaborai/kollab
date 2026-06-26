@@ -20,6 +20,22 @@ from kollabor_tui.color_contrast import readable_agent_color
 from kollabor_tui.design_system import S, T, TagBox, solid, solid_fg, wrap_text
 from kollabor_tui.terminal_state import get_global_width
 
+
+def _parse_markdown_bold(text: str) -> str:
+    """Parse markdown bold syntax (**bold**) and convert to ANSI codes.
+    
+    Args:
+        text: Text containing markdown bold syntax
+        
+    Returns:
+        Text with **bold** converted to ANSI bold codes
+    """
+    # Pattern to match **bold** syntax (non-greedy)
+    pattern = r'\*\*(.*?)\*\*'
+    
+    # Replace with ANSI bold codes
+    return re.sub(pattern, f'{S.BOLD}\\1{S.RESET_BOLD}', text)
+
 # Lazy import to avoid circular dependency with kollabor.io
 # tool_spinner is in kollabor.io which imports from kollabor_tui.terminal_renderer
 
@@ -614,7 +630,12 @@ class ModernMessageRenderer:
                     rendered_lines.append("")
                 continue
 
-            wrapped_lines = wrap_text(line, available, word_wrap=True)
+            # Convert **bold** to ANSI before wrapping: wrap_text measures
+            # visible width (ignores ANSI) and carries active codes across line
+            # breaks, so bold survives a wrap and the markers don't skew width.
+            wrapped_lines = wrap_text(
+                _parse_markdown_bold(line), available, word_wrap=True
+            )
             for wrap_idx, wrapped in enumerate(wrapped_lines):
                 active_prefix = prefix if wrap_idx == 0 else " " * len(prefix)
                 rendered_lines.append(

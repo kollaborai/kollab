@@ -26,16 +26,33 @@ Config keys (under plugins.hub.*):
 """
 
 import asyncio
+import fcntl
+import hashlib
 import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Seconds to back off after an inbound poll conflict (e.g. Telegram HTTP 409).
+# The poll inbox is a singleton per token; on conflict we yield hard rather
+# than hammering the API every poll_interval and flooding the log.
+BRIDGE_CONFLICT_BACKOFF = 60
+
+
+class BridgeConflictError(Exception):
+    """Raised when the platform reports another consumer owns the inbox.
+
+    Telegram's getUpdates returns HTTP 409 when a second process long-polls
+    the same bot token. The poll loop catches this to back off instead of
+    spinning. Outgoing sends are unaffected -- only the inbox is a singleton.
+    """
 
 
 @dataclass
@@ -220,6 +237,12 @@ class TelegramBridge(MessagingBridge):
             data = resp.json()
 
             if not data.get("ok"):
+                # 409 == another process is polling this bot token. Signal the
+                # loop to back off rather than retrying every poll_interval.
+                if data.get("error_code") == 409:
+                    raise BridgeConflictError(
+                        data.get("description", "getUpdates conflict")
+                    )
                 logger.warning(f"telegram getUpdates not ok: {data}")
                 return []
 
@@ -273,6 +296,9 @@ class TelegramBridge(MessagingBridge):
 
             return results
 
+        except BridgeConflictError:
+            # Propagate so the loop can back off; don't swallow as a poll error.
+            raise
         except httpx.TimeoutException:
             # Normal for long-polling -- no new messages
             return []
@@ -373,6 +399,62 @@ class TelegramBridge(MessagingBridge):
         except Exception as e:
             logger.error(f"Voice transcription failed: {e}")
             return "[voice message - transcription failed]"
+
+
+class BridgePollLock:
+    """Machine-global singleton lock for inbound bridge polling.
+
+    Long-poll inboxes (Telegram getUpdates, etc.) allow only ONE consumer
+    per bot token, account-wide -- a second poller gets HTTP 409. The hub
+    elects a coordinator *per project*, so two kollab sessions launched from
+    different repos each elect their own coordinator and would each poll the
+    same token, flapping 409 forever.
+
+    This lock lives in the GLOBAL config dir (not the project-scoped hub dir)
+    and is keyed on the token, so exactly one process across the machine polls
+    a given token. ``flock`` releases automatically when the holder dies, so a
+    standby session can take over polling without manual cleanup.
+
+    Outgoing ``send()`` is never gated -- sendMessage has no singleton
+    constraint, so every session can still push notifications.
+    """
+
+    def __init__(self, key: str, lock_dir: Path):
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+        self._lock_path = Path(lock_dir) / f"bridge-poll-{digest}.lock"
+        self._fd: Optional[Any] = None
+
+    def acquire(self) -> bool:
+        """Try to grab the lock (non-blocking). Idempotent while held."""
+        if self._fd is not None:
+            return True
+        fd = None
+        try:
+            fd = open(self._lock_path, "w")
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._fd = fd
+            return True
+        except (BlockingIOError, OSError):
+            if fd is not None:
+                try:
+                    fd.close()
+                except OSError:
+                    pass
+            return False
+
+    def release(self) -> None:
+        """Release the lock if held. Safe to call repeatedly."""
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+                self._fd.close()
+            except OSError as e:
+                logger.debug(f"bridge poll lock release error: {e}")
+            self._fd = None
+
+    @property
+    def held(self) -> bool:
+        return self._fd is not None
 
 
 class BridgeManager:

@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-webui"
-version = "0.5.16"
+version = "0.5.18"
 description = "Web UI for Kollab Engine"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
-    "kollabor-engine>=0.5.15",
+    "kollabor-engine>=0.5.18",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
 ]

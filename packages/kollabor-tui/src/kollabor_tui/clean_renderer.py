@@ -22,6 +22,22 @@ from kollabor_tui.terminal_state import get_global_width
 logger = logging.getLogger(__name__)
 
 
+def _parse_markdown_bold(text: str) -> str:
+    """Parse markdown bold syntax (**bold**) and convert to ANSI codes.
+    
+    Args:
+        text: Text containing markdown bold syntax
+        
+    Returns:
+        Text with **bold** converted to ANSI bold codes
+    """
+    # Pattern to match **bold** syntax (non-greedy)
+    pattern = r'\*\*(.*?)\*\*'
+    
+    # Replace with ANSI bold codes
+    return re.sub(pattern, f'{S.BOLD}\\1{S.RESET_BOLD}', text)
+
+
 def _tag(icon: str, bg, fg) -> str:
     """Render a 3-char tag cell with solid background."""
     return str(solid(icon, bg, fg, 3))
@@ -78,7 +94,10 @@ def _plain_rows(
     for line_idx, line in enumerate(lines):
         active_prefix = prefix if line_idx == 0 else continuation_prefix
         available = max(1, line_width - len(active_prefix))
-        wrapped = wrap_text(line, available) if line else [""]
+        # Parse markdown bold before wrapping: wrap_text preserves ANSI codes
+        # and carries active codes across line breaks, so bold survives wrap.
+        parsed_line = _parse_markdown_bold(line) if line else ""
+        wrapped = wrap_text(parsed_line, available) if parsed_line else [""]
 
         for wrap_idx, wrapped_line in enumerate(wrapped):
             row_prefix = active_prefix if wrap_idx == 0 else " " * len(active_prefix)
