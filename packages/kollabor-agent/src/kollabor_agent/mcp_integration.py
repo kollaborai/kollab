@@ -809,8 +809,19 @@ class MCPIntegration:
             command,
             cwd=self.workspace,
             extra_env={
-                "MENTIKO_SESSION_TOKEN": self.user_token or "",
-                "MENTIKO_SESSION_ID": self.session_id,
+                # Fall back to the ambient env when the caller didn't pass an
+                # explicit token/id. A mentiko chain-run agent is launched via
+                # application.py, which constructs MCPIntegration WITHOUT
+                # user_token/session_id — but the mentiko engine exports
+                # MENTIKO_SESSION_TOKEN / MENTIKO_SESSION_ID into the agent's
+                # environment. Without this fallback the MCP subprocess gets an
+                # empty token and every ops call fails "session auth required".
+                # The engine-session path still passes user_token explicitly, so
+                # it takes precedence and is unaffected.
+                "MENTIKO_SESSION_TOKEN": self.user_token
+                or os.environ.get("MENTIKO_SESSION_TOKEN", ""),
+                "MENTIKO_SESSION_ID": self.session_id
+                or os.environ.get("MENTIKO_SESSION_ID", ""),
             },
         )
 
