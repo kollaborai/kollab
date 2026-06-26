@@ -34,7 +34,14 @@ from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
-from .messaging_bridge import BridgeManager, IncomingMessage, MessagingBridge
+from .messaging_bridge import (
+    BRIDGE_CONFLICT_BACKOFF,
+    BridgeConflictError,
+    BridgeManager,
+    BridgePollLock,
+    IncomingMessage,
+    MessagingBridge,
+)
 from .messenger import AgentMessenger, AgentSocketServer
 from .models import POOL_BY_NAME, POOL_IDENTITIES, AgentState, HubMessage, MessageScope
 from .notifier import HubNotifier
@@ -243,6 +250,9 @@ class HubPlugin(BasePlugin):
         self._autosave_task: Optional[asyncio.Task] = None
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
+        # True when this session owns the inbound poll; False on standby
+        # (another session polls the shared token). See _messaging_bridge_loop.
+        self._bridge_polling: bool = False
         self._hub_cron_jobs: List[HubCronJob] = []
         self._recent_hub_msgs: Dict[str, float] = {}  # hash -> timestamp
         self._hub_wake_seen_ids: collections.OrderedDict[str, float] = (
@@ -4650,22 +4660,61 @@ class HubPlugin(BasePlugin):
         if not bridge:
             return
 
-        # Connect
+        # Connect (validates token via getMe, inits client). getMe and
+        # sendMessage carry no singleton constraint, so every session connects
+        # and can send immediately -- only the inbox poll must be a singleton.
         connected = await bridge.connect()
         if not connected:
             logger.error(f"messaging bridge ({platform}) failed to connect")
             return
 
         self._bridge = bridge
+
+        # Machine-global poll lock keyed on the token (see BridgePollLock).
+        # The hub elects a coordinator per project, so multiple kollab sessions
+        # in different repos each elect their own coordinator and would each
+        # poll the same bot token -> HTTP 409. This lock ensures exactly one
+        # process across the machine owns the inbox; the rest stand by (ready
+        # to take over on holder death) while still able to send.
+        from kollabor_config.config_utils import get_config_directory
+
+        poll_lock = BridgePollLock(f"{platform}:{token}", get_config_directory())
+        standby_interval = max(int(poll_interval), 15)
+        conflict_logged = False
+        was_standby = False
+
         logger.info(
-            f"messaging bridge loop started ({platform}, "
-            f"poll every {poll_interval}s)"
+            f"messaging bridge connected ({platform}); "
+            f"contending for inbound poll lock"
         )
 
         try:
             while True:
                 try:
+                    if not poll_lock.acquire():
+                        # Another session owns the inbox. We can still send;
+                        # retry so we take over if that session exits.
+                        if not was_standby:
+                            logger.info(
+                                f"messaging bridge ({platform}) on standby "
+                                f"(another session owns the inbox); "
+                                f"retry every {standby_interval}s"
+                            )
+                            was_standby = True
+                        self._bridge_polling = False
+                        await asyncio.sleep(standby_interval)
+                        continue
+
+                    if was_standby:
+                        logger.info(
+                            f"messaging bridge ({platform}) acquired inbox; "
+                            f"polling every {poll_interval}s"
+                        )
+                        was_standby = False
+                    self._bridge_polling = True
+
                     messages = await bridge.poll()
+                    conflict_logged = False
                     for msg in messages:
                         await self._handle_bridge_incoming(msg)
                     # poll() already blocks via long-polling (30s for telegram).
@@ -4675,6 +4724,19 @@ class HubPlugin(BasePlugin):
                         await asyncio.sleep(poll_interval)
                 except asyncio.CancelledError:
                     raise
+                except BridgeConflictError:
+                    # We hold the lock but the platform still reports another
+                    # consumer on this token (e.g. an external tool, or a stale
+                    # session mid-handoff). Keep the lock so no other kollab
+                    # session piles on, but back off hard and log once.
+                    if not conflict_logged:
+                        logger.warning(
+                            f"messaging bridge ({platform}) inbound conflict "
+                            f"(HTTP 409): another consumer is polling this "
+                            f"token; backing off {BRIDGE_CONFLICT_BACKOFF}s"
+                        )
+                        conflict_logged = True
+                    await asyncio.sleep(BRIDGE_CONFLICT_BACKOFF)
                 except Exception as e:
                     logger.debug(f"bridge poll error: {e}")
                     await asyncio.sleep(poll_interval)
@@ -4682,6 +4744,8 @@ class HubPlugin(BasePlugin):
         except asyncio.CancelledError:
             pass
         finally:
+            self._bridge_polling = False
+            poll_lock.release()
             await bridge.disconnect()
             self._bridge = None
 
@@ -8418,11 +8482,18 @@ class HubPlugin(BasePlugin):
         poll_interval = self.config.get("plugins.hub.bridge_poll_interval", 2)
         loop_status = "running" if self._bridge_task else "stopped"
         connected = "yes" if self._bridge else "no"
+        if not self._bridge_task:
+            inbox = "n/a"
+        elif self._bridge_polling:
+            inbox = "polling (this session owns the inbox)"
+        else:
+            inbox = "standby (another session owns the inbox)"
 
         return (
             f"messaging bridge: {'enabled' if enabled else 'disabled'}\n"
             f"  loop: {loop_status}\n"
             f"  connected: {connected}\n"
+            f"  inbox: {inbox}\n"
             f"  platform: {platform}\n"
             f"  token: {'set' if has_token else '(not set)'}\n"
             f"  chat_id: {'set' if has_chat else '(not set)'}\n"

@@ -1,0 +1,41 @@
+{
+  "name": "hub_bridge_poll_singleton",
+  "description": "Verifies the messaging-bridge singleton poll lock changes load cleanly: app boots with no traceback, and /hub bridge status renders the new 'inbox:' ownership line (polling vs standby) added to dedupe Telegram getUpdates across multiple kollab sessions.",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    {
+      "action": "section",
+      "name": "app_boots_with_bridge_lock_code_loaded"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback|ImportError|BridgePollLock.*error|cannot import"
+    },
+    {
+      "action": "type",
+      "text": "/hub bridge status"
+    },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    {
+      "action": "section",
+      "name": "bridge_status_shows_inbox_ownership_line"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "messaging bridge"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "inbox"
+    }
+  ]
+}
