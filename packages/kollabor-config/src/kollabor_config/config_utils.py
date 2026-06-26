@@ -821,7 +821,7 @@ def initialize_config(force: bool = False) -> None:
             default_config["kollabor"]["llm"]["profiles"] = DEFAULT_LLM_PROFILES.copy()
             default_config["kollabor"]["llm"]["active_profile"] = "default"
             default_config["kollabor"]["llm"]["default_agent"] = {
-                "name": "koordinator",
+                "name": "default",
                 "level": "global",
             }
             default_config["plugins"] = default_config.get("plugins", {})

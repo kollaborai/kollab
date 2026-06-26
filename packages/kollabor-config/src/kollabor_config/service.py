@@ -195,7 +195,7 @@ class ConfigService:
             "kollabor.updates.timeout_seconds": 5,
             "kollabor.updates.include_prereleases": False,
             "kollabor.llm.default_agent": {
-                "name": "koordinator",
+                "name": "default",
                 "level": "global",
             },
         }

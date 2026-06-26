@@ -43,7 +43,15 @@ from .messaging_bridge import (
     MessagingBridge,
 )
 from .messenger import AgentMessenger, AgentSocketServer
-from .models import POOL_BY_NAME, POOL_IDENTITIES, AgentState, HubMessage, MessageScope
+from .models import (
+    COORDINATOR_IDENTITY,
+    POOL_BY_NAME,
+    POOL_IDENTITIES,
+    AgentState,
+    HubMessage,
+    MessageScope,
+    desired_bundle_for_identity,
+)
 from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir
@@ -3571,6 +3579,69 @@ class HubPlugin(BasePlugin):
                 lambda: asyncio.ensure_future(_safe_start())
             )
 
+    async def _reconcile_agent_bundle(self, bundle: str) -> None:
+        """Switch the active agent bundle to match this agent's hub role.
+
+        Routes through the state service (set_active_agent +
+        rebuild_system_prompt + tool-scope sync) so the new bundle's prompt
+        and tools take effect before the first LLM turn — the same path the
+        ``/agent`` command and resume use. Best-effort: any failure leaves
+        the already-loaded bundle in place and is logged, never raised, so a
+        reconcile problem can't abort hub startup.
+
+        Args:
+            bundle: Target agent bundle name (e.g. "koordinator", "coder").
+        """
+        identity = self._identity.identity if self._identity else "?"
+        try:
+            state_service = (
+                self.event_bus.get_service("state_service")
+                if self.event_bus
+                else None
+            )
+            if state_service is not None and hasattr(state_service, "set_agent"):
+                await state_service.set_agent(bundle)
+                # Keep the hub identity's cached bundle name in sync so the
+                # presence record / dashboards report the real bundle, not the
+                # one loaded at startup.
+                if self._identity:
+                    self._identity.name = bundle
+                logger.info(
+                    f"Reconciled agent bundle to '{bundle}' for hub role "
+                    f"(identity={identity})"
+                )
+                return
+
+            # Fallback: no state service (e.g. attach mode). Apply directly.
+            agent_mgr = (
+                self.event_bus.get_service("agent_manager")
+                if self.event_bus
+                else None
+            )
+            if agent_mgr and agent_mgr.set_active_agent(bundle):
+                llm = (
+                    self.event_bus.get_service("llm_service")
+                    if self.event_bus
+                    else None
+                )
+                if llm is not None and hasattr(llm, "rebuild_system_prompt"):
+                    import inspect as _inspect
+
+                    result = llm.rebuild_system_prompt()
+                    if _inspect.iscoroutine(result):
+                        await result
+                if self._identity:
+                    self._identity.name = bundle
+                logger.info(
+                    f"Reconciled agent bundle to '{bundle}' via fallback "
+                    f"(identity={identity})"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to reconcile agent bundle to '{bundle}' "
+                f"(identity={identity}): {e}"
+            )
+
     async def _start_hub(self) -> None:
         """Start hub services (called after all plugins init)."""
         if self._started or self._starting or not self._identity:
@@ -3617,9 +3688,22 @@ class HubPlugin(BasePlugin):
                 and hasattr(self._cli_args, "as_identity")
                 and self._cli_args.as_identity
             )
+            # explicit_agent is True only when --agent was passed. It marks the
+            # bundle as a deliberate user choice, so the role-based bundle
+            # reconcile below leaves it untouched.
+            explicit_agent: bool = bool(
+                self._cli_args and getattr(self._cli_args, "agent", None)
+            )
             preferred = ""
             if explicit_as:
                 preferred = self._cli_args.as_identity  # type: ignore[union-attr]
+            elif is_coordinator and not explicit_agent:
+                # Flock winner claims the koordinator identity. The default
+                # bundle is no longer "koordinator" (demoted to a normal
+                # agent), so nothing else would claim it — without this the
+                # winner would grab a gem identity and every
+                # `identity == "koordinator"` coordinator check would fail.
+                preferred = COORDINATOR_IDENTITY
             else:
                 if active_agent:
                     # Use agent's identity field, or fall back to agent name
@@ -3698,6 +3782,29 @@ class HubPlugin(BasePlugin):
             # server is up.  If we crash before that, the stale file has our
             # real PID so the next startup_scan() cleans it up automatically.
             self._presence.publish()
+
+            # --- Reconcile agent bundle to hub role ---
+            # The koordinator orchestrator bundle belongs ONLY to the elected
+            # coordinator. A plain `kollab` launch loads the demoted default
+            # bundle, then the flock winner becomes "koordinator" while the
+            # rest take gem identities — so swap each agent to the bundle its
+            # identity should run (koordinator -> koordinator, gems -> their
+            # pool agent_type, e.g. "coder"). Skipped only when the user
+            # pinned a bundle with --agent; --as pins the *identity*, not the
+            # bundle, so `kollab --as lapis` must still demote lapis off the
+            # koordinator bundle. No-op when the bundle already matches.
+            # Runs AFTER the preliminary publish above so the identity is
+            # claimed before the (slower) system-prompt rebuild, keeping the
+            # TOCTOU window tight; re-publishes so presence shows the real
+            # bundle name rather than the one loaded at startup.
+            if not explicit_agent:
+                desired_bundle = desired_bundle_for_identity(self._identity.identity)
+                current_bundle = (
+                    getattr(active_agent, "name", "") if active_agent else ""
+                )
+                if desired_bundle and desired_bundle != current_bundle:
+                    await self._reconcile_agent_bundle(desired_bundle)
+                    self._presence.publish()
 
             # Update coordinator state now that identity is populated
             # (try_become_coordinator runs before identity assignment)

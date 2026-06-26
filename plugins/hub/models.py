@@ -419,6 +419,38 @@ for _g in GEM_IDENTITIES:
         ROLE_TO_GEM[_alias] = _g.name
 
 
+# Identity whose agent bundle is the koordinator orchestrator.
+COORDINATOR_IDENTITY = "koordinator"
+
+
+def desired_bundle_for_identity(identity: str, default_bundle: str = "default") -> str:
+    """Return the agent bundle a given hub identity should run.
+
+    The koordinator orchestrator bundle (its system prompt plus the
+    hub-spawn/hub-stop/hub-queue tools) belongs ONLY to the elected
+    coordinator, i.e. the agent whose identity is ``koordinator``. Every
+    pool gem runs its declared ``agent_type`` (``coder`` by default in
+    ``pool.json``); anything unrecognised falls back to ``default_bundle``.
+
+    This is the single source of truth used by the hub to reconcile a plain
+    ``kollab`` launch's loaded bundle to its assigned mesh role, so it is a
+    pure function with no side effects to keep it unit-testable.
+
+    Args:
+        identity: The hub identity the agent was assigned (e.g. "lapis").
+        default_bundle: Fallback bundle for non-gem, non-coordinator names.
+
+    Returns:
+        The agent bundle name this identity should run.
+    """
+    if identity == COORDINATOR_IDENTITY:
+        return COORDINATOR_IDENTITY
+    pool = POOL_BY_NAME.get(identity)
+    if pool and pool.agent_type:
+        return pool.agent_type
+    return default_bundle
+
+
 @dataclass
 class HubMessage:
     """A message between agents."""
