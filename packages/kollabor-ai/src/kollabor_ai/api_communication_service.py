@@ -939,7 +939,7 @@ class APICommunicationService:
         always fits. Returns the list unchanged when the window is unknown,
         rather than risk over-trimming.
         """
-        cfg = getattr(self._provider, "config", None)
+        cfg = getattr(getattr(self, "_provider", None), "config", None)
         window = int(getattr(cfg, "context_window", 0) or 0)
         if window <= 0 or not messages:
             return messages
