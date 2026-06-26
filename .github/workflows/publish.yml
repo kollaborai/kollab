@@ -87,6 +87,25 @@ jobs:
           uv build --out-dir dist --package kollab
           twine upload dist/*
 
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          # Publish a GitHub Release for this tag. The in-app update check
+          # (VersionCheckService) queries /releases/latest, so without a
+          # Release the notification never fires even though PyPI has the new
+          # version. Idempotent: skip if the Release already exists.
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists; skipping."
+          else
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --generate-notes \
+              --verify-tag \
+              || echo "::warning::GitHub Release creation failed for v$VERSION"
+          fi
+
       - name: Commit version bump
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
