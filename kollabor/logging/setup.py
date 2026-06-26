@@ -13,6 +13,12 @@ from typing import Any, Dict, Optional
 
 from kollabor_config.config_utils import get_logs_dir
 
+# Third-party loggers that emit one INFO record per operation and flood the
+# file log. httpx/httpcore log every HTTP request — with the Telegram bridge
+# polling ~every 60s that alone is hundreds of lines per session. Floored to
+# WARNING so application logs stay readable; app loggers are unaffected.
+_NOISY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3")
+
 
 class CompactFormatter(_logging.Formatter):
     """Custom formatter that compacts level names and includes file location."""
@@ -78,6 +84,9 @@ class LoggingSetup:
 
         # Apply formatter to all existing handlers
         self._apply_formatter_to_all_loggers(formatter)
+
+        # Keep third-party HTTP request spam out of the file log
+        self._quiet_noisy_loggers()
 
     def setup_from_config(self, config: Dict[str, Any]):
         """Setup logging from configuration system.
@@ -151,9 +160,21 @@ class LoggingSetup:
         # Apply formatter to all existing loggers
         self._apply_formatter_to_all_loggers(formatter)
 
+        self._quiet_noisy_loggers()
+
         _logging.getLogger(__name__).info(
             f"Logging reconfigured - Level: {level}, File: {log_file}, Format: {format_type}"
         )
+
+    def _quiet_noisy_loggers(self) -> None:
+        """Raise noisy third-party library loggers to WARNING.
+
+        httpx/httpcore log an INFO line for every HTTP request; combined with
+        background pollers this dominates the file log. Application loggers are
+        not touched.
+        """
+        for name in _NOISY_LIBRARY_LOGGERS:
+            _logging.getLogger(name).setLevel(_logging.WARNING)
 
     def _apply_formatter_to_all_loggers(self, formatter):
         """Apply formatter to all existing loggers and handlers."""
@@ -191,6 +212,9 @@ class LoggingSetup:
         for logger_name in _logging.Logger.manager.loggerDict:
             existing_logger = _logging.getLogger(logger_name)
             existing_logger.setLevel(numeric_level)
+
+        # Re-floor noisy third-party loggers (the loop above flattened them)
+        self._quiet_noisy_loggers()
 
         # Update current config
         self._current_config["level"] = level

@@ -327,7 +327,7 @@ class KeyPressHandler:
         # Process key press
         try:
             # Log all key presses for debugging
-            logger.info(
+            logger.debug(
                 f"Key press: name='{key_press.name}', "
                 f"char='{key_press.char}', code={key_press.code}, "
                 f"type={key_press.type}, "

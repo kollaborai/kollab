@@ -1,7 +1,7 @@
 {
   "_meta": {
     "description": "Frontier model registry for kollab",
-    "updated": "2026-04-13",
+    "updated": "2026-06-25",
     "notes": "User overrides: ~/.kollab/models.json (merged on top)"
   },
   "models": {
@@ -69,6 +69,21 @@
       "supports_streaming": true,
       "supports_vision": true,
       "retired": true
+    },
+    "claude-opus-4-8": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 5.00,
+      "pricing_out": 25.00,
+      "pricing_cached_in": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-05-01",
+      "notes": "Current Opus flagship. Specs mirror 4.6 — verify output/pricing."
     },
     "claude-opus-4-6": {
       "provider": "anthropic",
@@ -187,6 +202,32 @@
       "supports_thinking": true,
       "supports_streaming": true,
       "supports_vision": false
+    },
+    "glm-5.2": {
+      "provider": "custom",
+      "context_window": 1000000,
+      "max_output": 131072,
+      "default_output": 131072,
+      "pricing_in": 1.00,
+      "pricing_out": 4.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "1M context window. Pricing inferred from GLM-5.1 — verify."
+    },
+    "glm-4.7": {
+      "provider": "custom",
+      "context_window": 202752,
+      "max_output": 131072,
+      "default_output": 131072,
+      "pricing_in": 0.60,
+      "pricing_out": 2.20,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "z.ai GLM-4.7: 200K context / 128K output. Also served via anthropic-compatible endpoint (api.z.ai/api/anthropic). Pricing approximate."
     },
     "grok-4": {
       "provider": "custom",

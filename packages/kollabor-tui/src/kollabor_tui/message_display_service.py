@@ -113,7 +113,7 @@ class MessageDisplayService:
             # Extract tool name and args for modern rendering
             tool_name, tool_args = self._extract_tool_name_args(result, tool_data)
 
-            logger.info(
+            logger.debug(
                 f"[TOOL-DISPLAY-DEBUG] display_tool_results: "
                 f"tool_name={tool_name}, tool_type={result.tool_type}, "
                 f"is_displaying={self.message_coordinator.is_displaying}, "
@@ -153,7 +153,7 @@ class MessageDisplayService:
             # No spacing between tools - boxes provide visual separation
 
             # Display tool messages using coordinator
-            logger.info(
+            logger.debug(
                 f"[TOOL-DISPLAY-DEBUG] calling display_message_sequence "
                 f"with tool_name={tool_name}"
             )

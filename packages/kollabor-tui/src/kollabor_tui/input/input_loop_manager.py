@@ -268,7 +268,7 @@ class InputLoopManager:
                     else:
                         # Normal input - process each character individually
                         # This also handles paste in modal mode (chars go to form fields)
-                        logger.info(
+                        logger.debug(
                             f"Processing normal input "
                             f"character-by-character: {repr(chunk)}"
                         )

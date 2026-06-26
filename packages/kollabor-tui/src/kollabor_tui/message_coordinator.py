@@ -359,7 +359,7 @@ class MessageDisplayCoordinator:
             **kwargs: Additional arguments for message formatting
         """
         self.message_queue.append((message_type, content, kwargs))
-        logger.info(
+        logger.debug(
             f"[TOOL-DISPLAY-DEBUG] queue_message: type={message_type}, "
             f"queue_len={len(self.message_queue)}, is_displaying={self.is_displaying}"
         )
@@ -389,13 +389,13 @@ class MessageDisplayCoordinator:
         the caller forgot to call ``enter_alternate_buffer()``.
         """
         if not self.message_queue:
-            logger.info("[TOOL-DISPLAY-DEBUG] display_queued_messages: SKIP empty queue")
+            logger.debug("[TOOL-DISPLAY-DEBUG] display_queued_messages: SKIP empty queue")
             return
 
         # Atomically check-and-set is_displaying to prevent concurrent display
         # from different threads (async loop vs input handler).
         if not self._display_lock.acquire(blocking=False):
-            logger.info("[TOOL-DISPLAY-DEBUG] display_queued_messages: BLOCKED by is_displaying=True")
+            logger.debug("[TOOL-DISPLAY-DEBUG] display_queued_messages: BLOCKED by is_displaying=True")
             return
 
         # When in alternate buffer, still render messages but they go

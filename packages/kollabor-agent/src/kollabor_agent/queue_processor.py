@@ -33,6 +33,29 @@ def _tool_results_requiring_followup(
     return list(results)
 
 
+def _cap_tool_output(text: str, max_chars: int) -> str:
+    """Bound a single tool result so one command can't flood the context.
+
+    The universal net for everything that returns content into history — shell
+    output, grep, find, MCP results, and any future tool. (File reads are
+    already capped at the source with file-specific guidance.) Truncates on a
+    line boundary and appends a note telling the agent how to narrow the call.
+    """
+    if not text or max_chars <= 0 or len(text) <= max_chars:
+        return text
+    head = text[:max_chars]
+    newline = head.rfind("\n")
+    if newline > max_chars // 2:
+        head = head[:newline]
+    omitted = len(text) - len(head)
+    return (
+        head
+        + f"\n\n[output truncated — ~{max(1, omitted // 3500)}K+ tokens omitted to "
+        "protect the context window. Re-run more narrowly (head/tail, a tighter "
+        "grep pattern, or a more specific path) to see the rest.]"
+    )
+
+
 class QueueProcessor:
     """Handles queue processing and LLM turn execution.
 
@@ -936,6 +959,19 @@ class QueueProcessor:
 
             # Step 8: Bridge relay
             await self._bridge_relay(clean_response)
+
+            # Cap each tool result before it enters history so one oversized
+            # result (shell output, grep, find, MCP, ...) can't blow the context
+            # window. file_read is already capped at the source; this is the
+            # universal net. Display above already showed the full output.
+            _output_cap = int(
+                self.config.get("kollabor.llm.max_tool_output_chars", 80000)
+            )
+            for _result in (*native_results, *xml_tool_results):
+                if getattr(_result, "success", False) and getattr(
+                    _result, "output", ""
+                ):
+                    _result.output = _cap_tool_output(_result.output, _output_cap)
 
             # Step 9: Conversation logging + history
             # Build tool call entries for JSONL logging

@@ -444,6 +444,9 @@ class APICommunicationService:
                 error_str = str(e)
                 is_rate_limit = isinstance(e, RateLimitError) or "429" in error_str
                 is_empty_response = isinstance(e, EmptyResponseError)
+                is_context_overflow = is_empty_response and (
+                    getattr(e, "error_code", "") == "context_window_exceeded"
+                )
 
                 # Server errors (500, 502, 503, 504) and network errors are transient
                 is_server_error = any(
@@ -451,7 +454,12 @@ class APICommunicationService:
                     for code in ("500", "502", "503", "504", "Network error")
                 )
 
-                is_retryable = is_rate_limit or is_server_error or is_empty_response
+                # A context overflow won't fix itself on retry — the request is
+                # the same size each time. Surface it at once so the user can
+                # /compact instead of spinning through five identical failures.
+                is_retryable = (
+                    is_rate_limit or is_server_error or is_empty_response
+                ) and not is_context_overflow
 
                 if is_retryable and attempt < max_retries:
                     # Use retry_after from headers if available, else exponential backoff
@@ -781,6 +789,27 @@ class APICommunicationService:
 
     def _raise_if_empty_provider_response(self, content: str) -> None:
         """Reject provider responses with no observable response signal."""
+        provider = (
+            getattr(self._provider, "provider_name", None)
+            or getattr(self, "provider_type", None)
+            or "provider"
+        )
+
+        # A context-window overflow comes back as HTTP 200 with this stop
+        # reason, zero usage, and no content. It must be caught explicitly: it
+        # otherwise looks like a successful empty turn, gets saved, and every
+        # later request inherits the same too-large history and fails the same
+        # way. The budget guard should keep us from ever getting here; this is
+        # the backstop that makes the failure loud instead of silent.
+        if (getattr(self, "last_stop_reason", None) or "") == "model_context_window_exceeded":
+            raise EmptyResponseError(
+                "context window exceeded — the conversation is larger than the "
+                "model accepts. Older history must be compacted or cleared "
+                "(/compact) before continuing.",
+                provider=str(provider),
+                error_code="context_window_exceeded",
+            )
+
         if (content or "").strip():
             return
         if self.last_tool_calls or self.last_thinking_content:
@@ -790,11 +819,6 @@ class APICommunicationService:
         if self.last_raw_chunks or total_tokens:
             return
 
-        provider = (
-            getattr(self._provider, "provider_name", None)
-            or getattr(self, "provider_type", None)
-            or "provider"
-        )
         raise EmptyResponseError(
             "provider returned no content, tool calls, thinking, usage, or raw chunks",
             provider=str(provider),
@@ -852,7 +876,118 @@ class APICommunicationService:
 
             messages.append(formatted)
 
+        return self._enforce_token_budget(messages)
+
+    @staticmethod
+    def _estimate_tokens(value: Any) -> int:
+        """Conservative token estimate for a message field.
+
+        Uses ~3 chars/token (an intentional over-estimate for English/code) so
+        the budget guard trims early rather than late. Non-string content
+        (tool-call payloads, content-block lists) is stringified first.
+        """
+        if not value:
+            return 0
+        text = value if isinstance(value, str) else str(value)
+        return len(text) // 3 + 1
+
+    def _message_tokens(self, message: Dict[str, Any]) -> int:
+        total = self._estimate_tokens(message.get("content"))
+        if message.get("tool_calls"):
+            total += self._estimate_tokens(message.get("tool_calls"))
+        return total
+
+    @staticmethod
+    def _strip_leading_orphans(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Keep the trimmed window valid for the API.
+
+        After dropping old turns the window must still start on a real user
+        turn: a leading assistant/tool message, or a tool result whose
+        originating tool call was trimmed away, would be rejected (a
+        tool_result must follow its tool_use). Drop such leading messages,
+        never emptying the list.
+        """
+        while len(messages) > 1:
+            head = messages[0]
+            content = head.get("content")
+            is_tool_result = head.get("tool_call_id") is not None or (
+                isinstance(content, list)
+                and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
+            )
+            if head.get("role") in ("assistant", "tool") or is_tool_result:
+                messages.pop(0)
+            else:
+                break
         return messages
+
+    def _enforce_token_budget(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Bound a request to the model's context window before it is sent.
+
+        A single turn that injects a large payload (e.g. reading a big file)
+        can push the request past the provider window; the call then returns
+        empty (stop_reason=model_context_window_exceeded) and, because the
+        oversized history stays in place, every later turn fails the same way.
+        This drops the oldest messages from the *request only* (the stored
+        history is untouched and is summarized separately) so the wire payload
+        always fits. Returns the list unchanged when the window is unknown,
+        rather than risk over-trimming.
+        """
+        cfg = getattr(self._provider, "config", None)
+        window = int(getattr(cfg, "context_window", 0) or 0)
+        if window <= 0 or not messages:
+            return messages
+
+        reserve_output = int(getattr(cfg, "max_tokens", 0) or 16384)
+        # The system prompt and tool schemas are added by the provider and are
+        # not in `messages`; reserve a conservative fixed overhead for them.
+        overhead = 60000
+        if self.config:
+            overhead = int(
+                self.config.get("kollabor.llm.context_overhead_tokens", overhead)
+            )
+        margin = 4000
+        budget = window - reserve_output - overhead - margin
+        if budget <= 0:
+            # Misconfigured (output reserve/overhead exceed the window); don't
+            # nuke the conversation — let the overflow guard surface it instead.
+            return messages
+
+        costs = [self._message_tokens(m) for m in messages]
+        total = sum(costs)
+        if total <= budget:
+            return messages
+
+        kept = list(messages)
+        kept_costs = list(costs)
+        dropped = 0
+        # Always keep the final (current) turn; drop from the oldest end.
+        while len(kept) > 1 and total > budget:
+            total -= kept_costs.pop(0)
+            kept.pop(0)
+            dropped += 1
+
+        before = len(kept)
+        kept = self._strip_leading_orphans(kept)
+        dropped += before - len(kept)
+
+        logger.warning(
+            "Context budget guard trimmed %d oldest message(s) to fit the model "
+            "window (window=%d, reserve_out=%d, overhead=%d, budget=%d). Stored "
+            "history is preserved; only this request was bounded.",
+            dropped,
+            window,
+            reserve_output,
+            overhead,
+            budget,
+        )
+        return kept
 
     def get_last_token_usage(self) -> Dict[str, int]:
         """Get token usage from last API call.
