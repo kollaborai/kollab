@@ -16,6 +16,22 @@ This solves two problems:
 
 The state_service abstraction makes commands work identically in local mode and attach mode. Code depends on the StateService protocol, never on a specific implementation.
 
+## Canonical Attach Path
+
+The canonical attach implementation is the in-app proxy in
+`TerminalLLMChat._initialize_attach_proxy()` (`kollabor/application.py`). The
+CLI parses `--attach <identity>`, passes that identity into `TerminalLLMChat`,
+and the application owns the socket handshake, local TUI, input forwarding,
+RemoteStateService RPC client, permission bridge, heartbeat tracking, pending
+RPC visibility, widget state updates, Ctrl+Z detach, and Ctrl+C owned-daemon
+shutdown semantics.
+
+Do not add new behavior to `kollabor.attach_client.AttachClient`. That module is
+the legacy standalone terminal mirror and now emits a `DeprecationWarning` when
+constructed directly. The old `_handle_cli_attach` short-circuit path has been
+removed, so future attach work should extend the in-app proxy and its
+StateService/RPC boundary instead.
+
 ## Quick Start
 
 Three-command happy path:
