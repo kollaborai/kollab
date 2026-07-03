@@ -132,11 +132,21 @@ agent key metadata for interoperability experiments.
 /hub dns leaderboard
 /hub dns endorse lapis review
 /hub dns keys lapis
+/hub dns endpoint
+/hub dns connect example.com
 ```
 
 Today this is best understood as an emerging trust and routing layer for local
 agent meshes: resolve who is online, find agents by capability, inspect key
 material, and track reputation through task outcomes and endorsements.
+
+An optional off-box endpoint (`plugins.hub.endpoint_enabled`) binds a TCP/TLS
+listener that shares the same Ed25519 handshake, so a remote agent on another
+machine can authenticate and deliver messages over the network. It is disabled
+by default, always requires the handshake, and refuses to bind a plaintext port
+without an explicit opt-in. `/hub dns connect <authority>` imports a remote
+mesh's published keys so the inbound handshake can verify it. See
+`docs/specs/hub-remote-endpoint.md`.
 
 ## Why It Exists
 

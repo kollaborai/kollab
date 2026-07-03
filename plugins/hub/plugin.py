@@ -68,6 +68,7 @@ try:
     from .dns.registry import AgentRegistry
     from .dns.reputation import ReputationTracker
     from .dns.storage import DNSStorage
+
     _DNS_AVAILABLE = True
 except ImportError as _dns_import_err:
     DNSStorage = None  # type: ignore[assignment,misc]
@@ -80,6 +81,7 @@ except ImportError as _dns_import_err:
     Endorsement = None  # type: ignore[assignment,misc]
     _DNS_AVAILABLE = False
     import logging as _logging
+
     _logging.getLogger(__name__).debug(
         f"Agent DNS disabled (PyNaCl not installed): {_dns_import_err}. "
         "Install with: pip install pynacl"
@@ -145,7 +147,6 @@ def _parse_interval(s: str) -> float:
         return float(total)
 
     raise ValueError(f"invalid interval format: {s} (use e.g. 30s, 5m, 1h, 2h30m)")
-
 
 
 def _looks_like_crystal_id(value: Any) -> bool:
@@ -219,6 +220,8 @@ class HubPlugin(BasePlugin):
         self._presence: Optional[PresenceManager] = None
         self._election: Optional[CoordinatorElection] = None
         self._socket_server: Optional[AgentSocketServer] = None
+        self._endpoint_uri: str = ""  # advertised off-box A2A URI (if enabled)
+        self._endpoint_setup_error: str = ""  # config/bootstrap rejection reason
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
@@ -228,7 +231,7 @@ class HubPlugin(BasePlugin):
 
         # Vault (persistent memory across sessions)
         self._vault: Optional[AgentVault] = None
-        self._crystal_store: Optional[CrystalStore] = None        # project-scoped
+        self._crystal_store: Optional[CrystalStore] = None  # project-scoped
         self._global_crystal_store: Optional[CrystalStore] = None  # cross-project
 
         # Task ledger (compaction-proof task persistence)
@@ -353,6 +356,14 @@ class HubPlugin(BasePlugin):
                     "require_auth": False,
                     "authority": "kollabor.ai",
                     "project_scoped": True,
+                    "endpoint_enabled": False,
+                    "endpoint_host": "0.0.0.0",
+                    "endpoint_port": 8765,
+                    "endpoint_tls_cert": "",
+                    "endpoint_tls_key": "",
+                    "endpoint_tls_ca": "",
+                    "endpoint_advertise_host": "",
+                    "endpoint_allow_insecure": False,
                 }
             }
         }
@@ -731,7 +742,7 @@ class HubPlugin(BasePlugin):
             r'(?:\s+force="([^"]*)")?'
             r'(?:\s+thread="([^"]*)")?'
             r'(?:\s+reply_to="([^"]*)")?'
-            r'\s*>(.*?)(?:</hub_msg>|$)',
+            r"\s*>(.*?)(?:</hub_msg>|$)",
             _re.DOTALL | _re.IGNORECASE,
         )
 
@@ -761,7 +772,7 @@ class HubPlugin(BasePlugin):
         hub_reply_pat = _re.compile(
             r'<hub_reply\s+to="([^"]+)"'
             r'(?:\s+wait="([^"]*)")?'
-            r'\s*>(.*?)(?:</hub_reply>|$)',
+            r"\s*>(.*?)(?:</hub_reply>|$)",
             _re.DOTALL | _re.IGNORECASE,
         )
 
@@ -884,7 +895,10 @@ class HubPlugin(BasePlugin):
             return {"content": m.group(1).strip()}
 
         response_parser.register_plugin_tag(
-            "scratchpad_append", spa_pat, "scratchpad_append", _extract_scratchpad_append
+            "scratchpad_append",
+            spa_pat,
+            "scratchpad_append",
+            _extract_scratchpad_append,
         )
         tool_executor.register_plugin_handler(
             "scratchpad_append", self._handle_scratchpad_append_tool
@@ -1101,9 +1115,7 @@ class HubPlugin(BasePlugin):
         response_parser.register_plugin_tag(
             "feed_file", ff_pat, "feed_file", _extract_feed_file
         )
-        tool_executor.register_plugin_handler(
-            "feed_file", self._handle_feed_file_tool
-        )
+        tool_executor.register_plugin_handler("feed_file", self._handle_feed_file_tool)
 
         # claims (self-closing, optional identity attribute)
         def _extract_claims(m):
@@ -1113,12 +1125,8 @@ class HubPlugin(BasePlugin):
             r'<claims(?:\s+identity="([^"]*)")?\s*/>',
             _re.IGNORECASE,
         )
-        response_parser.register_plugin_tag(
-            "claims", cl_pat, "claims", _extract_claims
-        )
-        tool_executor.register_plugin_handler(
-            "claims", self._handle_claims_tool
-        )
+        response_parser.register_plugin_tag("claims", cl_pat, "claims", _extract_claims)
+        tool_executor.register_plugin_handler("claims", self._handle_claims_tool)
 
         # --- hub_agents (self-closing) ---
         def _extract_hub_agents(m):
@@ -1161,9 +1169,7 @@ class HubPlugin(BasePlugin):
         response_parser.register_plugin_tag(
             "hub_spawn", spawn_pat, "hub_spawn", _extract_hub_spawn
         )
-        tool_executor.register_plugin_handler(
-            "hub_spawn", self._handle_hub_spawn_tool
-        )
+        tool_executor.register_plugin_handler("hub_spawn", self._handle_hub_spawn_tool)
 
         # hub_queue
         def _extract_hub_queue(m):
@@ -1176,9 +1182,7 @@ class HubPlugin(BasePlugin):
         response_parser.register_plugin_tag(
             "hub_queue", queue_pat, "hub_queue", _extract_hub_queue
         )
-        tool_executor.register_plugin_handler(
-            "hub_queue", self._handle_hub_queue_tool
-        )
+        tool_executor.register_plugin_handler("hub_queue", self._handle_hub_queue_tool)
 
         # hub_claim (self-closing, optional id attribute)
         def _extract_hub_claim(m):
@@ -1191,9 +1195,7 @@ class HubPlugin(BasePlugin):
         response_parser.register_plugin_tag(
             "hub_claim", claim_pat, "hub_claim", _extract_hub_claim
         )
-        tool_executor.register_plugin_handler(
-            "hub_claim", self._handle_hub_claim_tool
-        )
+        tool_executor.register_plugin_handler("hub_claim", self._handle_hub_claim_tool)
 
         # hub_work (self-closing)
         def _extract_hub_work(m):
@@ -1206,9 +1208,7 @@ class HubPlugin(BasePlugin):
         response_parser.register_plugin_tag(
             "hub_work", work_pat, "hub_work", _extract_hub_work
         )
-        tool_executor.register_plugin_handler(
-            "hub_work", self._handle_hub_work_tool
-        )
+        tool_executor.register_plugin_handler("hub_work", self._handle_hub_work_tool)
 
         # hub_vault (self-closing, optional name attribute)
         def _extract_hub_vault(m):
@@ -1221,9 +1221,7 @@ class HubPlugin(BasePlugin):
         response_parser.register_plugin_tag(
             "hub_vault", vault_pat, "hub_vault", _extract_hub_vault
         )
-        tool_executor.register_plugin_handler(
-            "hub_vault", self._handle_hub_vault_tool
-        )
+        tool_executor.register_plugin_handler("hub_vault", self._handle_hub_vault_tool)
 
         # hub_vaults (self-closing)
         def _extract_hub_vaults(m):
@@ -1310,8 +1308,7 @@ class HubPlugin(BasePlugin):
         # Matches: <vault_write>insight</vault_write>
         #          <vault_write keywords="a,b,c">insight</vault_write>
         vw_pat = _re.compile(
-            r'<vault_write(?:\s+keywords="([^"]*)")?\s*>'
-            r"(.*?)</vault_write>",
+            r'<vault_write(?:\s+keywords="([^"]*)")?\s*>' r"(.*?)</vault_write>",
             _re.DOTALL | _re.IGNORECASE,
         )
 
@@ -1482,8 +1479,7 @@ class HubPlugin(BasePlugin):
 
         # --- Context service: curate ---
         curate_pat = _re.compile(
-            r'<curate\s+id="([^"]+)"\s+decision="(keep|summary)"\s*>'
-            r"(.*?)</curate>",
+            r'<curate\s+id="([^"]+)"\s+decision="(keep|summary)"\s*>' r"(.*?)</curate>",
             _re.DOTALL | _re.IGNORECASE,
         )
 
@@ -1497,14 +1493,12 @@ class HubPlugin(BasePlugin):
         response_parser.register_plugin_tag(
             "curate", curate_pat, "curate", _extract_curate
         )
-        tool_executor.register_plugin_handler(
-            "curate", self._handle_curate_tool
-        )
+        tool_executor.register_plugin_handler("curate", self._handle_curate_tool)
 
         # --- Context service: context query (body form) ---
         # xml_form="body", xml_tag="context_query"
         context_pat = _re.compile(
-            r'<context_query>(.*?)</context_query>',
+            r"<context_query>(.*?)</context_query>",
             _re.DOTALL | _re.IGNORECASE,
         )
 
@@ -1533,20 +1527,14 @@ class HubPlugin(BasePlugin):
                 return {"ctx_id": attr_id.strip(), "reason": body}
             return {"ctx_id": body, "reason": ""}
 
-        response_parser.register_plugin_tag(
-            "evict", evict_pat, "evict", _extract_evict
-        )
-        tool_executor.register_plugin_handler(
-            "evict", self._handle_evict_tool
-        )
+        response_parser.register_plugin_tag("evict", evict_pat, "evict", _extract_evict)
+        tool_executor.register_plugin_handler("evict", self._handle_evict_tool)
 
         # --- hub_ask_ctx ---
         # <hub_ask_ctx peer="lapis" />
         # <hub_ask_ctx peer="lapis" filter="file:kollabor/" />
         ask_ctx_pat = _re.compile(
-            r'<hub_ask_ctx\s+peer="([^"]+)"'
-            r'(?:\s+filter="([^"]*)")?'
-            r"\s*/>",
+            r'<hub_ask_ctx\s+peer="([^"]+)"' r'(?:\s+filter="([^"]*)")?' r"\s*/>",
             _re.IGNORECASE,
         )
 
@@ -1594,8 +1582,7 @@ class HubPlugin(BasePlugin):
                 tool_type="curate",
                 success=True,
                 output=(
-                    f"[curate] {ctx_id} -> {decision} "
-                    f"({len(body)} bytes recorded)"
+                    f"[curate] {ctx_id} -> {decision} " f"({len(body)} bytes recorded)"
                 ),
             )
         return ToolExecutionResult(
@@ -1704,9 +1691,7 @@ class HubPlugin(BasePlugin):
             output=summary,
         )
 
-    async def _broadcast_context_ledger_update(
-        self, payload: Dict[str, Any]
-    ) -> None:
+    async def _broadcast_context_ledger_update(self, payload: Dict[str, Any]) -> None:
         """Control-plane broadcaster for context ledger updates.
 
         Uses action="context_ledger_update" so peers dispatch it
@@ -1750,9 +1735,7 @@ class HubPlugin(BasePlugin):
         if self.config is None:
             return
         enabled = bool(
-            self.config.get(
-                "plugins.context_service.hub_broadcast_enabled", True
-            )
+            self.config.get("plugins.context_service.hub_broadcast_enabled", True)
         )
         if not enabled:
             return
@@ -1772,14 +1755,11 @@ class HubPlugin(BasePlugin):
         def _is_waiting() -> bool:
             return bool(
                 self._identity
-                and getattr(self._identity, "state", "")
-                == PresenceState.WAITING.value
+                and getattr(self._identity, "state", "") == PresenceState.WAITING.value
             )
 
         bridge = HubBridge(
-            identity=(
-                self._identity.identity if self._identity else "unknown"
-            ),
+            identity=(self._identity.identity if self._identity else "unknown"),
             context_service=context_svc,
             broadcaster=self._broadcast_context_ledger_update,
             is_waiting=_is_waiting,
@@ -1897,9 +1877,7 @@ class HubPlugin(BasePlugin):
             if len(self._waiting_durations) > 100:
                 self._waiting_durations = self._waiting_durations[-100:]
 
-        logger.info(
-            f"Agent {self._identity.identity} woke from waiting state"
-        )
+        logger.info(f"Agent {self._identity.identity} woke from waiting state")
 
         # Render a [wake: ...] catch-up header from the env queue
         # so agents see what they missed while parked.
@@ -2064,9 +2042,7 @@ class HubPlugin(BasePlugin):
                 )
 
             limit = min(tool_data.get("limit", 5), 10)
-            results = self._crystal_store.find_by_keywords(
-                query.split(), top_k=limit
-            )
+            results = self._crystal_store.find_by_keywords(query.split(), top_k=limit)
 
             if not results:
                 output = f"no matches for '{query}'"
@@ -2091,9 +2067,7 @@ class HubPlugin(BasePlugin):
                 shown = len(truncated) - 2  # subtract header + footer
                 remaining = total_matches - max(shown, 0)
                 if remaining > 0:
-                    truncated.append(
-                        f"{remaining} more matches, narrow your query."
-                    )
+                    truncated.append(f"{remaining} more matches, narrow your query.")
                 else:
                     truncated.append("use crystal_read to see full entry body.")
                 output = "\n".join(truncated)
@@ -2378,7 +2352,6 @@ class HubPlugin(BasePlugin):
                 output=f"crystal_delete error: {e}",
             )
 
-
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -2433,9 +2406,7 @@ class HubPlugin(BasePlugin):
         msg_hash = hashlib.md5(f"{target}:{content}".encode()).hexdigest()
         now = time.time()
         self._recent_hub_msgs = {
-            k: v
-            for k, v in self._recent_hub_msgs.items()
-            if now - v < dedup_window
+            k: v for k, v in self._recent_hub_msgs.items() if now - v < dedup_window
         }
         if msg_hash in self._recent_hub_msgs:
             logger.debug(f"hub_msg dedup: skipping duplicate to {target}")
@@ -2468,13 +2439,9 @@ class HubPlugin(BasePlugin):
                 sender_has_task = False
 
         metadata = {"wait": any_wait}
-        if self._is_ack_only_content(
-            content, sender_has_active_task=sender_has_task
-        ):
+        if self._is_ack_only_content(content, sender_has_active_task=sender_has_task):
             metadata["ack"] = True
-        elif self._has_report_evidence(
-            content, sender_has_active_task=sender_has_task
-        ):
+        elif self._has_report_evidence(content, sender_has_active_task=sender_has_task):
             metadata["task_report"] = True
         elif self._has_request_evidence(content):
             metadata["task_assignment"] = True
@@ -2524,7 +2491,7 @@ class HubPlugin(BasePlugin):
                 parts.append(f"{ident}: {reason}")
             output = (
                 f"[hub_msg] rejected: {'; '.join(parts)}. "
-                f"send with force=\"true\" to break through."
+                f'send with force="true" to break through.'
             )
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2630,9 +2597,7 @@ class HubPlugin(BasePlugin):
                 error="hub not initialized",
             )
 
-        logger.info(
-            f"{self._identity.identity} requested self-restart via hub_restart"
-        )
+        logger.info(f"{self._identity.identity} requested self-restart via hub_restart")
 
         # Build the re-exec command. sys.argv[0] is main.py or the kollab
         # entry point; anything after is user-supplied flags. Drop --detached
@@ -2919,7 +2884,9 @@ class HubPlugin(BasePlugin):
             for a in agents:
                 if a.identity == card.report_to:
                     await self._deliver_to_agent(a, qa_msg)
-            output = f"task {task_id} marked complete, routed to {card.report_to} for QA"
+            output = (
+                f"task {task_id} marked complete, routed to {card.report_to} for QA"
+            )
         elif card:
             output = f"task {task_id} marked complete (presence unavailable, reviewer not notified)"
         else:
@@ -2951,9 +2918,7 @@ class HubPlugin(BasePlugin):
 
         task_id = _safe_semantic_id(tool_data, ["task_id"])
         notes = tool_data.get("notes", "")
-        card = self._task_ledger.qa_approve(
-            task_id, self._identity.identity, notes
-        )
+        card = self._task_ledger.qa_approve(task_id, self._identity.identity, notes)
         if card and self._presence:
             approve_msg = HubMessage(
                 action="message",
@@ -2973,7 +2938,9 @@ class HubPlugin(BasePlugin):
                     await self._deliver_to_agent(a, approve_msg)
             output = f"task {task_id} approved, notified {card.assignee}"
         elif card:
-            output = f"task {task_id} approved (presence unavailable, assignee not notified)"
+            output = (
+                f"task {task_id} approved (presence unavailable, assignee not notified)"
+            )
         else:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -3003,9 +2970,7 @@ class HubPlugin(BasePlugin):
 
         task_id = _safe_semantic_id(tool_data, ["task_id"])
         reason = tool_data.get("reason", "")
-        card = self._task_ledger.qa_reject(
-            task_id, self._identity.identity, reason
-        )
+        card = self._task_ledger.qa_reject(task_id, self._identity.identity, reason)
         if card and self._presence:
             reject_msg = HubMessage(
                 action="message",
@@ -3025,7 +2990,9 @@ class HubPlugin(BasePlugin):
                     await self._deliver_to_agent(a, reject_msg)
             output = f"task {task_id} rejected, returned to {card.assignee} for rework"
         elif card:
-            output = f"task {task_id} rejected (presence unavailable, assignee not notified)"
+            output = (
+                f"task {task_id} rejected (presence unavailable, assignee not notified)"
+            )
         else:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -3262,7 +3229,9 @@ class HubPlugin(BasePlugin):
                 error="change feed not initialized",
             )
 
-        target_identity = tool_data.get("identity", tool_data.get("target_identity", "")) or None
+        target_identity = (
+            tool_data.get("identity", tool_data.get("target_identity", "")) or None
+        )
         result = self._change_feed.get_claims(identity=target_identity)
         claims = result.get("claims", {})
         if claims:
@@ -3305,8 +3274,7 @@ class HubPlugin(BasePlugin):
         raw_name = tool_data.get("name", "")
         requested_identity = (tool_data.get("identity", "") or "").strip()
         agent_type_override = (
-            tool_data.get("agent_type_override", "")
-            or tool_data.get("type", "")
+            tool_data.get("agent_type_override", "") or tool_data.get("type", "")
         ).strip()
         task = tool_data.get("task", "")
 
@@ -3482,7 +3450,9 @@ class HubPlugin(BasePlugin):
         from kollabor_agent.tool_executor import ToolExecutionResult
 
         cap_name = tool_data.get("cap_name", "") or tool_data.get("name", "")
-        cap_lines = tool_data.get("cap_lines", "50") or str(tool_data.get("lines", "50"))
+        cap_lines = tool_data.get("cap_lines", "50") or str(
+            tool_data.get("lines", "50")
+        )
         args = cap_name.strip()
         if cap_lines:
             args += f" {cap_lines}"
@@ -3575,9 +3545,7 @@ class HubPlugin(BasePlugin):
                 except Exception as e:
                     logger.error(f"Hub _start_hub failed: {e}", exc_info=True)
 
-            _get_loop().call_soon(
-                lambda: asyncio.ensure_future(_safe_start())
-            )
+            _get_loop().call_soon(lambda: asyncio.ensure_future(_safe_start()))
 
     async def _reconcile_agent_bundle(self, bundle: str) -> None:
         """Switch the active agent bundle to match this agent's hub role.
@@ -3595,9 +3563,7 @@ class HubPlugin(BasePlugin):
         identity = self._identity.identity if self._identity else "?"
         try:
             state_service = (
-                self.event_bus.get_service("state_service")
-                if self.event_bus
-                else None
+                self.event_bus.get_service("state_service") if self.event_bus else None
             )
             if state_service is not None and hasattr(state_service, "set_agent"):
                 await state_service.set_agent(bundle)
@@ -3614,9 +3580,7 @@ class HubPlugin(BasePlugin):
 
             # Fallback: no state service (e.g. attach mode). Apply directly.
             agent_mgr = (
-                self.event_bus.get_service("agent_manager")
-                if self.event_bus
-                else None
+                self.event_bus.get_service("agent_manager") if self.event_bus else None
             )
             if agent_mgr and agent_mgr.set_active_agent(bundle):
                 llm = (
@@ -3824,6 +3788,42 @@ class HubPlugin(BasePlugin):
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
             self._socket_server._identity_info = self._identity  # type: ignore[assignment]
 
+            # === Off-box A2A endpoint (optional) ===
+            # Bind a TCP/TLS listener that shares the socket handler so remote
+            # agents can complete the same Ed25519 handshake. Gated behind
+            # plugins.hub.endpoint_enabled; when off, behavior is unchanged
+            # (unix socket only). Must run BEFORE socket_server.start() below.
+            self._endpoint_uri = ""
+            self._endpoint_setup_error = ""
+            if _DNS_AVAILABLE:
+                try:
+                    from .dns.endpoint import (
+                        EndpointConfig,
+                        build_server_ssl_context,
+                    )
+
+                    ep = EndpointConfig.from_config(self.config)
+                    if ep.enabled:
+                        ssl_ctx = build_server_ssl_context(ep.tls_cert, ep.tls_key)
+                        if ssl_ctx is None and not ep.allow_insecure:
+                            self._endpoint_setup_error = "no valid TLS cert/key and endpoint_allow_insecure=false"
+                            logger.error(
+                                "endpoint_enabled but no valid TLS cert/key and "
+                                "endpoint_allow_insecure=false — refusing to bind an "
+                                "unencrypted public listener (set a cert or allow_insecure)"
+                            )
+                        else:
+                            self._socket_server.enable_endpoint(
+                                ep.host, ep.port, ssl_ctx
+                            )
+                            self._endpoint_uri = ep.endpoint_uri
+                            logger.info(
+                                f"A2A endpoint will advertise: {self._endpoint_uri}"
+                            )
+                except Exception as e:
+                    self._endpoint_setup_error = f"{type(e).__name__}: {e}"
+                    logger.warning(f"endpoint setup failed: {e}")
+
             # === RPC server (phase 1 of daemon transparency refactor) ===
             # Instantiate RpcServer and install it on the socket server so
             # _handle_connection and _recv_input can dispatch "rpc_request"
@@ -3842,7 +3842,9 @@ class HubPlugin(BasePlugin):
                 from kollabor_rpc import RpcServer
             except ImportError:
                 RpcServer = None  # type: ignore[misc,assignment]
-                logger.debug("kollabor_rpc not installed, RPC disabled (attach mode unavailable)")
+                logger.debug(
+                    "kollabor_rpc not installed, RPC disabled (attach mode unavailable)"
+                )
 
             if RpcServer is not None:
                 _rpc_started_at = _time.monotonic()
@@ -3869,14 +3871,18 @@ class HubPlugin(BasePlugin):
 
                 # === State RPC handlers (phase 2) ===
                 state_service = (
-                    self.event_bus.get_service("state_service") if self.event_bus else None
+                    self.event_bus.get_service("state_service")
+                    if self.event_bus
+                    else None
                 )
                 if state_service is not None:
                     try:
                         from kollabor.state import register_state_handlers
 
                         register_state_handlers(self._rpc_server, state_service)
-                        logger.info("state rpc handlers registered from hub plugin path")
+                        logger.info(
+                            "state rpc handlers registered from hub plugin path"
+                        )
                     except Exception as e:
                         logger.warning(
                             f"failed to register state rpc handlers from hub: {e}"
@@ -3950,16 +3956,21 @@ class HubPlugin(BasePlugin):
                     if self.config:
                         authority = self.config.get("plugins.hub.authority", authority)
 
+                    protocols = ["socket", "mcp"]
+                    if self._endpoint_uri:
+                        protocols.append("a2a")
+
                     record = AgentRecord(
                         designation=self._identity.identity,
                         agent_id=self._identity.agent_id,
                         runtime="kollab",
                         authority=authority,
                         socket_path=self._identity.socket_path,
+                        endpoint_uri=self._endpoint_uri,
                         pid=os.getpid(),
                         project=os.getcwd(),
                         capabilities=caps,
-                        protocols=["socket", "mcp"],
+                        protocols=protocols,
                         public_key=pub_hex,
                         is_coordinator=self._identity.is_coordinator,
                         caste=caste,
@@ -4102,8 +4113,14 @@ class HubPlugin(BasePlugin):
             llm_svc = (
                 self.event_bus.get_service("llm_service") if self.event_bus else None
             )
-            if llm_svc and hasattr(llm_svc, "conversation_logger") and llm_svc.conversation_logger:
-                self._identity.session_log = str(llm_svc.conversation_logger.session_file)
+            if (
+                llm_svc
+                and hasattr(llm_svc, "conversation_logger")
+                and llm_svc.conversation_logger
+            ):
+                self._identity.session_log = str(
+                    llm_svc.conversation_logger.session_file
+                )
 
             # Final presence publish: overwrites the preliminary record written
             # just after identity assignment (issue #38 TOCTOU guard) with the
@@ -4298,13 +4315,9 @@ class HubPlugin(BasePlugin):
                                 await self._socket_server.stop()
                                 new_path = await self._socket_server.start()
                                 self._identity.socket_path = new_path
-                                logger.info(
-                                    f"Socket reconnected: {new_path}"
-                                )
+                                logger.info(f"Socket reconnected: {new_path}")
                             except Exception as e:
-                                logger.error(
-                                    f"Socket reconnection failed: {e}"
-                                )
+                                logger.error(f"Socket reconnection failed: {e}")
 
                     # Refresh roster using async discovery (non-blocking
                     # socket checks). This also updates the presence
@@ -4321,9 +4334,7 @@ class HubPlugin(BasePlugin):
                         try:
                             live_agents = self._presence.get_cached_agents()
                             preserve = (
-                                [self._identity.identity]
-                                if self._identity
-                                else []
+                                [self._identity.identity] if self._identity else []
                             )
                             self._dns_registry.refresh_liveness(
                                 live_agents,
@@ -4456,6 +4467,7 @@ class HubPlugin(BasePlugin):
         if self.config:
             poll_interval = self.config.get("plugins.hub.mailbox_poll_interval", 5)
         from .messenger import INBOX_MAX_REPLAY
+
         while True:
             try:
                 await asyncio.sleep(poll_interval)
@@ -4967,14 +4979,9 @@ class HubPlugin(BasePlugin):
                             # Self-targeted cron: _route_message skips self
                             # (open channel model), so deliver directly.
                             my_identity = (
-                                self._identity.identity
-                                if self._identity
-                                else ""
+                                self._identity.identity if self._identity else ""
                             )
-                            if (
-                                my_identity
-                                and target == my_identity
-                            ):
+                            if my_identity and target == my_identity:
                                 await self._on_message_received(msg)
 
                             logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
@@ -5175,7 +5182,10 @@ class HubPlugin(BasePlugin):
                 scope=MessageScope.DIRECT.value,
                 metadata={"task_assignment": True, "work_slot_id": slot.id},
             )
-            await AgentMessenger.send_to_agent(target.socket_path, msg)
+            dial_target, dial_auth = self._resolve_dial_target(
+                target.identity, target.socket_path
+            )
+            await AgentMessenger.send_to_agent(dial_target, msg, auth=dial_auth)
 
     async def _announce_to_peers(self, peers: List[AgentRuntime]) -> None:
         """Announce this agent to all existing peers, triggering their LLM.
@@ -5347,10 +5357,7 @@ class HubPlugin(BasePlugin):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         metadata = metadata or {}
-        if any(
-            metadata.get(k)
-            for k in ("task_complete", "task_report", "task_id")
-        ):
+        if any(metadata.get(k) for k in ("task_complete", "task_report", "task_id")):
             return True
         text = self._normalize_hub_wake_content(content)
         if re.search(r"\b[0-9a-f]{7,40}\b", text):
@@ -5461,13 +5468,12 @@ class HubPlugin(BasePlugin):
         ):
             return HubWakeDecision("observe", False, "ack only")
 
-        has_actionable_evidence = (
-            self._has_request_evidence(message.content, metadata)
-            or self._has_report_evidence(
-                message.content,
-                sender_has_active_task=sender_has_task,
-                metadata=metadata,
-            )
+        has_actionable_evidence = self._has_request_evidence(
+            message.content, metadata
+        ) or self._has_report_evidence(
+            message.content,
+            sender_has_active_task=sender_has_task,
+            metadata=metadata,
         )
         wake_reason = "actionable" if has_actionable_evidence else "default intended"
 
@@ -5560,8 +5566,7 @@ class HubPlugin(BasePlugin):
         # sender intentionally created a new message and it must reach us.
         _my_identity = self._identity.identity if self._identity else ""
         _is_direct_to_me = (
-            message.scope == MessageScope.DIRECT.value
-            and message.to == _my_identity
+            message.scope == MessageScope.DIRECT.value and message.to == _my_identity
         )
         _now = time.time()
         _content_key = f"{message.from_identity}:{message.content}"
@@ -5828,7 +5833,9 @@ class HubPlugin(BasePlugin):
 
                 async with self._history_lock:
                     hud_content = formatted
-                    drain_hud_now = should_trigger_llm and wake_decision.mode != "buffer"
+                    drain_hud_now = (
+                        should_trigger_llm and wake_decision.mode != "buffer"
+                    )
                     if hasattr(llm_service, "queue_agent_hud"):
                         pending_replies = []
                         if self._task_ledger:
@@ -5839,14 +5846,37 @@ class HubPlugin(BasePlugin):
                                     "failed to load pending hub replies: %s", e
                                 )
                         if pending_replies:
+                            import time as _time
+                            _now = _time.time()
+                            # Sort by most recent first, show top 8
+                            _sorted = sorted(
+                                pending_replies,
+                                key=lambda r: r.get("created_at", 0),
+                                reverse=True,
+                            )[:8]
+                            _lines = []
+                            for item in _sorted:
+                                _age_s = _now - item.get("created_at", 0)
+                                if _age_s > 86400:
+                                    _age = f"{_age_s / 86400:.0f}d old"
+                                elif _age_s > 3600:
+                                    _age = f"{_age_s / 3600:.0f}h old"
+                                else:
+                                    _age = f"{_age_s / 60:.0f}m old"
+                                _assignee = item.get("assignee", "?")
+                                _tid = item.get("task_id", "?")[:12]
+                                _lines.append(f"  {_assignee}: {_tid} ({_age})")
+                            _total = len(pending_replies)
+                            _lines.insert(
+                                0,
+                                f"{_total} pending ({_total - len(_sorted)} more hidden). "
+                                f"Entries >24h old are stale — if not actionable, "
+                                f"clean up with: resolve_reply or clear from ledger.",
+                            )
                             llm_service.queue_agent_hud(
                                 section="hub",
                                 label="pending replies",
-                                content="\n".join(
-                                    f"{item.get('assignee', '?')}: "
-                                    f"{item.get('task_id', '?')}"
-                                    for item in pending_replies[:8]
-                                ),
+                                content="\n".join(_lines),
                             )
                         llm_service.queue_agent_hud(
                             section="hub",
@@ -5990,9 +6020,7 @@ class HubPlugin(BasePlugin):
             else ""
         )
         is_human_elsewhere = (
-            message.from_agent == "human"
-            and source_agent
-            and source_agent != my_name
+            message.from_agent == "human" and source_agent and source_agent != my_name
         )
 
         if is_human_elsewhere:
@@ -6093,8 +6121,7 @@ class HubPlugin(BasePlugin):
         lines.append("agent operations (XML tags parsed from your responses):")
         lines.append('  <hub_spawn name="lapis">task description</hub_spawn>')
         lines.append(
-            '  <hub_spawn name="sapphire" type="research">'
-            "research task</hub_spawn>"
+            '  <hub_spawn name="sapphire" type="research">' "research task</hub_spawn>"
         )
         lines.append(
             "  note: name is a hub identity. to choose an agent bundle, "
@@ -6181,9 +6208,7 @@ class HubPlugin(BasePlugin):
             claims_result = self._change_feed.get_claims()
             raw = claims_result.get("claims") if isinstance(claims_result, dict) else {}
             # get_claims returns path -> claim dict; iterating the mapping yields strings.
-            claim_entries = (
-                list(raw.values()) if isinstance(raw, dict) else (raw or [])
-            )
+            claim_entries = list(raw.values()) if isinstance(raw, dict) else (raw or [])
             if claim_entries:
                 claim_lines = ["\n--- active lane claims ---"]
                 for c in claim_entries:
@@ -6429,16 +6454,12 @@ class HubPlugin(BasePlugin):
         for tier, entry in matches:
             prefix = "[global] " if tier == "global" else ""
             nudge_lines.append(f"  {prefix}{entry.summary_line()}")
-        nudge_lines.append(
-            "use crystal_read to see full details of any entry."
-        )
+        nudge_lines.append("use crystal_read to see full details of any entry.")
         nudge_text = "\n".join(nudge_lines)
 
         # Inject as system message into conversation history
         llm_service = (
-            self.event_bus.get_service("llm_service")
-            if self.event_bus
-            else None
+            self.event_bus.get_service("llm_service") if self.event_bus else None
         )
         if not llm_service:
             logger.info("crystal nudge: no llm_service available")
@@ -6491,8 +6512,6 @@ class HubPlugin(BasePlugin):
         cleaned = wait_tag_pat.sub("", cleaned).strip()
         # All hub XML tags are now handled by the pipeline.
         # See _register_pipeline_tools for the full list of 33 tags.
-
-
 
         # --- Nudge engine: observe behavior and maybe remind ---
         # NOTE: `response` (from data["response_text"]) is the RAW pre-parser
@@ -6566,14 +6585,33 @@ class HubPlugin(BasePlugin):
         # so the queue_processor always gets the stripped version
         # regardless of which keys were in the original data dict.
         _hub_tag_markers = (
-            "<hub_msg", "<hub_broadcast", "<hub_stop", "<hub_status",
-            "<scratchpad", "<state_update", "<task_checkpoint",
-            "<task_complete", "<task_approve", "<task_reject",
-            "<lane_claim", "<lane_release", "<file_changed",
-            "<file_watch", "<file_unwatch", "<feed_recent", "<feed_file",
-            "<claims", "<hub_spawn", "<hub_queue", "<hub_claim",
-            "<hub_work", "<hub_vault", "<hub_vaults",
-            "<hub_cron", "<hub_capture", "<wait_for_user",
+            "<hub_msg",
+            "<hub_broadcast",
+            "<hub_stop",
+            "<hub_status",
+            "<scratchpad",
+            "<state_update",
+            "<task_checkpoint",
+            "<task_complete",
+            "<task_approve",
+            "<task_reject",
+            "<lane_claim",
+            "<lane_release",
+            "<file_changed",
+            "<file_watch",
+            "<file_unwatch",
+            "<feed_recent",
+            "<feed_file",
+            "<claims",
+            "<hub_spawn",
+            "<hub_queue",
+            "<hub_claim",
+            "<hub_work",
+            "<hub_vault",
+            "<hub_vaults",
+            "<hub_cron",
+            "<hub_capture",
+            "<wait_for_user",
         )
         had_tags = any(m in response for m in _hub_tag_markers) if response else False
         data["response_text"] = cleaned
@@ -6595,7 +6633,11 @@ class HubPlugin(BasePlugin):
         if not cleaned:
             has_native_tools = False
             try:
-                llm_svc = self.event_bus.get_service("llm_service") if self.event_bus else None
+                llm_svc = (
+                    self.event_bus.get_service("llm_service")
+                    if self.event_bus
+                    else None
+                )
                 api_svc = getattr(llm_svc, "api_service", None) if llm_svc else None
                 if api_svc and hasattr(api_svc, "has_pending_tool_calls"):
                     has_native_tools = api_svc.has_pending_tool_calls()
@@ -6666,9 +6708,7 @@ class HubPlugin(BasePlugin):
             )
         )
 
-    async def _quarantine_hub_message(
-        self, message: HubMessage, reason: str
-    ) -> None:
+    async def _quarantine_hub_message(self, message: HubMessage, reason: str) -> None:
         """Store a message that failed remote trust checks for inspection."""
         message.metadata["quarantined"] = True
         message.metadata["quarantine_reason"] = reason
@@ -6705,9 +6745,7 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.debug("hub delivery trace failed: %s", e)
 
-    async def _route_message(
-        self, message: HubMessage
-    ) -> List[Tuple[str, str]]:
+    async def _route_message(self, message: HubMessage) -> List[Tuple[str, str]]:
         """Route a message to all agents (open channel).
 
         Every agent sees every message - like a Slack channel.
@@ -6764,9 +6802,7 @@ class HubPlugin(BasePlugin):
             if not delivered:
                 # Build a reason string for the rejection
                 cooldown_remaining = (
-                    agent.cooldown_until - time.time()
-                    if agent.cooldown_until
-                    else 0
+                    agent.cooldown_until - time.time() if agent.cooldown_until else 0
                 )
                 if cooldown_remaining > 0:
                     reason = f"in cooldown for {int(cooldown_remaining)}s"
@@ -6812,9 +6848,52 @@ class HubPlugin(BasePlugin):
         }
     )
 
-    async def _deliver_to_agent(
-        self, agent: AgentRuntime, message: HubMessage
-    ) -> bool:
+    def _resolve_dial_target(
+        self, designation: str, fallback_socket: str = ""
+    ) -> tuple:
+        """Resolve a designation to a ``(target, auth)`` pair for the dialers.
+
+        When the DNS registry knows about a remote ``endpoint_uri`` for this
+        designation, the dial is upgraded to a remote handshake and the
+        ``auth`` dict is populated (identity manager + our designation +
+        optional CA). Otherwise the local ``fallback_socket`` path is
+        returned with ``auth=None`` — byte-for-byte the legacy behavior.
+
+        This is the single seam that makes off-box delivery transparent:
+        callers keep passing the local socket path, and the registry decides
+        whether to reach the peer off-box.
+        """
+        if designation and self._dns_registry:
+            try:
+                from .dns.endpoint import is_remote_uri
+
+                addr = self._dns_registry.resolve_address(designation)
+                if addr and is_remote_uri(addr):
+                    # Remote: only dial when we can complete the handshake;
+                    # a remote dial without auth is guaranteed-rejected, so
+                    # fall through to the local socket path if we can't auth.
+                    if self._dns_identity and self._identity:
+                        auth: Dict[str, Any] = {
+                            "identity_manager": self._dns_identity,
+                            "designation": self._identity.identity,
+                        }
+                        if self.config:
+                            ca = (
+                                self.config.get("plugins.hub.endpoint_tls_ca", "") or ""
+                            )
+                            if ca:
+                                auth["tls_ca"] = ca
+                        return addr, auth
+                elif addr:
+                    # Local socket path from the registry — use it directly.
+                    return addr, None
+            except Exception:
+                # DNS not fully wired (e.g. PyNaCl missing) — fall through to
+                # the local socket path so local delivery keeps working.
+                pass
+        return fallback_socket, None
+
+    async def _deliver_to_agent(self, agent: AgentRuntime, message: HubMessage) -> bool:
         """Deliver message to agent via socket, fall back to filesystem.
 
         Checks cooldown state before delivery. Returns False if the
@@ -6826,15 +6905,24 @@ class HubPlugin(BasePlugin):
 
         now = time.time()
 
+        # Resolve the dial target once: remote endpoint_uri if the registry
+        # knows about one, else the local socket path. The auth dict is only
+        # populated for remote handshakes; local delivery is unchanged.
+        dial_target, dial_auth = self._resolve_dial_target(
+            agent.identity, agent.socket_path
+        )
+
         # Control-plane traffic bypasses the WAITING gate entirely.
         # These messages never trigger a LLM turn so there is no loop risk.
         if message.action in self._CONTROL_PLANE_ACTIONS:
-            success = await AgentMessenger.send_to_agent(agent.socket_path, message)
+            success = await AgentMessenger.send_to_agent(
+                dial_target, message, auth=dial_auth
+            )
             self._trace_delivery(
                 message,
                 "socket_send_succeeded" if success else "socket_send_failed",
                 target=agent.identity,
-                detail=agent.socket_path,
+                detail=dial_target,
             )
             if not success:
                 await AgentMessenger.send_to_file(agent.agent_id, message)
@@ -6843,8 +6931,7 @@ class HubPlugin(BasePlugin):
         # Check cooldown only if the target is in waiting state
         if agent.state == PresenceState.WAITING.value:
             cooldown_active = (
-                agent.cooldown_until is not None
-                and agent.cooldown_until > now
+                agent.cooldown_until is not None and agent.cooldown_until > now
             )
 
             if cooldown_active:
@@ -6893,12 +6980,14 @@ class HubPlugin(BasePlugin):
             if self._is_self(agent):
                 await self._exit_waiting_state()
 
-        success = await AgentMessenger.send_to_agent(agent.socket_path, message)
+        success = await AgentMessenger.send_to_agent(
+            dial_target, message, auth=dial_auth
+        )
         self._trace_delivery(
             message,
             "socket_send_succeeded" if success else "socket_send_failed",
             target=agent.identity,
-            detail=agent.socket_path,
+            detail=dial_target,
         )
         if not success:
             await AgentMessenger.send_to_file(agent.agent_id, message)
@@ -7077,21 +7166,15 @@ class HubPlugin(BasePlugin):
                     "status|send|enable|disable",
                     "Messaging bridge (Telegram, etc)",
                 ),
-                SubcommandInfo(
-                    "wake", "<identity>", "Manually wake a waiting agent"
-                ),
+                SubcommandInfo("wake", "<identity>", "Manually wake a waiting agent"),
                 SubcommandInfo(
                     "approve", "<identity>", "Approve agent for mesh participation"
                 ),
                 SubcommandInfo(
                     "reject", "<identity> [reason]", "Reject agent from mesh"
                 ),
-                SubcommandInfo(
-                    "pending", "", "List agents pending approval"
-                ),
-                SubcommandInfo(
-                    "metrics", "", "Show loop prevention metrics"
-                ),
+                SubcommandInfo("pending", "", "List agents pending approval"),
+                SubcommandInfo("metrics", "", "Show loop prevention metrics"),
                 SubcommandInfo(
                     "dns",
                     "resolve|find|trust|leaderboard|endorse|keys [args]",
@@ -7154,16 +7237,12 @@ class HubPlugin(BasePlugin):
                 return text
             return self._format_whoami()
         elif subcmd == "msg":
-            text = await self._write_hub_via_state_service(
-                "hub_send_msg", rest
-            )
+            text = await self._write_hub_via_state_service("hub_send_msg", rest)
             if text is not None:
                 return text
             return await self._handle_msg_command(rest)
         elif subcmd == "broadcast":
-            text = await self._write_hub_via_state_service(
-                "hub_broadcast", rest
-            )
+            text = await self._write_hub_via_state_service("hub_broadcast", rest)
             if text is not None:
                 return text
             return await self._handle_broadcast_command(rest)
@@ -7215,12 +7294,12 @@ class HubPlugin(BasePlugin):
         elif subcmd == "metrics":
             return self._format_metrics()
         elif subcmd == "dns":
-            return self._handle_dns_command(rest)
+            return await self._handle_dns_command(rest)
         else:
             return self._format_status()
 
-    def _handle_dns_command(self, args: str) -> str:
-        """Handle /hub dns subcommands: resolve, find, trust, leaderboard, endorse, keys."""
+    async def _handle_dns_command(self, args: str) -> str:
+        """Handle /hub dns subcommands: resolve, find, trust, leaderboard, endorse, keys, endpoint, connect."""
         if not _DNS_AVAILABLE:
             return "dns: PyNaCl not installed\nrun: pip install pynacl"
         if not self._dns_registry:
@@ -7267,7 +7346,9 @@ class HubPlugin(BasePlugin):
                 return f"dns find: no agents with capability '{cap}'"
             lines = [f"agents with '{cap}':"]
             for designation, entry in matches[:10]:
-                lines.append(f"  {designation}  [{entry.evidence}]  confidence={entry.confidence:.2f}")
+                lines.append(
+                    f"  {designation}  [{entry.evidence}]  confidence={entry.confidence:.2f}"
+                )
             return "\n".join(lines)
 
         elif sub == "trust":
@@ -7315,6 +7396,7 @@ class HubPlugin(BasePlugin):
             if not self._dns_reputation or not self._designation:
                 return "dns: not running as named agent"
             from .dns.models import Endorsement
+
             endorsement = Endorsement(
                 from_designation=self._designation,
                 to_designation=target,
@@ -7345,6 +7427,67 @@ class HubPlugin(BasePlugin):
                 ]
             return "\n".join(lines)
 
+        elif sub == "endpoint":
+            from .dns.endpoint import EndpointConfig
+
+            ep_cfg = EndpointConfig.from_config(self.config)
+            lines = ["a2a endpoint:", f"  enabled:   {ep_cfg.enabled}"]
+            if ep_cfg.enabled:
+                listening = (
+                    self._socket_server is not None
+                    and getattr(self._socket_server, "_tcp_server", None) is not None
+                )
+                lines += [
+                    f"  listening: {listening}",
+                    f"  bind:      {ep_cfg.host}:{ep_cfg.port}",
+                    f"  tls:       {'yes' if ep_cfg.has_tls else 'NO (plaintext)'}",
+                    f"  advertise: {self._endpoint_uri or ep_cfg.endpoint_uri}",
+                ]
+                # Surface the last bind error so operators can see *why* the
+                # listener isn't up (e.g. port in use, bad cert) instead of
+                # just `listening: False`.
+                if not listening:
+                    if self._endpoint_setup_error:
+                        lines.append(f"  error:     {self._endpoint_setup_error}")
+                    elif self._socket_server is not None:
+                        err = (
+                            getattr(self._socket_server, "_endpoint_bind_error", "")
+                            or ""
+                        )
+                        if err:
+                            lines.append(f"  error:     {err}")
+            else:
+                lines.append(
+                    "  (set plugins.hub.endpoint_enabled to bind a remote listener)"
+                )
+            return "\n".join(lines)
+
+        elif sub == "connect":
+            url = rest.strip()
+            if not url:
+                return "usage: /hub dns connect <authority|url>  (fetch + import remote keys)"
+            import asyncio as _asyncio
+
+            from .dns.endpoint import fetch_well_known, register_well_known
+
+            ca = ""
+            if self.config:
+                ca = self.config.get("plugins.hub.endpoint_tls_ca", "") or ""
+            payload = await _asyncio.to_thread(fetch_well_known, url, ca)
+            if not payload:
+                return f"dns connect: could not fetch well-known from '{url}'"
+            designation = register_well_known(
+                payload, self._dns_registry, self._dns_identity
+            )
+            if not designation:
+                return f"dns connect: invalid/unverified well-known from '{url}'"
+            record = self._dns_registry.resolve(designation)
+            endpoint = record.endpoint_uri if record else ""
+            return (
+                f"dns connect: imported '{designation}' "
+                f"({endpoint or 'no endpoint'}) — handshake now possible"
+            )
+
         else:
             return (
                 "dns subcommands:\n"
@@ -7353,7 +7496,9 @@ class HubPlugin(BasePlugin):
                 "  trust <name>            show trust score breakdown\n"
                 "  leaderboard [N]         top N by trust (default 10)\n"
                 "  endorse <name> <cap>    endorse an agent's capability\n"
-                "  keys [name]             show public key + AID"
+                "  keys [name]             show public key + AID\n"
+                "  endpoint                show off-box A2A endpoint status\n"
+                "  connect <authority>     fetch + import a remote mesh's keys"
             )
 
     def _get_orchestrator(self):
@@ -7413,10 +7558,14 @@ class HubPlugin(BasePlugin):
             self._presence.cleanup_agent(peer)
             return f"agent '{peer.identity}' has no socket path, cleaned up"
 
+        dial_target, dial_auth = self._resolve_dial_target(
+            peer.identity, peer.socket_path
+        )
         output_lines = await AgentMessenger.request_output(
-            peer.socket_path,
+            dial_target,
             lines=lines,
             timeout=5.0,
+            auth=dial_auth,
         )
         if not output_lines:
             return f"no recent output from '{peer.identity}'"
@@ -7447,15 +7596,14 @@ class HubPlugin(BasePlugin):
             agent_name = str(rest.get("name", "")).strip()
             task = str(rest.get("task", "")).strip()
             requested_identity = str(rest.get("identity", "")).strip()
-            agent_type_override = (
-                str(rest.get("agent_type_override", "") or "").strip()
-            )
+            agent_type_override = str(rest.get("agent_type_override", "") or "").strip()
             if not agent_name or not task:
                 return "usage: /hub spawn <name> [identity=X] [type=X] <task>"
         else:
             raw = str(rest or "").strip()
             # Parse key=value args (identity=X, type=X) from the string
             import shlex
+
             try:
                 tokens = shlex.split(raw)
             except ValueError:
@@ -7484,9 +7632,7 @@ class HubPlugin(BasePlugin):
             resolved_identity = agent_name
             # Type override wins, then pool's agent_type, then fallback to "coder"
             effective_agent_type = (
-                agent_type_override
-                or pool_match.agent_type
-                or "coder"
+                agent_type_override or pool_match.agent_type or "coder"
             )
             effective_skills = list(pool_match.skills or [])
         else:
@@ -7516,7 +7662,10 @@ class HubPlugin(BasePlugin):
             # Find first pool gem with matching agent_type that isn't online
             if not resolved_identity:
                 for gem in POOL_IDENTITIES:
-                    if gem.agent_type == agent_name and gem.name not in online_identities:
+                    if (
+                        gem.agent_type == agent_name
+                        and gem.name not in online_identities
+                    ):
                         resolved_identity = gem.name
                         effective_skills = list(gem.skills or [])
                         break
@@ -7544,7 +7693,8 @@ class HubPlugin(BasePlugin):
 
             if not resolved_identity:
                 online_with_type = [
-                    g.name for g in POOL_IDENTITIES
+                    g.name
+                    for g in POOL_IDENTITIES
                     if g.agent_type == agent_name and g.name in online_identities
                 ]
                 if online_with_type:
@@ -7623,7 +7773,9 @@ class HubPlugin(BasePlugin):
             return f"Failed to create agent (identity: {resolved_identity}, type: {effective_agent_type})"
 
         # --- Build response (identity is known upfront, no discovery needed) ---
-        msg = f"Created agent '{resolved_identity}' (agent type: {effective_agent_type})"
+        msg = (
+            f"Created agent '{resolved_identity}' (agent type: {effective_agent_type})"
+        )
         msg += f"\nTask: {task}"
         if effective_skills:
             msg += f"\nSkills: {', '.join(effective_skills)}"
@@ -7649,7 +7801,11 @@ class HubPlugin(BasePlugin):
                 pre_record = AgentRecord(
                     designation=resolved_identity,
                     runtime="kollab",
-                    authority=self.config.get("plugins.hub.authority", "kollabor.ai") if self.config else "kollabor.ai",
+                    authority=(
+                        self.config.get("plugins.hub.authority", "kollabor.ai")
+                        if self.config
+                        else "kollabor.ai"
+                    ),
                     public_key=spawned_pub_hex,
                     attestation=attestation,
                     approval_state="auto_approved",
@@ -7880,7 +8036,9 @@ class HubPlugin(BasePlugin):
                 # watchdog kills the process after 8s so self-stop is
                 # always terminal — matches the operator's mental model of
                 # "hub_stop means die."
-                logger.info(f"{self._identity.identity} requested self-stop via hub_stop")
+                logger.info(
+                    f"{self._identity.identity} requested self-stop via hub_stop"
+                )
                 self._self_stop_requested = True
                 asyncio.ensure_future(self.shutdown())
 
@@ -7951,7 +8109,9 @@ class HubPlugin(BasePlugin):
                 return "stopped"
 
             killed = self._force_kill_agent(agent)
-            if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
+            if killed and await self._wait_for_agent_exit(
+                agent, timeout=STOP_TERM_SECONDS
+            ):
                 self._presence.cleanup_agent(agent)
                 return "killed (SIGTERM after graceful timeout)"
             if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
@@ -8704,14 +8864,12 @@ class HubPlugin(BasePlugin):
             # Validate config before starting
             if not self.config:
                 return "config not available"
-            token = (
-                self.config.get("plugins.hub.bridge_token", "")
-                or self.config.get("plugins.hub.notify_telegram_token", "")
+            token = self.config.get("plugins.hub.bridge_token", "") or self.config.get(
+                "plugins.hub.notify_telegram_token", ""
             )
-            chat_id = (
-                self.config.get("plugins.hub.bridge_chat_id", "")
-                or self.config.get("plugins.hub.notify_telegram_chat_id", "")
-            )
+            chat_id = self.config.get(
+                "plugins.hub.bridge_chat_id", ""
+            ) or self.config.get("plugins.hub.notify_telegram_chat_id", "")
             if not token or not chat_id:
                 return "cannot enable: bridge_token and bridge_chat_id required"
 
@@ -8821,7 +8979,9 @@ class HubPlugin(BasePlugin):
         if self._waiting_durations:
             avg = sum(self._waiting_durations) / len(self._waiting_durations)
             lines.append(f"  avg waiting duration:      {avg:.1f}s")
-            lines.append(f"  max waiting duration:      {max(self._waiting_durations):.1f}s")
+            lines.append(
+                f"  max waiting duration:      {max(self._waiting_durations):.1f}s"
+            )
         else:
             lines.append("  avg waiting duration:      n/a")
         return "\n".join(lines)
@@ -8890,9 +9050,7 @@ class HubPlugin(BasePlugin):
         try:
             inbox_counts = AgentMessenger.get_all_inbox_counts()
             if inbox_counts:
-                parts = ", ".join(
-                    f"{k}({v})" for k, v in sorted(inbox_counts.items())
-                )
+                parts = ", ".join(f"{k}({v})" for k, v in sorted(inbox_counts.items()))
                 lines.append(f"  offline inboxes: {parts}")
         except Exception:
             pass
@@ -8927,14 +9085,11 @@ class HubPlugin(BasePlugin):
         if rejections:
             parts = [f"{ident}: {reason}" for ident, reason in rejections]
             return (
-                f"rejected: {'; '.join(parts)}. "
-                f"use force=\"true\" to break through."
+                f"rejected: {'; '.join(parts)}. " f'use force="true" to break through.'
             )
         return f"sent to {target}"
 
-    async def _handle_broadcast_command(
-        self, content: str, force: bool = False
-    ) -> str:
+    async def _handle_broadcast_command(self, content: str, force: bool = False) -> str:
         if not content:
             return "usage: /hub broadcast <message>"
         msg = HubMessage(
@@ -9063,9 +9218,7 @@ class HubPlugin(BasePlugin):
         """
         if not entry_id:
             return "usage: /hub vault read <id> (e.g. crys-001)"
-        identity = (
-            self._identity.identity if self._identity else "koordinator"
-        )
+        identity = self._identity.identity if self._identity else "koordinator"
         vault = AgentVault(identity)
         # Search project store first, then global
         project_store = CrystalStore(vault._vault_dir)
@@ -9115,9 +9268,7 @@ class HubPlugin(BasePlugin):
         """Search crystal entries by keyword across both tiers."""
         if not query:
             return "usage: /hub vault search <query>"
-        identity = (
-            self._identity.identity if self._identity else "koordinator"
-        )
+        identity = self._identity.identity if self._identity else "koordinator"
         vault = AgentVault(identity)
         seen_ids: set = set()
         results = []
@@ -9138,9 +9289,7 @@ class HubPlugin(BasePlugin):
 
     def _vault_stats(self) -> str:
         """Show crystal store statistics for both tiers."""
-        identity = (
-            self._identity.identity if self._identity else "koordinator"
-        )
+        identity = self._identity.identity if self._identity else "koordinator"
         vault = AgentVault(identity)
         lines = [f"crystal store: {identity}"]
         for tier_label, store in (
@@ -9598,5 +9747,7 @@ class HubPlugin(BasePlugin):
 
         # If this was a self-stop request, exit the process after clean teardown
         if getattr(self, "_self_stop_requested", False):
-            logger.info(f"{self._identity.identity}: self-stop complete, exiting process")
+            logger.info(
+                f"{self._identity.identity}: self-stop complete, exiting process"
+            )
             os._exit(0)

@@ -1,0 +1,19 @@
+{
+  "name": "hub-endpoint",
+  "description": "Off-box A2A endpoint: app boots with the endpoint code wired in and the /hub dns endpoint subcommand routes (default: disabled, unix-socket only).",
+  "config": {
+    "command": "python main.py",
+    "app_init_sleep": 5,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "type", "text": "/hub dns endpoint" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "endpoint|dns" },
+    { "action": "assert_not_contains", "pattern": "Traceback" }
+  ]
+}

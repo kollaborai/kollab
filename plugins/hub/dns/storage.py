@@ -30,9 +30,7 @@ def _sanitize_designation(designation: str) -> str:
     """
     if not _SAFE_DESIGNATION_RE.match(designation):
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", designation)
-        logger.warning(
-            f"sanitized unsafe designation '{designation}' -> '{safe}'"
-        )
+        logger.warning(f"sanitized unsafe designation '{designation}' -> '{safe}'")
         return safe
     return designation
 
@@ -284,6 +282,7 @@ class DNSStorage:
             "endpoints": {
                 "registry": f"https://{record.authority}/.well-known/agent-keys",
                 "socket": record.socket_path or "",
+                "endpoint": record.endpoint_uri or "",
             },
             "published_at": time.time(),
         }

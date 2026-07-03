@@ -11,6 +11,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .models import HubMessage
+from .presence import _atomic_write, get_messages_dir, get_socket_dir
+
 # --- Durable inbox bounds ---
 # Max messages kept on disk per inbox. Oldest are evicted at write time.
 INBOX_MAX_SIZE: int = 50
@@ -20,9 +23,6 @@ INBOX_TTL_SECS: int = 7 * 86400  # 7 days
 # When the inbox exceeds this, a summary is prepended and only the newest
 # INBOX_MAX_REPLAY messages are returned.
 INBOX_MAX_REPLAY: int = 20
-
-from .models import HubMessage
-from .presence import _atomic_write, get_messages_dir, get_socket_dir
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,17 @@ class AgentSocketServer:
         self._dns_registry: Optional[Any] = None  # AgentRegistry for pubkey lookup
         self._dns_identity: Optional[Any] = None  # IdentityManager for verify
 
+        # Off-box TCP/TLS endpoint (None until enable_endpoint() is called).
+        # Remote connections share _handle_connection but ALWAYS require the
+        # Ed25519 handshake regardless of the local-socket auth setting.
+        self._tcp_server: Optional[asyncio.AbstractServer] = None
+        self._tcp_host: Optional[str] = None
+        self._tcp_port: Optional[int] = None
+        self._tcp_ssl: Optional[Any] = None
+        # Last bind error (or "") so `/hub dns endpoint` can explain *why*
+        # the off-box listener isn't up. Cleared on a successful bind.
+        self._endpoint_bind_error: str = ""
+
     async def start(self) -> str:
         """Start the socket server. Returns the socket path."""
         # Clean stale socket
@@ -95,8 +106,10 @@ class AgentSocketServer:
 
         try:
             self._server = await asyncio.wait_for(
-                asyncio.start_unix_server(self._handle_connection, path=str(self.socket_path)),
-                timeout=10.0
+                asyncio.start_unix_server(
+                    self._handle_connection, path=str(self.socket_path)
+                ),
+                timeout=10.0,
             )
         except asyncio.TimeoutError:
             raise RuntimeError(f"socket bind timeout: {self.socket_path}")
@@ -104,6 +117,44 @@ class AgentSocketServer:
             raise RuntimeError(f"socket bind failed: {e}")
         os.chmod(str(self.socket_path), 0o600)
         logger.info(f"Agent socket listening: {self.socket_path}")
+
+        # Off-box TCP/TLS listener (optional). Same handler as the unix
+        # socket; remote connections are forced through the Ed25519
+        # handshake. A bind failure here is non-fatal — the unix socket
+        # keeps the local mesh working.
+        if self._tcp_host is not None and self._tcp_port is not None:
+            try:
+                self._tcp_server = await asyncio.wait_for(
+                    asyncio.start_server(
+                        lambda r, w: self._handle_connection(r, w, require_auth=True),
+                        host=self._tcp_host,
+                        port=self._tcp_port,
+                        ssl=self._tcp_ssl,
+                    ),
+                    timeout=10.0,
+                )
+                bound = (
+                    self._tcp_server.sockets[0].getsockname()
+                    if self._tcp_server.sockets
+                    else (self._tcp_host, self._tcp_port)
+                )
+                self._endpoint_bind_error = ""
+                logger.info(
+                    "Agent endpoint listening: %s:%s (%s)",
+                    bound[0],
+                    bound[1],
+                    "TLS" if self._tcp_ssl else "plaintext",
+                )
+            except (asyncio.TimeoutError, OSError) as e:
+                self._endpoint_bind_error = f"{type(e).__name__}: {e}"
+                logger.error(
+                    "endpoint bind failed (%s:%s): %s — unix socket still active",
+                    self._tcp_host,
+                    self._tcp_port,
+                    e,
+                )
+                self._tcp_server = None
+
         return str(self.socket_path)
 
     @staticmethod
@@ -190,10 +241,15 @@ class AgentSocketServer:
         nonce = secrets.token_hex(32)
 
         # Send challenge
-        challenge = json.dumps({
-            "type": "auth_challenge",
-            "nonce": nonce,
-        }) + "\n"
+        challenge = (
+            json.dumps(
+                {
+                    "type": "auth_challenge",
+                    "nonce": nonce,
+                }
+            )
+            + "\n"
+        )
         writer.write(challenge.encode())
         await writer.drain()
 
@@ -201,10 +257,15 @@ class AgentSocketServer:
         try:
             resp_line = await asyncio.wait_for(reader.readline(), timeout=10.0)
         except asyncio.TimeoutError:
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": "handshake timeout",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": "handshake timeout",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             return None
@@ -215,19 +276,29 @@ class AgentSocketServer:
         try:
             resp = json.loads(resp_line.decode().strip())
         except (json.JSONDecodeError, UnicodeDecodeError):
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": "invalid auth_response JSON",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": "invalid auth_response JSON",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             return None
 
         if resp.get("type") != "auth_response":
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": f"expected auth_response, got {resp.get('type', 'none')}",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": f"expected auth_response, got {resp.get('type', 'none')}",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             return None
@@ -236,20 +307,30 @@ class AgentSocketServer:
         signature_hex = resp.get("signature", "")
 
         if not designation or not signature_hex:
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": "missing designation or signature",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": "missing designation or signature",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             return None
 
         # Look up public key from DNS registry
         if self._dns_registry is None:
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": "DNS registry not available",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": "DNS registry not available",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             logger.warning("auth rejected: DNS registry not initialized")
@@ -257,10 +338,15 @@ class AgentSocketServer:
 
         record = self._dns_registry.resolve(designation)
         if record is None or not getattr(record, "public_key", ""):
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": f"unknown designation: {designation}",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": f"unknown designation: {designation}",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             logger.warning(f"auth rejected: unknown designation '{designation}'")
@@ -268,10 +354,15 @@ class AgentSocketServer:
 
         # Verify Ed25519 signature of nonce
         if self._dns_identity is None:
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": "identity manager not available",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": "identity manager not available",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             logger.warning("auth rejected: identity manager not initialized")
@@ -283,10 +374,15 @@ class AgentSocketServer:
         )
 
         if not valid:
-            rej = json.dumps({
-                "type": "auth_rejected",
-                "reason": "signature verification failed",
-            }) + "\n"
+            rej = (
+                json.dumps(
+                    {
+                        "type": "auth_rejected",
+                        "reason": "signature verification failed",
+                    }
+                )
+                + "\n"
+            )
             writer.write(rej.encode())
             await writer.drain()
             logger.warning(
@@ -296,24 +392,39 @@ class AgentSocketServer:
             return None
 
         # Authenticated — send success
-        ack = json.dumps({
-            "type": "auth_ok",
-            "designation": designation,
-        }) + "\n"
+        ack = (
+            json.dumps(
+                {
+                    "type": "auth_ok",
+                    "designation": designation,
+                }
+            )
+            + "\n"
+        )
         writer.write(ack.encode())
         await writer.drain()
         logger.info(f"socket auth succeeded for '{designation}'")
         return designation
 
     async def _handle_connection(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        require_auth: bool = False,
     ):
-        """Handle incoming connection."""
+        """Handle incoming connection.
+
+        ``require_auth=True`` is set by the off-box TCP listener and forces
+        the Ed25519 handshake regardless of the local-socket auth setting.
+        """
         # --- Peer credential check ---
-        # Verify the connecting process runs under the same UID.
-        # Rejects cross-user connections; logs a warning on failure.
-        peer_cred = self._get_peer_credentials(writer)
-        if peer_cred is not None:
+        # Verify the connecting process runs under the same UID. This is a
+        # same-host gate and is meaningless off-box, where the Ed25519
+        # handshake is the real gate — so skip it for remote connections.
+        peer_cred = None if require_auth else self._get_peer_credentials(writer)
+        if require_auth:
+            pass  # remote connection — UID check skipped, handshake enforced below
+        elif peer_cred is not None:
             peer_pid, peer_uid = peer_cred
             our_uid = os.getuid()
             if peer_uid != our_uid:
@@ -344,17 +455,20 @@ class AgentSocketServer:
             )
 
         # --- Ed25519 challenge-response auth ---
-        if self._auth_enabled:
+        if self._auth_enabled or require_auth:
             if self._dns_registry is None or self._dns_identity is None:
                 # DNS subsystem not initialized yet — reject
-                logger.warning(
-                    "auth required but DNS not ready — closing connection"
-                )
+                logger.warning("auth required but DNS not ready — closing connection")
                 try:
-                    rej = json.dumps({
-                        "type": "auth_rejected",
-                        "reason": "authentication service not ready",
-                    }) + "\n"
+                    rej = (
+                        json.dumps(
+                            {
+                                "type": "auth_rejected",
+                                "reason": "authentication service not ready",
+                            }
+                        )
+                        + "\n"
+                    )
                     writer.write(rej.encode())
                     await writer.drain()
                 except Exception:
@@ -621,6 +735,25 @@ class AgentSocketServer:
         else:
             logger.info("socket auth DISABLED (dev mode)")
 
+    def enable_endpoint(self, host: str, port: int, ssl_ctx: Any = None) -> None:
+        """Enable an off-box TCP/TLS listener sharing the same handler.
+
+        Must be called BEFORE ``start()`` so the listener binds. Remote
+        connections are always required to complete the Ed25519 handshake
+        (the local-socket ``require_auth`` setting does not relax this);
+        the handshake still needs ``set_dns_auth()`` to have wired the
+        registry + identity manager.
+        """
+        self._tcp_host = host
+        self._tcp_port = port
+        self._tcp_ssl = ssl_ctx
+        logger.info(
+            "endpoint configured: %s:%s [%s]",
+            host,
+            port,
+            "TLS" if ssl_ctx is not None else "plaintext",
+        )
+
     @property
     def shutdown_requested(self) -> bool:
         """Whether a remote shutdown has been requested."""
@@ -779,6 +912,13 @@ class AgentSocketServer:
 
     async def stop(self) -> None:
         """Stop the socket server."""
+        if self._tcp_server:
+            self._tcp_server.close()
+            try:
+                await self._tcp_server.wait_closed()
+            except Exception:
+                pass
+            self._tcp_server = None
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -812,9 +952,7 @@ class AgentMessenger:
         """
         try:
             # Read server greeting — should be auth_challenge or a normal ack
-            greeting_line = await asyncio.wait_for(
-                reader.readline(), timeout=timeout
-            )
+            greeting_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.debug("client handshake: timeout waiting for server greeting")
             return False
@@ -850,19 +988,22 @@ class AgentMessenger:
             return False
 
         # Send auth_response
-        auth_resp = json.dumps({
-            "type": "auth_response",
-            "designation": designation,
-            "signature": signature,
-        }) + "\n"
+        auth_resp = (
+            json.dumps(
+                {
+                    "type": "auth_response",
+                    "designation": designation,
+                    "signature": signature,
+                }
+            )
+            + "\n"
+        )
         writer.write(auth_resp.encode())
         await writer.drain()
 
         # Wait for auth_ok or auth_rejected
         try:
-            result_line = await asyncio.wait_for(
-                reader.readline(), timeout=timeout
-            )
+            result_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.debug("client handshake: timeout waiting for auth result")
             return False
@@ -881,26 +1022,93 @@ class AgentMessenger:
 
         # auth_rejected or anything else
         reason = result.get("reason", "unknown")
-        logger.warning(
-            f"client handshake: rejected for '{designation}': {reason}"
-        )
+        logger.warning(f"client handshake: rejected for '{designation}': {reason}")
         return False
+
+    @staticmethod
+    async def _open(
+        target: str,
+        *,
+        timeout: float,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ):
+        """Open a connection to a peer (unix socket path OR endpoint URI).
+
+        ``target`` is a unix socket path, or a remote endpoint URI
+        (``wss://host:port`` / ``ws://`` / ``a2a://``). For remote targets —
+        or whenever ``auth`` is supplied and the peer challenges — the
+        Ed25519 client handshake runs first, leaving the stream positioned
+        for normal protocol traffic.
+
+        ``auth`` is ``{"identity_manager": IdentityManager,
+        "designation": str, "require_auth"?: bool, "tls_ca"?: str}``. When
+        ``auth`` is None and ``target`` is a unix path, behavior is identical
+        to a plain ``open_unix_connection`` — existing local callers unchanged.
+
+        Returns ``(reader, writer)``. Raises on connect/handshake failure.
+        """
+        from .dns.endpoint import (
+            build_client_ssl_context,
+            is_remote_uri,
+            parse_endpoint_uri,
+            uri_is_tls,
+        )
+
+        remote = is_remote_uri(target)
+        if remote:
+            parsed = parse_endpoint_uri(target)
+            if parsed is None:
+                raise ValueError(f"invalid endpoint URI: {target}")
+            host, port = parsed
+            ctx = ssl_ctx
+            if ctx is None and uri_is_tls(target):
+                ca = auth.get("tls_ca", "") if auth else ""
+                ctx = build_client_ssl_context(ca)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port, ssl=ctx),
+                timeout=timeout,
+            )
+        else:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(target),
+                timeout=timeout,
+            )
+
+        # Remote peers always challenge; local peers only when auth is forced.
+        if auth is not None and (remote or auth.get("require_auth")):
+            ok = await AgentMessenger.do_client_handshake(
+                reader,
+                writer,
+                auth["identity_manager"],
+                auth["designation"],
+                timeout=timeout,
+            )
+            if not ok:
+                writer.close()
+                raise ConnectionError(f"handshake failed for {target}")
+
+        return reader, writer
 
     @staticmethod
     async def send_to_agent(
         target_socket: str,
         message: HubMessage,
         timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
     ) -> bool:
-        """Send a message to an agent's socket.
+        """Send a message to an agent's socket or remote endpoint.
 
+        ``target_socket`` may be a unix socket path or an endpoint URI.
+        Pass ``auth`` to authenticate over a remote / auth-required peer.
         Returns True if delivered and acked.
         """
         writer = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(target_socket),
-                timeout=timeout,
+            reader, writer = await AgentMessenger._open(
+                target_socket, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
 
             msg_line = json.dumps(message.to_dict()) + "\n"
@@ -928,13 +1136,18 @@ class AgentMessenger:
                     pass
 
     @staticmethod
-    async def ping_agent(socket_path: str, timeout: float = 3.0) -> bool:
-        """Ping an agent to check if it's alive."""
+    async def ping_agent(
+        socket_path: str,
+        timeout: float = 3.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> bool:
+        """Ping an agent (unix socket or remote endpoint) to check liveness."""
         writer = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path),
-                timeout=timeout,
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
             ping = json.dumps({"action": "ping"}) + "\n"
             writer.write(ping.encode())
@@ -959,14 +1172,18 @@ class AgentMessenger:
 
     @staticmethod
     async def request_context(
-        socket_path: str, lines: int = 200, timeout: float = 5.0
+        socket_path: str,
+        lines: int = 200,
+        timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
     ) -> str:
-        """Request recent context from an agent."""
+        """Request recent context from an agent (unix socket or endpoint)."""
         writer = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path),
-                timeout=timeout,
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
             req = json.dumps({"action": "get_context", "lines": lines}) + "\n"
             writer.write(req.encode())
@@ -992,14 +1209,18 @@ class AgentMessenger:
 
     @staticmethod
     async def request_output(
-        socket_path: str, lines: int = 100, timeout: float = 5.0
+        socket_path: str,
+        lines: int = 100,
+        timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
     ) -> List[str]:
-        """Request recent output lines from an agent."""
+        """Request recent output lines from an agent (unix socket or endpoint)."""
         writer = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path),
-                timeout=timeout,
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
             req = json.dumps({"action": "get_output", "lines": lines}) + "\n"
             writer.write(req.encode())
@@ -1024,13 +1245,18 @@ class AgentMessenger:
                     pass
 
     @staticmethod
-    async def request_status(socket_path: str, timeout: float = 3.0) -> dict:
-        """Request status from an agent."""
+    async def request_status(
+        socket_path: str,
+        timeout: float = 3.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> dict:
+        """Request status from an agent (unix socket or remote endpoint)."""
         writer = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path),
-                timeout=timeout,
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
             req = json.dumps({"action": "get_status"}) + "\n"
             writer.write(req.encode())
@@ -1055,14 +1281,18 @@ class AgentMessenger:
 
     @staticmethod
     async def signal_shutdown(
-        socket_path: str, reason: str = "", timeout: float = 3.0
+        socket_path: str,
+        reason: str = "",
+        timeout: float = 3.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
     ) -> bool:
-        """Signal an agent to shut down gracefully. Returns True if acked."""
+        """Signal an agent to shut down gracefully (unix or remote). Returns True if acked."""
         writer = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path),
-                timeout=timeout,
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
             req = json.dumps({"action": "shutdown", "reason": reason}) + "\n"
             writer.write(req.encode())
@@ -1086,12 +1316,17 @@ class AgentMessenger:
                     pass
 
     @staticmethod
-    async def subscribe(socket_path: str, timeout: float = 5.0) -> dict:
-        """Subscribe to an agent's output stream. Returns ack dict."""
+    async def subscribe(
+        socket_path: str,
+        timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> dict:
+        """Subscribe to an agent's output stream (unix or remote). Returns ack dict."""
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path),
-                timeout=timeout,
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
             req = json.dumps({"action": "subscribe"}) + "\n"
             writer.write(req.encode())

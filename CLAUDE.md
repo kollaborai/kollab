@@ -191,7 +191,9 @@ Peer-to-peer agent mesh with persistent identity.
 - `models.py` - GemDesignation, HubMessage, WorkSlot, designation pool
 - `presence.py` - Heartbeat files, agent discovery, socket liveness checks
 - `coordinator.py` - flock election, work queue, designation assignment
-- `messenger.py` - Unix socket server/client, message delivery
+- `messenger.py` - Unix socket server/client + off-box TCP/TLS endpoint, message delivery
+- `dns/` - Agent DNS: discovery, Ed25519 identity, trust, capabilities (AID/ARDP/ANS-aligned)
+- `dns/endpoint.py` - Off-box A2A endpoint: TLS listener + federation bootstrap (well-known fetch/import)
 - `vault.py` - Three-tier persistent memory (stream, working, crystallized)
 - `crystal_store.py` - Structured crystal entries with IDs, keywords, dedup, nudge retrieval
 - `text_utils.py` - Keyword extraction, stemming, relevance scoring for crystal nudge
@@ -205,6 +207,12 @@ Peer-to-peer agent mesh with persistent identity.
 - First agent becomes coordinator via `flock()` on `hub.lock`
 - Designations are gem-inspired names (lapis, peridot, ruby) with color castes
 - Open channel: all agents see all messages (like Slack)
+- Off-box mesh: `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the
+  same `_handle_connection` handler; remote agents complete the same Ed25519 handshake.
+  Default OFF (unix socket only). The endpoint always forces auth and refuses to bind
+  plaintext without `endpoint_allow_insecure`. Federation: `/hub dns connect <authority>`
+  fetches + imports a remote mesh's `/.well-known/agent-keys.json`. See
+  `docs/specs/hub-remote-endpoint.md`.
 - Vaults persist across sessions at `~/.kollab/hub/vaults/<designation>/`
 - `--agent` flag sets both agent bundle AND hub designation (phase 2+)
 - Status widget: `◈ designation* +peers` on status bar row 3

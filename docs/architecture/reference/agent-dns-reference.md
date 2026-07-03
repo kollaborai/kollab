@@ -2,7 +2,7 @@
 title: "Agent DNS: Discovery, Identity & Trust"
 doc_type: architecture-reference
 created: 2026-04-11
-modified: 2026-05-15
+modified: 2026-06-28
 status: reference
 ---
 # Agent DNS: Discovery, Identity & Trust
@@ -69,10 +69,12 @@ Arch server (10.0.0.5, internal-only)
   serves ~/.kollab/hub/dns/well-known/agent-keys.json
 ```
 
-The arch server is not reachable from the public internet. The
-well-known endpoint is the only DNS/HTTPS surface exposed; there is
-no public socket listener, so the mesh accepts no inbound traffic
-from outside the host.
+The arch server is not reachable from the public internet. In the
+default deployment the well-known endpoint is the only DNS/HTTPS surface
+exposed and there is no public socket listener, so the mesh accepts no
+inbound traffic from outside the host. An optional off-box endpoint
+(`plugins.hub.endpoint_enabled`, default off) can bind a TCP/TLS listener
+that accepts authenticated inbound connections — see "Off-Box Endpoint".
 
 ### Resolution Flow
 
@@ -89,8 +91,52 @@ GET https://kollabor.ai/.well-known/agent-keys  -->  coordinator pubkey + attest
 Verify attestation signature against published public key
     |
     v
-(future) Connect via authenticated transport + Ed25519 handshake
+Connect via authenticated transport + Ed25519 handshake
+(optional off-box endpoint — see "Off-Box Endpoint" below)
 ```
+
+## Off-Box Endpoint
+
+By default the mesh speaks only over local Unix domain sockets. An optional
+TCP/TLS endpoint lets a remote agent on another machine complete the **same**
+Ed25519 handshake and deliver messages over the network. It is implemented in
+`plugins/hub/dns/endpoint.py` and wired in `plugins/hub/messenger.py` +
+`plugins/hub/plugin.py`. See `docs/specs/hub-remote-endpoint.md` for the full
+design.
+
+**Key property:** the handshake and message loop are transport-neutral (they
+operate on `asyncio` stream pairs), so enabling off-box access adds a listener
+and a client dial — `_do_handshake` and the message protocol are unchanged.
+
+**Configuration** (`plugins.hub.endpoint_*`, all default off/empty):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `endpoint_enabled` | `false` | Bind the off-box TCP/TLS listener. Off → unix socket only |
+| `endpoint_host` / `endpoint_port` | `0.0.0.0` / `8765` | Bind address |
+| `endpoint_tls_cert` / `endpoint_tls_key` | `""` | PEM paths; required unless `endpoint_allow_insecure` |
+| `endpoint_tls_ca` | `""` | CA bundle for verifying remote endpoints (self-signed mesh CA) |
+| `endpoint_advertise_host` | `""` | Public hostname to advertise; falls back to `authority` |
+| `endpoint_allow_insecure` | `false` | Permit a plaintext listener (loopback / trusted network only) |
+
+**Security coupling:** the endpoint listener **always** forces the Ed25519
+handshake regardless of the local-socket `require_auth` setting, and refuses to
+bind a plaintext port unless `endpoint_allow_insecure` is set — you cannot
+accidentally publish an unauthenticated, unencrypted port.
+
+**Federation:** the server verifies an inbound handshake against its own
+registry, so a remote agent must be imported first.
+`/hub dns connect <authority>` fetches that mesh's
+`/.well-known/agent-keys.json` (which now publishes the advertised
+`endpoint_uri`) and registers the remote coordinator's designation, public key,
+and endpoint locally. `resolve_address()` then returns the remote `wss://` URI
+and an outbound `send_to_agent(..., auth=...)` dials it.
+
+> Note: only the off-box endpoint is end-to-end authenticated today. Setting the
+> local-socket `plugins.hub.require_auth` makes the unix server *challenge*, but
+> the local delivery callers do not yet send the client handshake — so remote is
+> the supported authenticated path. Auto-routing local delivery through registry
+> resolution is a tracked follow-up.
 
 ## Architecture
 
@@ -105,6 +151,7 @@ plugins/hub/dns/
   storage.py         filesystem persistence for keys and records
   capabilities.py    capability tracking with evidence levels
   reputation.py      trust scoring with exponential decay
+  endpoint.py        off-box TCP/TLS listener config + federation bootstrap (well-known fetch/import)
 ```
 
 ### Data Models
@@ -276,9 +323,11 @@ Pool configuration: `plugins/hub/organizations/pool.json`
 | Ed25519 keypairs | deployed | Persistent per-designation keys via PyNaCl (libsodium) |
 | Coordinator attestations | deployed | Signed and written at startup; published to well-known |
 | AID DNS TXT record | deployed | `_agent.kollabor.ai` live; points at well-known endpoint |
-| `/.well-known/agent-keys` | deployed | Public coordinator pubkey + attestation, served over TLS via VPS → WireGuard → arch |
-| Ed25519 handshake on socket | not wired | Sign/verify helpers exist in `identity.py`; `messenger.py` does not call them yet |
-| Coordinator gatekeeper | not wired | `approval_state` field exists on `AgentRecord` but no code reads it before accepting messages |
+| `/.well-known/agent-keys` | deployed | Public coordinator pubkey + attestation, served over TLS via VPS → WireGuard → arch; now also publishes the advertised `endpoint_uri` |
+| Ed25519 handshake on socket | wired | `messenger.py` `_do_handshake` (server) + `do_client_handshake` (client) verify a signed nonce against the registry public key. Always enforced on the off-box endpoint |
+| Off-box TCP/TLS endpoint | available (opt-in) | `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the same handler; forces the handshake; refuses plaintext without `endpoint_allow_insecure`. Default off |
+| Federation import | wired | `/hub dns connect <authority>` fetches + imports a remote mesh's well-known keys so the inbound handshake can verify it |
+| Coordinator gatekeeper | partial | `approval_state` is set on registration/import; delivery policy reads it, but message-accept does not yet hard-gate on it independently of the handshake |
 | DNS TXT `k=` field | pending | Mesh public key in TXT record itself (currently only in well-known) |
 
 ### What Is (and Isn't) Publicly Exposed
@@ -327,8 +376,9 @@ Socket location: `/tmp/kollabor-hub/<project-hash>/<designation>.sock`
 ```
 AgentSocketServer (per agent)
   |-- accepts connections on .sock file (owner-only, 0o600)
-  |-- verifies peer UID (deployed, SO_PEERCRED / getpeereid)
-  |-- Ed25519 challenge-response handshake (NOT wired; helpers exist)
+  |     and, when endpoint_enabled, on a TCP/TLS port (same handler)
+  |-- verifies peer UID on the unix socket (SO_PEERCRED / getpeereid)
+  |-- Ed25519 challenge-response handshake (wired; always forced off-box)
   |-- routes authenticated messages to handler
 ```
 
@@ -354,8 +404,11 @@ The hub socket protocol enables external tools to participate in the mesh:
 - **External schedulers** can trigger agent tasks
 - **Telegram/Slack bridges** enable human-to-agent communication
 
-All external tools must authenticate via the Ed25519 handshake once
-the security layer is fully deployed. Today's surface is:
-peer-UID-gated Unix sockets (local only) plus a public-key-only DNS
-+ well-known discovery record. Inbound mesh traffic from the public
-internet is not yet possible.
+External tools authenticate via the Ed25519 handshake. The default
+surface is peer-UID-gated Unix sockets (local only) plus a public-key-only
+DNS + well-known discovery record. Inbound mesh traffic from off-box is
+possible once the optional endpoint (`plugins.hub.endpoint_enabled`) is
+turned on: it binds a TCP/TLS listener that forces the handshake, and a
+remote mesh is imported with `/hub dns connect <authority>`. The endpoint
+is off by default, so out of the box the mesh still accepts no inbound
+traffic from outside the host.

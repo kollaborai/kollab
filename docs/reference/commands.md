@@ -126,6 +126,12 @@ examples:
 interactive equivalents:
   /hub status       /hub msg <name> <text>    /hub broadcast <text>
   /hub bridge setup /hub notify channel <...> /hub feed
+  /hub dns resolve  /hub dns endpoint         /hub dns connect <authority>
+
+/hub dns exposes the agent DNS layer (discovery, identity, trust) and the
+off-box endpoint: `/hub dns endpoint` shows the A2A listener status, and
+`/hub dns connect <authority>` imports a remote mesh's published keys. see
+docs/architecture/reference/agent-dns-reference.md.
 
 
 ## --context Flag
