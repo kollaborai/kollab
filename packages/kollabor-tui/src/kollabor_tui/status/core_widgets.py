@@ -1538,7 +1538,14 @@ def render_session(width: int, ctx: Optional[WidgetContext]) -> str:
     """
     try:
         session_name = "unknown"
-        if ctx and ctx.llm_service:
+        # Prefer the daemon-sourced session in attach mode so the bar shows the
+        # daemon's real session, not the client shadow's throwaway one. Mirrors
+        # render_stats, which reads remote_state first. Without this the local
+        # conversation_manager's id always wins and the displayed session name
+        # diverges from the daemon's actual conversation.
+        if ctx and ctx.remote_state and ctx.remote_state.get("session"):
+            session_name = ctx.remote_state["session"]
+        elif ctx and ctx.llm_service:
             conversation_manager = getattr(
                 ctx.llm_service, "conversation_manager", None
             )
@@ -1546,10 +1553,6 @@ def render_session(width: int, ctx: Optional[WidgetContext]) -> str:
                 session_name = getattr(
                     conversation_manager, "current_session_id", "unknown"
                 )
-
-        # Attach mode fallback
-        if session_name == "unknown" and ctx and ctx.remote_state:
-            session_name = ctx.remote_state.get("session", "unknown")
 
         # Strip timestamp prefix if present (format: YYMMDDHHMM-name-name)
         # Session names are like "2601231430-quantum-spark"

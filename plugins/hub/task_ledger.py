@@ -232,11 +232,35 @@ class TaskLedger:
         )
         self._save_pending_replies(replies)
 
+    # Replies older than this are auto-expired on read.
+    PENDING_REPLY_TTL = 86400  # 24 hours
+
     def pending_replies(self) -> List[Dict[str, Any]]:
+        """Return pending replies, auto-expiring stale ones.
+
+        Entries older than PENDING_REPLY_TTL are marked expired and
+        pruned from the file. This prevents the pending list from
+        growing unbounded when agents go offline without resolving.
+        """
+        replies = self._load_pending_replies()
+        now = time.time()
+        changed = False
+        kept = []
+        for item in replies:
+            if item.get("status") == "pending":
+                age = now - item.get("created_at", 0)
+                if age > self.PENDING_REPLY_TTL:
+                    item["status"] = "expired"
+                    item["expired_at"] = now
+                    changed = True
+            kept.append(item)
+        if changed:
+            # Prune: keep only non-expired entries to prevent unbounded growth
+            pruned = [r for r in kept if r.get("status") != "expired"]
+            self._save_pending_replies(pruned)
+            kept = pruned
         return [
-            item
-            for item in self._load_pending_replies()
-            if item.get("status") == "pending"
+            item for item in kept if item.get("status") == "pending"
         ]
 
     def resolve_reply(

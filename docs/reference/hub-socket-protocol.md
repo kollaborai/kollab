@@ -3,6 +3,11 @@
 unix domain sockets, newline-delimited JSON. one request per connection,
 one response per request (except `attach` which streams).
 
+the same wire protocol is also reachable over an optional off-box TCP/TLS
+endpoint (`plugins.hub.endpoint_enabled`, default off). the protocol below is
+transport-neutral; the only difference off-box is a mandatory Ed25519
+handshake before the actions — see "transport & authentication".
+
 ## socket locations
 
 sockets live in `/tmp/kollabor-hub/<project-hash>/<identity>.sock`
@@ -23,6 +28,49 @@ every message: `json_object\n` (single line, newline terminated)
 every response: `json_object\n`
 
 open connection -> write request -> read response -> close.
+
+
+## transport & authentication
+
+two transports, one handler (`AgentSocketServer._handle_connection`):
+
+- **unix domain socket** (always on) — `/tmp/kollabor-hub/<hash>/<identity>.sock`,
+  gated by a peer-UID check. no handshake by default.
+- **off-box TCP/TLS endpoint** (optional, `plugins.hub.endpoint_enabled`) —
+  binds `endpoint_host:endpoint_port` (default `0.0.0.0:8765`), wrapped in TLS
+  when a cert/key is configured. every connection is **forced** through the
+  Ed25519 handshake below; it refuses to bind plaintext unless
+  `endpoint_allow_insecure` is set.
+
+remote endpoint URIs are `wss://host:port` (TLS) or `ws://`/`a2a://` (plaintext).
+peers discover them via `AgentRegistry.resolve_address()` /
+`/.well-known/agent-keys.json`.
+
+### Ed25519 handshake
+
+when the server requires auth (always on the off-box endpoint), it speaks
+FIRST — before any action is read:
+
+1. server -> client:
+       {"type": "auth_challenge", "nonce": "<hex>"}
+2. client signs the nonce with its designation's Ed25519 private key:
+       {"type": "auth_response", "designation": "<your-name>", "signature": "<hex>"}
+3. server verifies the signature against the registry's public key for that
+   designation, then:
+       {"type": "auth_ok", "designation": "<your-name>"}        # success
+       {"type": "auth_rejected", "reason": "<why>"}             # failure (then closes)
+
+on `auth_ok` the connection proceeds to the normal action protocol below. an
+unknown designation, a bad signature, or a missing registry entry yields
+`auth_rejected`. the client side is `AgentMessenger.do_client_handshake`; the
+server side is `AgentSocketServer._do_handshake`.
+
+> the unix socket does not perform the handshake by default. setting
+> `plugins.hub.require_auth` makes the unix server *challenge*; local delivery
+> callers answer it via `AgentMessenger._open` when `auth=` is supplied. remote
+> delivery (`_resolve_dial_target` upgrades a dial when the registry knows an
+> `endpoint_uri`) always answers the challenge — that is the supported
+> authenticated path.
 
 
 ## actions

@@ -212,6 +212,9 @@ capabilities, and team structure.
 | `/hub feed` | Live activity dashboard |
 | `/hub console` | Agent management UI |
 | `/hub org <name>` | Launch an organization |
+| `/hub dns resolve [name]` | Resolve agent / list the DNS roster |
+| `/hub dns endpoint` | Show off-box A2A endpoint status |
+| `/hub dns connect <authority>` | Import a remote mesh's published keys |
 
 | CLI Flag | What it does |
 |---|---|

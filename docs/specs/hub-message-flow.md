@@ -310,6 +310,13 @@ there are TWO separate dedup systems:
     polled every 5 seconds by _mailbox_loop
     consumed (deleted) after read
 
+  off-box endpoint (optional, plugins.hub.endpoint_enabled):
+    remote agent dials wss://host:port (or ws://) instead of a unix socket
+    same send + ack protocol, preceded by a forced Ed25519 handshake
+    target resolved via AgentRegistry.resolve_address (endpoint_uri or socket)
+    send via AgentMessenger.send_to_agent(uri, msg, auth={...})
+    see docs/reference/hub-socket-protocol.md and docs/specs/hub-remote-endpoint.md
+
 
 ## display paths
 

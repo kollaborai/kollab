@@ -411,8 +411,16 @@ class ContextCompactionPlugin(BasePlugin):
     async def _handle_compact_command(self, command) -> str:
         """Handle /compact -- show active compaction config."""
         args = getattr(command, "args", []) or []
+
+        # Prefer daemon state so /compact reflects the real conversation in
+        # attach mode -- the local llm_service is only a client-side shadow
+        # with an empty history, which made every number read as zero. Falls
+        # back to local state in standalone mode.
+        history = await self._fetch_display_history()
+        prompt_tokens = await self._fetch_display_tokens()
+
         if args and str(args[0]).lower() == "preview":
-            return self._build_compact_preview()
+            return self._build_compact_preview(history, prompt_tokens)
 
         # Resolve provider info
         model = "?"
@@ -445,8 +453,7 @@ class ContextCompactionPlugin(BasePlugin):
         else:
             source = "fallback (no provider detected)"
 
-        # Current state
-        prompt_tokens = self._get_prompt_tokens()
+        # Current state (prompt_tokens fetched above, daemon-preferred)
         keep_recent_cfg = self.config.get(
             "plugins.context_compaction.keep_recent", 8
         )
@@ -458,8 +465,7 @@ class ContextCompactionPlugin(BasePlugin):
             self.config.get("plugins.context_compaction.min_human_turns", 6)
         )
 
-        # History stats
-        history = self._get_conversation_history()
+        # History stats (history fetched above, daemon-preferred)
         msg_count = len(history) if history else 0
         human_turns = 0
         if history:
@@ -503,9 +509,19 @@ class ContextCompactionPlugin(BasePlugin):
 
         return "\n".join(lines)
 
-    def _build_compact_preview(self) -> str:
-        """Build a non-mutating preview of what compaction would affect."""
-        history = self._get_conversation_history() or []
+    def _build_compact_preview(
+        self,
+        history: Optional[List[ConversationMessage]] = None,
+        prompt_tokens: Optional[int] = None,
+    ) -> str:
+        """Build a non-mutating preview of what compaction would affect.
+
+        ``history`` and ``prompt_tokens`` are supplied by the command handler
+        (daemon-sourced in attach mode). When omitted they fall back to local
+        state so the method still works standalone.
+        """
+        if history is None:
+            history = self._get_conversation_history() or []
         keep_recent = int(
             self.config.get("plugins.context_compaction.keep_recent", 8)
         )
@@ -516,22 +532,22 @@ class ContextCompactionPlugin(BasePlugin):
             remove_candidates
         )
 
-        prompt_tokens = self._get_prompt_tokens()
+        if prompt_tokens is None:
+            prompt_tokens = self._get_prompt_tokens()
         estimated_removed = int(
             prompt_tokens * (len(summarizable) / max(1, len(history)))
         )
 
-        lines = [
-            "compact preview:",
-            f"  messages:       {len(history)}",
-            f"  preserved:      {len(to_keep)} recent",
-            f"  removed:        {len(summarizable)} summarizable",
-            f"  pinned:         {len(preserved)} hub/task",
-            f"  token delta:    ~{estimated_removed // 1000}K removed",
-            "",
-            "  apply:          /compact apply",
-        ]
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                "compact preview:",
+                f"  messages:       {len(history)}",
+                f"  preserved:      {len(to_keep)} recent",
+                f"  removed:        {len(summarizable)} summarizable",
+                f"  pinned:         {len(preserved)} hub/task",
+                f"  token delta:    ~{estimated_removed // 1000}K removed",
+            ]
+        )
 
     # ------------------------------------------------------------------
     # Hooks
@@ -853,6 +869,51 @@ class ContextCompactionPlugin(BasePlugin):
         if self._llm_service and hasattr(self._llm_service, "conversation_history"):
             return self._llm_service.conversation_history
         return None
+
+    def _get_state_service(self):
+        """Return the daemon state_service proxy, or None if unavailable.
+
+        The mock guard mirrors _partition_by_ledger so unit tests that inject a
+        MagicMock event_bus fall back to local state instead of awaiting a mock
+        (which is not awaitable).
+        """
+        if not self.event_bus:
+            return None
+        svc = self.event_bus.get_service("state_service")
+        if svc is None or type(svc).__module__ == "unittest.mock":
+            return None
+        return svc
+
+    async def _fetch_display_history(self) -> List[ConversationMessage]:
+        """Conversation history for /compact display, daemon-preferred.
+
+        In attach mode the local llm_service is only a client-side shadow with
+        an empty history, which made /compact report zeros. Pull the real
+        conversation from the daemon via state_service; fall back to local.
+        """
+        svc = self._get_state_service()
+        if svc is not None and hasattr(svc, "get_conversation"):
+            try:
+                snapshot = await svc.get_conversation()
+                messages = getattr(snapshot, "messages", None)
+                if messages is not None:
+                    return list(messages)
+            except Exception as e:
+                logger.debug(f"/compact: get_conversation failed: {e}")
+        return self._get_conversation_history() or []
+
+    async def _fetch_display_tokens(self) -> int:
+        """Prompt-token count for /compact display, daemon-preferred."""
+        svc = self._get_state_service()
+        if svc is not None and hasattr(svc, "get_session_stats"):
+            try:
+                stats = await svc.get_session_stats()
+                input_tokens = int(getattr(stats, "input_tokens", 0) or 0)
+                if input_tokens > 0:
+                    return input_tokens
+            except Exception as e:
+                logger.debug(f"/compact: get_session_stats failed: {e}")
+        return self._get_prompt_tokens()
 
     def _get_current_session_id(self) -> Optional[str]:
         """Return current session ID for stale-stage detection."""
