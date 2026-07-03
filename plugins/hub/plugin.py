@@ -4700,6 +4700,22 @@ class HubPlugin(BasePlugin):
                     "dreaming: %d insights written to crystallized.md",
                     added,
                 )
+
+                # Deduplicate vault entries after writing new insights.
+                # Merges entries with >55% keyword overlap, keeping the
+                # longer body and union of keywords.
+                if self._crystal_store:
+                    merged = self._crystal_store.deduplicate()
+                    if merged:
+                        logger.info(
+                            "dreaming: deduplicated %d vault entries",
+                            merged,
+                        )
+                        self._vault.append_stream(
+                            "vault_dedup",
+                            f"deduplicated {merged} vault entries",
+                            from_agent=identity,
+                        )
             else:
                 self._vault.append_stream(
                     "dreaming_skipped",

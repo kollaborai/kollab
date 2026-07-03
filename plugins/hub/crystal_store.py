@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # Dedup threshold: entries with keyword overlap above this merge.
 # 0.55 catches semantic duplicates (same concept, different wording).
 # Higher values (0.70+) miss many real duplicates in natural language.
-DEDUP_THRESHOLD = 0.55
+DEDUP_THRESHOLD = 0.45
 
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
