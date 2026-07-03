@@ -349,7 +349,13 @@ class MessageHandler:
                     logger.info("Hub continue: user typing at exec time, skipping")
                     return
                 qp.is_processing = True
-                qp.turn_completed = True
+                # Set turn_completed=False so _continue_conversation does not
+                # inject pending_agent_hud as a new user message. Setting True
+                # here caused the session-dying bug: _continue_conversation
+                # saw turn_completed=True, injected HUD nudges as user input,
+                # the LLM responded to the nudge text instead of continuing
+                # work, produced no tool calls, and the session went silent.
+                qp.turn_completed = False
                 hub_deadline = time.monotonic() + 300  # 5min max
                 try:
                     await coord._continue_conversation()
