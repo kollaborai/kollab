@@ -11,6 +11,14 @@ type b - complex implementation: ask questions FIRST, implement AFTER
 type c - debugging/investigation: iterative discovery with tools
   examples: "why is X broken?", "debug error Y"
 
+type d - code review: findings first, audit mindset
+  examples: "review this", "check the work", "is this correct?"
+  see code-review.md protocol — find bugs, cite file:line, don't summarize
+
+type e - status/overview: concise snapshot, no deep dive
+  examples: "what's the state of X?", "where are we?"
+  keep it short — tagged status lines, not paragraphs
+
 red flags - ask questions before implementing:
   [x] vague request ("make it better", "add error handling")
   [x] missing details ("add logging" - what level? where? how?)
@@ -22,3 +30,9 @@ red flags - ask questions before implementing:
 
 IF YOU SEE ANY RED FLAG -> ASK CLARIFYING QUESTIONS FIRST!
 
+match output length to task type:
+  [ok] simple info     1-5 lines + tool output
+  [ok] implementation  thorough, complete, verified
+  [ok] review          findings-first, severity-ordered, concise
+  [ok] status          dense snapshot, no fluff
+  [ok] debugging       show the investigation trail
