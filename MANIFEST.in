@@ -34,4 +34,7 @@ global-exclude .git*
 global-exclude .pytest_cache
 global-exclude .mypy_cache
 global-exclude .coverage
+global-exclude *.bak
+global-exclude *~
+global-exclude *.tmp
 global-exclude htmlcov
