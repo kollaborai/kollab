@@ -259,6 +259,7 @@ class HubPlugin(BasePlugin):
         self._notifier: Optional[HubNotifier] = None
         self._cron_task: Optional[asyncio.Task] = None
         self._autosave_task: Optional[asyncio.Task] = None
+        self._presence_sweep_task: Optional[asyncio.Task] = None
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
         # True when this session owns the inbound poll; False on standby
@@ -4209,6 +4210,13 @@ class HubPlugin(BasePlugin):
             if self._vault:
                 self._autosave_task = asyncio.create_task(self._vault_autosave_loop())
 
+            # Start presence sweep (coordinator only — cleans dead agent
+            # presence files across ALL project dirs every 5 minutes)
+            if is_coordinator:
+                self._presence_sweep_task = asyncio.create_task(
+                    self._presence_sweep_loop()
+                )
+
             if self._conversation_manager:
                 logger.info("Hub messaging ready (direct injection)")
             else:
@@ -4778,6 +4786,82 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Vault autosave error: {e}")
+
+    async def _presence_sweep_loop(self) -> None:
+        """Coordinator-only: periodically clean dead presence files.
+
+        Scans ALL project hub directories (not just the current project)
+        for presence files whose PID is no longer running. This prevents
+        ghost agents from accumulating when processes crash without
+        cleanup. Only runs on the coordinator to avoid duplicate sweeps.
+        """
+        from .presence import get_hub_dir
+        from kollabor_config.config_utils import get_config_directory
+
+        while True:
+            try:
+                await asyncio.sleep(300)  # every 5 minutes
+
+                config_root = get_config_directory()
+                projects_root = config_root / "projects"
+                removed = 0
+
+                if projects_root.exists():
+                    for presence_dir in projects_root.glob(
+                        "*/hub/presence/*.json"
+                    ):
+                        try:
+                            with open(presence_dir) as f:
+                                data = json.load(f)
+                            pid = data.get("pid", 0)
+                            if not pid:
+                                continue
+
+                            # Check if PID is alive
+                            try:
+                                os.kill(pid, 0)
+                            except (OSError, ProcessLookupError):
+                                # PID is dead — remove presence file
+                                identity = data.get("identity", "?")
+                                presence_dir.unlink(missing_ok=True)
+                                removed += 1
+                                logger.info(
+                                    f"presence sweep: removed dead agent "
+                                    f"{identity} (pid {pid}) from "
+                                    f"{presence_dir.parent.parent.parent.name}"
+                                )
+                        except (json.JSONDecodeError, Exception) as e:
+                            logger.debug(
+                                f"presence sweep: bad file {presence_dir}: {e}"
+                            )
+
+                # Also sweep the legacy global hub dir
+                global_presence = config_root / "hub" / "presence"
+                if global_presence.exists():
+                    for pf in global_presence.glob("*.json"):
+                        try:
+                            with open(pf) as f:
+                                data = json.load(f)
+                            pid = data.get("pid", 0)
+                            if not pid:
+                                continue
+                            try:
+                                os.kill(pid, 0)
+                            except (OSError, ProcessLookupError):
+                                pf.unlink(missing_ok=True)
+                                removed += 1
+                        except Exception:
+                            pass
+
+                if removed:
+                    logger.info(
+                        f"presence sweep: removed {removed} dead presence files"
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"presence sweep error: {e}")
 
     async def _messaging_bridge_loop(self) -> None:
         """Background loop: connect to messaging bridge, poll for incoming.
@@ -9735,6 +9819,13 @@ class HubPlugin(BasePlugin):
             self._autosave_task.cancel()
             try:
                 await self._autosave_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._presence_sweep_task:
+            self._presence_sweep_task.cancel()
+            try:
+                await self._presence_sweep_task
             except asyncio.CancelledError:
                 pass
 
