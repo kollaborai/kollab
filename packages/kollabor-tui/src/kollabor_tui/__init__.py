@@ -62,6 +62,7 @@ from .modals import (
 from .profile_modal_builder import (
     build_create_profile_modal,
     build_delete_profile_confirm_modal,
+    build_duplicate_profile_modal,
     build_edit_profile_modal,
     build_profiles_modal,
 )
@@ -260,6 +261,7 @@ __all__ = [
     # Profile modal builders
     "build_profiles_modal",
     "build_create_profile_modal",
+    "build_duplicate_profile_modal",
     "build_edit_profile_modal",
     "build_delete_profile_confirm_modal",
     # Fullscreen plugin framework

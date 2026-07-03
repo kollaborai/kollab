@@ -310,6 +310,102 @@ async def handle_profile_modal_actions(
                     ("error", "Failed to update profile", {}),
                 ]
 
+    # Handle duplicate profile - show form modal with cloned credentials
+    elif action == "duplicate_profile_prompt":
+        profile_name = command.get("profile_name")
+        if profile_name and handler.profile_manager:
+            modal_def = handler._get_duplicate_profile_modal_definition(profile_name)
+            if modal_def:
+                data["show_modal"] = modal_def
+            else:
+                data["display_messages"] = [
+                    ("error", f"Profile not found: {profile_name}", {}),
+                ]
+        else:
+            data["display_messages"] = [
+                ("error", "Select a profile to duplicate", {}),
+            ]
+
+    # Handle duplicate profile form submission
+    elif action == "duplicate_profile_submit":
+        form_data = command.get("form_data", {})
+        source_name = command.get("duplicate_source_profile", "")
+        name = form_data.get("name", "").strip()
+        model = form_data.get("model", "").strip()
+        temperature = float(form_data.get("temperature", 0.7))
+        description = form_data.get("description", "").strip()
+        provider = form_data.get("provider", "custom").strip() or "custom"
+        base_url = form_data.get("base_url", "").strip()
+        submitted_api_key = form_data.get("api_key", "").strip()
+
+        # Resolve API key: if user left the masked value, copy from source
+        api_key = None
+        if submitted_api_key and handler.profile_manager:
+            source_profile = handler.profile_manager.get_profile(source_name)
+            if source_profile and source_profile.api_key:
+                masked_source = _mask_api_key(source_profile.api_key)
+                if submitted_api_key == masked_source:
+                    # User didn't change the masked key — copy the real key from source
+                    api_key = source_profile.api_key
+                else:
+                    # User entered a new key
+                    api_key = submitted_api_key
+            else:
+                api_key = submitted_api_key
+        elif handler.profile_manager:
+            # No key entered — try to copy from source profile
+            source_profile = handler.profile_manager.get_profile(source_name)
+            if source_profile and source_profile.api_key:
+                api_key = source_profile.api_key
+
+        # Validation
+        if not name or not model:
+            data["display_messages"] = [
+                ("error", "Name and Model are required", {}),
+            ]
+        elif not base_url:
+            data["display_messages"] = [
+                ("error", "Base URL is required", {}),
+            ]
+        elif handler.profile_manager:
+            profile = handler.profile_manager.create_profile(
+                name=name,
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                temperature=temperature,
+                provider=provider,
+                supports_tools=True,
+                description=description or f"Duplicate of {source_name}",
+                save_to_config=True,
+            )
+            if profile:
+                data["display_messages"] = [
+                    (
+                        "system",
+                        (
+                            f"Duplicated profile: {name}\n"
+                            f"  Cloned from: {source_name}\n"
+                            f"  Base URL: {base_url}\n"
+                            f"  Model: {model}\n"
+                            f"  Provider: {provider}\n"
+                            f"  Saved to config.json"
+                        ),
+                        {"display_type": "success"},
+                    ),
+                ]
+                data["show_modal"] = await handler._get_profiles_modal_definition(
+                    skip_reload=True
+                )
+            else:
+                data["display_messages"] = [
+                    (
+                        "error",
+                        f"Failed to create profile '{name}' — may already exist.",
+                        {},
+                    ),
+                ]
+
     # Handle delete profile prompt - show confirmation modal
     elif action == "delete_profile_prompt":
         profile_name = command.get("profile_name")

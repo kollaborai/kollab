@@ -36,6 +36,8 @@ class ProfileCommandHandler(BaseCommandHandler):
         "edit_profile_submit",
         "delete_profile_prompt",
         "delete_profile_confirm",
+        "duplicate_profile_prompt",
+        "duplicate_profile_submit",
         "save_profile_to_config",
         "toggle_project_default_profile",
         "toggle_global_default_profile",
@@ -482,3 +484,50 @@ class ProfileCommandHandler(BaseCommandHandler):
             api_url=profile.get_endpoint() or "unknown",
             is_active=is_active,
         )
+
+    def _get_duplicate_profile_modal_definition(self, profile_name: str) -> Dict[str, Any]:
+        """Get modal definition for duplicating an existing profile.
+
+        Clones connection credentials from the source profile but leaves
+        name and model blank for the user to fill in.
+
+        Args:
+            profile_name: Name of the profile to duplicate.
+
+        Returns:
+            Modal definition dict with pre-populated connection fields.
+        """
+        from kollabor_tui.profile_modal_builder import build_duplicate_profile_modal
+
+        if not self.profile_manager:
+            return {}
+
+        profile = self.profile_manager.get_profile(profile_name)
+        if not profile:
+            return {}
+
+        # Get env var hints for API key status
+        env_hints = profile.get_env_var_hints()
+        api_key_from_env = env_hints["api_key"].is_set
+        api_key_in_config = bool(profile.api_key)
+        if api_key_from_env:
+            api_key_masked = ""
+            api_key_placeholder = f"Using env: {env_hints['api_key'].name}"
+        elif api_key_in_config:
+            api_key_masked = mask_api_key(profile.api_key)
+            api_key_placeholder = ""
+        else:
+            api_key_masked = ""
+            api_key_placeholder = "No API key set"
+
+        profile_data = {
+            "name": profile.name,
+            "model": profile.model or "",
+            "base_url": profile.get_endpoint() or "",
+            "provider": profile.provider or "custom",
+            "temperature": profile.temperature,
+            "api_key_masked": api_key_masked,
+            "api_key_placeholder": api_key_placeholder,
+        }
+
+        return build_duplicate_profile_modal(profile_data=profile_data)

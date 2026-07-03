@@ -22,6 +22,15 @@ And add these to __all__:
 
 from typing import Any, Dict, List, Optional
 
+# Ensure build_duplicate_profile_modal is exported
+__all__ = [
+    "build_profiles_modal",
+    "build_create_profile_modal",
+    "build_edit_profile_modal",
+    "build_delete_profile_confirm_modal",
+    "build_duplicate_profile_modal",
+]
+
 
 def build_profiles_modal(
     profiles_data: List[Dict[str, Any]],
@@ -162,7 +171,7 @@ def build_profiles_modal(
 
     return {
         "title": "LLM Profiles",
-        "footer": "↑↓ navigate • Enter select • e edit • d delete • p project default • g global default • Esc exit",
+        "footer": "↑↓ navigate • Enter select • e edit • c duplicate • d delete • p project default • g global default • Esc exit",
         "sections": [
             {
                 "title": f"Available Profiles (active: {active_profile})",
@@ -177,6 +186,7 @@ def build_profiles_modal(
         "actions": [
             {"key": "Enter", "label": "Select", "action": "select"},
             {"key": "e", "label": "Edit", "action": "edit_profile_prompt"},
+            {"key": "c", "label": "Duplicate", "action": "duplicate_profile_prompt"},
             {"key": "d", "label": "Delete", "action": "delete_profile_prompt"},
             {
                 "key": "p",
@@ -543,5 +553,135 @@ def build_delete_profile_confirm_modal(
         "actions": [
             {"key": "Enter", "label": "Confirm", "action": "select"},
             {"key": "Escape", "label": "Cancel", "action": "cancel"},
+        ],
+    }
+
+
+def build_duplicate_profile_modal(
+    source_data: Dict[str, Any],
+    providers: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Build modal definition for duplicating an existing profile.
+
+    Clones connection credentials (base_url, provider, api_key) from the
+    source profile but leaves name and model blank for the user to fill in.
+
+    Args:
+        source_data: Dict with source profile fields (name, model, base_url,
+                     provider, api_key_masked, temperature, etc.).
+        providers: List of provider names for dropdown (uses default if None).
+
+    Returns:
+        Modal definition dictionary.
+    """
+    if providers is None:
+        providers = [
+            "custom",
+            "openai",
+            "anthropic",
+            "azure_openai",
+            "gemini",
+            "openai_responses",
+            "openrouter",
+        ]
+
+    source_name = source_data.get("name", "")
+    source_model = source_data.get("model", "")
+    base_url = source_data.get("base_url") or source_data.get("api_url") or ""
+    provider = source_data.get("provider") or "custom"
+    temperature = source_data.get("temperature", 0.7)
+    api_key_masked = source_data.get("api_key_masked", "")
+
+    return {
+        "title": f"Duplicate Profile: {source_name}",
+        "footer": "Tab: next • Ctrl+S: create • Esc: cancel",
+        "form_action": "duplicate_profile_submit",
+        "duplicate_source_profile": source_name,
+        "sections": [
+            {
+                "title": f"Cloned from '{source_name}' — set new name and model",
+                "widgets": [
+                    {
+                        "type": "text_input",
+                        "label": "New Profile Name *",
+                        "field": "name",
+                        "placeholder": f"{source_name}-variant",
+                        "help": "Unique name for the duplicated profile",
+                    },
+                    {
+                        "type": "text_input",
+                        "label": "Model *",
+                        "field": "model",
+                        "placeholder": f"e.g. {source_model}" if source_model else "Model identifier",
+                        "help": "The new model to use with this profile",
+                    },
+                ],
+            },
+            {
+                "title": "Connection (cloned from source)",
+                "widgets": [
+                    {
+                        "type": "text_input",
+                        "label": "Base URL *",
+                        "field": "base_url",
+                        "value": base_url,
+                        "placeholder": "https://api.openai.com/v1/chat/completions",
+                        "help": "Cloned from source — edit if needed",
+                    },
+                    {
+                        "type": "dropdown",
+                        "label": "Provider",
+                        "field": "provider",
+                        "options": providers,
+                        "current_value": provider,
+                        "help": "Cloned from source — edit if needed",
+                    },
+                    {
+                        "type": "text_input",
+                        "label": "API Key",
+                        "field": "api_key",
+                        "value": api_key_masked,
+                        "placeholder": "Leave empty to copy from source",
+                        "password": True,
+                        "help": "Cloned from source — leave as-is to reuse key",
+                    },
+                ],
+            },
+            {
+                "title": "Model Settings",
+                "widgets": [
+                    {
+                        "type": "slider",
+                        "label": "Temperature",
+                        "field": "temperature",
+                        "min_value": 0.0,
+                        "max_value": 2.0,
+                        "step": 0.1,
+                        "current_value": temperature,
+                        "help": "0.0 = precise, 2.0 = creative",
+                    },
+                    {
+                        "type": "text_input",
+                        "label": "Description",
+                        "field": "description",
+                        "placeholder": f"Duplicate of {source_name}",
+                        "help": "Optional description",
+                    },
+                ],
+            },
+        ],
+        "actions": [
+            {
+                "key": "Ctrl+S",
+                "label": "[ Create ]",
+                "action": "submit",
+                "style": "primary",
+            },
+            {
+                "key": "Escape",
+                "label": "[ Cancel ]",
+                "action": "cancel",
+                "style": "secondary",
+            },
         ],
     }

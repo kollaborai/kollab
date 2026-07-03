@@ -1,6 +1,6 @@
 {
   "description": "Fast implementation agent - ships code aggressively with less questioning",
-  "profile": "glm51",
+  "profile": "default",
   "identity": "coder",
   "tools": [
     "terminal",
