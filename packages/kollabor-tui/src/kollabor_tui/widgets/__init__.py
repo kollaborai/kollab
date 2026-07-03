@@ -6,7 +6,7 @@ Core Widgets:
 - BaseWidget: Foundation class for all widgets
 - CheckboxWidget: Boolean toggle with ✓ symbol
 - DropdownWidget: Option selection with ▼ indicator
-- TextInputWidget: Text entry with cursor ▌
+- TextInputWidget: Text entry with block cursor
 - SliderWidget: Numeric slider with █░ visual bar
 - LabelWidget: Static text display
 
