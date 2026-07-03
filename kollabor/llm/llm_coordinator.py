@@ -883,7 +883,15 @@ class LLMService:
         )
 
     async def _continue_conversation(self):
-        """Continue an ongoing conversation. Delegates to QueueProcessor."""
+        """Continue an ongoing conversation. Delegates to QueueProcessor.
+
+        Note: HUD injection here is gated on turn_completed because this
+        method is called from both process_queue (where turn_completed=True
+        means the previous turn finished and HUD should be shown) and
+        _hub_continue (where turn_completed should be False so HUD is NOT
+        injected mid-continuation). See FIX in message_handler.py
+        _hub_continue for the session-dying bug this coupling caused.
+        """
         if self._pending_agent_hud and getattr(
             self._queue_processor, "turn_completed", False
         ):
