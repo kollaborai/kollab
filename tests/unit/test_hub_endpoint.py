@@ -231,6 +231,49 @@ async def _start_endpoint_server(tmp_path, received, *, socket_name):
     return server, identity, registry, port
 
 
+def test_failed_endpoint_bind_captures_error_and_keeps_unix_alive(tmp_path):
+    """A TCP bind failure is non-fatal: the unix socket stays up, the TCP
+    server is None, and the bind error is captured for operability."""
+
+    async def run():
+        received = []
+
+        async def on_message(msg):
+            received.append(msg)
+
+        # Bind a listener on an OS-assigned port, then steal that port so the
+        # endpoint's bind to the same port collides and fails.
+        import socket as _socket
+
+        blocker = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        blocker.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 0)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        stolen_port = blocker.getsockname()[1]
+
+        server = AgentSocketServer(
+            "bind-fail-id", on_message, socket_name=f"ep-fail-{os.getpid()}"
+        )
+        server.enable_endpoint("127.0.0.1", stolen_port, None)
+        try:
+            sock_path = await server.start()
+            # unix socket is up regardless of the TCP failure
+            assert server._tcp_server is None
+            assert server._endpoint_bind_error  # captured a reason
+            # local delivery still works over the unix socket
+            ok = await AgentMessenger.send_to_agent(
+                sock_path,
+                HubMessage(content="still works", from_identity="peer"),
+            )
+            assert ok is True
+            assert len(received) == 1
+        finally:
+            await server.stop()
+            blocker.close()
+
+    asyncio.run(run())
+
+
 def test_offbox_handshake_and_delivery(tmp_path):
     async def run():
         received = []
@@ -393,12 +436,25 @@ def test_resolve_dial_target_upgrades_remote(tmp_path):
     assert target == "/tmp/local.sock"
     assert auth is None
 
-    # Remote record (endpoint_uri) but no identity manager wired -> graceful
-    # fallback to the local socket path (no crash, no half-built auth dict).
+    # A co-located agent that ALSO enabled its endpoint (socket_path AND
+    # endpoint_uri both set) must STILL route over the local socket — never
+    # its own public endpoint (avoids hairpin/NAT failure + needless hops).
+    p._dns_registry.register(
+        AgentRecord(
+            designation="coloc-peer",
+            socket_path="/tmp/coloc.sock",
+            endpoint_uri="wss://mesh.example.com:8765",
+        )
+    )
+    target, auth = p._resolve_dial_target("coloc-peer", "/tmp/fallback.sock")
+    assert target == "/tmp/coloc.sock"
+    assert auth is None
+
+    # Remote-only record (endpoint_uri, NO socket_path — as produced by
+    # register_well_known) with no identity manager -> graceful fallback.
     p._dns_registry.register(
         AgentRecord(
             designation="remote-peer",
-            socket_path="/tmp/should-not-use.sock",
             endpoint_uri="wss://mesh.example.com:8765",
         )
     )

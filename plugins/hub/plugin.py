@@ -3906,6 +3906,26 @@ class HubPlugin(BasePlugin):
                 self._started = False
                 return
 
+            # Reconcile the advertised endpoint against the actual bind.
+            # enable_endpoint() + _endpoint_uri were set before start(); if the
+            # TCP bind failed, drop the advertised URI so peers don't route to a
+            # dead endpoint (and local delivery keeps using the unix socket).
+            if (
+                self._endpoint_uri
+                and getattr(self._socket_server, "_tcp_server", None) is None
+            ):
+                bind_err = (
+                    getattr(self._socket_server, "_endpoint_bind_error", "")
+                    or "bind failed"
+                )
+                logger.error(
+                    f"endpoint bind failed ({bind_err}) — NOT advertising "
+                    f"{self._endpoint_uri}; remote delivery disabled, unix socket active"
+                )
+                if not self._endpoint_setup_error:
+                    self._endpoint_setup_error = bind_err
+                self._endpoint_uri = ""
+
             # Signal daemon-ready if running in fork-daemon mode
             try:
                 from kollabor.daemon import signal_daemon_ready
@@ -5847,6 +5867,7 @@ class HubPlugin(BasePlugin):
                                 )
                         if pending_replies:
                             import time as _time
+
                             _now = _time.time()
                             # Sort by most recent first, show top 8
                             _sorted = sorted(
@@ -6853,26 +6874,48 @@ class HubPlugin(BasePlugin):
     ) -> tuple:
         """Resolve a designation to a ``(target, auth)`` pair for the dialers.
 
-        When the DNS registry knows about a remote ``endpoint_uri`` for this
-        designation, the dial is upgraded to a remote handshake and the
-        ``auth`` dict is populated (identity manager + our designation +
-        optional CA). Otherwise the local ``fallback_socket`` path is
-        returned with ``auth=None`` — byte-for-byte the legacy behavior.
+        Routing rules (in order):
+          1. The local agent's own designation, or any record carrying a
+             ``socket_path``, is a *local/co-located* peer — deliver over the
+             unix socket. This deliberately overrides an advertised
+             ``endpoint_uri`` so an agent never dials its own (or a
+             co-located peer's) public endpoint, which is wasteful and can
+             fail under hairpin/NAT where the box can't reach its own public
+             hostname.
+          2. A record with only a remote ``endpoint_uri`` (imported via
+             ``/hub dns connect`` — no local socket) is upgraded to a remote
+             handshake; ``auth`` is populated (identity manager + our
+             designation + optional CA).
+          3. Otherwise the ``fallback_socket`` is returned with ``auth=None``
+             — byte-for-byte the legacy behavior.
 
-        This is the single seam that makes off-box delivery transparent:
-        callers keep passing the local socket path, and the registry decides
-        whether to reach the peer off-box.
+        Remote-imported peers never carry a ``socket_path`` (see
+        ``register_well_known``), so the socket-path test cleanly separates
+        co-located agents from remote ones.
         """
         if designation and self._dns_registry:
             try:
                 from .dns.endpoint import is_remote_uri
 
-                addr = self._dns_registry.resolve_address(designation)
-                if addr and is_remote_uri(addr):
-                    # Remote: only dial when we can complete the handshake;
-                    # a remote dial without auth is guaranteed-rejected, so
-                    # fall through to the local socket path if we can't auth.
-                    if self._dns_identity and self._identity:
+                record = self._dns_registry.resolve(designation)
+                if record is not None:
+                    local_sock = record.socket_path or ""
+                    # Rule 1: any record carrying a socket_path is a local or
+                    # co-located agent (self included) — deliver over unix and
+                    # never dial its public endpoint_uri, which is wasteful and
+                    # can fail under hairpin/NAT. Remote imports have no
+                    # socket_path, so this cleanly separates the two.
+                    if local_sock:
+                        return local_sock, None
+
+                    # Rule 2: remote-only record -> upgrade when we can auth.
+                    addr = record.endpoint_uri or ""
+                    if (
+                        addr
+                        and is_remote_uri(addr)
+                        and self._dns_identity
+                        and self._identity
+                    ):
                         auth: Dict[str, Any] = {
                             "identity_manager": self._dns_identity,
                             "designation": self._identity.identity,
@@ -6884,9 +6927,6 @@ class HubPlugin(BasePlugin):
                             if ca:
                                 auth["tls_ca"] = ca
                         return addr, auth
-                elif addr:
-                    # Local socket path from the registry — use it directly.
-                    return addr, None
             except Exception:
                 # DNS not fully wired (e.g. PyNaCl missing) — fall through to
                 # the local socket path so local delivery keeps working.
