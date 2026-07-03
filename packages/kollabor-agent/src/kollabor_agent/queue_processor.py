@@ -153,6 +153,11 @@ class QueueProcessor:
         self.cancel_processing = False
         self.cancellation_message_shown = False
 
+        # Mutex to prevent concurrent _execute_llm_turn calls. Without this,
+        # _hub_continue and process_queue can interleave turns (evidence:
+        # turn counters 37,1,38,2,39,3 in logs), corrupting shared qp state.
+        self._turn_lock = asyncio.Lock()
+
         # Processing state (owned by QueueProcessor)
         self.current_processing_tokens = 0
         self.processing_start_time: Optional[float] = None
@@ -490,6 +495,23 @@ class QueueProcessor:
         Raises:
             asyncio.CancelledError: If request was cancelled by user
         """
+        # Guard against concurrent _execute_llm_turn calls. _hub_continue and
+        # process_queue can race — if both call this method simultaneously,
+        # they interleave turns and corrupt shared qp state (evidence:
+        # interleaved turn counters 37,1,38,2,39,3 in production logs).
+        # The lock serializes turns; the second caller waits for the first
+        # to finish rather than running concurrently.
+        async with self._turn_lock:
+            return await self._execute_llm_turn_inner(
+                user_message_provided, current_parent_uuid
+            )
+
+    async def _execute_llm_turn_inner(
+        self,
+        user_message_provided: bool,
+        current_parent_uuid: str,
+    ) -> str:
+        """Inner implementation of _execute_llm_turn (called under _turn_lock)."""
         # Context service: signal new turn for curator throttling
         context_svc = None
         if self.event_bus:
