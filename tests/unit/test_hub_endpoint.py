@@ -9,6 +9,8 @@ same code path and is exercised separately via the context builders.
 
 import asyncio
 import os
+import shutil
+import subprocess
 
 from plugins.hub.dns.endpoint import (
     DEFAULT_ENDPOINT_PORT,
@@ -274,6 +276,61 @@ def test_failed_endpoint_bind_captures_error_and_keeps_unix_alive(tmp_path):
     asyncio.run(run())
 
 
+def test_offbox_idle_connection_dropped_after_timeout(tmp_path):
+    """An authenticated remote peer that sends nothing is dropped after the
+    idle timeout, capping the per-connection resource hold."""
+
+    async def run():
+        storage, identity, registry = _make_dns(tmp_path)
+        _, server_pub = identity.get_or_create_keypair("server-agent")
+        _, client_pub = identity.get_or_create_keypair("client-agent")
+        registry.register(
+            AgentRecord(
+                designation="server-agent",
+                public_key=server_pub,
+                approval_state="approved",
+            )
+        )
+        registry.register(
+            AgentRecord(
+                designation="client-agent",
+                public_key=client_pub,
+                approval_state="approved",
+            )
+        )
+
+        async def on_message(msg):
+            pass
+
+        server = AgentSocketServer(
+            "idle-id", on_message, socket_name=f"ep-idle-{os.getpid()}"
+        )
+        server.set_dns_auth(registry, identity, require_auth=False)
+        server.enable_endpoint("127.0.0.1", 0, None)
+        server._remote_idle_timeout = 0.3  # short for the test
+        await server.start()
+        port = server._tcp_server.sockets[0].getsockname()[1]
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            ok = await AgentMessenger.do_client_handshake(
+                reader, writer, identity, "client-agent", timeout=5.0
+            )
+            assert ok is True
+            # Send nothing. The server should close within a few idle windows.
+            # An EOF (empty bytes) proves it dropped the idle connection.
+            data = await asyncio.wait_for(reader.readline(), timeout=3.0)
+            assert data == b""  # server closed the connection
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            await server.stop()
+
+    asyncio.run(run())
+
+
 def test_offbox_handshake_and_delivery(tmp_path):
     async def run():
         received = []
@@ -314,6 +371,108 @@ def test_offbox_rejects_unregistered_client(tmp_path):
             )
             assert ok is False
             assert received == []
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def _mint_self_signed_cert(tmp_path, cn="127.0.0.1"):
+    """Mint a self-signed cert+key (IP SAN = cn) via the openssl CLI.
+
+    Returns (cert_path, key_path) or (None, None) if openssl is unavailable.
+    """
+    if not shutil.which("openssl"):
+        return None, None
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    san = f"IP:{cn}" if cn else "IP:127.0.0.1"
+    cmd = [
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        str(key),
+        "-out",
+        str(cert),
+        "-days",
+        "1",
+        "-nodes",
+        "-subj",
+        f"/CN={cn}",
+        "-addext",
+        f"subjectAltName={san}",
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=20)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None, None
+    return str(cert), str(key)
+
+
+def test_offbox_tls_round_trip_end_to_end(tmp_path):
+    """Full TLS path: self-signed server cert, client trusts it as its own CA,
+    completes the Ed25519 handshake over the TLS channel, and delivers a
+    message. Skipped when the ``openssl`` CLI is unavailable."""
+
+    cert, key = _mint_self_signed_cert(tmp_path)
+    if cert is None:
+        import pytest
+
+        pytest.skip("openssl CLI unavailable — cannot mint a test cert")
+
+    server_ssl = build_server_ssl_context(cert, key)
+    assert server_ssl is not None  # cert mints + loads
+
+    async def run():
+        received = []
+        storage, identity, registry = _make_dns(tmp_path / "tls-dns")
+        _, server_pub = identity.get_or_create_keypair("server-agent")
+        _, client_pub = identity.get_or_create_keypair("client-agent")
+        registry.register(
+            AgentRecord(
+                designation="server-agent",
+                public_key=server_pub,
+                approval_state="approved",
+            )
+        )
+        registry.register(
+            AgentRecord(
+                designation="client-agent",
+                public_key=client_pub,
+                approval_state="approved",
+            )
+        )
+
+        async def on_message(msg):
+            received.append(msg)
+
+        server = AgentSocketServer(
+            "tls-id", on_message, socket_name=f"ep-tls-{os.getpid()}"
+        )
+        server.set_dns_auth(registry, identity, require_auth=False)
+        server.enable_endpoint("127.0.0.1", 0, server_ssl)
+        await server.start()
+        port = server._tcp_server.sockets[0].getsockname()[1]
+        try:
+            # tls_ca in auth -> _open builds the client context from it; the
+            # self-signed cert is its own CA, and its IP SAN lets hostname
+            # verification pass for wss://127.0.0.1.
+            auth = {
+                "identity_manager": identity,
+                "designation": "client-agent",
+                "tls_ca": cert,
+            }
+            ok = await AgentMessenger.send_to_agent(
+                f"wss://127.0.0.1:{port}",
+                HubMessage(content="hello over TLS", from_identity="client-agent"),
+                auth=auth,
+            )
+            assert ok is True
+            assert len(received) == 1
+            assert received[0].content == "hello over TLS"
         finally:
             await server.stop()
 

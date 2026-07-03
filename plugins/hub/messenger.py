@@ -24,6 +24,13 @@ INBOX_TTL_SECS: int = 7 * 86400  # 7 days
 # INBOX_MAX_REPLAY messages are returned.
 INBOX_MAX_REPLAY: int = 20
 
+# Idle timeout (seconds) for the off-box read loop. An authenticated remote
+# peer that handshakes then sends nothing (or stops between actions) is dropped
+# after this long, capping the per-connection resource hold. Local unix
+# connections are unbounded (cooperative same-UID peers). Does NOT affect the
+# `attach` live-stream path, which exits the read loop before streaming.
+REMOTE_IDLE_TIMEOUT: float = 30.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,6 +104,8 @@ class AgentSocketServer:
         # Last bind error (or "") so `/hub dns endpoint` can explain *why*
         # the off-box listener isn't up. Cleared on a successful bind.
         self._endpoint_bind_error: str = ""
+        # Idle read timeout for off-box connections (overridable for tests).
+        self._remote_idle_timeout: float = REMOTE_IDLE_TIMEOUT
 
     async def start(self) -> str:
         """Start the socket server. Returns the socket path."""
@@ -494,7 +503,24 @@ class AgentSocketServer:
 
         try:
             while True:
-                line = await reader.readline()
+                # Off-box connections get an idle read timeout so an
+                # authenticated-but-idle peer can't hold connections open
+                # forever. Local unix peers are cooperative same-UID processes
+                # and stay unbounded. (`attach` exits this loop before it
+                # streams, so live attach is unaffected.)
+                if require_auth:
+                    try:
+                        line = await asyncio.wait_for(
+                            reader.readline(), timeout=self._remote_idle_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        logger.debug(
+                            "remote connection idle >%ss — closing",
+                            self._remote_idle_timeout,
+                        )
+                        break
+                else:
+                    line = await reader.readline()
                 if not line:
                     break
 

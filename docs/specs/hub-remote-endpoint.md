@@ -36,7 +36,9 @@ identity. They are complementary, not redundant.
 | `dns/storage.py` `write_well_known` | Publishes `endpoints.endpoint` = the advertised URI. |
 | `plugin.py` `/hub dns` | New `endpoint` (status, surfaces bind/setup errors) and `connect <authority>` (federation import) subcommands. |
 
-**`_do_handshake` and the message loop changed zero lines.**
+**`_do_handshake` and the wire protocol are unchanged.** The off-box read
+loop gains an idle-timeout guard (remote peers that go idle are dropped;
+local unix peers are unaffected).
 
 ## Configuration
 
@@ -76,23 +78,62 @@ locally first:
 This is the AID/ANS discovery loop: publish identity → fetch + register →
 authenticated handshake.
 
+## Trust model (read this before federating)
+
+Federation is **trust-on-first-use (TOFU)** layered on transport security.
+Know exactly what each layer proves:
+
+- **The Ed25519 handshake** proves *key possession* — the peer holds the
+  private key whose public half is registered locally. It is NOT a statement
+  about *who* that key belongs to.
+- **The self-attestation** in `/.well-known/agent-keys.json` is signed by the
+  key itself. It proves the same thing (possession), not identity — anyone can
+  generate a keypair, self-attest it, and publish a well-known file claiming
+  any designation they like. `register_well_known` verifies the attestation
+  only to detect corruption/transit tampering, not to bind name → identity.
+- **The identity binding comes from the transport**: `fetch_well_known` fetches
+  over HTTPS, and you typed the authority (`/hub dns connect <host>`) yourself.
+  So "this really is `obsidian@example.com`" rests on TLS + DNS resolving
+  `example.com` to the operator you think it is. There is **no third-party
+  attestation, no web-of-trust, no certificate transparency** today.
+
+Consequence: importing a remote coordinator marks it `approved` and lets it
+authenticate inbound and receive messages. Only federate with authorities you
+control or already trust out-of-band. If a well-known endpoint is ever
+compromised, rotate the keys at the source and re-`connect`; stale imported
+records are not auto-expired yet (see "Not yet done").
+
 ## Testing
 
 - `tests/unit/test_hub_endpoint.py` — URI/config/TLS-context/federation unit
-  tests **plus** an end-to-end integration test that drives the full off-box
-  path (TCP listener + Ed25519 handshake + message delivery) over a plaintext
-  loopback socket, a negative test (unregistered client → rejected), and a
+  tests **plus** end-to-end integration tests that drive the full off-box path
+  (TCP listener + Ed25519 handshake + message delivery) over a plaintext
+  loopback socket, a negative test (unregistered client → rejected), a failed-
+  bind regression, an idle-timeout test, a loopback TLS round-trip, and a
   regression test (local unix path unchanged when the endpoint is off).
 - `tests/tmux/specs/hub-endpoint.json` — boot smoke test: the app starts with
   the endpoint code wired in and `/hub dns endpoint` routes.
 
-TLS is an orthogonal `ssl=` wrapper on the same code path; the context
-builders are unit-tested directly. The integration test uses plaintext TCP so
-it needs no cert fixture (`cryptography` is not a hub dependency).
+TLS is an orthogonal `ssl=` wrapper on the same code path. The context
+builders are unit-tested directly, and a loopback TLS round-trip test (a
+self-signed cert minted via the `openssl` CLI) exercises the full server +
+client TLS path end-to-end; it is skipped when `openssl` is unavailable.
+
+### Off-box resource bounds
+
+- **Handshake:** 10 s to respond to the challenge, else `auth_rejected`.
+- **Idle read:** authenticated remote connections that send nothing (or stop
+  between actions) are dropped after `REMOTE_IDLE_TIMEOUT` (30 s default,
+  overridable per-server). Local unix peers are cooperative same-UID processes
+  and stay unbounded. The `attach` live-stream path exits the read loop before
+  streaming, so it is unaffected.
 
 ## Not yet done (next legs)
 
 - Cert provisioning helper (the deploy toolkit could mint a mesh CA + per-agent
   certs).
 - `/hub dns connect` is one-shot; a background refresh / expiry of imported
-  remote keys is not automated yet.
+  remote keys is not automated yet (stale records after a key rotation must be
+  re-`connect`ed manually — see "Trust model").
+- A keepalive/idle policy for the `attach` live-stream path (the read-loop
+  timeout above does not cover a peer that attaches and lingers).
