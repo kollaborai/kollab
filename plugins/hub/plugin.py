@@ -293,6 +293,8 @@ class HubPlugin(BasePlugin):
         self._last_activity_at: float = time.time()
         self._last_dream_at: float = 0.0
         self._last_autosave_at: float = 0.0
+        self._last_scratchpad_inject_at: float = 0.0
+        self._cached_scratchpad: str = ""  # cached scratchpad content (refreshed on timer)
 
         # Loop prevention metrics (phase 3 observability)
         self._loop_metrics: Dict[str, int] = {
@@ -6208,12 +6210,20 @@ class HubPlugin(BasePlugin):
                 task_lines.append("--- end tasks ---")
                 roster_block += "\n" + "\n".join(task_lines)
 
-        # Inject scratchpad (live notes, survives compaction)
+        # Inject scratchpad (timer-gated: read from disk every 3 min,
+        # but always include the cached content so it persists between
+        # refreshes — the roster block is stripped and rebuilt each call).
+        SCRATCHPAD_INJECT_INTERVAL = 180  # 3 minutes
         if self._scratchpad:
-            pad = self._scratchpad.get()
-            if pad:
+            now_sp = time.time()
+            if now_sp - self._last_scratchpad_inject_at >= SCRATCHPAD_INJECT_INTERVAL:
+                self._last_scratchpad_inject_at = now_sp
+                self._cached_scratchpad = self._scratchpad.get()
+            if self._cached_scratchpad:
                 roster_block += (
-                    "\n\n--- scratchpad ---\n" f"{pad}\n" "--- end scratchpad ---"
+                    "\n\n--- scratchpad ---\n"
+                    f"{self._cached_scratchpad}\n"
+                    "--- end scratchpad ---"
                 )
 
         # Inject session state (working context from previous session)
