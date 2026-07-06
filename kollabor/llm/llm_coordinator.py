@@ -29,17 +29,17 @@ from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui import MessageDisplayService
 
-from .hook_system import LLMHookSystem
-from .message_handler import MessageHandler
-from .session_manager import SessionManager
-from .status_service import StatusService
-from .streaming_handler import StreamingHandler
 from .agent_hud import (
     AgentHudEntry,
     format_agent_hud,
     merge_agent_hud_with_user_message,
     normalize_hud_label,
 )
+from .hook_system import LLMHookSystem
+from .message_handler import MessageHandler
+from .session_manager import SessionManager
+from .status_service import StatusService
+from .streaming_handler import StreamingHandler
 
 logger = logging.getLogger(__name__)
 
@@ -529,8 +529,39 @@ class LLMService:
         # Message handler (owns event/message handling methods)
         self._message_handler = MessageHandler(coordinator=self)
 
+        # Progress watchdog: recovers a session that goes silent while alive
+        # (wedged is_processing / orphaned queue). Started in initialize().
+        # Config-gated so it can be disabled if it ever misbehaves.
+        self._turn_watchdog = None
+        if self.config.get("kollabor.llm.watchdog_enabled", True):
+            from kollabor.llm.turn_watchdog import TurnWatchdog
+
+            self._turn_watchdog = TurnWatchdog(
+                queue_processor=self._queue_processor,
+                api_service=self.api_service,
+                message_handler=self._message_handler,
+                restart_queue=self._watchdog_restart_queue,
+                stuck_threshold_s=float(
+                    self.config.get("kollabor.llm.watchdog_stuck_threshold_s", 600)
+                ),
+                check_interval_s=float(
+                    self.config.get("kollabor.llm.watchdog_check_interval_s", 60)
+                ),
+            )
+
         # Status service (owns status line generation and queue metrics)
         self._status_service = StatusService(coordinator=self)
+
+    def _watchdog_restart_queue(self) -> None:
+        """Re-kick the queue drain on behalf of the watchdog.
+
+        Fire-and-forget: launches _process_queue as a background task and
+        returns None so the watchdog's heal step does not block on the whole
+        drain completing.
+        """
+        self.create_background_task(
+            self._process_queue(), name="watchdog_requeue"
+        )
 
     def _init_hooks(self):
         """Create hooks for LLM service (delegated to MessageHandler)."""
@@ -712,6 +743,15 @@ class LLMService:
         # Start task monitoring
         if self.task_config.background_tasks.enable_monitoring:
             await self.start_task_monitor()
+
+        # Start the progress watchdog (recovers wedged/silent sessions).
+        if self._turn_watchdog is not None:
+            try:
+                self.create_background_task(
+                    self._turn_watchdog.run(), name="turn_watchdog"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to start turn watchdog: {e}")
 
         logger.info("Core LLM Service initialized and ready")
         return True

@@ -12,7 +12,11 @@ from .session import EngineSession, _permission_input_payload
 
 logger = logging.getLogger(__name__)
 
-MAX_AGENTIC_TURNS = 20  # prevent runaway loops
+# Backstop against a model that never stops calling tools. Investigations
+# routinely need 30-100 turns; 20 silently cut them off mid-chain (the
+# "engine stops tool calls" bug, 2026-07-03). Tool results from the final
+# turn stay in history, so the client's "continue" resumes cleanly if hit.
+MAX_AGENTIC_TURNS = 200
 
 
 def _tc_get(tool_call: Any, key: str, default: Any = None) -> Any:
@@ -188,6 +192,14 @@ class TurnRunner:
                 # Any actual tool call requires another model pass so the
                 # assistant can see the tool results before completing.
                 continue
+            else:
+                # range() exhausted with tool calls still pending.
+                logger.warning(
+                    f"Session {session.session_id}: hit MAX_AGENTIC_TURNS "
+                    f"({MAX_AGENTIC_TURNS}) with tools still pending — "
+                    f"stopping; tool results are in history, client can "
+                    f"continue"
+                )
 
 
             # Turn complete

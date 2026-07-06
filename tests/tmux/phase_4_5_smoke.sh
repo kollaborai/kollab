@@ -39,6 +39,16 @@ FAILED=0
 # spawning our daemon and treat the first new one as ours.
 IDENTITY=""
 DAEMON_PID=""
+PRESENCE_DIR=$(uv run python - <<'PY'
+from plugins.hub.presence import get_presence_dir
+print(get_presence_dir())
+PY
+)
+SOCKET_DIR=$(uv run python - <<'PY'
+from plugins.hub.presence import get_socket_dir
+print(get_socket_dir())
+PY
+)
 
 log() {
     echo "[$(date +%H:%M:%S)] $*"
@@ -73,7 +83,7 @@ cleanup() {
 
     # Clean up stale presence file if still present
     if [ -n "$IDENTITY" ]; then
-        for f in "$HOME/.kollab/hub/presence/"*.json; do
+        for f in "$PRESENCE_DIR"/*.json; do
             [ -f "$f" ] || continue
             if grep -q "\"identity\": \"$IDENTITY\"" "$f" 2>/dev/null; then
                 local fpid
@@ -84,7 +94,7 @@ cleanup() {
                 fi
             fi
         done
-        rm -f "/tmp/kollabor-hub/${IDENTITY}.sock" 2>/dev/null || true
+        rm -f "${SOCKET_DIR}/${IDENTITY}.sock" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -100,7 +110,6 @@ echo ""
 # ---------------------------------------------------------------------------
 log "step 1: recording existing presence files before spawn"
 
-PRESENCE_DIR="$HOME/.kollab/hub/presence"
 mkdir -p "$PRESENCE_DIR"
 
 # Snapshot which presence files exist BEFORE we spawn. Anything new after

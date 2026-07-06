@@ -4,8 +4,8 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-
-from kollabor_engine.turn_runner import TurnRunner
+from kollabor_engine import turn_runner as turn_runner_mod
+from kollabor_engine.turn_runner import MAX_AGENTIC_TURNS, TurnRunner
 
 
 class FakeAPIService:
@@ -206,3 +206,90 @@ async def test_direct_engine_tool_execution_normalizes_provider_object():
     assert tool_call["type"] == "file_read"
     assert tool_call["name"] == "file_read"
     assert tool_call["input"] == {"file": "README.md", "limit": 5}
+
+
+# --------------------------------------------------------------------------- #
+# Regression: MAX_AGENTIC_TURNS=20 silently truncated long investigations      #
+# mid-chain (the "engine stops tool calls" bug, 2026-07-03)                    #
+# --------------------------------------------------------------------------- #
+
+
+class LongChainAPIService(FakeAPIService):
+    """Emits a tool call for the first `tool_turns` model passes, then ends."""
+
+    def __init__(self, tool_turns):
+        super().__init__()
+        self.tool_turns = tool_turns
+
+    async def call_llm(self, conversation_history, streaming_callback, tools):
+        self.calls += 1
+        self.last_thinking_content = None
+        self.last_token_usage = {"prompt_tokens": 1, "completion_tokens": 1}
+
+        if self.calls <= self.tool_turns:
+            self.last_stop_reason = "tool_use"
+            self.last_tool_calls = [
+                {
+                    "id": f"call_{self.calls}",
+                    "type": "tool_use",
+                    "name": "get_current_page",
+                    "input": {},
+                }
+            ]
+            return ""
+
+        self.last_stop_reason = "end_turn"
+        self.last_tool_calls = []
+        await streaming_callback("done investigating.")
+        return "done investigating."
+
+
+class LongChainSession(FakeSession):
+    def __init__(self, tool_turns):
+        super().__init__()
+        self.api_service = LongChainAPIService(tool_turns)
+
+
+@pytest.mark.asyncio
+async def test_long_investigation_past_old_cap_completes_naturally():
+    """A 30-tool-call chain must finish; the old cap of 20 cut it off silently.
+
+    The model calls a tool 30 times, then completes. Under the old
+    MAX_AGENTIC_TURNS=20 the loop ended at turn 20 with tools still
+    pending — the client saw a truncated turn and had to hit "continue".
+    """
+    session = LongChainSession(tool_turns=30)
+    events = [event async for event in TurnRunner().run(session, "investigate")]
+
+    # 30 tool turns + 1 final completion pass.
+    assert session.api_service.calls == 31
+    assert len(session.tool_executor.calls) == 30
+    assert events[-1]["type"] == "turn_complete"
+    assert events[-1]["stop_reason"] == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_cap_raised_well_above_typical_investigation_depth():
+    """The runaway backstop must clear real investigation depth (was 20)."""
+    assert MAX_AGENTIC_TURNS >= 100
+
+
+@pytest.mark.asyncio
+async def test_hitting_the_cap_logs_and_stops_without_orphaning(monkeypatch, caplog):
+    """When the cap IS hit, the engine logs a warning and stops cleanly —
+    tool results stay in history so the client can continue."""
+    monkeypatch.setattr(turn_runner_mod, "MAX_AGENTIC_TURNS", 3)
+    # Model never stops calling tools → cap is the only exit.
+    session = LongChainSession(tool_turns=999)
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        events = [event async for event in TurnRunner().run(session, "loop")]
+
+    assert session.api_service.calls == 3  # exactly the (patched) cap
+    assert any("MAX_AGENTIC_TURNS" in r.message for r in caplog.records)
+    # Turn still completes cleanly (no exception) and the tool results the
+    # model produced are in history for a follow-up "continue".
+    assert events[-1]["type"] == "turn_complete"
+    assert any(m["role"] == "tool" for m in session.history)

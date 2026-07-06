@@ -19,6 +19,12 @@ from kollabor_tui.status.core_widgets import get_token_io_state
 
 logger = logging.getLogger(__name__)
 
+# Hard ceiling on continuation turns in one LOOP 2 pass. Runaway backstop,
+# NOT a work limit — sits far above any healthy investigation depth. Stops a
+# no-progress spin (turn_completed never flips) from looping forever. Replaces
+# the old 300s wall-clock deadline that guillotined healthy multi-turn chains.
+MAX_CONTINUATION_TURNS = 500
+
 
 def _should_ingest(result: ToolExecutionResult) -> bool:
     """Check if a tool result is worth ingesting into the context ledger."""
@@ -164,6 +170,23 @@ class QueueProcessor:
         self.question_gate_active = False
         self._last_tool_error_sig: Optional[str] = None
 
+        # Watchdog heartbeat: monotonic timestamp of the last real forward
+        # progress (a turn executed, a message processed). The TurnWatchdog
+        # compares now - last_progress_at against a stuck threshold to detect
+        # a wedged session (is_processing stuck True with nothing advancing).
+        # Bumped by mark_progress(); starts "now" so a fresh processor is not
+        # instantly flagged.
+        self.last_progress_at = time.monotonic()
+
+    def mark_progress(self) -> None:
+        """Record that forward progress just happened (watchdog heartbeat).
+
+        Called at the start of every LLM turn and whenever work is enqueued.
+        A session that stops calling this while is_processing stays True is
+        wedged, and the TurnWatchdog will recover it.
+        """
+        self.last_progress_at = time.monotonic()
+
     def _drain_env_block(self) -> str:
         """Drain pending env events and render as an [env: N events] block.
 
@@ -187,6 +210,9 @@ class QueueProcessor:
 
     async def enqueue(self, message: str) -> None:
         """Enqueue message with overflow strategy."""
+        # Watchdog heartbeat: new work arriving is activity — keeps a session
+        # that just received a message from being flagged as wedged.
+        self.mark_progress()
         self._queue_metrics["total_enqueue_attempts"] += 1
 
         if self.task_config.queue.log_queue_events:
@@ -347,7 +373,14 @@ class QueueProcessor:
                 consecutive_errors = 0
                 last_error_sig = None
                 MAX_CONSECUTIVE_ERRORS = 3
-                loop_deadline = time.monotonic() + 300  # 5min max
+                # Wall-clock checkpoints only — never kill a working chain.
+                # Force-completing on a timer orphaned the last turn's tool
+                # results and left the session silent (the "agent stops
+                # mid-tool-call" bug, 2026-07-03). Chains end via: the model
+                # completing the turn, user input (break below), ESC, or the
+                # error circuit breaker. Checkpoints log progress every 5min.
+                loop_start = time.monotonic()
+                checkpoint_at = loop_start + 300
                 while not self.turn_completed and not self.cancel_processing:
                     # User input takes priority: if a new message arrived
                     # while we're continuing, break out so LOOP 1 processes
@@ -359,16 +392,41 @@ class QueueProcessor:
                         )
                         break
 
-                    if time.monotonic() > loop_deadline:
+                    if time.monotonic() > checkpoint_at:
+                        elapsed = int(time.monotonic() - loop_start)
                         logger.warning(
-                            "LOOP 2: exceeded 300s deadline, forcing turn completion"
+                            f"LOOP 2: continuation still working after "
+                            f"{elapsed}s ({turn_count} turns) — not killing; "
+                            f"ESC or new input interrupts"
+                        )
+                        checkpoint_at = time.monotonic() + 300
+
+                    if turn_count >= MAX_CONTINUATION_TURNS:
+                        # No-progress spin backstop (replaces the old 300s
+                        # wall-clock kill). A healthy chain completes or
+                        # yields to user input long before this; hitting it
+                        # means turn_completed never flipped, so stop rather
+                        # than loop forever and eat the machine.
+                        logger.error(
+                            f"LOOP 2: hit MAX_CONTINUATION_TURNS "
+                            f"({MAX_CONTINUATION_TURNS}) without completing — "
+                            f"stopping runaway chain"
+                        )
+                        self.message_display_service.display_error_message(
+                            f"Continuation stopped after "
+                            f"{MAX_CONTINUATION_TURNS} turns without "
+                            f"completing. This is a safety backstop."
                         )
                         self.turn_completed = True
                         break
 
                     try:
                         turn_count += 1
-                        logger.info(
+                        # DEBUG, not INFO: fires every continuation turn. Its
+                        # hub-side twin was 98.8% of a 4.3GB/day log
+                        # (2026-07-03). The 5-min checkpoint WARNING surfaces
+                        # progress; per-turn detail belongs at DEBUG.
+                        logger.debug(
                             f"Turn not completed - continuing conversation "
                             f"(turn {turn_count})"
                         )
@@ -512,6 +570,9 @@ class QueueProcessor:
         current_parent_uuid: str,
     ) -> str:
         """Inner implementation of _execute_llm_turn (called under _turn_lock)."""
+        # Watchdog heartbeat: a turn is actually executing = forward progress.
+        self.mark_progress()
+
         # Context service: signal new turn for curator throttling
         context_svc = None
         if self.event_bus:

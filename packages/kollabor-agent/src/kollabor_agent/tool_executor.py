@@ -118,6 +118,12 @@ class ToolExecutor:
             interactive_shell = config.get("terminal.interactive_shell", False)
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
 
+        # True while a tool is genuinely executing. The TurnWatchdog reads this
+        # (like an in-flight API call) so a long-running foreground tool — e.g.
+        # a 10-minute build — is never mistaken for a wedged session and
+        # interrupted. Independent of the renderer so it works headless.
+        self.tool_executing = False
+
         # File operations executor
         self.file_ops_executor = FileOperationsExecutor(
             config=config,
@@ -335,6 +341,7 @@ class ToolExecutor:
 
         # Set tool executing state for spinner animation
         tool_name = self._get_display_name(tool_data)
+        self.tool_executing = True  # watchdog: real work in flight
         if self.renderer:
             self.renderer.set_tool_executing(True, tool_name)
 
@@ -471,6 +478,7 @@ class ToolExecutor:
             return error_result
         finally:
             # Always clear tool executing state, even if exception occurs
+            self.tool_executing = False
             if self.renderer:
                 self.renderer.set_tool_executing(False)
 
