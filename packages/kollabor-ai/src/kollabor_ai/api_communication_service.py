@@ -56,6 +56,24 @@ class APICommunicationService:
             Path(raw_conversations_dir) if raw_conversations_dir else None
         )
 
+        # Disk safety for raw interaction logs. These append the FULL request
+        # (whole conversation history) per call, so a single long session grows
+        # O(n^2) — observed 290MB files, 6.2GB total dir (2026-07-03). Two
+        # bounds, both tunable, both 0 = disabled:
+        #   - per-file cap: stop appending once one session's log is huge
+        #   - total-dir cap: prune oldest sessions so weeks of runs stay bounded
+        self._raw_max_file_bytes = int(
+            config.get("kollabor.llm.raw_log_max_file_mb", 100) * 1024 * 1024
+        )
+        self._raw_max_total_bytes = int(
+            config.get("kollabor.llm.raw_log_max_total_mb", 1024) * 1024 * 1024
+        )
+        self._raw_file_capped_warned = False
+        # Enforce the total-dir ceiling once at session start (prunes oldest
+        # *_raw.jsonl). The current session's file does not exist yet, so it
+        # is never a prune target here.
+        self._prune_raw_logs()
+
         # Initialize from profile (resolves env vars through profile's getter methods)
         self.update_from_profile(profile)
 
@@ -1195,11 +1213,80 @@ class APICommunicationService:
                 Path(self.raw_conversations_dir)
                 / f"{self.current_session_id}_raw.jsonl"
             )
+
+            # Per-file cap: a single long session appends the full history per
+            # call (O(n^2)). Once this file is huge, stop appending so one
+            # runaway session can't blow past the total-dir ceiling mid-run.
+            if self._raw_max_file_bytes > 0:
+                try:
+                    if (
+                        raw_file.exists()
+                        and raw_file.stat().st_size >= self._raw_max_file_bytes
+                    ):
+                        if not self._raw_file_capped_warned:
+                            self._raw_file_capped_warned = True
+                            logger.warning(
+                                "Raw log for session %s hit the per-file cap "
+                                "(%d MB); further raw entries this session are "
+                                "dropped. Tune kollabor.llm.raw_log_max_file_mb.",
+                                self.current_session_id,
+                                self._raw_max_file_bytes // (1024 * 1024),
+                            )
+                        return
+                except OSError:
+                    pass  # stat failed — fall through and attempt the write
+
             with open(raw_file, "a") as f:
                 f.write(json.dumps(interaction.to_dict(), default=str) + "\n")
 
         except Exception as e:
             logger.warning(f"Failed to log raw interaction: {e}")
+
+    def _prune_raw_logs(self) -> None:
+        """Keep the raw-conversations dir under the total-size ceiling.
+
+        Deletes oldest ``*_raw.jsonl`` files (by mtime) until the directory
+        total is under ``self._raw_max_total_bytes``. No-op when the cap is 0
+        or the dir is unset/missing. Best-effort: never raises into callers.
+        """
+        try:
+            if not self.raw_conversations_dir or self._raw_max_total_bytes <= 0:
+                return
+            d = Path(self.raw_conversations_dir)
+            if not d.is_dir():
+                return
+            files = []
+            total = 0
+            for f in d.glob("*_raw.jsonl"):
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                files.append((st.st_mtime, st.st_size, f))
+                total += st.st_size
+            if total <= self._raw_max_total_bytes:
+                return
+            # Oldest first; delete until under the ceiling.
+            files.sort(key=lambda t: t[0])
+            removed = 0
+            for _mtime, size, f in files:
+                if total <= self._raw_max_total_bytes:
+                    break
+                try:
+                    f.unlink()
+                    total -= size
+                    removed += 1
+                except OSError:
+                    continue
+            if removed:
+                logger.info(
+                    "Raw log retention: pruned %d oldest session file(s) to "
+                    "stay under %d MB total",
+                    removed,
+                    self._raw_max_total_bytes // (1024 * 1024),
+                )
+        except Exception as e:  # never let retention break the service
+            logger.debug(f"Raw log prune skipped: {e}")
 
     def has_pending_tool_calls(self) -> bool:
         """Check if there are pending tool calls from last response.
