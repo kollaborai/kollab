@@ -1,19 +1,10 @@
 """Space shooter plugin using the full-screen framework.
 
-A retro 80s arcade-style demo with ships flying through a starfield,
-dodging and shooting enemies.
+A playable retro 80s arcade-style shooter: fly through a starfield,
+dodge enemy fire, and shoot down invaders. Arrows/A-D move, space fires.
 """
 
 import asyncio
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 import logging
 
 from kollabor_tui.fullscreen import FullScreenPlugin
@@ -26,19 +17,27 @@ from kollabor_tui.key_parser import KeyPress
 logger = logging.getLogger(__name__)
 
 
-class SpaceShooterPlugin(FullScreenPlugin):
-    """Space shooter demo implemented as a full-screen plugin.
+def _get_loop():
+    """Return the running event loop, or create one if none is running."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.new_event_loop()
 
-    This plugin creates a retro 80s arcade-style space shooter demo with
-    ships flying through a starfield, banking and dodging, shooting enemies.
+
+class SpaceShooterPlugin(FullScreenPlugin):
+    """Playable space shooter implemented as a full-screen plugin.
+
+    Retro 80s arcade-style vertical shooter: the player ship banks left
+    and right dodging enemy fire while shooting down descending invaders.
     """
 
     def __init__(self):
         """Initialize the space shooter plugin."""
         metadata = PluginMetadata(
             name="space",
-            description="80s arcade space shooter demo",
-            version="1.0.0",
+            description="80s arcade space shooter - arrows move, space fires",
+            version="2.0.0",
             author="Framework",
             category="effects",
             icon="*",
@@ -120,6 +119,9 @@ class SpaceShooterPlugin(FullScreenPlugin):
     async def handle_input(self, key_press: KeyPress) -> bool:
         """Handle input for space shooter plugin.
 
+        Left/Right arrows (or A/D) move the ship, space fires,
+        R restarts after game over, Q/ESC exits.
+
         Args:
             key_press: Key that was pressed
 
@@ -127,10 +129,22 @@ class SpaceShooterPlugin(FullScreenPlugin):
             True to exit, False to continue
         """
         # Exit on 'q', ESC, or Escape key
-        if key_press.char in ["q", "\x1b"] or key_press.name == "Escape":
+        if key_press.char in ["q", "Q", "\x1b"] or key_press.name == "Escape":
             return True
 
-        # Continue running for all other keys
+        game = self.space_renderer
+        if not game:
+            return False
+
+        if key_press.key == "left" or key_press.char in ["a", "A"]:
+            game.move_left()
+        elif key_press.key == "right" or key_press.char in ["d", "D"]:
+            game.move_right()
+        elif key_press.char == " ":
+            game.fire()
+        elif key_press.char in ["r", "R"]:
+            game.restart()
+
         return False
 
     async def on_stop(self):

@@ -5,9 +5,11 @@ from .drawing import DrawingPrimitives
 from .matrix_components import MatrixColumn, MatrixRenderer
 from .space_shooter_components import (
     Enemy,
+    EnemyBullet,
     Explosion,
     Laser,
-    Ship,
+    PlayerShip,
+    PowerUp,
     SpaceShooterRenderer,
     Star,
 )
@@ -18,9 +20,11 @@ __all__ = [
     "MatrixColumn",
     "MatrixRenderer",
     "Star",
-    "Ship",
+    "PlayerShip",
     "Enemy",
+    "EnemyBullet",
     "Laser",
     "Explosion",
+    "PowerUp",
     "SpaceShooterRenderer",
 ]
