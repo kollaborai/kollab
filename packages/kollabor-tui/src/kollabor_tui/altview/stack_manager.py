@@ -88,7 +88,9 @@ class AltViewStackManager:
 
     # -- push / pop ---------------------------------------------------------
 
-    async def push(self, altview: AltView, session_name: str) -> bool:
+    async def push(
+        self, altview: AltView, session_name: str, reuse: bool = True
+    ) -> bool:
         """Push an AltView onto the stack. Blocks until the user exits.
 
         If *session_name* already exists in the registry the existing
@@ -97,6 +99,18 @@ class AltViewStackManager:
         Args:
             altview: The AltView plugin to run.
             session_name: Unique name for lookup and re-entry.
+            reuse: When True (default), a session already registered under
+                *session_name* is re-entered with its plugin state intact --
+                correct for resumable views (hub feed, config, terminal).
+                When False, any cached session under that name is discarded
+                and a fresh one is built from *altview*. One-shot flows
+                (setup, model picker, login) MUST pass reuse=False: they
+                construct a new AltView each call and read its result flags
+                after push() returns, so the instance that actually runs has
+                to be the one they passed -- never a stale cached view from a
+                prior invocation (which would re-enter via on_resume() still
+                carrying old result state, making the caller misread the
+                outcome).
 
         Returns:
             False if the stack depth limit is reached, True otherwise.
@@ -112,9 +126,17 @@ class AltViewStackManager:
 
         created_session = False
 
-        # Look up or create the session
-        session = self._session_registry.get(session_name)
+        # Look up or create the session. reuse=False forces a fresh session so
+        # the caller's freshly-built AltView is the instance that actually runs
+        # (one-shot flows read result flags off it after push() returns).
+        session = self._session_registry.get(session_name) if reuse else None
         if session is None:
+            # A prior one-shot run may have left a stale session under this
+            # name; it has already exited (not on the stack), so drop and
+            # destroy it before rebuilding.
+            stale = self._session_registry.pop(session_name, None)
+            if stale is not None and stale not in self._stack:
+                await stale.destroy()
             session = AltViewSession(altview, self.event_bus, session_name)
             self._session_registry[session_name] = session
             created_session = True
@@ -184,7 +206,14 @@ class AltViewStackManager:
                 modal_started=modal_started,
                 session_entered=session_entered,
             )
-            if created_session and not session_entered:
+            if not reuse:
+                # One-shot flow: never cache. Drop + destroy so the next
+                # invocation builds a fresh view and reads its own result
+                # flags instead of re-entering this finished session.
+                if self._session_registry.get(session_name) is session:
+                    self._session_registry.pop(session_name, None)
+                await session.destroy()
+            elif created_session and not session_entered:
                 self._session_registry.pop(session_name, None)
 
         return True

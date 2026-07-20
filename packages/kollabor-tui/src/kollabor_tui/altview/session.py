@@ -233,7 +233,10 @@ class AltViewSession:
             old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
             fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os_module.O_NONBLOCK)
             try:
-                chars = sys.stdin.read(32)
+                # Read a generous chunk so a pasted API key or fast typing
+                # arrives in one go. Every byte is dispatched below, not just
+                # the first — see the loop.
+                chars = sys.stdin.read(1024)
             except (IOError, BlockingIOError):
                 chars = ""
             finally:
@@ -246,18 +249,27 @@ class AltViewSession:
             if not hasattr(self, "_key_parser"):
                 self._key_parser = KeyParser()
 
-            key_press = None
+            # Dispatch EVERY key press in the buffer, in order. A single read
+            # can contain many characters (fast typing, or a pasted key); the
+            # previous code broke after the first and silently dropped the
+            # rest, so pasted API keys collapsed to a single character.
+            key_presses = []
             for char in chars:
                 key_press = self._key_parser.parse_char(char)
                 if key_press:
-                    break
+                    key_presses.append(key_press)
 
-            if not key_press:
-                key_press = self._key_parser.check_for_standalone_escape()
-                if not key_press:
+            if not key_presses:
+                standalone = self._key_parser.check_for_standalone_escape()
+                if not standalone:
                     return (False, False)
+                key_presses.append(standalone)
 
-            exit_requested = await self.altview.handle_input(key_press)
+            exit_requested = False
+            for key_press in key_presses:
+                exit_requested = await self.altview.handle_input(key_press)
+                if exit_requested:
+                    break
             return (True, exit_requested)
 
         except Exception as e:

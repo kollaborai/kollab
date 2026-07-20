@@ -1,10 +1,10 @@
 {
   "name": "config-modal-width",
-  "description": "Verify /config modal shows width settings",
+  "description": "Verify the /config modal renders the Terminal Settings width controls (UI Width Mode, Min Width, Max Width). Runs against an isolated throwaway HOME with the hub disabled so it does not collide with a live ~/.kollab (daemon/state/mesh); wait_for gates the assert on the frame where the modal actually painted.",
   "config": {
-    "command": "python main.py",
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
     "show_captures": false,
-    "app_init_sleep": 3,
+    "app_init_sleep": 6,
     "term_width": 120,
     "term_height": 35,
     "key_delay": 0.3,
@@ -12,21 +12,23 @@
   },
   "steps": [
     { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 15, "description": "app ready at the input prompt" },
 
-    { "action": "section", "title": "Step 1: Initialize app with message" },
-    { "action": "send_keys", "keys": "hello" },
+    { "action": "section", "title": "Step 1: Open /config modal" },
+    { "action": "type", "text": "/config" },
+    { "action": "sleep", "seconds": 1 },
     { "action": "send_keys", "keys": "Enter" },
-    { "action": "sleep", "seconds": 3 },
+    { "action": "wait_for", "pattern": "UI Width Mode", "timeout": 8, "description": "config modal painted the width controls" },
 
-    { "action": "section", "title": "Step 2: Open /config modal" },
-    { "action": "send_keys", "keys": "/config" },
-    { "action": "send_keys", "keys": "Enter" },
-    { "action": "sleep", "seconds": 2 },
-    { "action": "capture" },
-
-    { "action": "section", "title": "Step 3: Verify width settings present" },
+    { "action": "section", "title": "Step 2: Verify width settings present" },
     { "action": "assert_contains", "pattern": "UI Width Mode|Width Mode", "description": "UI Width Mode setting found" },
     { "action": "assert_contains", "pattern": "Min Width|Minimum", "description": "Min Width setting found" },
-    { "action": "assert_contains", "pattern": "Max Width|Maximum", "description": "Max Width setting found" }
+    { "action": "assert_contains", "pattern": "Max Width|Maximum", "description": "Max Width setting found" },
+
+    { "action": "section", "title": "Step 3: Close modal cleanly" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "System Configuration", "description": "modal closed after Esc" }
   ]
 }

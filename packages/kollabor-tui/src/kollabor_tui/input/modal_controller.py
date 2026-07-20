@@ -86,6 +86,7 @@ class ModalController:
         update_display_callback: Callable,
         exit_command_mode_callback: Callable,
         set_command_mode_callback: Optional[Callable] = None,
+        execute_command_callback: Optional[Callable] = None,
     ) -> None:
         """Initialize the modal controller.
 
@@ -105,6 +106,7 @@ class ModalController:
         self._update_display = update_display_callback
         self._exit_command_mode = exit_command_mode_callback
         self._set_command_mode_callback = set_command_mode_callback
+        self._execute_command_callback = execute_command_callback
 
         # Modal state
         self._command_mode = CommandMode.NORMAL
@@ -442,6 +444,13 @@ class ModalController:
                                         # - Resets input_line_written=False, last_line_count=0
                                         # - Invalidates render cache
                                         # Calling _update_display here causes duplicate input boxes.
+                            if (
+                                final_data.get("run_command")
+                                and self._execute_command_callback
+                            ):
+                                await self._execute_command_callback(
+                                    final_data["run_command"]
+                                )
                     return True
                 # Re-render modal with updated widget state
                 await self._refresh_modal_display()
@@ -601,6 +610,13 @@ class ModalController:
                                         self.renderer.message_coordinator.display_message_sequence(
                                             final_data["display_messages"]
                                         )
+                                if (
+                                    final_data.get("run_command")
+                                    and self._execute_command_callback
+                                ):
+                                    await self._execute_command_callback(
+                                        final_data["run_command"]
+                                    )
 
                             return True
 

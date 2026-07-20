@@ -97,7 +97,19 @@ def build_profiles_modal(
             }
         )
 
-    # Add management options
+    # A fresh install has no selectable profiles yet. Keep the modal useful
+    # by making the setup wizard the first available action.
+    if not profile_items:
+        profile_items.append(
+            {
+                "name": "    [+] Run Setup",
+                "description": "Configure a provider with /setup",
+                "action": "run_setup",
+            }
+        )
+
+    # Add management options. New profiles use the guided setup flow so the
+    # setup marker and provider-specific defaults stay consistent.
     management_items = [
         {
             "name": "    [+] Save to Config",
@@ -106,8 +118,8 @@ def build_profiles_modal(
         },
         {
             "name": "    [+] Create New",
-            "description": "Create a new profile",
-            "action": "create_profile_prompt",
+            "description": "Open the guided provider setup (/setup)",
+            "action": "run_setup",
         },
     ]
 
@@ -171,7 +183,10 @@ def build_profiles_modal(
 
     return {
         "title": "LLM Profiles",
-        "footer": "↑↓ navigate • Enter select • e edit • c duplicate • d delete • p project default • g global default • Esc exit",
+        "footer": (
+            "↑↓ navigate • Enter select • e edit • c duplicate • d delete • "
+            "p project default • g global default • Esc exit"
+        ),
         "sections": [
             {
                 "title": f"Available Profiles (active: {active_profile})",
