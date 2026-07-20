@@ -12,6 +12,9 @@ from .buffer_manager import BufferManager
 # Pluggable renderer system
 from .clean_renderer import CleanRenderer
 
+# System clipboard helper
+from .clipboard import copy_to_clipboard
+
 # Config UI components
 from .config_merger import ConfigMerger
 from .config_widgets import ConfigWidgetDefinitions
@@ -231,6 +234,8 @@ __all__ = [
     "FileBrowserWidget",
     # Buffer manager
     "BufferManager",
+    # Clipboard
+    "copy_to_clipboard",
     # Message coordination
     "MessageDisplayCoordinator",
     # Tool spinner
