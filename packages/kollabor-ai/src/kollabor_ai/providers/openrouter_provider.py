@@ -25,14 +25,12 @@ from .models import (
     ProviderConfig,
     ProviderType,
     StreamingResponse,
-    ToolCallDelta,
     UnifiedResponse,
 )
 from .openrouter_model_info import OpenRouterModelInfo
 from .registry import register_provider
 from .transformers import (
     OpenAIResponseTransformer,
-    ToolCallAccumulator,
     ToolSchemaTransformer,
 )
 
@@ -91,9 +89,6 @@ class OpenRouterProvider(LLMProvider):
 
         # OpenAI client (initialized in initialize())
         self._client: Optional[Any] = None
-
-        # Tool accumulator for streaming
-        self._tool_accumulator: Optional[ToolCallAccumulator] = None
 
         # Model metadata for dynamic max_tokens capping
         self._model_info = OpenRouterModelInfo()
@@ -313,9 +308,6 @@ class OpenRouterProvider(LLMProvider):
         self._validate_not_shutdown()
         await self._track_request_start()
 
-        # Initialize tool accumulator
-        self._tool_accumulator = ToolCallAccumulator(legacy_mode=False)
-
         try:
             # Dynamically cap max_tokens based on model limits
             await self._model_info.get_model_limits(self.model)
@@ -365,28 +357,15 @@ class OpenRouterProvider(LLMProvider):
                 )
 
                 if streaming_response:
-                    # Handle tool call accumulation
-                    if isinstance(streaming_response.delta, ToolCallDelta):
-                        delta = streaming_response.delta
-                        completed_tools = self._tool_accumulator.add_delta(
-                            tool_call_id=delta.tool_call_id,
-                            name=delta.tool_name,
-                            arguments_delta=delta.tool_arguments_delta,
-                        )
-
-                        # If tools completed, yield them
-                        if completed_tools:
-                            for tool in completed_tools:
-                                yield StreamingResponse(
-                                    delta=ToolCallDelta(
-                                        tool_call_id=tool.id,
-                                        tool_name=tool.name,
-                                        tool_arguments_delta=None,
-                                    ),
-                                    is_final=False,
-                                )
-                    else:
-                        yield streaming_response
+                    # Pass every delta (text, tool-call, usage) straight through.
+                    # The APICommunicationService layer owns the authoritative
+                    # ToolCallAccumulator that reassembles streamed tool-call JSON
+                    # fragments. Accumulating here as well and re-emitting the
+                    # finished tool with tool_arguments_delta=None dropped the
+                    # arguments in the handoff, so the service rebuilt a name-only
+                    # call with empty args and discarded it -- INCONSISTENT_TOOL_STOP,
+                    # every streamed tool call silently lost.
+                    yield streaming_response
 
                 # Check if stream is finished
                 if streaming_response and streaming_response.is_final:
@@ -398,7 +377,6 @@ class OpenRouterProvider(LLMProvider):
             raise map_openai_error(e, "openrouter") from e
 
         finally:
-            self._tool_accumulator = None
             await self._track_request_end()
 
     @staticmethod
