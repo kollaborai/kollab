@@ -788,14 +788,14 @@ class LocalStateService(StateService):
         *,
         persist: bool = False,
         persist_local: bool = False,
+        reload_profile: bool = False,
     ) -> ProfileSnapshot:
         """Switch the active LLM profile and trigger a provider reinitialize.
 
         Mirrors the existing `/profile set` behavior in the system command
         handler: delegates to profile_manager.set_active_profile, then
-        kicks off background re-initialization of the provider and
-        native tool registry so the new profile's model/endpoint takes
-        effect without a restart.
+        re-initializes the request provider before returning. The write is
+        not complete until the next request will use the selected profile.
 
         Args:
             name: Profile name registered in the profile manager.
@@ -811,7 +811,45 @@ class LocalStateService(StateService):
         """
         if self._profile_manager is None:
             raise ValueError("profile manager not available")
+        # A client may have created or edited this profile in config while the
+        # daemon's registry was already running. Reload before activation when
+        # the caller explicitly asks for a hot reload (setup/model updates).
+        reloaded = False
+        if reload_profile and hasattr(self._profile_manager, "reload"):
+            try:
+                self._profile_manager.reload()
+                reloaded = True
+            except Exception as e:
+                logger.debug("profile reload before activation failed: %s", e)
+
+        # OAuth tokens can be refreshed/replaced while the daemon is already
+        # running. Reload that registry entry before activation so an existing
+        # ``openai-oauth`` profile also picks up the new token and model.
+        if (
+            name == "openai-oauth"
+            and not reloaded
+            and hasattr(self._profile_manager, "reload")
+        ):
+            try:
+                self._profile_manager.reload()
+                reloaded = True
+            except Exception as e:
+                logger.debug("OAuth profile reload before activation failed: %s", e)
+
         ok = bool(self._profile_manager.set_active_profile(name))
+        if not ok and hasattr(self._profile_manager, "reload"):
+            # OAuth login stores tokens before it asks the daemon to activate
+            # ``openai-oauth``.  In attach mode the daemon's ProfileManager
+            # was initialized before that token file existed, so the profile
+            # is absent from its in-memory registry.  Refresh once before
+            # reporting "profile not found"; this keeps session-only login
+            # on the daemon-owned state path without persisting a default.
+            try:
+                if not reloaded:
+                    self._profile_manager.reload()
+                ok = bool(self._profile_manager.set_active_profile(name))
+            except Exception as e:
+                logger.debug("profile reload before activation failed: %s", e)
         if not ok:
             # Match the error vocabulary used by the existing /profile handler.
             try:
@@ -850,25 +888,24 @@ class LocalStateService(StateService):
                 logger.warning(f"failed to persist profile {name!r}: {e}")
 
         # Mirror the legacy /profile set path: reinitialize the provider
-        # so new requests use the switched profile, and reload native
-        # tools because the new profile may have different
-        # supports_tools. These are background tasks so the state-write
-        # returns immediately -- subsequent chat turns will see the
-        # updated provider.
+        # synchronously so a chat turn sent immediately after the RPC cannot
+        # race the switch and use the previous provider/error state. Reload
+        # native tools in the background because that work is independent of
+        # provider selection.
         llm = self._llm_service
         if (
             llm is not None
             and hasattr(llm, "api_service")
-            and hasattr(llm, "create_background_task")
         ):
             try:
-                llm.create_background_task(
-                    llm.api_service.reinitialize_provider(profile),
-                    name="reinitialize_provider",
-                )
+                reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
+                if callable(reinitialize):
+                    await reinitialize(profile)
             except Exception as e:
-                logger.debug(f"reinitialize_provider background task error: {e}")
-            if hasattr(llm, "_load_native_tools"):
+                logger.warning(f"reinitialize_provider error for {name!r}: {e}")
+            if hasattr(llm, "_load_native_tools") and hasattr(
+                llm, "create_background_task"
+            ):
                 try:
                     llm.create_background_task(
                         llm._load_native_tools(),

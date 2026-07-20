@@ -42,6 +42,12 @@ async def handle_profile_modal_actions(
 
     logger.info(f"Profile modal action received: {action}")
 
+    # Close /profile first, then let the modal controller execute the normal
+    # /setup command so the guided wizard owns onboarding.
+    if action == "run_setup":
+        data["run_command"] = "/setup"
+        return data
+
     # Handle profile selection
     if action == "select_profile":
         profile_name = command.get("profile_name")

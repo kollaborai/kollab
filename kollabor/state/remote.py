@@ -208,25 +208,27 @@ class RemoteStateService(StateService):
         *,
         persist: bool = False,
         persist_local: bool = False,
+        reload_profile: bool = False,
     ) -> ProfileSnapshot:
         """Ask the daemon to switch profiles and return the new snapshot.
 
-        The daemon wraps LocalStateService.set_active_profile, which kicks
-        off the provider reinitialize and native tool reload as
-        background tasks. By the time the RPC reply arrives, the
-        in-memory profile has switched but the provider reinit may still
-        be in flight -- the next chat turn is the one that actually
-        sees the new model.
+        The daemon wraps LocalStateService.set_active_profile, which waits
+        for the request provider to reinitialize before replying. Native
+        tool reload may continue in the background, but the next chat turn
+        cannot race the provider switch.
 
         persist/persist_local mirror the legacy --save / --save --local
         flags: when true the daemon writes the profile values back to
         config (global or local).
+        reload_profile asks the daemon to reload profile config before
+        activation, which is required after client-side profile edits.
         """
         logger.debug(
-            "state rpc: set_active_profile name=%s persist=%s local=%s",
+            "state rpc: set_active_profile name=%s persist=%s local=%s reload=%s",
             name,
             persist,
             persist_local,
+            reload_profile,
         )
         result = await self._rpc.call(
             "state.set_active_profile",
@@ -234,6 +236,7 @@ class RemoteStateService(StateService):
                 "name": name,
                 "persist": bool(persist),
                 "persist_local": bool(persist_local),
+                "reload_profile": bool(reload_profile),
             },
             timeout=self._timeout,
         )

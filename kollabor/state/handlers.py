@@ -138,9 +138,13 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             return {"error": "profile name is required"}
         persist = bool(params.get("persist", False))
         persist_local = bool(params.get("persist_local", False))
+        reload_profile = bool(params.get("reload_profile", False))
         try:
             snapshot = await state_service.set_active_profile(
-                name.strip(), persist=persist, persist_local=persist_local
+                name.strip(),
+                persist=persist,
+                persist_local=persist_local,
+                reload_profile=reload_profile,
             )
         except ValueError as e:
             return {"error": str(e)}

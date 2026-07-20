@@ -396,7 +396,8 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
     if is_auto:
         raise ValueError(
             "No provider could be auto-detected. "
-            "Set a provider API key env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.) "
+            "Run /setup for a guided walkthrough, "
+            "set a provider API key env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.), "
             "or use /profile to configure a provider manually."
         )
 

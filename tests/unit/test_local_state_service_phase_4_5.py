@@ -162,6 +162,58 @@ class TestMcpGlobalEnabled(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["reconnected"], 0)
 
 
+class TestSetActiveProfileOAuthRefresh(unittest.IsolatedAsyncioTestCase):
+    async def test_reloads_profile_registry_before_reporting_missing_profile(self) -> None:
+        """A token created after daemon startup must be activatable via RPC."""
+        profile = SimpleNamespace(
+            name="openai-oauth",
+            provider="openai_responses",
+            model="gpt-5.4",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_key="token",
+            extra_headers={},
+            auth_type="oauth",
+        )
+        manager = MagicMock()
+        manager.set_active_profile.side_effect = [False, True]
+        manager.get_active_profile.return_value = profile
+        manager.get_profile_names.return_value = ["default", "openai-oauth"]
+        manager.reload = MagicMock()
+
+        svc = LocalStateService(llm_service=None, profile_manager=manager)
+
+        snapshot = await svc.set_active_profile("openai-oauth", persist=False)
+
+        manager.reload.assert_called_once_with()
+        self.assertEqual(snapshot.name, "openai-oauth")
+        self.assertTrue(snapshot.is_active)
+
+
+class TestSetActiveProfileProviderReady(unittest.IsolatedAsyncioTestCase):
+    async def test_waits_for_request_provider_reinitialize(self) -> None:
+        """The RPC must not return while the old request provider is active."""
+        profile = SimpleNamespace(
+            name="openrouter",
+            provider="openrouter",
+            model="tencent/hy3:free",
+            base_url="https://openrouter.ai/api/v1",
+            supports_tools=True,
+            temperature=0.7,
+        )
+        manager = MagicMock()
+        manager.set_active_profile.return_value = True
+        manager.get_active_profile.return_value = profile
+        api_service = SimpleNamespace(reinitialize_provider=AsyncMock(return_value=True))
+        llm = SimpleNamespace(api_service=api_service)
+
+        svc = LocalStateService(llm_service=llm, profile_manager=manager)
+
+        snapshot = await svc.set_active_profile("openrouter", persist=False)
+
+        api_service.reinitialize_provider.assert_awaited_once_with(profile)
+        self.assertEqual(snapshot.name, "openrouter")
+
+
 # === Agents ===
 
 

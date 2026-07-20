@@ -8,7 +8,10 @@ import logging
 from typing import Any, Dict
 
 from kollabor_ai.profile_manager import EnvVarHint
-from kollabor_config.config_utils import get_existing_global_config_path
+from kollabor_config.config_utils import (
+    get_existing_global_config_path,
+    get_local_config_path,
+)
 from kollabor_config.loader import mask_api_key
 from kollabor_events.models import (
     CommandCategory,
@@ -30,6 +33,7 @@ class ProfileCommandHandler(BaseCommandHandler):
 
     MODAL_ACTIONS = {
         "select_profile",
+        "run_setup",
         "create_profile_prompt",
         "create_profile_submit",
         "edit_profile_prompt",
@@ -159,7 +163,11 @@ class ProfileCommandHandler(BaseCommandHandler):
         config_path = get_existing_global_config_path()
         provider_profiles = set()
         provider_types = {}
-        if config_path.exists():
+        setup_profile_names = set()
+        config_paths = {config_path, get_local_config_path()}
+        for config_path in config_paths:
+            if not config_path.exists():
+                continue
             try:
                 config_data = json.loads(config_path.read_text())
                 profiles_config = (
@@ -169,6 +177,9 @@ class ProfileCommandHandler(BaseCommandHandler):
                     if "provider" in profile_config:
                         provider_profiles.add(profile_name)
                         provider_types[profile_name] = profile_config["provider"]
+                    description = str(profile_config.get("description", ""))
+                    if description.startswith(("Created via /setup", "Configured via /setup")):
+                        setup_profile_names.add(profile_name)
             except Exception as e:
                 logger.debug(f"Failed to load provider config: {e}")
 
@@ -227,6 +238,16 @@ class ProfileCommandHandler(BaseCommandHandler):
                         "provider": provider,
                     }
                 )
+
+        # ProfileManager intentionally exposes built-ins and ephemeral
+        # environment profiles. /profile is the setup-facing view, so only
+        # profiles carrying the explicit /setup provenance marker belong here.
+        profiles_data = [
+            profile for profile in profiles_data
+            if profile["name"] in setup_profile_names
+        ]
+        if active_name not in setup_profile_names:
+            active_name = ""
 
         from kollabor_config.config_utils import get_all_default_profiles
 

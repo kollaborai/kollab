@@ -134,6 +134,7 @@ class StateService(Protocol):
         *,
         persist: bool = False,
         persist_local: bool = False,
+        reload_profile: bool = False,
     ) -> ProfileSnapshot:
         """Switch to a different LLM profile by name.
 
@@ -143,6 +144,9 @@ class StateService(Protocol):
                 the legacy --save flag). Default False.
             persist_local: If True with persist, save to local project
                 config instead of global (mirrors --save --local).
+            reload_profile: If True, reload profile config before activation.
+                Use this after a profile was created or edited by another
+                process (for example the attached client).
 
         Returns:
             ProfileSnapshot of the newly-active profile.

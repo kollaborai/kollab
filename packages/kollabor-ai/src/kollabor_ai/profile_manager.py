@@ -492,7 +492,7 @@ class ProfileManager:
     Manages LLM configuration profiles.
 
     Features:
-    - Built-in default profiles (default, fast, claude, openai)
+    - Built-in fallback profile (default)
     - User-defined profiles from config.json
     - Active profile switching
     - Adapter instantiation for profiles
@@ -574,32 +574,15 @@ class ProfileManager:
         },
     ]
 
-    # Built-in default profiles (all use provider format)
+    # Keep only the runtime fallback as a built-in. Provider-specific profiles
+    # are created by /setup; they are user configuration, not templates to
+    # expose or mutate from the profile manager.
     DEFAULT_PROFILES: Dict[str, Dict[str, Any]] = {
         "default": {
             "provider": "auto",
             "model": "",
             "temperature": 0.7,
             "description": "Auto-detect from env vars, fallback to local LLM",
-        },
-        "local": {
-            "provider": "custom",
-            "base_url": "http://localhost:1234/v1",
-            "model": "qwen3-4b",
-            "temperature": 0.7,
-            "description": "Local LLM via LM Studio / Ollama",
-        },
-        "claude": {
-            "provider": "anthropic",
-            "model": "claude-sonnet-4-6",
-            "temperature": 0.7,
-            "description": "Anthropic Claude for complex tasks",
-        },
-        "openai": {
-            "provider": "openai",
-            "model": "gpt-5.4",
-            "temperature": 0.7,
-            "description": "OpenAI GPT-5.3 for general tasks",
         },
     }
 
