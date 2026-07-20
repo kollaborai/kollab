@@ -15,7 +15,31 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from .terminal_state import get_terminal_width
 from .visual_effects import ColorPalette
+
+
+def _clamp_display_line(text: str, reserved: int = 5) -> str:
+    """Clip a display line to the terminal width.
+
+    Tool-output/diff previews are indented and written straight to the screen.
+    Without clamping, a line wider than the terminal (e.g. a grep hit with a
+    long path) hard-wraps at the raw terminal edge -- breaking mid-word and
+    dumping the tail at column 0. Expand tabs first so width is measured in the
+    columns the terminal actually renders.
+
+    Args:
+        text: The raw line content (no leading indent).
+        reserved: Columns to leave for indentation + a 1-col right margin.
+
+    Returns:
+        The line, clipped with a trailing ellipsis if it would overflow.
+    """
+    budget = max(20, get_terminal_width() - reserved)
+    text = text.expandtabs()
+    if len(text) > budget:
+        return text[: budget - 1] + "…"
+    return text
 
 logger = logging.getLogger(__name__)
 
@@ -663,9 +687,10 @@ def format_tool_output(result: Any) -> List[str]:
     output_lines = result.output.strip().split("\n")
     formatted_lines = []
 
-    # Show first 20 lines with indentation
+    # Show first 20 lines with indentation, each clamped to the terminal
+    # width so long output can't hard-wrap at the raw terminal edge.
     for line in output_lines[:20]:
-        formatted_lines.append(f"    {line}")
+        formatted_lines.append(f"    {_clamp_display_line(line)}")
 
     # Add truncation message if needed
     if len(output_lines) > 20:
@@ -703,7 +728,7 @@ def format_edit_diff(result: Any) -> List[str]:
 
     # Show the first line of output (✅ Replaced...)
     first_line = result.output.split("\n")[0]
-    formatted_lines.append(f"    {first_line}")
+    formatted_lines.append(f"    {_clamp_display_line(first_line)}")
 
     # Add pretty diff visualization
     formatted_lines.append("")
@@ -711,9 +736,12 @@ def format_edit_diff(result: Any) -> List[str]:
     # Calculate starting line number for display
     start_line = line_numbers[0] if line_numbers else None
 
-    # Removed lines (red with -) with line numbers
+    # Removed lines (red with -) with line numbers. Clamp the code content
+    # before wrapping in color codes so long lines can't overflow (and so the
+    # clip never lands inside an ANSI escape). reserved: indent + "│- NNNN ".
     removed_lines = find_text.split("\n")
     for i, line in enumerate(removed_lines[:3]):  # Show max 3 lines
+        line = _clamp_display_line(line, reserved=13)
         if start_line:
             line_num = start_line + i
             formatted_lines.append(f"    \033[31m│- {line_num:4d} {line}\033[0m")
@@ -728,9 +756,10 @@ def format_edit_diff(result: Any) -> List[str]:
     # Separator
     formatted_lines.append("    \033[90m│\033[0m")
 
-    # Added lines (green with +) with line numbers
+    # Added lines (green with +) with line numbers. Same clamp as removed.
     added_lines = replace_text.split("\n")
     for i, line in enumerate(added_lines[:3]):  # Show max 3 lines
+        line = _clamp_display_line(line, reserved=13)
         if start_line:
             line_num = start_line + i
             formatted_lines.append(f"    \033[32m│+ {line_num:4d} {line}\033[0m")
@@ -748,7 +777,7 @@ def format_edit_diff(result: Any) -> List[str]:
     output_lines = result.output.split("\n")
     for line in output_lines[1:]:  # Skip first line (already shown)
         if line.strip():
-            formatted_lines.append(f"    {line}")
+            formatted_lines.append(f"    {_clamp_display_line(line)}")
 
     return formatted_lines
 
