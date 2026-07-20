@@ -1,0 +1,33 @@
+{
+  "name": "profile-setup-only",
+  "description": "Regression spec for /profile: show only profiles created/configured by /setup, hide built-in and auto-detected profiles, and route Create New to the guided setup wizard.",
+  "config": {
+"command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf %s eyJwbHVnaW5zIjp7Imh1YiI6eyJlbmFibGVkIjpmYWxzZX19LCJrb2xsYWJvciI6eyJsbG0iOnsiYWN0aXZlX3Byb2ZpbGUiOiJzZXR1cC1vcGVucm91dGVyIiwicHJvZmlsZXMiOnsic2V0dXAtb3BlbnJvdXRlciI6eyJwcm92aWRlciI6Im9wZW5yb3V0ZXIiLCJiYXNlX3VybCI6Imh0dHBzOi8vb3BlbnJvdXRlci5haS9hcGkvdjEiLCJtb2RlbCI6InRlbmNlbnQvaHkzOmZyZWUiLCJhcGlfa2V5IjoidGVzdC1rZXkiLCJkZXNjcmlwdGlvbiI6IkNyZWF0ZWQgdmlhIC9zZXR1cCAoT3BlblJvdXRlcikifSwibWFudWFsLXByb2ZpbGUiOnsicHJvdmlkZXIiOiJjdXN0b20iLCJiYXNlX3VybCI6Imh0dHA6Ly8xMjcuMC4wLjE6OS92MSIsIm1vZGVsIjoibWFudWFsLW1vZGVsIiwiYXBpX2tleSI6InRlc3Qta2V5IiwiZGVzY3JpcHRpb24iOiJDcmVhdGVkIG1hbnVhbGx5In19fX19 | base64 --decode > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon",
+    "show_captures": false,
+    "app_init_sleep": 15,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.25,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯|>", "timeout": 15, "description": "app ready" },
+    { "action": "type", "text": "/profile" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "wait_for", "pattern": "setup-openrouter", "timeout": 8, "description": "configured profile rendered" },
+    { "action": "assert_contains", "pattern": "setup-openrouter", "description": "configured /setup profile is visible" },
+    { "action": "assert_not_contains", "pattern": "manual-profile|manual-model", "description": "manually-created profile is hidden" },
+    { "action": "assert_not_contains", "pattern": "\\[auto\\] no model set|\\[anthropic\\] claude-sonnet-4-6|\\[openai\\] gpt-5\\.4", "description": "built-in profiles are hidden" },
+    { "action": "assert_not_contains", "pattern": "anthropic-auto|openrouter-auto", "description": "auto-detected profiles are hidden" },
+    { "action": "send_keys", "keys": "Tab" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "Tab" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "Provider Setup", "timeout": 8, "description": "Create New opened the setup wizard" },
+    { "action": "assert_contains", "pattern": "Which provider|Paste your API key|sign in with ChatGPT", "description": "guided setup content is visible" },
+    { "action": "assert_not_contains", "pattern": "Create Profile|Base URL.*Model", "description": "legacy profile form was not opened" }
+  ]
+}

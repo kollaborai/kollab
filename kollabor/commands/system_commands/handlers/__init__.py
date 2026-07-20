@@ -6,6 +6,7 @@ from .directory import DirectoryCommandHandler
 from .login import LoginCommandHandler
 from .model import ModelCommandHandler
 from .profile import ProfileCommandHandler
+from .setup import SetupCommandHandler
 from .skills import SkillCommandHandler
 from .system import SystemCommandHandler
 
@@ -18,4 +19,5 @@ __all__ = [
     "DirectoryCommandHandler",
     "SystemCommandHandler",
     "LoginCommandHandler",
+    "SetupCommandHandler",
 ]

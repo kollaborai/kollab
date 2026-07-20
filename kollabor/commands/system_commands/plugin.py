@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         LoginCommandHandler,
         ModelCommandHandler,
         ProfileCommandHandler,
+        SetupCommandHandler,
         SkillCommandHandler,
         SystemCommandHandler,
     )
@@ -42,6 +43,7 @@ class SystemCommandsPlugin:
     _model_handler: ModelCommandHandler | None
     _directory_handler: DirectoryCommandHandler | None
     _login_handler: LoginCommandHandler | None
+    _setup_handler: SetupCommandHandler | None
     _context_handler: ContextCommandHandler | None
 
     def __init__(
@@ -97,6 +99,7 @@ class SystemCommandsPlugin:
             directory_command_handler
         )
         self._login_handler: LoginCommandHandler | None = login_command_handler
+        self._setup_handler: SetupCommandHandler | None = None
         self._context_handler: ContextCommandHandler | None = None
 
         # Initialize handlers if not provided
@@ -116,6 +119,7 @@ class SystemCommandsPlugin:
                 LoginCommandHandler,
                 ModelCommandHandler,
                 ProfileCommandHandler,
+                SetupCommandHandler,
                 SkillCommandHandler,
                 SystemCommandHandler,
             )
@@ -174,6 +178,15 @@ class SystemCommandsPlugin:
                     self.llm_service,
                 )
 
+            if self._setup_handler is None:
+                self._setup_handler = SetupCommandHandler(
+                    self.command_registry,
+                    self.event_bus,
+                    self.profile_manager,
+                    self.llm_service,
+                    login_handler=self._login_handler,
+                )
+
             if not hasattr(self, "_context_handler") or self._context_handler is None:
                 self._context_handler = ContextCommandHandler(
                     self.command_registry,
@@ -198,6 +211,8 @@ class SystemCommandsPlugin:
             actions.update(self._directory_handler.MODAL_ACTIONS)
         if self._login_handler:
             actions.update(self._login_handler.MODAL_ACTIONS)
+        if self._setup_handler:
+            actions.update(self._setup_handler.MODAL_ACTIONS)
         if self._context_handler:
             actions.update(self._context_handler.MODAL_ACTIONS)
         return actions
@@ -218,6 +233,8 @@ class SystemCommandsPlugin:
             self._directory_handler.register_commands()
         if self._login_handler:
             self._login_handler.register_commands()
+        if self._setup_handler:
+            self._setup_handler.register_commands()
         if self._context_handler:
             self._context_handler.register_commands()
 
@@ -365,6 +382,16 @@ class SystemCommandsPlugin:
             display_type="error",
         )
 
+    async def handle_setup(self, command: SlashCommand) -> CommandResult:
+        """Handle /setup command."""
+        if self._setup_handler:
+            return await self._setup_handler.handle_setup(command)
+        return CommandResult(
+            success=False,
+            message="Setup handler not initialized",
+            display_type="error",
+        )
+
     # Modal action handler
     async def handle_modal_action(self, data: dict, event: Event) -> dict:
         """Handle modal actions by delegating to appropriate handler.
@@ -409,6 +436,7 @@ class SystemCommandsPlugin:
             handler = self._agent_handler
         elif action in (
             "select_profile",
+            "run_setup",
             "create_profile_submit",
             "edit_profile_prompt",
             "edit_profile_submit",
