@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-07-21
+
+### Added
+
+- Added the `/setup` onboarding wizard, with `/onboard` and `/wizard` aliases,
+  to guide new users through provider and profile configuration.
+- Added engineering-discipline guidance to the bundled agent base prompt.
+
+### Changed
+
+- Updated README, FAQ, and profile documentation to describe wizard-created
+  profiles and the current built-in profile behavior.
+
 ## [0.5.20] - 2026-07-03
 
 ### Added

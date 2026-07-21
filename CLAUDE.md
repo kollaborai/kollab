@@ -919,6 +919,7 @@ set_color_support(ColorSupport.EXTENDED)
 
 **Built-in:**
 - `/help` - Show available commands
+- `/setup` (aliases: `/onboard`, `/wizard`) - Guided fullscreen wizard to configure a new LLM provider (pick provider → API key → endpoint → model → optional live test → save + activate). New-user entry point; ChatGPT OAuth delegates to `/login`, Azure/advanced routes to `/profile`.
 - `/save` - Save conversation (transcript|markdown|jsonl|clipboard|both|local)
 - `/profile` (aliases: `/prof`, `/llm`) - Manage LLM profiles (list|set|create)
 - `/permissions` (aliases: `/perms`, `/security`) - Manage permissions (show|default|strict|trust|stats|clear)

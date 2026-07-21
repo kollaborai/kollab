@@ -209,7 +209,12 @@ the formula SHA is available. Maintainer notes live in
 
 ## Quick Start
 
-Kollab auto-detects common provider environment variables:
+New here? Launch Kollab and run **`/setup`** — a guided wizard walks you through
+picking a provider, entering your API key, choosing a model, optionally testing
+the connection, and saving it as your active profile. No env vars or JSON
+required. (ChatGPT sign-in delegates to `/login`; Azure/advanced go to `/profile`.)
+
+Prefer environment variables? Kollab also auto-detects common provider vars:
 
 | Environment Variable | Provider | Notes |
 | --- | --- | --- |

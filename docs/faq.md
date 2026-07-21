@@ -77,8 +77,8 @@ Encoded path: `/home/user/myproject` becomes `home_user_myproject`. Global confi
 Use the profile command interactively:
   /profile
 
-Or specify via flag:
-  kollab --profile openai
+Or specify a configured profile via flag:
+  kollab --profile my-profile
 
 List available profiles:
   /profile list
@@ -197,11 +197,11 @@ See [features/dynamic-system-prompts.md](features/dynamic-system-prompts.md).
 
 ### Can I use multiple providers?
 
-Yes. Create profiles for each:
+Yes. Run `/setup` once for each provider, then switch between the profiles it
+creates:
 
-  kollab --profile claude    # Anthropic
-  kollab --profile openai   # OpenAI
-  kollab --profile local    # Ollama
+  /setup
+  kollab --profile my-anthropic-profile
 
 Profiles are stored in config.json. Switch anytime via /profile.
 

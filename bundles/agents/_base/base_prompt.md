@@ -20,6 +20,7 @@
 <trender type="include" path="sections/meta/thoroughness-mandate.md" />
 <trender type="include" path="sections/meta/resource-limits.md" />
 
+<trender type="include" path="sections/practices/engineering-discipline.md" />
 <trender type="include" path="sections/practices/error-handling.md" />
 <trender type="include" path="sections/practices/testing.md" />
 <trender type="include" path="sections/practices/debugging.md" />
