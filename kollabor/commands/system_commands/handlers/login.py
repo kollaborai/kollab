@@ -124,8 +124,10 @@ class LoginCommandHandler(BaseCommandHandler):
                         display_type="error",
                     )
 
-            # push() blocks until the user exits or the flow completes
-            await stack_mgr.push(altview, "login-openai")
+            # push() blocks until the user exits or the flow completes.
+            # reuse=False: login is one-shot -- run this fresh view (we read
+            # its result_* below), not a cached one from a prior /login.
+            await stack_mgr.push(altview, "login-openai", reuse=False)
 
             # Read result from the altview
             if altview.result_error:
@@ -159,6 +161,11 @@ class LoginCommandHandler(BaseCommandHandler):
             if tokens.account_id:
                 extra_headers["ChatGPT-Account-Id"] = tokens.account_id
 
+            # Whether the user opted to make this the saved default (asked in
+            # the login view's confirm stage). Read before the profile block
+            # so it is always defined for the result message below.
+            make_default = bool(getattr(altview, "result_make_default", False))
+
             # Create/update oauth profile in profile manager
             if self.profile_manager:
                 from kollabor_ai.profile_manager import LLMProfile
@@ -189,17 +196,44 @@ class LoginCommandHandler(BaseCommandHandler):
                     )
                     self.profile_manager._profiles[profile_name] = profile
 
-                # Switch profile (also reinitializes provider)
-                llm = self.llm_service
-                if llm and hasattr(llm, "switch_profile"):
-                    await llm.switch_profile(profile_name)
+                # Switch through StateService when available. In attach mode
+                # this is an RPC to the daemon, which owns the real provider,
+                # conversation, and status state. Calling the client's local
+                # LLMService here only changes a shadow profile and leaves the
+                # daemon on the previous provider. In local mode the same
+                # StateService call is an in-process LocalStateService.
+                state_service = self.event_bus.get_service("state_service")
+                if state_service is not None and hasattr(
+                    state_service, "set_active_profile"
+                ):
+                    await state_service.set_active_profile(
+                        profile_name, persist=make_default
+                    )
                 else:
-                    self.profile_manager.set_active_profile(profile_name)
+                    llm = self.llm_service
+                    if llm and hasattr(llm, "switch_profile"):
+                        switched = await llm.switch_profile(
+                            profile_name, persist=make_default
+                        )
+                        if switched is False:
+                            raise RuntimeError(
+                                f"runtime could not activate profile {profile_name!r}"
+                            )
+                    else:
+                        self.profile_manager.set_active_profile(
+                            profile_name, persist=make_default
+                        )
 
             expires_str = _format_expiry(tokens.expires_at)
             models_note = ""
             if available_models:
                 models_note = f"\n  available: {', '.join(available_models)}"
+
+            default_note = (
+                "  default: yes (active on next launch)"
+                if make_default
+                else "  default: no (active this session only, run /profile to change)"
+            )
 
             return CommandResult(
                 success=True,
@@ -208,7 +242,8 @@ class LoginCommandHandler(BaseCommandHandler):
                     f"  profile: openai-oauth\n"
                     f"  model:   {model}\n"
                     f"  endpoint: chatgpt.com/backend-api/codex\n"
-                    f"  expires: {expires_str}"
+                    f"  expires: {expires_str}\n"
+                    f"{default_note}"
                     f"{models_note}"
                 ),
                 display_type="success",

@@ -17,6 +17,7 @@ import time
 from typing import Any, Optional
 
 from kollabor_tui.altview.base import AltView, AltViewMetadata
+from kollabor_tui.clipboard import copy_to_clipboard
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
 
@@ -64,11 +65,18 @@ class LoginAltView(AltView):
         self.result_models: list = []
         self.result_best_model: str = ""
         self.result_error: Optional[str] = None
+        # Whether the user chose to make this the active/default profile
+        # (asked in the "confirm" stage after a successful login).
+        self.result_make_default: bool = False
 
         # Spinner for waiting stage
         self._spinner_chars = ["|", "/", "-", "\\"]
         self._spinner_idx = 0
         self._last_spinner_time = 0.0
+
+        # Clipboard copy feedback (transient, shown next to the code)
+        self._copied_at: float = 0.0
+        self._copy_ok: bool = False
 
     async def on_enter(self, renderer: Any) -> None:
         """Start the OAuth flow as a background task."""
@@ -98,12 +106,39 @@ class LoginAltView(AltView):
         return True
 
     async def handle_input(self, key_press: KeyPress) -> bool:
-        """Esc cancels the login flow."""
+        """Esc cancels; `c` copies the device code; y/n answer the default prompt."""
+        # Post-auth "make this your default?" prompt. Handled first so Esc/n
+        # here declines the default WITHOUT discarding the successful login.
+        if self._stage == "confirm":
+            if key_press.char in ("y", "Y"):
+                self.result_make_default = True
+                self._stage = "done"
+                logger.info("LoginAltView: user set openai-oauth as default")
+                return True
+            if key_press.char in ("n", "N") or key_press.name == "Escape":
+                self.result_make_default = False
+                self._stage = "done"
+                logger.info("LoginAltView: user declined default (session only)")
+                return True
+            return False
+
         if key_press.name == "Escape" or key_press.char == "q":
             self._cancelled = True
             self.result_error = "cancelled by user"
             logger.info("LoginAltView: cancelled by user")
             return True
+
+        # Copy the device code to the clipboard (the screen repaints on a
+        # timer, which makes manual text selection fight the render loop).
+        if (
+            key_press.char in ("c", "C")
+            and self._code
+            and self._stage in ("device_code", "waiting")
+        ):
+            self._copy_ok = copy_to_clipboard(self._code)
+            self._copied_at = time.monotonic()
+            logger.info("LoginAltView: copy code -> %s", self._copy_ok)
+            return False
 
         # In error state, any key exits
         if self._stage == "error":
@@ -185,6 +220,20 @@ class LoginAltView(AltView):
                 ),
                 "",
             )
+            # Copy hint / transient feedback to the right of the code box
+            hint_x = 2 + len(self._code) + 4 + 2
+            if self._copied_at and (now - self._copied_at) < 2.0:
+                if self._copy_ok:
+                    hint_text, hint_color = "copied to clipboard", theme.success[0]
+                else:
+                    hint_text, hint_color = (
+                        "no clipboard tool found",
+                        theme.warning[0],
+                    )
+            else:
+                hint_text, hint_color = "press c to copy", theme.text_dim
+            if hint_x + len(hint_text) <= width - 2:
+                self._renderer.write_at(hint_x, y, solid_fg(hint_text, hint_color), "")
             y += 2
             self._renderer.write_at(
                 2,
@@ -205,6 +254,23 @@ class LoginAltView(AltView):
                 2, y, "authenticated, querying available models...", ""
             )
 
+        elif self._stage == "confirm":
+            self._renderer.write_at(
+                2,
+                y,
+                solid_fg(
+                    f"authenticated  (model: {self.result_best_model or 'codex'})",
+                    theme.success[0],
+                ),
+                "",
+            )
+            y += 2
+            self._renderer.write_at(2, y, "make openai-oauth your default profile?", "")
+            y += 2
+            self._renderer.write_at(2, y, "  [y] yes - use it everywhere", "")
+            y += 1
+            self._renderer.write_at(2, y, "  [n] no  - just this session", "")
+
         elif self._stage == "error":
             self._renderer.write_at(2, y, f"error: {self._error_message}", "")
             y += 2
@@ -221,6 +287,10 @@ class LoginAltView(AltView):
         footer_text = " Esc: cancel"
         if self._stage == "error":
             footer_text = " any key: exit"
+        elif self._stage == "confirm":
+            footer_text = " y: make default    n: session only"
+        elif self._code and self._stage in ("device_code", "waiting"):
+            footer_text = " Esc: cancel    c: copy code"
         self._renderer.write_at(
             0,
             footer_y + 1,
@@ -304,8 +374,9 @@ class LoginAltView(AltView):
 
             logger.info("LoginAltView: OAuth flow complete, model=%s", model)
 
-            # Signal done
-            self._stage = "done"
+            # Ask whether to make this the active/default profile before
+            # exiting. handle_input transitions confirm -> done on y/n/Esc.
+            self._stage = "confirm"
 
         except asyncio.CancelledError:
             self._stage = "done"

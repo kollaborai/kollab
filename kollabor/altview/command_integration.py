@@ -356,7 +356,15 @@ class AltViewCommandIntegrator:
                 # without get_resume_session). Routes through state_service so the
                 # daemon owns the load+swap; works in attach mode. Shared with the
                 # fullscreen browser and /resume.
-                await stack_mgr.push(altview, session_name)
+                #
+                # One-shot selection views (the conversation browser) read their
+                # pick off THIS instance via get_resume_session() below, so they
+                # must run the fresh view we built -- not a cached prior one, or
+                # the second open would re-enter a stale session and the pick
+                # would read as None. Resumable dashboards have no such read and
+                # keep the default cached behaviour.
+                one_shot = hasattr(altview, "get_resume_session")
+                await stack_mgr.push(altview, session_name, reuse=not one_shot)
 
                 if hasattr(altview, "get_resume_session"):
                     from kollabor.llm.session_resume import (

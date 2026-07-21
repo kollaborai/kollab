@@ -262,9 +262,21 @@ class TestCrystalStoreRetrieval(unittest.TestCase):
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.store = CrystalStore(self.tmpdir)
-        self.store.add_entry("Entry one", date="2026-04-09")
-        self.store.add_entry("Entry two about something else", date="2026-04-10")
-        self.store.add_entry("Entry three latest work", date="2026-04-12")
+        self.store.add_entry(
+            "Entry one covers routing",
+            manual_keywords=["entry", "routing"],
+            date="2026-04-09",
+        )
+        self.store.add_entry(
+            "Entry two about config",
+            manual_keywords=["entry", "config"],
+            date="2026-04-10",
+        )
+        self.store.add_entry(
+            "Entry three latest TUI work",
+            manual_keywords=["entry", "tui"],
+            date="2026-04-12",
+        )
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)

@@ -617,10 +617,11 @@ class TestFeedPanelBackgroundFill:
 
         altview._render_feed_panel(3, 20, T())
 
-        # Every write_at call should be a solid()-rendered string (contains 48;2; bg)
+        # Every write_at call should be a solid()-rendered string with a
+        # background color. The design system may emit RGB or 256-color ANSI.
         assert captured, "expected write_at calls for empty rows"
         for text in captured:
-            assert "48;2;" in text, f"empty row must have solid bg: {text!r}"
+            assert "48;" in text, f"empty row must have solid bg: {text!r}"
 
     def test_raw_feed_blank_line_gets_dark_bg(self, altview: HubConsoleAltView):
         """An empty string entry in raw feed should be handled without crash."""

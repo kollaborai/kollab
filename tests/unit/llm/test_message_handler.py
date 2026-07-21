@@ -1,8 +1,9 @@
 """Tests for MessageHandler."""
 
 import asyncio
+import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor.llm.message_handler import MessageHandler
 
@@ -296,6 +297,18 @@ class TestMessageHandler(unittest.TestCase):
             self.coordinator._queue_processor.processing_queue = asyncio.Queue()
             self.coordinator._process_queue = MagicMock(return_value=object())
 
+            # Realistic mock: a real _continue_conversation sets turn_completed
+            # when the model finishes the turn. Without this the continuation
+            # loop never exits — the default AsyncMock never flips the flag, so
+            # the loop relied on the (now-removed) 300s deadline to terminate.
+            # That reliance made this test a 5-min hang, then an infinite one
+            # (2026-07-03). Simulate a completed turn so termination is driven
+            # by real turn completion, not a backstop.
+            async def complete_turn():
+                self.coordinator._queue_processor.turn_completed = True
+
+            self.coordinator._continue_conversation = complete_turn
+
             await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
             hub_coro = self.coordinator.create_background_task.call_args[0][0]
             self.coordinator.create_background_task.reset_mock()
@@ -306,6 +319,194 @@ class TestMessageHandler(unittest.TestCase):
                 self.coordinator.create_background_task.called,
                 "_hub_continue() must not spawn _process_queue() when queue is empty",
             )
+
+        self.loop.run_until_complete(run())
+
+    # ------------------------------------------------------------------ #
+    # Regression: 300s wall-clock deadline killed healthy chains          #
+    # mid-tool-call (2026-07-03)                                          #
+    # ------------------------------------------------------------------ #
+
+    def _patch_monotonic(self, offset):
+        """Patch time.monotonic to real time plus a controllable offset."""
+        real_mono = time.monotonic
+        return patch(
+            "kollabor.llm.message_handler.time.monotonic",
+            side_effect=lambda: real_mono() + offset["v"],
+        )
+
+    def test_hub_continue_survives_past_300s(self):
+        """A chain running longer than 300s must NOT be force-completed.
+
+        Regression: _hub_continue force-set turn_completed=True once the
+        chain's cumulative wall-clock passed 300s. The last turn's tool
+        results were already in history but the LLM was never re-invoked
+        to see them, so the session went silent (lapis, quantum-flux,
+        2026-07-03 19:15:06).
+        """
+
+        async def run():
+            self.coordinator.conversation_history.append(
+                type("obj", (object,), {"role": "user", "content": "hello"})()
+            )
+            qp = self.coordinator._queue_processor
+            qp.processing_queue = asyncio.Queue()
+            self.coordinator._process_queue = MagicMock(return_value=object())
+
+            offset = {"v": 0.0}
+            calls = {"n": 0}
+
+            async def fake_continue():
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    # Simulate the first turn taking >300s of wall clock.
+                    offset["v"] += 400.0
+                if calls["n"] >= 2:
+                    qp.turn_completed = True  # model finishes naturally
+
+            self.coordinator._continue_conversation = fake_continue
+
+            with self._patch_monotonic(offset):
+                await self.handler.handle_llm_continue(
+                    {"source": "hub-test"}, MagicMock()
+                )
+                hub_coro = self.coordinator.create_background_task.call_args[0][0]
+                await hub_coro
+
+            self.assertEqual(
+                calls["n"],
+                2,
+                "chain must continue past 300s until the model completes "
+                "the turn (old code force-completed after 1 call)",
+            )
+            self.assertTrue(qp.turn_completed)
+
+        self.loop.run_until_complete(run())
+
+    def test_hub_continue_yields_to_user_message_mid_chain(self):
+        """A user message arriving mid-chain must break the chain so the
+        queue drain processes it — without force-completing the turn."""
+
+        async def run():
+            self.coordinator.conversation_history.append(
+                type("obj", (object,), {"role": "user", "content": "hello"})()
+            )
+            qp = self.coordinator._queue_processor
+            real_queue = asyncio.Queue()
+            qp.processing_queue = real_queue
+            self.coordinator._process_queue = MagicMock(return_value=object())
+
+            calls = {"n": 0}
+
+            async def fake_continue():
+                calls["n"] += 1
+                # User types while the chain is running; turn never
+                # completes on its own.
+                real_queue.put_nowait("user interjection")
+
+            self.coordinator._continue_conversation = fake_continue
+
+            await self.handler.handle_llm_continue(
+                {"source": "hub-test"}, MagicMock()
+            )
+            hub_coro = self.coordinator.create_background_task.call_args[0][0]
+            self.coordinator.create_background_task.reset_mock()
+            await hub_coro
+
+            self.assertEqual(
+                calls["n"], 1, "chain must yield before running another turn"
+            )
+            self.assertFalse(
+                qp.turn_completed,
+                "yielding to user input must not force-complete the turn",
+            )
+            self.assertTrue(
+                self.coordinator.create_background_task.called,
+                "queue drain must be scheduled for the interjected message",
+            )
+
+        self.loop.run_until_complete(run())
+
+    def test_retry_continue_never_cancels_busy_session(self):
+        """A hub trigger during a long busy chain must wait, not cancel.
+
+        Regression: _retry_continue set coord.cancel_processing=True after
+        waiting 300s, aborting healthy long-running chains 5 minutes after
+        any hub message arrived.
+        """
+        coord = _make_coordinator(is_processing=True)
+        handler = MessageHandler(coordinator=coord)
+
+        async def run():
+            result = await handler.handle_llm_continue(
+                {"source": "peer"}, MagicMock()
+            )
+            self.assertEqual(result["status"], "queued_for_retry")
+            retry_coro = coord.create_background_task.call_args[0][0]
+            coord.create_background_task.reset_mock()
+
+            offset = {"v": 0.0}
+            sleeps = {"n": 0}
+
+            async def fake_sleep(_secs):
+                sleeps["n"] += 1
+                offset["v"] += 400.0  # each wait tick jumps 400s
+                if sleeps["n"] >= 2:
+                    coord.is_processing = False  # chain finishes naturally
+
+            real_mono = time.monotonic
+            with patch(
+                "kollabor.llm.message_handler.time.monotonic",
+                side_effect=lambda: real_mono() + offset["v"],
+            ), patch(
+                "kollabor.llm.message_handler.asyncio.sleep", fake_sleep
+            ):
+                await retry_coro
+
+            self.assertFalse(
+                coord.cancel_processing,
+                "retry waiter must never cancel a busy session "
+                "(old code set cancel_processing=True after 300s)",
+            )
+            self.assertTrue(
+                coord.create_background_task.called,
+                "retry must fire the continuation once the chain finishes",
+            )
+            # Close the unawaited _hub_continue coroutine handed to the mock.
+            coord.create_background_task.call_args[0][0].close()
+
+        self.loop.run_until_complete(run())
+
+    def test_retry_continue_gives_up_after_an_hour_without_cancelling(self):
+        """If a session stays busy >1h, drop the retry — never cancel."""
+        coord = _make_coordinator(is_processing=True)
+        handler = MessageHandler(coordinator=coord)
+
+        async def run():
+            await handler.handle_llm_continue({"source": "peer"}, MagicMock())
+            retry_coro = coord.create_background_task.call_args[0][0]
+            coord.create_background_task.reset_mock()
+
+            offset = {"v": 0.0}
+
+            async def fake_sleep(_secs):
+                offset["v"] += 4000.0  # jump past the 3600s give-up point
+
+            real_mono = time.monotonic
+            with patch(
+                "kollabor.llm.message_handler.time.monotonic",
+                side_effect=lambda: real_mono() + offset["v"],
+            ), patch(
+                "kollabor.llm.message_handler.asyncio.sleep", fake_sleep
+            ):
+                await retry_coro
+
+            self.assertFalse(coord.cancel_processing)
+            self.assertFalse(
+                coord.create_background_task.called,
+                "retry must be dropped, not fired, after the give-up point",
+            )
+            self.assertFalse(handler._retry_pending)
 
         self.loop.run_until_complete(run())
 

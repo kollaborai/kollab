@@ -15,6 +15,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Hard ceiling on continuation turns in a single uninterrupted chain.
+# This is a RUNAWAY backstop, not a work limit: it must sit far above any
+# healthy investigation depth (lapis's real chain was 34 turns). It exists
+# only to stop a no-progress spin — e.g. a path where turn_completed never
+# flips — from looping forever and eating the machine (that spin grew a
+# hung process to 5.7GB, 2026-07-03). It replaces the old 300s wall-clock
+# deadline, which was too aggressive and guillotined healthy multi-turn
+# chains mid-work.
+MAX_CONTINUATION_TURNS = 500
+
 
 class MessageHandler:
     """Handles incoming events and messages for the LLM service.
@@ -349,21 +359,62 @@ class MessageHandler:
                     logger.info("Hub continue: user typing at exec time, skipping")
                     return
                 qp.is_processing = True
-                qp.turn_completed = True
-                hub_deadline = time.monotonic() + 300  # 5min max
+                # Set turn_completed=False so _continue_conversation does not
+                # inject pending_agent_hud as a new user message. Setting True
+                # here caused the session-dying bug: _continue_conversation
+                # saw turn_completed=True, injected HUD nudges as user input,
+                # the LLM responded to the nudge text instead of continuing
+                # work, produced no tool calls, and the session went silent.
+                qp.turn_completed = False
+                # Wall-clock checkpoints only — never kill a working chain.
+                # Force-completing on a timer orphaned the last turn's tool
+                # results (they were in history but the LLM never got called
+                # to see them) and the session went silent until an external
+                # trigger (the "agent stops mid-tool-call" bug, 2026-07-03).
+                # Chains end via: model completing the turn, user input
+                # arriving (break below), ESC (cancel_processing), or the
+                # error breaks. The checkpoint just logs progress every 5min.
+                chain_start = time.monotonic()
+                checkpoint_at = chain_start + 300
                 try:
                     await coord._continue_conversation()
                     turn_count = 0
                     while not qp.turn_completed and not qp.cancel_processing:
-                        if time.monotonic() > hub_deadline:
+                        # User input takes priority: yield the chain so the
+                        # finally-block drain processes the queued message.
+                        # Pending tool results stay in history and are
+                        # consumed by that message's turn — nothing orphans.
+                        if not qp.processing_queue.empty():
+                            logger.info(
+                                "Hub continue: user message arrived, "
+                                "yielding chain to queue drain"
+                            )
+                            break
+                        if time.monotonic() > checkpoint_at:
+                            elapsed = int(time.monotonic() - chain_start)
                             logger.warning(
-                                "Hub continue: exceeded 300s deadline, "
-                                "forcing turn completion"
+                                f"Hub continue: chain still working after "
+                                f"{elapsed}s ({turn_count} turns) — not "
+                                f"killing; ESC or new input interrupts"
+                            )
+                            checkpoint_at = time.monotonic() + 300
+                        if turn_count >= MAX_CONTINUATION_TURNS:
+                            # No-progress spin backstop. A healthy chain
+                            # completes or yields long before this; hitting
+                            # it means turn_completed never flipped, so stop
+                            # rather than loop forever.
+                            logger.error(
+                                f"Hub continue: hit MAX_CONTINUATION_TURNS "
+                                f"({MAX_CONTINUATION_TURNS}) without completing "
+                                f"— stopping runaway chain"
                             )
                             qp.turn_completed = True
                             break
                         turn_count += 1
-                        logger.info(
+                        # DEBUG, not INFO: this fires every continuation turn.
+                        # At INFO it was 98.8% of a 4.3GB/day log (2026-07-03).
+                        # Progress is surfaced by the 5-min checkpoint WARNING.
+                        logger.debug(
                             f"Hub continue: tool results pending, continuing (turn {turn_count})"
                         )
                         try:
@@ -411,15 +462,33 @@ class MessageHandler:
 
                 async def _retry_continue():
                     try:
-                        retry_deadline = time.monotonic() + 300  # 5min max wait
+                        # Wait for the active chain to finish — do NOT cancel
+                        # it. Setting cancel_processing here aborted healthy
+                        # long-running chains 5min after any hub message
+                        # arrived (second cause of the "agent stops
+                        # mid-tool-call" bug). A busy session is working, not
+                        # stuck; if it truly never finishes, give up on the
+                        # RETRY only — the triggering message is already in
+                        # conversation history and the next turn will see it.
+                        retry_start = time.monotonic()
+                        checkpoint_at = retry_start + 300
+                        give_up_at = retry_start + 3600  # drop retry, not session
                         while coord.is_processing:
-                            if time.monotonic() > retry_deadline:
+                            now = time.monotonic()
+                            if now > give_up_at:
                                 logger.warning(
-                                    "TRIGGER_LLM_CONTINUE: processing stuck for >300s, "
-                                    "cancelling stale request"
+                                    "TRIGGER_LLM_CONTINUE: processing busy for "
+                                    ">1h, dropping retry (message remains in "
+                                    "history for the next turn)"
                                 )
-                                coord.cancel_processing = True
-                                break
+                                return
+                            if now > checkpoint_at:
+                                logger.info(
+                                    "TRIGGER_LLM_CONTINUE: still waiting for "
+                                    "active chain to finish "
+                                    f"({int(now - retry_start)}s)"
+                                )
+                                checkpoint_at = now + 300
                             await asyncio.sleep(1)
                         if coord.cancel_processing:
                             logger.info(

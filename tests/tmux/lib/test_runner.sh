@@ -237,6 +237,35 @@ def _assert_not_contains(pattern: str, description: str = "") -> None:
     print(_tail(LAST_OUTPUT))
 
 
+def _wait_for(
+    pattern: str, timeout: float, interval: float, description: str = ""
+) -> None:
+    """Poll the pane until *pattern* appears, then leave it in LAST_OUTPUT.
+
+    Eliminates fixed-sleep races: an assert_contains after this sees the frame
+    where the content actually rendered, not a snapshot taken too early.
+    """
+    global LAST_OUTPUT, FAILURES
+    label = description or f"appeared: {pattern}"
+    if not STARTED:
+        FAILURES += 1
+        print(f"[FAIL] {label}: app not started")
+        return
+    deadline = time.time() + timeout
+    while True:
+        result = _tmux("capture-pane", "-t", SESSION_NAME, "-p", check=False)
+        LAST_OUTPUT = result.stdout or ""
+        if re.search(pattern, LAST_OUTPUT, flags=re.IGNORECASE | re.MULTILINE):
+            print(f"[PASS] {label}")
+            return
+        if time.time() >= deadline:
+            FAILURES += 1
+            print(f"[FAIL] {label}: '{pattern}' not seen within {timeout}s")
+            print(_tail(LAST_OUTPUT))
+            return
+        time.sleep(interval)
+
+
 def _type_text(text: str, delay: float) -> None:
     for char in text:
         _send_literal(char)
@@ -273,6 +302,13 @@ def _execute_step(step: dict[str, Any]) -> None:
         time.sleep(float(step.get("seconds", 1)))
     elif action == "capture":
         _capture(step)
+    elif action == "wait_for":
+        _wait_for(
+            str(step.get("pattern", "")),
+            float(step.get("timeout", 5)),
+            float(step.get("interval", 0.25)),
+            str(step.get("description") or step.get("name") or ""),
+        )
     elif action == "assert_contains":
         _assert_contains(
             str(step.get("pattern", "")),

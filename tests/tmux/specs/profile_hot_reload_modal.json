@@ -1,0 +1,54 @@
+{
+  "name": "profile-hot-reload-modal",
+  "description": "Verify profile hot-reload in modal: editing active profile model should update daemon via state_service with reload_profile=True",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Capture initial model widget" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Model:|model", "description": "Model widget should be visible on status bar" },
+
+    { "action": "section", "title": "Step 2: Open profile modal" },
+    { "action": "slash_command", "command": "profile" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "LLM Profiles|Profile|Profiles", "description": "Profile modal should open" },
+
+    { "action": "section", "title": "Step 3: Select first profile and press 'e' to edit" },
+    { "action": "send_keys", "keys": "e" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Edit Profile|Model", "description": "Edit profile form should open" },
+
+    { "action": "section", "title": "Step 4: Navigate to model field and change it" },
+    { "action": "send_keys", "keys": "Tab Tab Tab" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "ctrl+a" },
+    { "action": "sleep", "seconds": 0.2 },
+    { "action": "type", "text": "test-model-v2" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 5: Submit form" },
+    { "action": "send_keys", "keys": "Tab" },
+    { "action": "sleep", "seconds": 0.3 },
+    { "action": "send_keys", "keys": "Return" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "reloaded|changes applied|Updated profile", "description": "Should show reload confirmation message" },
+
+    { "action": "section", "title": "Step 6: Verify modal closed and profile list reopens" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Profile|LLM", "description": "Should return to profile list" }
+  ]
+}

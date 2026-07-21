@@ -335,7 +335,7 @@ Examples:
   kollab --system-prompt my-prompt.md       # Use custom system prompt
   kollab --agent lint-editor               # Use specific agent
   kollab -a lint-editor                    # Short form for agent
-  kollab --profile claude                  # Use specific LLM profile
+  kollab --profile my-profile              # Use a configured LLM profile
   kollab -a myagent -s coding -s review    # Agent with multiple skills
   kollab --agent myagent --skill coding    # Agent with skill (long form)
   kollab --agent coder --as lapis          # Run coder bundle under hub identity 'lapis'
@@ -422,7 +422,7 @@ Telegram bridge setup (run inside interactive mode):
         type=str,
         default=None,
         metavar="PROFILE",
-        help="Use a specific LLM profile (e.g., --profile claude, --profile openai)",
+        help="Use a configured LLM profile (created via /setup or /profile)",
     )
 
     parser.add_argument(

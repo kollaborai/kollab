@@ -1,0 +1,42 @@
+{
+  "name": "space-shooter-playable",
+  "description": "Verify /space launches the playable shooter, shows HUD, responds to input, and exits cleanly",
+  "config": {
+    "command": ".venv/bin/python main.py",
+    "app_init_sleep": 10,
+    "term_width": 100,
+    "term_height": 35,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: /space launches the game with HUD" },
+    { "action": "slash_command", "command": "space" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "SPACE SQUADRON", "description": "Game title visible" },
+    { "action": "assert_contains", "pattern": "SCORE: ", "description": "Score HUD visible" },
+    { "action": "assert_contains", "pattern": "LIVES", "description": "Lives HUD visible" },
+    { "action": "assert_contains", "pattern": "WAVE", "description": "Wave HUD visible" },
+    { "action": "assert_contains", "pattern": "SPACE FIRE", "description": "Control hints visible" },
+    { "action": "assert_contains", "pattern": "WPN SINGLE", "description": "Weapon HUD visible" },
+
+    { "action": "section", "title": "Test 2: game accepts movement and fire input" },
+    { "action": "send_keys", "keys": "Left" },
+    { "action": "send_keys", "keys": "Left" },
+    { "action": "send_keys", "keys": "Left" },
+    { "action": "send_keys", "keys": "Space" },
+    { "action": "send_keys", "keys": "Space" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "SCORE: ", "description": "Game still running after input" },
+
+    { "action": "section", "title": "Test 3: Q exits back to the chat UI" },
+    { "action": "send_keys", "keys": "q" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "SPACE SQUADRON", "description": "Game screen closed" }
+  ]
+}

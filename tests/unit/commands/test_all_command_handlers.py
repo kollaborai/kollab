@@ -615,6 +615,53 @@ class TestLoginCommandHandler(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# SetupCommandHandler (/setup)
+# ---------------------------------------------------------------------------
+
+
+class TestSetupCommandHandler(unittest.TestCase):
+    def _make_handler(self, extra_services=None):
+        from kollabor.commands.system_commands.handlers.setup import (
+            SetupCommandHandler,
+        )
+
+        eb = _make_event_bus(extra_services)
+        return SetupCommandHandler(
+            command_registry=MagicMock(),
+            event_bus=eb,
+        )
+
+    def test_setup_registers_command(self):
+        registry = MagicMock()
+        eb = _make_event_bus()
+        from kollabor.commands.system_commands.handlers.setup import (
+            SetupCommandHandler,
+        )
+
+        handler = SetupCommandHandler(command_registry=registry, event_bus=eb)
+        handler.register_commands()
+
+        registry.register_command.assert_called_once()
+        cmd = registry.register_command.call_args[0][0]
+        assert cmd.name == "setup"
+        assert "onboard" in cmd.aliases and "wizard" in cmd.aliases
+
+    def test_setup_returns_result_when_wizard_exits_unsaved(self):
+        # Inject a fake AltView stack manager whose push completes without
+        # the wizard saving -> handler should return a CommandResult, not None.
+        stack_mgr = SimpleNamespace(push=AsyncMock(return_value=True))
+        handler = self._make_handler(
+            extra_services={"altview_stack_manager": stack_mgr}
+        )
+        result = _safe_run(handler.handle_setup(_make_slash_command()))
+        _assert_result(result)
+        from kollabor_events.models import CommandResult
+
+        assert isinstance(result, CommandResult)
+        stack_mgr.push.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # DirectoryCommandHandler (/cd)
 # ---------------------------------------------------------------------------
 

@@ -7,6 +7,7 @@ forget their active tasks.
 
 Lifecycle:
   assign -> active -> (checkpoint)* -> complete/fail -> QA review -> closed
+  assign -> standby -> active -> (checkpoint)* -> ... (standby = no cron)
 """
 
 import json
@@ -26,7 +27,7 @@ class TaskCard:
     """A task assignment that survives context compaction."""
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    status: str = "active"  # active, paused, done, failed, qa_review, closed
+    status: str = "active"  # active, standby, paused, done, failed, qa_review, closed
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -42,6 +43,7 @@ class TaskCard:
     # Auto-cron (task reminder)
     cron_interval: float = 300  # remind every 5 min by default
     cron_active: bool = True  # auto-enabled on assignment
+    cron_ttl_seconds: float = 7200  # auto-silence cron after 2h of no updates
 
     # Progress
     checkpoints: List[Dict] = field(default_factory=list)
@@ -102,6 +104,7 @@ class TaskCard:
             "timeout_seconds": self.timeout_seconds,
             "cron_interval": self.cron_interval,
             "cron_active": self.cron_active,
+            "cron_ttl_seconds": self.cron_ttl_seconds,
             "checkpoints": self.checkpoints,
             "result": self.result,
             "error": self.error,
@@ -160,6 +163,17 @@ class TaskLedger:
 
     def _save(self, card: TaskCard) -> None:
         card.updated_at = time.time()
+        self._write_card(card)
+
+    def _save_preserve(self, card: TaskCard) -> None:
+        """Save card without updating updated_at.
+
+        Used for internal state changes (e.g. cron silencing) that
+        should not reset the TTL timer.
+        """
+        self._write_card(card)
+
+    def _write_card(self, card: TaskCard) -> None:
         path = self._task_path(card.id)
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w") as f:
@@ -189,6 +203,7 @@ class TaskLedger:
         priority: int = 5,
         timeout: float = 0,
         cron_interval: float = 300,
+        status: str = "active",
     ) -> TaskCard:
         card = TaskCard(
             assigner=assigner,
@@ -199,6 +214,8 @@ class TaskLedger:
             priority=priority,
             timeout_seconds=timeout,
             cron_interval=cron_interval,
+            status=status,
+            cron_active=(status != "standby"),
         )
         self._save(card)
         logger.info(
@@ -300,7 +317,7 @@ class TaskLedger:
             if (
                 card
                 and card.assignee == identity
-                and card.status in ("active", "qa_review")
+                and card.status in ("active", "standby", "qa_review")
             ):
                 result.append(card)
         return sorted(result, key=lambda c: c.priority)
@@ -389,12 +406,31 @@ class TaskLedger:
         return True
 
     def get_cron_due(self) -> List[TaskCard]:
-        """Get tasks whose cron reminder is due."""
+        """Get tasks whose cron reminder is due.
+
+        Excludes:
+        - Tasks with status != "active" (standby, qa_review, closed, etc.)
+        - Tasks with cron_active=False
+        - Tasks that have exceeded their cron_ttl_seconds with no updates
+          (auto-silences stale tasks to prevent infinite reactivation)
+        """
         now = time.time()
         due = []
         for card in self.get_all(status="active"):
             if not card.cron_active:
                 continue
+
+            # TTL auto-expire: if no update in cron_ttl_seconds, silence cron
+            ttl = card.cron_ttl_seconds if card.cron_ttl_seconds > 0 else 0
+            if ttl > 0 and (now - card.updated_at) > ttl:
+                logger.info(
+                    f"Task {card.id} cron auto-expired "
+                    f"(no update in {int(ttl / 3600)}h)"
+                )
+                card.cron_active = False
+                self._save_preserve(card)
+                continue
+
             last_update = card.updated_at
             if now - last_update >= card.cron_interval:
                 due.append(card)

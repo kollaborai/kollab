@@ -1,10 +1,11 @@
 """Tests for QueueProcessor."""
 
 import asyncio
+import time
 import unittest
 from dataclasses import dataclass, field
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor_agent.queue_processor import (
     QueueProcessor,
@@ -160,6 +161,49 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(self.queue_metrics["block_count"], 1)
         self.assertEqual(self.queue_metrics["block_timeout_count"], 1)
         self.assertEqual(self.processor.dropped_messages, 1)
+
+    def test_loop2_continuation_survives_past_300s(self):
+        """LOOP 2 must not force-complete a working chain on wall-clock.
+
+        Regression: process_queue's LOOP 2 force-set turn_completed=True
+        once the continuation chain's cumulative wall-clock passed 300s,
+        orphaning the last turn's tool results and leaving the session
+        silent (koordinator 2026-07-03 14:24, bismuth 15:15).
+        """
+        task_manager = MagicMock()
+        process_batch_fn = AsyncMock()
+
+        offset = {"v": 0.0}
+        calls = {"n": 0}
+
+        async def continue_fn():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Simulate the first continuation turn taking >300s.
+                offset["v"] += 400.0
+            if calls["n"] >= 2:
+                self.processor.turn_completed = True  # natural completion
+
+        self.processor.turn_completed = False
+        real_mono = time.monotonic
+
+        with patch(
+            "kollabor_agent.queue_processor.time.monotonic",
+            side_effect=lambda: real_mono() + offset["v"],
+        ):
+            self.loop.run_until_complete(
+                self.processor.process_queue(
+                    task_manager, process_batch_fn, continue_fn
+                )
+            )
+
+        self.assertEqual(
+            calls["n"],
+            2,
+            "LOOP 2 must continue past 300s until the model completes the "
+            "turn (old code force-completed after 1 call)",
+        )
+        self.assertTrue(self.processor.turn_completed)
 
     def test_process_queue_empty(self):
         """Test processing empty queue returns immediately."""

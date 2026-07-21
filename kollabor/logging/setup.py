@@ -19,6 +19,37 @@ from kollabor_config.config_utils import get_logs_dir
 # WARNING so application logs stay readable; app loggers are unaffected.
 _NOISY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3")
 
+# Disk safety: the file log MUST have a hard size ceiling, not just daily
+# rotation. Daily rotation is useless against a runaway that writes 4GB in
+# one day (observed 2026-07-03). RotatingFileHandler caps total on-disk log
+# at max_bytes * (backup_count + 1) — e.g. 200MB * 4 = 800MB worst case,
+# regardless of write rate. This is the single guarantee that lets a kollab
+# agent run for weeks without filling the disk.
+DEFAULT_LOG_MAX_BYTES = 200 * 1024 * 1024  # 200 MB per file
+DEFAULT_LOG_BACKUP_COUNT = 3  # keep 3 rotated files (+ the live one)
+
+
+def _build_rotating_handler(
+    log_path: Path,
+    max_bytes: int = DEFAULT_LOG_MAX_BYTES,
+    backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
+) -> "_logging.handlers.RotatingFileHandler":
+    """Build a size-capped rotating file handler with a hard disk ceiling.
+
+    Total on-disk log is bounded by ``max_bytes * (backup_count + 1)``. Used
+    by both bootstrap and config-driven setup so the cap can never be bypassed
+    by one path forgetting it.
+    """
+    handler = _logging.handlers.RotatingFileHandler(
+        filename=str(log_path),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    # Preserve the thread-safety override the previous handler used.
+    handler.lock = threading.RLock()  # type: ignore[assignment]
+    return handler
+
 
 class CompactFormatter(_logging.Formatter):
     """Custom formatter that compacts level names and includes file location."""
@@ -52,16 +83,8 @@ class LoggingSetup:
         # Setup with hardcoded defaults that match current behavior
         log_file = log_dir / "kollab.log"
 
-        handler = _logging.handlers.TimedRotatingFileHandler(
-            filename=str(log_file),
-            when="D",  # Daily rotation
-            interval=1,
-            backupCount=1,
-            encoding="utf-8",
-        )
-
-        # Add thread safety
-        handler.lock = threading.RLock()  # type: ignore[assignment]
+        # Size-capped rotation (hard disk ceiling). See _build_rotating_handler.
+        handler = _build_rotating_handler(log_file)
 
         # Use compact formatter
         formatter = CompactFormatter(
@@ -102,6 +125,10 @@ class LoggingSetup:
         log_file = logging_config.get("file") or str(default_log_path)
         format_type = logging_config.get("format_type", "compact")
         custom_format = logging_config.get("format", None)
+        max_bytes = int(logging_config.get("max_bytes", DEFAULT_LOG_MAX_BYTES))
+        backup_count = int(
+            logging_config.get("backup_count", DEFAULT_LOG_BACKUP_COUNT)
+        )
 
         # Convert string level to logging constant
         numeric_level = getattr(_logging, level, _logging.INFO)
@@ -110,17 +137,9 @@ class LoggingSetup:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create new handler
-        handler = _logging.handlers.TimedRotatingFileHandler(
-            filename=str(log_path),
-            when="D",
-            interval=1,
-            backupCount=1,
-            encoding="utf-8",
-        )
-
-        # Add thread safety
-        handler.lock = threading.RLock()  # type: ignore[assignment]
+        # Size-capped rotation (hard disk ceiling), tunable via config keys
+        # logging.max_bytes / logging.backup_count.
+        handler = _build_rotating_handler(log_path, max_bytes, backup_count)
 
         # Choose formatter based on config
         if format_type == "compact":

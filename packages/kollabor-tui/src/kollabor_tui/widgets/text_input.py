@@ -9,10 +9,10 @@ from .base_widget import BaseWidget
 
 
 class TextInputWidget(BaseWidget):
-    """Interactive text input widget with cursor ▌.
+    """Interactive text input widget with block cursor.
 
-    Displays as [text▌] with blinking cursor and accepts character input.
-    Uses design system for styling.
+    Displays as [text] with a block cursor (inverse video) at the cursor
+    position and accepts character input. Uses design system for styling.
     """
 
     def __init__(self, config: dict, config_path: str, config_service=None):
@@ -47,11 +47,11 @@ class TextInputWidget(BaseWidget):
         else:
             display_text = ""
 
-        # Add cursor when focused
+        # Apply block cursor when focused
         if self.focused and self._show_cursor:
             cursor_pos = min(self.cursor_position, len(display_text))
-            display_with_cursor = (
-                display_text[:cursor_pos] + "▌" + display_text[cursor_pos:]
+            display_with_cursor = self._apply_block_cursor(
+                display_text, cursor_pos
             )
         else:
             display_with_cursor = display_text
@@ -82,8 +82,8 @@ class TextInputWidget(BaseWidget):
         label = self.get_label()
         placeholder = self.config.get("placeholder", "")
 
-        # Cursor icon for tag
-        cursor_icon = " ▌ " if self.focused else "   "
+        # Cursor icon for tag (block cursor indicator)
+        cursor_icon = " █ " if self.focused else "   "
 
         # Colors based on focus state
         if self.focused:
@@ -97,18 +97,18 @@ class TextInputWidget(BaseWidget):
             content_fg = T().text_dim
             tag_fg = T().text_dim
 
-        # Display text with cursor
+        # Display text with block cursor
         if text:
             display = text
             if self.focused and self._show_cursor:
                 cursor_pos = min(self.cursor_position, len(display))
-                display = text[:cursor_pos] + "▌" + text[cursor_pos:]
+                display = self._apply_block_cursor(text, cursor_pos)
         elif placeholder and not self.focused:
             # Show placeholder in dim when empty and unfocused
             display = f"{S.DIM}{placeholder}{S.RESET_DIM}"
         else:
-            # Empty - show cursor if focused
-            display = "▌" if (self.focused and self._show_cursor) else ""
+            # Empty - show block cursor if focused
+            display = "\033[7m \033[0m" if (self.focused and self._show_cursor) else ""
 
         rendered = TagBox.render(
             lines=[f" {label}: {display}"],
@@ -123,6 +123,39 @@ class TextInputWidget(BaseWidget):
             position=position,
         )
         return [rendered]
+
+    @staticmethod
+    def _apply_block_cursor(text: str, cursor_pos: int) -> str:
+        """Apply a block cursor (inverse video) at the given position.
+
+        Instead of inserting a visible character (like ▌) into the text,
+        this highlights the character AT the cursor position using ANSI
+        reverse video (\033[7m). When the cursor is at the end of the
+        text (no character to highlight), a space is highlighted instead.
+
+        This ensures the visual cursor position matches the actual text
+        insertion point — no character shifting occurs.
+
+        Args:
+            text: The display text (without any cursor marker).
+            cursor_pos: Character index where the cursor should appear.
+
+        Returns:
+            Text with ANSI inverse-video block cursor applied.
+        """
+        if not text:
+            # Empty text — show a block cursor space
+            return "\033[7m \033[0m"
+
+        pos = min(cursor_pos, len(text))
+
+        if pos >= len(text):
+            # Cursor at end — append a highlighted space
+            return text + "\033[7m \033[0m"
+        else:
+            # Highlight the character at the cursor position
+            char = text[pos]
+            return text[:pos] + f"\033[7m{char}\033[0m" + text[pos + 1 :]
 
     def handle_input(self, key_press: KeyPress) -> bool:
         """Handle text input - character insertion and navigation.

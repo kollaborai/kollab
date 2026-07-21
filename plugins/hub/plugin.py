@@ -4788,15 +4788,19 @@ class HubPlugin(BasePlugin):
                 logger.debug(f"Vault autosave error: {e}")
 
     async def _presence_sweep_loop(self) -> None:
-        """Coordinator-only: periodically clean dead presence files.
+        """Coordinator-only: periodic background cleanup.
 
-        Scans ALL project hub directories (not just the current project)
-        for presence files whose PID is no longer running. This prevents
-        ghost agents from accumulating when processes crash without
-        cleanup. Only runs on the coordinator to avoid duplicate sweeps.
+        Runs every 5 minutes on the coordinator only. Three jobs:
+        1. Remove dead presence files (PID no longer running).
+        2. Trigger pending_replies() auto-expiry (entries >24h old).
+        3. Sweep offline inbox dirs whose session has no living
+           presence file and whose messages are older than INBOX_TTL_SECS.
+
+        Scans ALL project hub directories, not just the current project.
         """
         from .presence import get_hub_dir
         from kollabor_config.config_utils import get_config_directory
+        import shutil
 
         while True:
             try:
@@ -4856,6 +4860,73 @@ class HubPlugin(BasePlugin):
                 if removed:
                     logger.info(
                         f"presence sweep: removed {removed} dead presence files"
+                    )
+
+                # --- Step 2: Expire stale pending replies (>24h) ---
+                # pending_replies() auto-expires entries older than
+                # PENDING_REPLY_TTL on read, so calling it here triggers
+                # cleanup even when no agent is actively reading.
+                if self._task_ledger:
+                    try:
+                        self._task_ledger.pending_replies()
+                    except Exception as e:
+                        logger.debug(f"pending_replies sweep error: {e}")
+
+                # --- Step 3: Sweep orphaned offline inbox dirs ---
+                # Remove inbox dirs whose messages are all older than
+                # INBOX_TTL_SECS and whose session has no living presence
+                # file. This reclaims disk from crashed/offline agents
+                # that will never reconnect to consume their inbox.
+                from .messenger import INBOX_TTL_SECS
+
+                now = time.time()
+                inboxes_removed = 0
+
+                if projects_root.exists():
+                    for messages_root in projects_root.glob(
+                        "*/hub/messages"
+                    ):
+                        if not messages_root.is_dir():
+                            continue
+                        for inbox_dir in messages_root.iterdir():
+                            if not inbox_dir.is_dir():
+                                continue
+                            try:
+                                files = list(inbox_dir.glob("*.json"))
+                                if not files:
+                                    # Empty dir — remove if no presence
+                                    inbox_dir.rmdir()
+                                    continue
+
+                                # Check if all messages are stale
+                                all_stale = True
+                                for mf in files:
+                                    try:
+                                        with open(mf) as f:
+                                            data = json.load(f)
+                                        ts = float(
+                                            data.get("timestamp", 0) or 0
+                                        )
+                                        if ts and (
+                                            now - ts
+                                        ) < INBOX_TTL_SECS:
+                                            all_stale = False
+                                            break
+                                    except Exception:
+                                        pass  # keep dirs with unreadable files
+
+                                if all_stale:
+                                    shutil.rmtree(inbox_dir)
+                                    inboxes_removed += 1
+                            except Exception as e:
+                                logger.debug(
+                                    f"inbox sweep: error on {inbox_dir}: {e}"
+                                )
+
+                if inboxes_removed:
+                    logger.info(
+                        f"presence sweep: removed {inboxes_removed} "
+                        f"stale offline inbox dirs"
                     )
 
             except asyncio.CancelledError:

@@ -105,8 +105,8 @@ class ModelCommandHandler(BaseCommandHandler):
             args = command.args or []
 
             if not args:
-                # Show model selection modal
-                return await self._show_models_modal()
+                # Open the fullscreen model picker for the active provider
+                return await self._show_model_picker()
             elif args[0] in ("list", "ls"):
                 if len(args) >= 2 and args[1].lower() in ("all", "*"):
                     active_profile = profile_manager.get_active_profile()
@@ -172,9 +172,7 @@ class ModelCommandHandler(BaseCommandHandler):
                     ),
                     "sections": [
                         {
-                            "title": (
-                                f"{title} (active: {active_model or 'none'})"
-                            ),
+                            "title": (f"{title} (active: {active_model or 'none'})"),
                             "commands": commands,
                         }
                     ],
@@ -276,11 +274,15 @@ class ModelCommandHandler(BaseCommandHandler):
                     else None
                 )
                 tools_note = (
-                    "tools" if supports_tools else "no tools"
-                    if supports_tools is not None
-                    else "profile"
+                    "tools"
+                    if supports_tools
+                    else "no tools" if supports_tools is not None else "profile"
                 )
-                add_model(model, f"current • via {profile.name} • {tools_note}", supports_tools)
+                add_model(
+                    model,
+                    f"current • via {profile.name} • {tools_note}",
+                    supports_tools,
+                )
 
         add_model(
             self.OPENROUTER_DEFAULT_MODEL,
@@ -332,8 +334,7 @@ class ModelCommandHandler(BaseCommandHandler):
             context_length = model.get("context_length")
             supported_parameters = model.get("supported_parameters") or []
             supports_tools = (
-                "tools" in supported_parameters
-                or "tool_choice" in supported_parameters
+                "tools" in supported_parameters or "tool_choice" in supported_parameters
             )
             token_note = (
                 f"{context_length:,} ctx"
@@ -401,6 +402,100 @@ class ModelCommandHandler(BaseCommandHandler):
             ),
             display_type="modal",
         )
+
+    @staticmethod
+    def _provider_label(provider: str) -> str:
+        """Human-readable provider name for the picker title."""
+        return {
+            "openai_responses": "OpenAI (ChatGPT)",
+            "openai": "OpenAI",
+            "anthropic": "Anthropic",
+            "openrouter": "OpenRouter",
+            "gemini": "Gemini",
+            "azure": "Azure OpenAI",
+            "custom": "Custom",
+        }.get((provider or "").lower(), provider or "provider")
+
+    def _build_known_models(self, provider: str, current_model: str) -> list:
+        """Models we already know for a provider: current + same-provider profiles."""
+        known: list = []
+        if current_model:
+            known.append({"id": current_model, "note": "current"})
+        pm = self.profile_manager
+        if pm:
+            for p in pm.list_profiles():
+                if (p.get_provider() or "") == provider and p.get_model():
+                    known.append({"id": p.get_model(), "note": f"via {p.name}"})
+        return known
+
+    def _get_altview_stack_manager(self):
+        """Fetch (or lazily create) the AltView stack manager, or None."""
+        stack_mgr = self.event_bus.get_service("altview_stack_manager")
+        if stack_mgr:
+            return stack_mgr
+        try:
+            from kollabor_tui.altview.stack_manager import AltViewStackManager
+
+            renderer = self.event_bus.get_service("renderer")
+            stack_mgr = AltViewStackManager(self.event_bus, renderer)
+            self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            return stack_mgr
+        except Exception as e:
+            self.logger.error("Failed to create AltView stack manager: %s", e)
+            return None
+
+    async def _show_model_picker(self) -> CommandResult:
+        """Open the fullscreen model picker for the active provider.
+
+        Shows the current model, same-provider saved-profile models, and the
+        provider's live catalog (fetched async). Selecting or typing a model
+        switches the active profile to it.
+        """
+        profile_manager = self.profile_manager
+        if not profile_manager:
+            return CommandResult(
+                success=False,
+                message="Profile manager not available",
+                display_type="error",
+            )
+
+        active = profile_manager.get_active_profile()
+        provider = (active.get_provider() if active else "") or ""
+        current = (active.get_model() if active else "") or ""
+
+        known = self._build_known_models(provider, current)
+
+        stack_mgr = self._get_altview_stack_manager()
+        if not stack_mgr:
+            # Fall back to the legacy modal if the AltView stack is unavailable
+            return await self._show_models_modal()
+
+        from plugins.altview.model_picker_altview import ModelPickerAltView
+
+        picker = ModelPickerAltView()
+        picker.set_context(active, known, current, self._provider_label(provider))
+
+        # push() blocks until the user selects or cancels. reuse=False: the
+        # picker is one-shot -- run this fresh instance (we read its
+        # selected_model below), not a cached view from a prior /model.
+        await stack_mgr.push(picker, "model-picker", reuse=False)
+
+        selected = picker.selected_model
+        if not selected:
+            return CommandResult(
+                success=True,
+                message="model selection cancelled",
+                display_type="info",
+            )
+        if selected == current:
+            return CommandResult(
+                success=True,
+                message=f"already using model: {selected}",
+                display_type="info",
+            )
+
+        # Apply the chosen model to the active profile (persisted + reinit)
+        return await self._set_active_profile_model(selected)
 
     async def _switch_to_model(self, model_name: str) -> CommandResult:
         """Switch to profile with specified model.
@@ -499,7 +594,25 @@ class ModelCommandHandler(BaseCommandHandler):
             )
 
         profile = profile_manager.get_active_profile()
-        if llm_service and hasattr(llm_service, "api_service"):
+
+        # In attach mode the daemon owns the request provider. The model edit
+        # above happens in the client profile manager, so route activation
+        # through state_service with an explicit registry reload; otherwise
+        # the daemon keeps the old model until restart.
+        state_service = None
+        if self.event_bus and hasattr(self.event_bus, "get_service"):
+            state_service = self.event_bus.get_service("state_service")
+        synced = False
+        if state_service and hasattr(state_service, "set_active_profile"):
+            try:
+                await state_service.set_active_profile(
+                    profile.name, reload_profile=True
+                )
+                synced = True
+            except Exception as exc:
+                self.logger.warning("state-service model activation failed: %s", exc)
+
+        if not synced and llm_service and hasattr(llm_service, "api_service"):
             await llm_service.api_service.reinitialize_provider(profile)
             await llm_service._load_native_tools()
 

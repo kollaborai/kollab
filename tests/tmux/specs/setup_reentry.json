@@ -1,0 +1,44 @@
+{
+  "name": "setup-reentry",
+  "description": "Regression for the /setup re-entry bug: open the wizard, cancel with Esc, then open it again. Before the fix the second open re-entered a stale cached session and printed 'setup did not complete'; now it must re-open the wizard and cancel cleanly again. Isolated HOME + hub disabled for deterministic readiness.",
+  "config": {
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
+    "app_init_sleep": 11,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "label": "first open /setup" },
+    { "action": "type", "text": "/setup" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Provider Setup", "description": "wizard opens the first time" },
+
+    { "action": "section", "label": "cancel with Esc" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "setup cancelled", "description": "first cancel reports cancelled" },
+
+    { "action": "section", "label": "second open /setup (the regression)" },
+    { "action": "type", "text": "/setup" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Provider Setup", "description": "wizard RE-OPENS on second run" },
+    { "action": "assert_not_contains", "pattern": "did not complete", "description": "no stale 'did not complete' error" },
+
+    { "action": "section", "label": "cancel again -> still 'cancelled', not 'did not complete'" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "setup cancelled", "description": "second cancel also reports cancelled" },
+    { "action": "assert_not_contains", "pattern": "did not complete", "description": "second cancel is clean too" }
+  ]
+}

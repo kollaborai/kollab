@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-07-21
+
+### Added
+
+- Added the `/setup` onboarding wizard, with `/onboard` and `/wizard` aliases,
+  to guide new users through provider and profile configuration.
+- Added engineering-discipline guidance to the bundled agent base prompt.
+
+### Changed
+
+- Updated README, FAQ, and profile documentation to describe wizard-created
+  profiles and the current built-in profile behavior.
+
+## [0.5.20] - 2026-07-03
+
+### Added
+
+- Added remote hub endpoint hardening, trust/DNS documentation, and test
+  coverage for off-box hub message delivery.
+- Added a stability review audit covering startup, shutdown, plugin lifecycle,
+  event hooks, terminal cleanup, MCP policy, config reload, hub background work,
+  and subprocess cleanup.
+
+### Changed
+
+- Refined bundled agent operating guidance for code review, dirty worktrees,
+  tool workflow, resource use, final reminders, and session-log handling.
+- Timer-gated scratchpad injection to reduce repeated background context
+  overhead during long hub sessions.
+
+### Fixed
+
+- Fixed hub endpoint advertising so a failed remote listener is not published,
+  and co-located peers prefer the local socket path.
+- Fixed stale pending hub replies so they expire automatically and show age in
+  the hub display.
+- Fixed attach-mode session/status display so the status bar prefers the
+  daemon's real session instead of the local client shadow session.
+- Fixed `/compact` display and preview in attach mode so message and token
+  counts come from daemon-backed state instead of empty local history.
+
 ## [0.5.16] - 2026-06-21
 
 ### Added

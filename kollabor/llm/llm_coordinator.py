@@ -29,17 +29,17 @@ from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui import MessageDisplayService
 
-from .hook_system import LLMHookSystem
-from .message_handler import MessageHandler
-from .session_manager import SessionManager
-from .status_service import StatusService
-from .streaming_handler import StreamingHandler
 from .agent_hud import (
     AgentHudEntry,
     format_agent_hud,
     merge_agent_hud_with_user_message,
     normalize_hud_label,
 )
+from .hook_system import LLMHookSystem
+from .message_handler import MessageHandler
+from .session_manager import SessionManager
+from .status_service import StatusService
+from .streaming_handler import StreamingHandler
 
 logger = logging.getLogger(__name__)
 
@@ -154,9 +154,7 @@ class LLMService:
 
         tool = get_registry().get(tool_name)
         if tool is None:
-            logger.warning(
-                f"inject_tool_grant: unknown tool '{tool_name}', skipping"
-            )
+            logger.warning(f"inject_tool_grant: unknown tool '{tool_name}', skipping")
             return
 
         # Update the bundle scope to include the new tool
@@ -225,6 +223,7 @@ class LLMService:
         xml_tag = tool_name
         try:
             from kollabor_agent.tool_registry import get_registry
+
             tool = get_registry().get(tool_name)
             if tool:
                 xml_tag = tool.xml_tag_name
@@ -529,8 +528,37 @@ class LLMService:
         # Message handler (owns event/message handling methods)
         self._message_handler = MessageHandler(coordinator=self)
 
+        # Progress watchdog: recovers a session that goes silent while alive
+        # (wedged is_processing / orphaned queue). Started in initialize().
+        # Config-gated so it can be disabled if it ever misbehaves.
+        self._turn_watchdog = None
+        if self.config.get("kollabor.llm.watchdog_enabled", True):
+            from kollabor.llm.turn_watchdog import TurnWatchdog
+
+            self._turn_watchdog = TurnWatchdog(
+                queue_processor=self._queue_processor,
+                api_service=self.api_service,
+                message_handler=self._message_handler,
+                restart_queue=self._watchdog_restart_queue,
+                stuck_threshold_s=float(
+                    self.config.get("kollabor.llm.watchdog_stuck_threshold_s", 600)
+                ),
+                check_interval_s=float(
+                    self.config.get("kollabor.llm.watchdog_check_interval_s", 60)
+                ),
+            )
+
         # Status service (owns status line generation and queue metrics)
         self._status_service = StatusService(coordinator=self)
+
+    def _watchdog_restart_queue(self) -> None:
+        """Re-kick the queue drain on behalf of the watchdog.
+
+        Fire-and-forget: launches _process_queue as a background task and
+        returns None so the watchdog's heal step does not block on the whole
+        drain completing.
+        """
+        self.create_background_task(self._process_queue(), name="watchdog_requeue")
 
     def _init_hooks(self):
         """Create hooks for LLM service (delegated to MessageHandler)."""
@@ -713,6 +741,15 @@ class LLMService:
         if self.task_config.background_tasks.enable_monitoring:
             await self.start_task_monitor()
 
+        # Start the progress watchdog (recovers wedged/silent sessions).
+        if self._turn_watchdog is not None:
+            try:
+                self.create_background_task(
+                    self._turn_watchdog.run(), name="turn_watchdog"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to start turn watchdog: {e}")
+
         logger.info("Core LLM Service initialized and ready")
         return True
 
@@ -764,14 +801,22 @@ class LLMService:
             logger.warning(f"Provider initialization failed, using legacy system: {e}")
             self._current_provider = None
 
-    async def switch_profile(self, profile_name: str) -> bool:
+    async def switch_profile(self, profile_name: str, persist: bool = True) -> bool:
         """Switch to a different profile with thread-safe provider reinitialization.
 
         Wrapper pattern: Updates provider system transparently while maintaining
         backward compatibility with legacy HTTP system.
 
+        Also syncs ``profile_manager`` active state so the runtime provider,
+        the status bar, ``/model``, and ``/profile`` all agree. With
+        ``persist=True`` (default) the choice is written to config so it
+        survives restart and becomes the startup default; callers that only
+        want a session-scoped switch (e.g. ``/login`` when the user declines
+        making it the default) pass ``persist=False``.
+
         Args:
             profile_name: Name of the profile to switch to
+            persist: If True, persist as the active/default profile in config
 
         Returns:
             True if switch successful, False otherwise
@@ -833,20 +878,52 @@ class LLMService:
                             ]
                         )
 
-                # Update API service with new profile
-                self.api_service.update_from_profile(profile)
+                # Reinitialize the provider used by the request path.  The
+                # coordinator also keeps a provider reference for its wrapper
+                # integrations, but StreamingHandler calls
+                # ``api_service.call_llm``.  Updating only the coordinator
+                # reference leaves APICommunicationService holding the old
+                # provider (and, after a failed startup, its old
+                # ``_provider_error``), so the next turn can still report the
+                # previous profile's error.
+                provider_config = create_config_from_profile(profile.to_dict())
+                api_reinitialized = await self.api_service.reinitialize_provider(
+                    profile
+                )
+                if not api_reinitialized:
+                    logger.warning(
+                        "API service could not reinitialize for profile '%s'",
+                        profile_name,
+                    )
+                    return False
+
                 self.conversation_logger.set_provider(profile.provider)
 
-                # Reinitialize provider with new profile
-                provider_config = create_config_from_profile(profile.to_dict())
+                # Keep the coordinator's provider reference in sync with the
+                # API service. ProviderRegistry caches matching configurations,
+                # so this normally returns the same instance.
                 self._current_provider = await self._provider_registry.get_provider(
                     provider_config
                 )
 
+                # Keep profile_manager's active state (and optionally the
+                # persisted config) in sync with the runtime provider. Without
+                # this the provider switches but active_profile never updates --
+                # e.g. after `/login openai` the status bar and next launch
+                # would still show the old profile.
+                try:
+                    self.profile_manager.set_active_profile(
+                        profile_name, persist=persist
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not sync active profile '{profile_name}': {e}"
+                    )
+
                 logger.info(
                     f"Switched to profile '{profile_name}' "
                     f"(provider={self._current_provider.provider_name}, "
-                    f"model={self._current_provider.model})"
+                    f"model={self._current_provider.model}, persist={persist})"
                 )
                 return True
 
@@ -883,7 +960,15 @@ class LLMService:
         )
 
     async def _continue_conversation(self):
-        """Continue an ongoing conversation. Delegates to QueueProcessor."""
+        """Continue an ongoing conversation. Delegates to QueueProcessor.
+
+        Note: HUD injection here is gated on turn_completed because this
+        method is called from both process_queue (where turn_completed=True
+        means the previous turn finished and HUD should be shown) and
+        _hub_continue (where turn_completed should be False so HUD is NOT
+        injected mid-continuation). See FIX in message_handler.py
+        _hub_continue for the session-dying bug this coupling caused.
+        """
         if self._pending_agent_hud and getattr(
             self._queue_processor, "turn_completed", False
         ):
@@ -1193,9 +1278,7 @@ class LLMService:
         The cancel hook is still needed so ESC can forward the request to the
         daemon via RPC.
         """
-        cancel_hook = next(
-            (h for h in self.hooks if h.name == "cancel_request"), None
-        )
+        cancel_hook = next((h for h in self.hooks if h.name == "cancel_request"), None)
         if cancel_hook:
             await self.event_bus.register_hook(cancel_hook)
             logger.info("Registered cancel hook for attach-mode client")

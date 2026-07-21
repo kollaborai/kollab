@@ -5,12 +5,12 @@ in various formats (transcript, markdown, jsonl).
 """
 
 import logging
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from kollabor_events.models import CommandCategory, CommandDefinition, CommandMode
+from kollabor_tui.clipboard import copy_to_clipboard
 from kollabor_tui.visual_effects import AgnosterSegment
 
 logger = logging.getLogger(__name__)
@@ -226,9 +226,7 @@ class SaveConversationPlugin:
                     "state_service unavailable or failed; using llm_service "
                     "conversation_history fallback for /save"
                 )
-                formatted_content = self._format_conversation_fallback(
-                    save_format
-                )
+                formatted_content = self._format_conversation_fallback(save_format)
                 if formatted_content is None:
                     return "No conversation to save"
 
@@ -318,77 +316,17 @@ class SaveConversationPlugin:
     def _copy_to_clipboard(self, content: str) -> bool:
         """Copy content to system clipboard.
 
+        Delegates to the shared :func:`kollabor_tui.copy_to_clipboard`
+        helper so the copy logic lives in one place (also used by the
+        ``/login`` device-code view).
+
         Args:
             content: Content to copy.
 
         Returns:
             True if successful, False otherwise.
         """
-        try:
-            # Try pbcopy (macOS)
-            try:
-                process = subprocess.Popen(
-                    ["pbcopy"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                process.communicate(input=content.encode("utf-8"))
-                self.logger.info("Copied to clipboard using pbcopy")
-                return True
-            except FileNotFoundError:
-                pass
-
-            # Try xclip (Linux)
-            try:
-                process = subprocess.Popen(
-                    ["xclip", "-selection", "clipboard"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                process.communicate(input=content.encode("utf-8"))
-                self.logger.info("Copied to clipboard using xclip")
-                return True
-            except FileNotFoundError:
-                pass
-
-            # Try xsel (Linux alternative)
-            try:
-                process = subprocess.Popen(
-                    ["xsel", "--clipboard", "--input"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                process.communicate(input=content.encode("utf-8"))
-                self.logger.info("Copied to clipboard using xsel")
-                return True
-            except FileNotFoundError:
-                pass
-
-            # Try wl-copy (Wayland)
-            try:
-                process = subprocess.Popen(
-                    ["wl-copy"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                process.communicate(input=content.encode("utf-8"))
-                self.logger.info("Copied to clipboard using wl-copy")
-                return True
-            except FileNotFoundError:
-                pass
-
-            self.logger.warning(
-                "No clipboard utility found (pbcopy, xclip, xsel, wl-copy)"
-            )
-            return False
-
-        except Exception as e:
-            self.logger.error(f"Error copying to clipboard: {e}")
-            return False
+        return copy_to_clipboard(content)
 
     def _format_conversation_fallback(self, format_type: str) -> Optional[str]:
         """Format conversation directly from llm_service when state_service is unavailable.
@@ -398,9 +336,7 @@ class SaveConversationPlugin:
         or no llm_service available.
         """
         if not self.llm_service:
-            self.logger.warning(
-                "no llm_service available for fallback formatting"
-            )
+            self.logger.warning("no llm_service available for fallback formatting")
             return None
 
         history = getattr(self.llm_service, "conversation_history", None)
@@ -419,11 +355,13 @@ class SaveConversationPlugin:
                     timestamp = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
                 except Exception:
                     timestamp = ""
-            messages.append({
-                "role": role,
-                "content": content,
-                "timestamp": timestamp,
-            })
+            messages.append(
+                {
+                    "role": role,
+                    "content": content,
+                    "timestamp": timestamp,
+                }
+            )
 
         if not messages:
             return None
@@ -495,6 +433,7 @@ class SaveConversationPlugin:
 
     def _format_fallback_jsonl(self, messages: list) -> str:
         import json as _json
+
         lines = []
         for msg in messages:
             msg_dict = {
@@ -507,9 +446,8 @@ class SaveConversationPlugin:
 
     def _format_fallback_raw(self, messages: list) -> str:
         import json as _json
-        api_messages = [
-            {"role": m["role"], "content": m["content"]} for m in messages
-        ]
+
+        api_messages = [{"role": m["role"], "content": m["content"]} for m in messages]
         model = "unknown"
         temperature = 0.7
         try:
@@ -538,7 +476,6 @@ class SaveConversationPlugin:
             },
         }
         return _json.dumps(payload, indent=2, ensure_ascii=False)
-
 
     async def shutdown(self) -> None:
         """Shutdown the plugin and cleanup resources."""

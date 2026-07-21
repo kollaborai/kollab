@@ -56,6 +56,14 @@ class FullScreenRenderer:
         self._frame_buffer = []
         self._buffering_enabled = False
 
+        # Skip-if-unchanged: if a frame is byte-identical to the last one, write
+        # nothing. This stops timer-driven views (setup wizard, model picker at
+        # 12-15fps) from repainting while idle -- which is the flicker. A frame
+        # that *did* change is flushed in full (the buffer still starts with
+        # clear_screen's \033[2J), so a changed frame always repaints cleanly
+        # and can never leave stale rows behind -- no ghosting.
+        self._last_frame: str = ""
+
         logger.info("FullScreenRenderer initialized")
 
     def setup_terminal(self) -> bool:
@@ -109,6 +117,10 @@ class FullScreenRenderer:
                 sys.stdout.write(f"\033[{row+1};1H{' ' * self.terminal_width}")
             sys.stdout.write("\033[H")  # Return to home
             sys.stdout.flush()
+
+            # Screen is now blank -- force the next frame to paint in full
+            # (also covers session re-entry, which calls setup_terminal again).
+            self._last_frame = ""
 
             self.active = True
             logger.info(
@@ -172,24 +184,39 @@ class FullScreenRenderer:
     def begin_frame(self):
         """Begin a new frame with buffering enabled.
 
-        All writes will be buffered until end_frame() is called.
-        This eliminates flicker by making the entire frame update atomic.
+        All writes are buffered until end_frame(), which flushes the whole
+        frame as one write -- or skips it entirely if it is unchanged.
         """
         self._frame_buffer = []
         self._buffering_enabled = True
 
     def end_frame(self):
-        """End the current frame and flush all buffered writes.
+        """End the current frame and flush it, unless it is unchanged.
 
-        Writes the entire buffered frame as a single operation,
-        eliminating visible flickering.
+        The frame is written as a single operation only when it differs from
+        the previous frame. An identical frame writes nothing (no idle
+        flicker); a changed frame is written in full -- its buffer starts with
+        clear_screen's \\033[2J, so it always repaints cleanly (no ghosting).
         """
-        if self._buffering_enabled and self._frame_buffer:
-            # Write entire frame as single operation
-            sys.stdout.write("".join(self._frame_buffer))
-            sys.stdout.flush()
+        if not self._buffering_enabled:
+            return
+        try:
+            composed = "".join(self._frame_buffer)
+            if composed and composed != self._last_frame:
+                sys.stdout.write(composed)
+                sys.stdout.flush()
+                self._last_frame = composed
+        finally:
+            self._buffering_enabled = False
             self._frame_buffer = []
-        self._buffering_enabled = False
+
+    def invalidate_render_cache(self) -> None:
+        """Force the next frame to repaint in full.
+
+        Mirrors terminal_renderer.invalidate_render_cache(); call after a
+        resize or any out-of-band screen change.
+        """
+        self._last_frame = ""
 
     def _write(self, text: str):
         """Internal write method that respects buffering.
@@ -206,6 +233,9 @@ class FullScreenRenderer:
     def clear_screen(self):
         """Clear the entire screen."""
         self._write("\033[2J\033[H")
+        if not self._buffering_enabled:
+            # A standalone full clear blanks the screen -- force a full repaint.
+            self._last_frame = ""
 
     def clear_line(self, row: int):
         """Clear a specific line.

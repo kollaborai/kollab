@@ -670,9 +670,17 @@ class ModernMessageRenderer:
         output: list[str] = []
         width = max(1, nested_width - 6)
         for line in lines:
-            wrapped_lines = (
-                wrap_text(line, width, word_wrap=False) if wrap and line else [line]
-            )
+            # Always constrain lines to the available width so tool output
+            # never spills past the terminal column boundary. wrap=True uses
+            # word-wrap (break at word boundaries); wrap=False uses hard
+            # character truncation.
+            if line:
+                if wrap:
+                    wrapped_lines = wrap_text(line, width, word_wrap=True)
+                else:
+                    wrapped_lines = wrap_text(line, width, word_wrap=False)
+            else:
+                wrapped_lines = [line]
             for wrapped in wrapped_lines:
                 output.append("      " + solid_fg(wrapped, T().text_dim))
         return "\n".join(output)

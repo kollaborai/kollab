@@ -1,0 +1,37 @@
+{
+  "name": "model-picker",
+  "description": "Verify /model opens the fullscreen model picker for the active provider (SELECT MODEL alt-screen with a filter box + current model) and exits cleanly on Esc. Selection/switch behavior is unit-tested in tests/unit/test_model_picker_altview.py. Uses KOLLAB_HUB_DISABLED=1 for deterministic startup.",
+  "config": {
+    "command": "KOLLAB_HUB_DISABLED=1 python main.py",
+    "show_captures": false,
+    "app_init_sleep": 8,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2.0 },
+
+    { "action": "section", "title": "open /model picker" },
+    { "action": "send_keys", "keys": "/model" },
+    { "action": "sleep", "seconds": 1.2 },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 2.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "SELECT MODEL|filter:", "description": "fullscreen model picker opens" },
+    { "action": "assert_not_contains", "pattern": "provider not available|api_key", "description": "ran as a slash command, not sent to the LLM" },
+
+    { "action": "section", "title": "filter box accepts typing" },
+    { "action": "send_keys", "keys": "gpt" },
+    { "action": "sleep", "seconds": 0.6 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "filter: gpt|filter:", "description": "typed filter shown in the box" },
+
+    { "action": "section", "title": "exit picker" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "❯|>", "description": "normal prompt returns after exit" },
+    { "action": "assert_not_contains", "pattern": "SELECT MODEL", "description": "picker closed" }
+  ]
+}

@@ -42,41 +42,77 @@ async def handle_profile_modal_actions(
 
     logger.info(f"Profile modal action received: {action}")
 
+    # Close /profile first, then let the modal controller execute the normal
+    # /setup command so the guided wizard owns onboarding.
+    if action == "run_setup":
+        data["run_command"] = "/setup"
+        return data
+
     # Handle profile selection
     if action == "select_profile":
         profile_name = command.get("profile_name")
         if profile_name and handler.profile_manager:
-            if handler.profile_manager.set_active_profile(profile_name):
-                profile = handler.profile_manager.get_active_profile()
-                # Reinitialize the provider with new profile settings
-                if handler.llm_service and hasattr(handler.llm_service, "api_service"):
-                    handler.llm_service.create_background_task(
-                        handler.llm_service.api_service.reinitialize_provider(profile),
-                        name="reinitialize_provider",
+            # Route through state_service (attach OR local mode) for daemon-owned reload
+            state_service = None
+            if handler.event_bus and hasattr(handler.event_bus, "get_service"):
+                state_service = handler.event_bus.get_service("state_service")
+
+            if state_service is not None:
+                try:
+                    snapshot = await state_service.set_active_profile(
+                        profile_name, reload_profile=True
                     )
-                    # Reload native tools (profile may have different supports_tools setting)
-                    handler.llm_service.create_background_task(
-                        handler.llm_service._load_native_tools(),
-                        name="reload_native_tools",
-                    )
-                tools_mode = "enabled" if profile.get_supports_tools() else "disabled"
-                data["display_messages"] = [
-                    (
-                        "system",
+                    tools_mode = "enabled" if snapshot.supports_tools else "disabled"
+                    data["display_messages"] = [
                         (
-                            f"Switched to profile: {profile_name}\n"
-                            f"  Model: {profile.get_model()}\n"
-                            f"  Base URL: {profile.get_endpoint()}\n"
-                            f"  Provider: {profile.get_provider()}\n"
-                            f"  Tools: {tools_mode}"
+                            "system",
+                            (
+                                f"Switched to profile: {profile_name}\n"
+                                f"  Model: {snapshot.model}\n"
+                                f"  Base URL: {snapshot.endpoint}\n"
+                                f"  Provider: {snapshot.provider}\n"
+                                f"  Tools: {tools_mode}"
+                            ),
+                            {"display_type": "success"},
                         ),
-                        {"display_type": "success"},
-                    ),
-                ]
+                    ]
+                except ValueError:
+                    data["display_messages"] = [
+                        ("error", f"Profile not found: {profile_name}", {}),
+                    ]
             else:
-                data["display_messages"] = [
-                    ("error", f"Profile not found: {profile_name}", {}),
-                ]
+                # Fallback: local-mode shadow reinit (no state service available)
+                if handler.profile_manager.set_active_profile(profile_name):
+                    profile = handler.profile_manager.get_active_profile()
+                    # Reinitialize the provider with new profile settings
+                    if handler.llm_service and hasattr(handler.llm_service, "api_service"):
+                        handler.llm_service.create_background_task(
+                            handler.llm_service.api_service.reinitialize_provider(profile),
+                            name="reinitialize_provider",
+                        )
+                        # Reload native tools (profile may have different supports_tools setting)
+                        handler.llm_service.create_background_task(
+                            handler.llm_service._load_native_tools(),
+                            name="reload_native_tools",
+                        )
+                    tools_mode = "enabled" if profile.get_supports_tools() else "disabled"
+                    data["display_messages"] = [
+                        (
+                            "system",
+                            (
+                                f"Switched to profile: {profile_name}\n"
+                                f"  Model: {profile.get_model()}\n"
+                                f"  Base URL: {profile.get_endpoint()}\n"
+                                f"  Provider: {profile.get_provider()}\n"
+                                f"  Tools: {tools_mode}"
+                            ),
+                            {"display_type": "success"},
+                        ),
+                    ]
+                else:
+                    data["display_messages"] = [
+                        ("error", f"Profile not found: {profile_name}", {}),
+                    ]
 
     # Handle save profile to config
     elif action == "save_profile_to_config":
@@ -250,27 +286,49 @@ async def handle_profile_modal_actions(
                 is_active = handler.profile_manager.is_active(
                     new_name
                 ) or handler.profile_manager.is_active(original_name)
-                if (
-                    is_active
-                    and handler.llm_service
-                    and hasattr(handler.llm_service, "api_service")
-                ):
-                    profile = handler.profile_manager.get_profile(
+                if is_active:
+                    # Route through state_service (attach OR local) for daemon-owned reload
+                    # reload_profile=True ensures in-place edits (not just switches) are picked up
+                    state_service = None
+                    if handler.event_bus and hasattr(handler.event_bus, "get_service"):
+                        state_service = handler.event_bus.get_service("state_service")
+
+                    active_name = new_name if handler.profile_manager.is_active(
                         new_name
-                    ) or handler.profile_manager.get_profile(original_name)
-                    if profile:
-                        # Reinitialize provider (handles provider type changes)
-                        handler.llm_service.create_background_task(
-                            handler.llm_service.api_service.reinitialize_provider(
-                                profile
-                            ),
-                            name="reinitialize_provider",
-                        )
-                        # Reload native tools (tool calling mode may have changed)
-                        handler.llm_service.create_background_task(
-                            handler.llm_service._load_native_tools(),
-                            name="reload_native_tools",
-                        )
+                    ) else original_name
+
+                    if state_service is not None:
+                        try:
+                            await state_service.set_active_profile(
+                                active_name, reload_profile=True
+                            )
+                        except Exception as e:
+                            logger.warning(f"state_service reload failed: {e}")
+                            # Fall through to shadow reinit below
+                            state_service = None
+
+                    if state_service is None:
+                        # Fallback: local-mode shadow reinit
+                        if (
+                            handler.llm_service
+                            and hasattr(handler.llm_service, "api_service")
+                        ):
+                            profile = handler.profile_manager.get_profile(
+                                new_name
+                            ) or handler.profile_manager.get_profile(original_name)
+                            if profile:
+                                # Reinitialize provider (handles provider type changes)
+                                handler.llm_service.create_background_task(
+                                    handler.llm_service.api_service.reinitialize_provider(
+                                        profile
+                                    ),
+                                    name="reinitialize_provider",
+                                )
+                                # Reload native tools (tool calling mode may have changed)
+                                handler.llm_service.create_background_task(
+                                    handler.llm_service._load_native_tools(),
+                                    name="reload_native_tools",
+                                )
 
                 # Check for env var overrides and warn user
                 profile = handler.profile_manager.get_profile(new_name)
@@ -308,6 +366,102 @@ async def handle_profile_modal_actions(
             else:
                 data["display_messages"] = [
                     ("error", "Failed to update profile", {}),
+                ]
+
+    # Handle duplicate profile - show form modal with cloned credentials
+    elif action == "duplicate_profile_prompt":
+        profile_name = command.get("profile_name")
+        if profile_name and handler.profile_manager:
+            modal_def = handler._get_duplicate_profile_modal_definition(profile_name)
+            if modal_def:
+                data["show_modal"] = modal_def
+            else:
+                data["display_messages"] = [
+                    ("error", f"Profile not found: {profile_name}", {}),
+                ]
+        else:
+            data["display_messages"] = [
+                ("error", "Select a profile to duplicate", {}),
+            ]
+
+    # Handle duplicate profile form submission
+    elif action == "duplicate_profile_submit":
+        form_data = command.get("form_data", {})
+        source_name = command.get("duplicate_source_profile", "")
+        name = form_data.get("name", "").strip()
+        model = form_data.get("model", "").strip()
+        temperature = float(form_data.get("temperature", 0.7))
+        description = form_data.get("description", "").strip()
+        provider = form_data.get("provider", "custom").strip() or "custom"
+        base_url = form_data.get("base_url", "").strip()
+        submitted_api_key = form_data.get("api_key", "").strip()
+
+        # Resolve API key: if user left the masked value, copy from source
+        api_key = None
+        if submitted_api_key and handler.profile_manager:
+            source_profile = handler.profile_manager.get_profile(source_name)
+            if source_profile and source_profile.api_key:
+                masked_source = _mask_api_key(source_profile.api_key)
+                if submitted_api_key == masked_source:
+                    # User didn't change the masked key — copy the real key from source
+                    api_key = source_profile.api_key
+                else:
+                    # User entered a new key
+                    api_key = submitted_api_key
+            else:
+                api_key = submitted_api_key
+        elif handler.profile_manager:
+            # No key entered — try to copy from source profile
+            source_profile = handler.profile_manager.get_profile(source_name)
+            if source_profile and source_profile.api_key:
+                api_key = source_profile.api_key
+
+        # Validation
+        if not name or not model:
+            data["display_messages"] = [
+                ("error", "Name and Model are required", {}),
+            ]
+        elif not base_url:
+            data["display_messages"] = [
+                ("error", "Base URL is required", {}),
+            ]
+        elif handler.profile_manager:
+            profile = handler.profile_manager.create_profile(
+                name=name,
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                temperature=temperature,
+                provider=provider,
+                supports_tools=True,
+                description=description or f"Duplicate of {source_name}",
+                save_to_config=True,
+            )
+            if profile:
+                data["display_messages"] = [
+                    (
+                        "system",
+                        (
+                            f"Duplicated profile: {name}\n"
+                            f"  Cloned from: {source_name}\n"
+                            f"  Base URL: {base_url}\n"
+                            f"  Model: {model}\n"
+                            f"  Provider: {provider}\n"
+                            f"  Saved to config.json"
+                        ),
+                        {"display_type": "success"},
+                    ),
+                ]
+                data["show_modal"] = await handler._get_profiles_modal_definition(
+                    skip_reload=True
+                )
+            else:
+                data["display_messages"] = [
+                    (
+                        "error",
+                        f"Failed to create profile '{name}' — may already exist.",
+                        {},
+                    ),
                 ]
 
     # Handle delete profile prompt - show confirmation modal

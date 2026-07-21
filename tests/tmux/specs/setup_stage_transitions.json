@@ -1,0 +1,51 @@
+{
+  "name": "setup-stage-transitions",
+  "description": "Regression for altview render ghosting: drive /setup through Provider -> API key -> Endpoint (with edit+backspace) -> Model and assert the previous stage's content is fully cleared (no doubled step rows, no leftover 'Endpoint URL:' under the model list). Isolated HOME + hub disabled for deterministic startup.",
+  "config": {
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
+    "app_init_sleep": 11,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 15, "description": "app ready at prompt" },
+
+    { "action": "section", "label": "open /setup and pick Anthropic" },
+    { "action": "type", "text": "/setup" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "Which provider", "timeout": 8, "description": "wizard on provider stage" },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "Paste your API key", "timeout": 8, "description": "advanced to API key stage" },
+
+    { "action": "section", "label": "enter API key -> endpoint stage" },
+    { "action": "type", "text": "sk-ant-test-key-123" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "Endpoint URL", "timeout": 8, "description": "advanced to endpoint stage" },
+
+    { "action": "section", "label": "edit the endpoint then backspace it (Image #3 repro)" },
+    { "action": "type", "text": "/v2" },
+    { "action": "sleep", "seconds": 0.4 },
+    { "action": "send_keys", "keys": "BSpace" },
+    { "action": "send_keys", "keys": "BSpace" },
+    { "action": "send_keys", "keys": "BSpace" },
+    { "action": "sleep", "seconds": 0.4 },
+    { "action": "enter" },
+
+    { "action": "section", "label": "model stage must be clean -- no ghost of the endpoint stage" },
+    { "action": "wait_for", "pattern": "choose a model", "timeout": 8, "description": "advanced to model stage" },
+    { "action": "assert_not_contains", "pattern": "Endpoint URL", "description": "no leftover 'Endpoint URL:' ghost under the model list" },
+    { "action": "assert_not_contains", "pattern": "Paste your API key", "description": "no leftover API-key stage text" },
+
+    { "action": "section", "label": "close" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1 }
+  ]
+}

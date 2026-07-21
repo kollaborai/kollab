@@ -1,0 +1,42 @@
+{
+  "name": "setup-wizard",
+  "description": "Verify /setup opens the guided provider wizard, advances a step, and cancels cleanly. Launches with an isolated HOME and the hub disabled so app readiness is deterministic (no koordinator-attach race).",
+  "config": {
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
+    "app_init_sleep": 11,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "label": "open /setup wizard" },
+    { "action": "type", "text": "/setup" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Provider Setup", "description": "wizard header renders" },
+    { "action": "assert_contains", "pattern": "Which provider", "description": "wizard prompt renders" },
+    { "action": "assert_contains", "pattern": "Anthropic", "description": "provider list renders" },
+    { "action": "assert_contains", "pattern": "sign in with ChatGPT", "description": "oauth option present" },
+
+    { "action": "section", "label": "select a provider -> API key step" },
+    { "action": "arrow", "direction": "Down" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Paste your API key", "description": "advanced to API key step" },
+
+    { "action": "section", "label": "cancel wizard" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "❯|>", "description": "normal prompt returns after cancel" },
+    { "action": "assert_not_contains", "pattern": "Provider Setup", "description": "wizard closed after cancel" }
+  ]
+}

@@ -175,6 +175,7 @@ class InputHandler:
             self._display_controller.update_display,
             self._command_mode_handler.exit_command_mode,
             self._sync_command_mode,  # Callback to sync command_mode changes
+            self._command_mode_handler.execute_command_string,
         )
 
         # Phase 4: Hook system

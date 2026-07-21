@@ -1,0 +1,33 @@
+{
+  "name": "login-copy-code",
+  "description": "Verify /login openai launches the OAuth device-code view (which exposes the 'c: copy code' shortcut) and exits cleanly on Esc. Selects the 'openai' subcommand via the command menu (type /login as one literal block, Down to highlight openai, Enter) to avoid the harness char-by-char typing race. The 'c' copy behavior + on-screen 'copied to clipboard' feedback are unit-tested in tests/unit/test_login_altview_copy.py (they need a live OAuth code the tmux harness cannot mint offline); the header/prerequisite block asserted here renders on the view's first frame in every stage, so this stays network-independent.",
+  "config": {
+    "command": "KOLLAB_HUB_DISABLED=1 python main.py",
+    "show_captures": false,
+    "app_init_sleep": 8,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2.0 },
+
+    { "action": "section", "title": "launch login openai view via command menu" },
+    { "action": "send_keys", "keys": "/login" },
+    { "action": "sleep", "seconds": 1.2 },
+    { "action": "send_keys", "keys": "Down" },
+    { "action": "sleep", "seconds": 0.6 },
+    { "action": "enter" },
+    { "action": "sleep", "seconds": 5.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "OpenAI OAuth|device code|prerequisite", "description": "login device-code view opens" },
+    { "action": "assert_not_contains", "pattern": "provider not available|api_key", "description": "command executed as a slash command, not sent to the LLM" },
+
+    { "action": "section", "title": "exit login view" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1.0 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "❯|>", "description": "normal prompt returns after exit" },
+    { "action": "assert_not_contains", "pattern": "altview:", "description": "no stale altview status after exit" }
+  ]
+}

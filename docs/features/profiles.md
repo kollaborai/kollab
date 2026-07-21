@@ -373,10 +373,8 @@ kollab --profile cheap   # Quick, low-cost
 Select a profile at startup:
 
 ```bash
-kollab --profile claude         # Use built-in claude profile
-kollab --profile openai         # Use built-in openai profile
+kollab --profile my-profile     # Use a profile created via /setup or /profile
 kollab --profile openai-oauth   # Use OAuth profile (requires --login first)
-kollab --profile local          # Use local LLM profile
 ```
 
 The `--profile` flag takes highest priority in the resolution order,
@@ -440,15 +438,15 @@ Profiles are stored in `config.json`:
 
 ## Built-in Profiles
 
-These profiles are available by default:
+Only the fallback profile is built in. Provider-specific profiles are created
+by `/setup` (or manually through `/profile`):
 
 | Name | Provider | Model | Description |
 |------|----------|-------|-------------|
 | `default` | auto | (auto-detected) | Auto-detect from env vars, fallback to local LLM |
-| `local` | custom | qwen3-4b | Local LLM via LM Studio / Ollama |
-| `claude` | anthropic | claude-sonnet-4-6 | Anthropic Claude for complex tasks |
-| `openai` | openai | gpt-5.4 | OpenAI GPT-5.4 for general tasks |
-| `openai-oauth` | openai_responses | gpt-5.4 | OpenAI OAuth (ChatGPT account), auto-registered when tokens exist |
+
+`openai-oauth` is registered only when OAuth tokens exist; it is not a built-in
+provider template.
 
 ## Auto-Detected Profiles
 
