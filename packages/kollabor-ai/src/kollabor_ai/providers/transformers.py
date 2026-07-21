@@ -326,7 +326,36 @@ class OpenAIResponseTransformer:
             "usage": null
         }
         """
-        if not chunk or "choices" not in chunk or not chunk["choices"]:
+        if not chunk:
+            return None
+
+        usage = chunk.get("usage")
+        choices = chunk.get("choices", [])
+
+        # usage can ride a trailing chunk with empty choices (OpenAI) OR a final
+        # chunk whose delta content is "" (OpenRouter/deepseek). surface usage
+        # before the content / empty-choices early-returns swallow the token
+        # accounting.
+        if usage and usage.get("total_tokens"):
+            first_choice = choices[0] if choices else {}
+            delta0 = first_choice.get("delta", {}) or {}
+            # Only yield usage-only chunk if there's no real content/tool calls
+            if not (delta0.get("content") or delta0.get("tool_calls")):
+                details = usage.get("prompt_tokens_details", {}) or {}
+                return StreamingResponse(
+                    delta=TextDelta(content=""),
+                    usage=UsageInfo(
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        total_tokens=usage.get("total_tokens", 0),
+                        cache_read_tokens=details.get("cached_tokens", 0),
+                    ),
+                    is_final=True,
+                    finish_reason=first_choice.get("finish_reason"),
+                    raw_chunk=chunk,
+                )
+
+        if not choices:
             return None
 
         choice = chunk["choices"][0]

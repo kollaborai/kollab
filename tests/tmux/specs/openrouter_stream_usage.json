@@ -1,0 +1,44 @@
+{
+  "name": "openrouter-stream-usage",
+  "description": "Verify OpenRouter streaming usage is tracked: status widget shows nonzero token count after successful stream",
+  "config": {
+    "command": "python main.py",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3
+  },
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "Step 1: Verify OpenRouter profile exists and is active" },
+    { "action": "slash_command", "command": "profile" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Profile|LLM|openrouter", "description": "Profile modal should show OpenRouter profile" },
+
+    { "action": "section", "title": "Step 2: Close profile modal" },
+    { "action": "send_keys", "keys": "Escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 3: Capture initial token count (should be 0)" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "tok|msg", "description": "Status bar should show token stats" },
+
+    { "action": "section", "title": "Step 4: Send simple message to trigger OpenRouter completion" },
+    { "action": "type", "text": "Hello" },
+    { "action": "send_keys", "keys": "Return" },
+    { "action": "sleep", "seconds": 3 },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Step 5: Verify response received" },
+    { "action": "assert_contains", "pattern": "Hi|Hello|response", "description": "Should have LLM response in conversation" },
+
+    { "action": "section", "title": "Step 6: Verify status widget shows nonzero tokens" },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "0 tok|0 msg", "description": "Token count should be nonzero after successful stream" }
+  ]
+}
