@@ -52,37 +52,67 @@ async def handle_profile_modal_actions(
     if action == "select_profile":
         profile_name = command.get("profile_name")
         if profile_name and handler.profile_manager:
-            if handler.profile_manager.set_active_profile(profile_name):
-                profile = handler.profile_manager.get_active_profile()
-                # Reinitialize the provider with new profile settings
-                if handler.llm_service and hasattr(handler.llm_service, "api_service"):
-                    handler.llm_service.create_background_task(
-                        handler.llm_service.api_service.reinitialize_provider(profile),
-                        name="reinitialize_provider",
+            # Route through state_service (attach OR local mode) for daemon-owned reload
+            state_service = None
+            if handler.event_bus and hasattr(handler.event_bus, "get_service"):
+                state_service = handler.event_bus.get_service("state_service")
+
+            if state_service is not None:
+                try:
+                    snapshot = await state_service.set_active_profile(
+                        profile_name, reload_profile=True
                     )
-                    # Reload native tools (profile may have different supports_tools setting)
-                    handler.llm_service.create_background_task(
-                        handler.llm_service._load_native_tools(),
-                        name="reload_native_tools",
-                    )
-                tools_mode = "enabled" if profile.get_supports_tools() else "disabled"
-                data["display_messages"] = [
-                    (
-                        "system",
+                    tools_mode = "enabled" if snapshot.supports_tools else "disabled"
+                    data["display_messages"] = [
                         (
-                            f"Switched to profile: {profile_name}\n"
-                            f"  Model: {profile.get_model()}\n"
-                            f"  Base URL: {profile.get_endpoint()}\n"
-                            f"  Provider: {profile.get_provider()}\n"
-                            f"  Tools: {tools_mode}"
+                            "system",
+                            (
+                                f"Switched to profile: {profile_name}\n"
+                                f"  Model: {snapshot.model}\n"
+                                f"  Base URL: {snapshot.endpoint}\n"
+                                f"  Provider: {snapshot.provider}\n"
+                                f"  Tools: {tools_mode}"
+                            ),
+                            {"display_type": "success"},
                         ),
-                        {"display_type": "success"},
-                    ),
-                ]
+                    ]
+                except ValueError:
+                    data["display_messages"] = [
+                        ("error", f"Profile not found: {profile_name}", {}),
+                    ]
             else:
-                data["display_messages"] = [
-                    ("error", f"Profile not found: {profile_name}", {}),
-                ]
+                # Fallback: local-mode shadow reinit (no state service available)
+                if handler.profile_manager.set_active_profile(profile_name):
+                    profile = handler.profile_manager.get_active_profile()
+                    # Reinitialize the provider with new profile settings
+                    if handler.llm_service and hasattr(handler.llm_service, "api_service"):
+                        handler.llm_service.create_background_task(
+                            handler.llm_service.api_service.reinitialize_provider(profile),
+                            name="reinitialize_provider",
+                        )
+                        # Reload native tools (profile may have different supports_tools setting)
+                        handler.llm_service.create_background_task(
+                            handler.llm_service._load_native_tools(),
+                            name="reload_native_tools",
+                        )
+                    tools_mode = "enabled" if profile.get_supports_tools() else "disabled"
+                    data["display_messages"] = [
+                        (
+                            "system",
+                            (
+                                f"Switched to profile: {profile_name}\n"
+                                f"  Model: {profile.get_model()}\n"
+                                f"  Base URL: {profile.get_endpoint()}\n"
+                                f"  Provider: {profile.get_provider()}\n"
+                                f"  Tools: {tools_mode}"
+                            ),
+                            {"display_type": "success"},
+                        ),
+                    ]
+                else:
+                    data["display_messages"] = [
+                        ("error", f"Profile not found: {profile_name}", {}),
+                    ]
 
     # Handle save profile to config
     elif action == "save_profile_to_config":
@@ -256,27 +286,49 @@ async def handle_profile_modal_actions(
                 is_active = handler.profile_manager.is_active(
                     new_name
                 ) or handler.profile_manager.is_active(original_name)
-                if (
-                    is_active
-                    and handler.llm_service
-                    and hasattr(handler.llm_service, "api_service")
-                ):
-                    profile = handler.profile_manager.get_profile(
+                if is_active:
+                    # Route through state_service (attach OR local) for daemon-owned reload
+                    # reload_profile=True ensures in-place edits (not just switches) are picked up
+                    state_service = None
+                    if handler.event_bus and hasattr(handler.event_bus, "get_service"):
+                        state_service = handler.event_bus.get_service("state_service")
+
+                    active_name = new_name if handler.profile_manager.is_active(
                         new_name
-                    ) or handler.profile_manager.get_profile(original_name)
-                    if profile:
-                        # Reinitialize provider (handles provider type changes)
-                        handler.llm_service.create_background_task(
-                            handler.llm_service.api_service.reinitialize_provider(
-                                profile
-                            ),
-                            name="reinitialize_provider",
-                        )
-                        # Reload native tools (tool calling mode may have changed)
-                        handler.llm_service.create_background_task(
-                            handler.llm_service._load_native_tools(),
-                            name="reload_native_tools",
-                        )
+                    ) else original_name
+
+                    if state_service is not None:
+                        try:
+                            await state_service.set_active_profile(
+                                active_name, reload_profile=True
+                            )
+                        except Exception as e:
+                            logger.warning(f"state_service reload failed: {e}")
+                            # Fall through to shadow reinit below
+                            state_service = None
+
+                    if state_service is None:
+                        # Fallback: local-mode shadow reinit
+                        if (
+                            handler.llm_service
+                            and hasattr(handler.llm_service, "api_service")
+                        ):
+                            profile = handler.profile_manager.get_profile(
+                                new_name
+                            ) or handler.profile_manager.get_profile(original_name)
+                            if profile:
+                                # Reinitialize provider (handles provider type changes)
+                                handler.llm_service.create_background_task(
+                                    handler.llm_service.api_service.reinitialize_provider(
+                                        profile
+                                    ),
+                                    name="reinitialize_provider",
+                                )
+                                # Reload native tools (tool calling mode may have changed)
+                                handler.llm_service.create_background_task(
+                                    handler.llm_service._load_native_tools(),
+                                    name="reload_native_tools",
+                                )
 
                 # Check for env var overrides and warn user
                 profile = handler.profile_manager.get_profile(new_name)

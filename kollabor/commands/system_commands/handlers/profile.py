@@ -328,7 +328,9 @@ class ProfileCommandHandler(BaseCommandHandler):
 
         if state_service is not None:
             try:
-                snapshot = await state_service.set_active_profile(profile_name)
+                snapshot = await state_service.set_active_profile(
+                    profile_name, reload_profile=True
+                )
                 tools_mode = "enabled" if snapshot.supports_tools else "disabled"
                 return CommandResult(
                     success=True,
