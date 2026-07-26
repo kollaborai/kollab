@@ -1,0 +1,29 @@
+{
+  "name": "hub-dns-designation-fix",
+  "description": "Regression test for issue #51: /hub dns endorse and /hub dns keys must resolve self._identity.identity instead of the never-assigned self._designation, which raised AttributeError.",
+  "config": {
+    "command": "python main.py --no-daemon",
+    "app_init_sleep": 6,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "sleep", "seconds": 2 },
+
+    { "action": "section", "title": "endorse branch (reputation-gated)" },
+    { "action": "type", "text": "/hub dns endorse testpeer coding" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "endorsed testpeer for 'coding'.*new trust", "description": "endorse resolves self._identity.identity and completes" },
+    { "action": "assert_not_contains", "pattern": "failed:|no attribute|Traceback|not running as named agent", "description": "endorse does not raise AttributeError on self._designation" },
+
+    { "action": "section", "title": "keys branch (self-designation fallback)" },
+    { "action": "type", "text": "/hub dns keys" },
+    { "action": "send_keys", "keys": "Enter" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "keys for \\S+:", "description": "keys falls back to self._identity.identity and resolves own record" },
+    { "action": "assert_not_contains", "pattern": "failed:|no attribute|Traceback|no designation", "description": "keys does not raise AttributeError on self._designation" }
+  ]
+}
