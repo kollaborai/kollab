@@ -1242,10 +1242,11 @@ Platform: {version_info['platform']}"""
             )
 
     async def handle_upgrade(self, command: SlashCommand) -> CommandResult:
-        """Handle /upgrade command - update Kollab to the latest release.
+        """Handle /upgrade command - update Kollab and restart.
 
-        Detects the install method (source, pipx, brew, pip) and runs
-        the appropriate update command. Shows before/after version info.
+        Detects the install method (source, pipx, brew, pip), runs the
+        appropriate update command, then restarts the application so
+        the new version loads immediately.
 
         Args:
             command: Parsed slash command.
@@ -1254,19 +1255,20 @@ Platform: {version_info['platform']}"""
             Command execution result.
         """
         try:
+            import asyncio
+            import os
+            import sys
+
             from ....updates import run_auto_update
             from ....version import __version__ as current_version
 
             before_version = current_version
 
             # run_auto_update is blocking (subprocess calls) - run in thread
-            import asyncio
-
             result = await asyncio.to_thread(run_auto_update)
 
             # Try to read the new version after update
             try:
-                # Force re-import to pick up new version
                 import importlib
 
                 import kollabor.version as ver_mod
@@ -1276,33 +1278,7 @@ Platform: {version_info['platform']}"""
             except Exception:
                 after_version = before_version
 
-            if result.success:
-                if after_version != before_version:
-                    message = (
-                        f"\033[1;32mUpgrade complete:\033[0m "
-                        f"v{before_version} -> v{after_version}\n"
-                        f"\033[2;36mMethod:\033[0m {result.method}\n"
-                        f"\033[2;36mRestart Kollab to use the new version.\033[0m"
-                    )
-                else:
-                    message = (
-                        f"\033[1;32mUpgrade complete:\033[0m "
-                        f"(method: {result.method})\n"
-                        f"\033[2;36mRestart Kollab to use the new version.\033[0m"
-                    )
-                if result.message:
-                    message += f"\n\033[2m{result.message}\033[0m"
-
-                self.logger.info(
-                    "Upgrade complete: %s -> %s via %s",
-                    before_version,
-                    after_version,
-                    result.method,
-                )
-                return CommandResult(
-                    success=True, message=message, display_type="info"
-                )
-            else:
+            if not result.success:
                 message = (
                     f"\033[1;31mUpgrade failed:\033[0m "
                     f"(method: {result.method})\n"
@@ -1312,6 +1288,60 @@ Platform: {version_info['platform']}"""
                 return CommandResult(
                     success=False, message=message, display_type="error"
                 )
+
+            self.logger.info(
+                "Upgrade complete: %s -> %s via %s, restarting",
+                before_version,
+                after_version,
+                result.method,
+            )
+
+            # Show upgrade result before restarting
+            if after_version != before_version:
+                msg = (
+                    f"\033[1;32mUpgrade complete:\033[0m "
+                    f"v{before_version} -> v{after_version} "
+                    f"({result.method})\n"
+                    f"\033[2;36mRestarting...\033[0m"
+                )
+            else:
+                msg = (
+                    f"\033[1;32mUpgrade complete:\033[0m "
+                    f"({result.method})\n"
+                    f"\033[2;36mRestarting...\033[0m"
+                )
+            self.renderer.message_coordinator.display_raw_text(msg)
+
+            # Kill owned daemon so the new code loads on relaunch
+            daemon_pid = os.environ.pop("KOLLAB_DAEMON_PID", "")
+            if daemon_pid:
+                try:
+                    import signal as _sig
+
+                    os.kill(int(daemon_pid), _sig.SIGTERM)
+                except (ValueError, OSError, ProcessLookupError):
+                    pass
+
+            # Restore terminal before execv
+            try:
+                renderer = self.event_bus.get_service("renderer")
+                if renderer:
+                    renderer.exit_raw_mode()
+                    print("\033[?25h", end="", flush=True)  # show cursor
+            except Exception:
+                pass
+
+            # Re-launch kollab with the same arguments
+            # execv replaces the current process entirely
+            argv = [sys.executable, "-m", "kollabor_cli_main"] + sys.argv[1:]
+            os.execv(sys.executable, argv)
+
+            # Should never reach here
+            return CommandResult(
+                success=True,
+                message="Upgrade complete. Please restart Kollab manually.",
+                display_type="info",
+            )
 
         except Exception as e:
             self.logger.error(f"Error in upgrade command: {e}")
