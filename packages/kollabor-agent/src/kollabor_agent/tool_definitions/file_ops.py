@@ -10,7 +10,6 @@ the existing bundle agent.json conventions.
 from ..tool_definition import ToolDefinition, ToolParameter
 from ..tool_registry import get_registry
 
-
 # --- file-read ---
 file_read = ToolDefinition(
     name="file-read",
@@ -63,7 +62,8 @@ file_read = ToolDefinition(
     key_rules=[
         "use <read> instead of terminal cat — safer, tracked, validated",
         "use offset+limit for large files instead of reading the whole thing",
-        "re-reading a file already in context returns a short 'stale hit' marker; use force=\"true\" for a fresh re-read",
+        "re-reading a file already in context returns a short 'stale hit' marker; "
+        'use force="true" for a fresh re-read',
     ],
     anti_patterns=[
         "WRONG:   <terminal>cat file.py</terminal>",
@@ -382,7 +382,8 @@ file_insert_after = ToolDefinition(
         ),
     ],
     examples=[
-        '<insert_after><file>main.py</file><pattern>class MyClass:</pattern><content>    """Docstring."""</content></insert_after>',
+        '<insert_after><file>main.py</file><pattern>class MyClass:</pattern>'
+        '<content>    """Docstring."""</content></insert_after>',
     ],
     key_rules=[
         "pattern must be UNIQUE — errors if 0 or 2+ matches",
@@ -424,7 +425,8 @@ file_insert_before = ToolDefinition(
         ),
     ],
     examples=[
-        '<insert_before><file>main.py</file><pattern>def main():</pattern><content># Entry point\n</content></insert_before>',
+        '<insert_before><file>main.py</file><pattern>def main():</pattern>'
+        '<content># Entry point\n</content></insert_before>',
     ],
     key_rules=[
         "pattern must be UNIQUE — errors if 0 or 2+ matches",

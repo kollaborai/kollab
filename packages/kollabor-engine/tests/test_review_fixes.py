@@ -93,8 +93,9 @@ async def test_profile_routes_redact_api_key(profile_app):
 
 @pytest.mark.asyncio
 async def test_ready_does_not_resolve_or_migrate_api_keys(monkeypatch, bypass_auth):
-    import kollabor_ai
     from kollabor_engine.server import create_app
+
+    import kollabor_ai
 
     class _ReadinessProfile(LLMProfile):
         def get_api_key(self):

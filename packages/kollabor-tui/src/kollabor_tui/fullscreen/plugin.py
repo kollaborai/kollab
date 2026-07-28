@@ -1,6 +1,13 @@
 """Base class for full-screen plugins."""
 
 import asyncio
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
+
+from kollabor_tui.fullscreen.renderer import FullScreenRenderer
+from kollabor_tui.key_parser import KeyPress
 
 
 def _get_loop():
@@ -10,13 +17,6 @@ def _get_loop():
     except RuntimeError:
         return asyncio.new_event_loop()
 
-import logging
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
-
-from kollabor_tui.fullscreen.renderer import FullScreenRenderer
-from kollabor_tui.key_parser import KeyPress
 
 logger = logging.getLogger(__name__)
 

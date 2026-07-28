@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from kollabor_config.config_utils import APP_CONFIG_DIR_NAME
-
 from kollabor_events import EventBus
 from kollabor_events.models import Event, EventType, Hook, HookPriority
 

@@ -22,8 +22,9 @@ def get_hub_dir() -> Path:
     KOLLAB_HUB_PROJECT_SCOPED to an explicit false value uses the
     legacy global directory at ~/.kollab/hub/.
     """
-    from .project_scope import get_project_hub_dir, is_project_scoped
     from kollabor_config.config_utils import get_config_directory
+
+    from .project_scope import get_project_hub_dir, is_project_scoped
 
     if is_project_scoped():
         return get_project_hub_dir()

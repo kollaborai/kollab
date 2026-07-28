@@ -15,7 +15,6 @@ Organized by subcategory:
 from ..tool_definition import ToolDefinition, ToolParameter
 from ..tool_registry import get_registry
 
-
 # ============================================================
 # MESSAGING
 # ============================================================
@@ -65,7 +64,8 @@ hub_msg = ToolDefinition(
         "use identity names from the roster (lapis, sapphire, etc), not agent type names",
         "all messages are visible to all peers — no private DMs",
         "wait='true' means you are done talking after this message — use when you have nothing else to do",
-        "without wait='true' the system will re-invoke you after delivery — correct when you have more work to do but causes loops when you're just chatting",
+        "without wait='true' the system will re-invoke you after delivery — "
+        "correct when you have more work to do but causes loops when you're just chatting",
         "be concise — other agents have limited context too",
     ],
 )

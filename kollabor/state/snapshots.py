@@ -8,7 +8,7 @@ references) - snapshots are flat dicts suitable for json.dumps.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 

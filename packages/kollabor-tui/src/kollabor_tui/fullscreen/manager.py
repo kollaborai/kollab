@@ -1,6 +1,13 @@
 """Full-screen manager for plugin coordination and modal integration."""
 
 import asyncio
+import logging
+from typing import Any, Dict, List, Optional
+
+from kollabor_events.models import EventType
+
+from .plugin import FullScreenPlugin, PluginMetadata
+from .session import FullScreenSession
 
 
 def _get_loop():
@@ -10,13 +17,6 @@ def _get_loop():
     except RuntimeError:
         return asyncio.new_event_loop()
 
-import logging
-from typing import Any, Dict, List, Optional
-
-from kollabor_events.models import EventType
-
-from .plugin import FullScreenPlugin, PluginMetadata
-from .session import FullScreenSession
 
 logger = logging.getLogger(__name__)
 

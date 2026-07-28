@@ -6,7 +6,6 @@ Ephemeral notepad that survives context compaction but not sessions.
 from ..tool_definition import ToolDefinition, ToolParameter
 from ..tool_registry import get_registry
 
-
 # --- scratchpad (overwrite) ---
 scratchpad = ToolDefinition(
     name="scratchpad",

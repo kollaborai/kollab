@@ -6,7 +6,6 @@ Tools for managing what stays in the context window.
 from ..tool_definition import ToolDefinition, ToolParameter
 from ..tool_registry import get_registry
 
-
 # --- curate ---
 curate = ToolDefinition(
     name="curate",
@@ -48,7 +47,8 @@ curate = ToolDefinition(
     notes="Use when context window is getting large and you want to compact.",
     key_rules=[
         "use 'keep' for files you're actively editing or data you need to reference exactly",
-        "use 'summary' for material you've already extracted what you need from — your own summary is higher quality than the generic fallback",
+        "use 'summary' for material you've already extracted what you need from — "
+        "your own summary is higher quality than the generic fallback",
         "last-write-wins — emit a new <curate> with the same id to change a prior decision",
     ],
     safety_features=[
@@ -107,7 +107,8 @@ evict = ToolDefinition(
     result_format="Confirmation that content was evicted.",
     notes="Evicted content is gone from context window. Use curate instead if you need a summary.",
     key_rules=[
-        "eviction breaks prefix cache from that message forward — only use when the session has >=10 more turns AND the entry is >=32KB",
+        "eviction breaks prefix cache from that message forward — "
+        "only use when the session has >=10 more turns AND the entry is >=32KB",
         "prefer <curate> with summary over <evict> when possible",
     ],
 )
