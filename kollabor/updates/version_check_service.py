@@ -302,6 +302,11 @@ class VersionCheckService:
     def _is_cache_valid(self) -> bool:
         """Check if cached data is still valid based on TTL.
 
+        Uses a shorter TTL (1 hour) when the cached version matches the
+        current version, so that new releases are detected promptly.
+        Uses the full configured TTL when an update is already cached,
+        to avoid re-fetching the same release info repeatedly.
+
         Returns:
             True if cache is valid (age < TTL)
         """
@@ -310,10 +315,19 @@ class VersionCheckService:
         ttl_seconds = self.check_interval_hours * 3600
 
         age_seconds = current_time - last_check
+
+        # If cached version matches current, use a shorter re-check window
+        # so users learn about new releases within ~1 hour instead of 24h.
+        cached_version = self.config.get("kollabor.updates.cached_latest_version", "")
+        if cached_version and cached_version == self.current_version:
+            ttl_seconds = min(ttl_seconds, 3600)  # cap at 1 hour
+
         is_valid: bool = age_seconds < ttl_seconds
 
         logger.debug(
-            f"Cache validity: age={age_seconds}s, ttl={ttl_seconds}s, valid={is_valid}"
+            f"Cache validity: age={age_seconds}s, ttl={ttl_seconds}s, "
+            f"cached={cached_version}, current={self.current_version}, "
+            f"valid={is_valid}"
         )
 
         return is_valid
