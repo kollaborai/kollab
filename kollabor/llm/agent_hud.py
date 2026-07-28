@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-
 AGENT_HUD_OPEN = "<agent_hud>"
 AGENT_HUD_CLOSE = "</agent_hud>"
 

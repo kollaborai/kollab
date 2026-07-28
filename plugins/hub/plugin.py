@@ -2600,7 +2600,8 @@ class HubPlugin(BasePlugin):
                 error="hub not initialized",
             )
 
-        logger.info(f"{self._identity.identity} requested self-restart via hub_restart")
+        identity = self._identity
+        logger.info(f"{identity.identity} requested self-restart via hub_restart")
 
         # Build the re-exec command. sys.argv[0] is main.py or the kollab
         # entry point; anything after is user-supplied flags. Drop --detached
@@ -2626,7 +2627,7 @@ class HubPlugin(BasePlugin):
             except asyncio.CancelledError:
                 return
             logger.warning(
-                f"{self._identity.identity}: self-restart watchdog fired, "
+                f"{identity.identity}: self-restart watchdog fired, "
                 f"forcing execvp after graceful shutdown timeout"
             )
             try:
@@ -4798,9 +4799,9 @@ class HubPlugin(BasePlugin):
 
         Scans ALL project hub directories, not just the current project.
         """
-        from .presence import get_hub_dir
-        from kollabor_config.config_utils import get_config_directory
         import shutil
+
+        from kollabor_config.config_utils import get_config_directory
 
         while True:
             try:
@@ -5935,7 +5936,7 @@ class HubPlugin(BasePlugin):
                 if hasattr(message, "metadata") and message.metadata
                 else ""
             )
-            is_human_elsewhere = (
+            is_human_elsewhere = bool(
                 message.from_agent == "human"
                 and source_agent
                 and source_agent != my_name
@@ -7776,7 +7777,8 @@ class HubPlugin(BasePlugin):
     async def _capture_peer_output(self, peer: AgentRuntime, lines: int) -> str:
         """Capture output directly from a live hub peer via its socket."""
         if not peer.socket_path:
-            self._presence.cleanup_agent(peer)
+            if self._presence:
+                self._presence.cleanup_agent(peer)
             return f"agent '{peer.identity}' has no socket path, cleaned up"
 
         dial_target, dial_auth = self._resolve_dial_target(
@@ -7861,7 +7863,7 @@ class HubPlugin(BasePlugin):
             # Find next available gem from pool with matching agent_type
             effective_agent_type = agent_name
             resolved_identity = ""
-            effective_skills: List[str] = []
+            effective_skills = []
 
             if requested_identity:
                 requested_pool = POOL_BY_NAME.get(requested_identity)
@@ -8263,13 +8265,15 @@ class HubPlugin(BasePlugin):
                 self._self_stop_requested = True
                 asyncio.ensure_future(self.shutdown())
 
+                identity = self._identity
+
                 async def _self_stop_watchdog() -> None:
                     try:
                         await asyncio.sleep(8.0)
                     except asyncio.CancelledError:
                         return
                     logger.warning(
-                        f"{self._identity.identity}: self-stop watchdog fired, "
+                        f"{identity.identity}: self-stop watchdog fired, "
                         f"forcing os._exit after graceful shutdown timeout"
                     )
                     os._exit(0)
@@ -8827,7 +8831,9 @@ class HubPlugin(BasePlugin):
             )
 
         # Build a temporary backend for testing
-        backend = None
+        from .notifier import NotificationBackend
+
+        backend: Optional[NotificationBackend] = None
         if channel == "webhook":
             url = hub_cfg.get("notify_url", "")
             if not url:

@@ -271,8 +271,8 @@ class HubBridge:
         Sets the 'to' field to the agent's identity so TRIGGER_LLM_CONTINUE fires.
         Returns True if ack received, False otherwise.
         """
-        import uuid
         import time as _time
+        import uuid
 
         agent_data = self.get_agent(target_agent_id)
         target_identity = agent_data.get("identity", target_agent_id) if agent_data else target_agent_id
@@ -301,8 +301,8 @@ class HubBridge:
         Sets the 'to' field correctly so TRIGGER_LLM_CONTINUE fires.
         Returns True if ack received, False otherwise.
         """
-        import uuid
         import time as _time
+        import uuid
 
         resp = await self.query_socket_by_identity(
             identity,

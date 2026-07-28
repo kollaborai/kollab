@@ -1,6 +1,12 @@
 """Matrix rain plugin using the full-screen framework."""
 
 import asyncio
+import logging
+
+from kollabor_tui.fullscreen import FullScreenPlugin
+from kollabor_tui.fullscreen.components.matrix_components import MatrixRenderer
+from kollabor_tui.fullscreen.plugin import PluginMetadata
+from kollabor_tui.key_parser import KeyPress
 
 
 def _get_loop():
@@ -10,12 +16,6 @@ def _get_loop():
     except RuntimeError:
         return asyncio.new_event_loop()
 
-import logging
-
-from kollabor_tui.fullscreen import FullScreenPlugin
-from kollabor_tui.fullscreen.components.matrix_components import MatrixRenderer
-from kollabor_tui.fullscreen.plugin import PluginMetadata
-from kollabor_tui.key_parser import KeyPress
 
 logger = logging.getLogger(__name__)
 

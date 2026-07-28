@@ -245,6 +245,7 @@ class StatusLayoutManager:
             StatusLayout if file exists and is valid, None otherwise.
         """
         import json
+
         from kollabor_config.config_utils import resolve_global_path
 
         layout_file = resolve_global_path("layouts", "default.json")

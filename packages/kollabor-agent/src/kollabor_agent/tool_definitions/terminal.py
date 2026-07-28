@@ -7,7 +7,6 @@ and session management commands.
 from ..tool_definition import ToolDefinition, ToolParameter
 from ..tool_registry import get_registry
 
-
 terminal_tool = ToolDefinition(
     name="terminal",
     description=(

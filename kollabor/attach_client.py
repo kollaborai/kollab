@@ -35,8 +35,15 @@ Usage:
 """
 
 import asyncio
+import json
 import logging
+import os
+import select
 import signal
+import sys
+import termios
+import tty
+from typing import Any, Dict, List, Optional
 
 
 def _get_loop():
@@ -65,15 +72,6 @@ def _signal_cleanup(signum: int, frame: "Any") -> None:
     # Re-raise to default handler so the process actually exits
     signal.signal(signum, signal.SIG_DFL)
     os.kill(os.getpid(), signum)
-
-
-import json
-import os
-import select
-import sys
-import termios
-import tty
-from typing import Any, Dict, List, Optional
 
 
 class AttachClient:

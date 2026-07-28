@@ -8,7 +8,6 @@ can list "git" in their tools field without registry warnings.
 from ..tool_definition import ToolDefinition, ToolParameter
 from ..tool_registry import get_registry
 
-
 git_tool = ToolDefinition(
     name="git",
     description=(

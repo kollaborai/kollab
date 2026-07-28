@@ -613,7 +613,9 @@ class AgentOrchestratorPlugin(BasePlugin):
         )
         tool_executor.register_plugin_handler("orch_agent", self._handle_agent_tool)
 
-        logger.info("Registered 8 orchestrator pipeline tags (status, capture, stop, message, broadcast, clone, team, agent)")
+        logger.info(
+            "Registered 8 orchestrator pipeline tags (status, capture, stop, message, broadcast, clone, team, agent)"
+        )
 
     # ------------------------------------------------------------------
     # Pipeline tool handlers
@@ -753,6 +755,7 @@ class AgentOrchestratorPlugin(BasePlugin):
     async def _handle_clone_tool(self, tool_data: dict):
         """Execute a clone tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
+
         from .models import AgentTask
 
         name = tool_data.get("agent_name", "")
@@ -782,6 +785,7 @@ class AgentOrchestratorPlugin(BasePlugin):
     async def _handle_team_tool(self, tool_data: dict):
         """Execute a team tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
+
         from .models import AgentTask
 
         lead = tool_data.get("lead", "")
@@ -806,6 +810,7 @@ class AgentOrchestratorPlugin(BasePlugin):
     async def _handle_agent_tool(self, tool_data: dict):
         """Execute an agent spawn tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
+
         from .models import AgentTask
 
         raw_agents = tool_data.get("agents", [])

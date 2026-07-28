@@ -8,15 +8,6 @@ resource tracking (RSS, uptime, restart count).
 """
 
 import asyncio
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 import logging
 import os
 import subprocess
@@ -28,6 +19,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+
+def _get_loop():
+    """Return the running event loop, or create one if none is running."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.new_event_loop()
+
 
 logger = logging.getLogger(__name__)
 

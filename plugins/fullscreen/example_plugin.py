@@ -16,15 +16,6 @@ This comprehensive plugin showcases:
 """
 
 import asyncio
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 import math
 import random
 import time
@@ -39,6 +30,14 @@ from kollabor_tui.fullscreen.components.drawing import DrawingPrimitives
 from kollabor_tui.fullscreen.plugin import PluginMetadata
 from kollabor_tui.key_parser import KeyPress
 from kollabor_tui.visual_effects import ColorPalette, GradientRenderer
+
+
+def _get_loop():
+    """Return the running event loop, or create one if none is running."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.new_event_loop()
 
 
 @dataclass

@@ -1,15 +1,6 @@
 """Full-screen session management."""
 
 import asyncio
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 import logging
 import sys
 from dataclasses import dataclass
@@ -20,6 +11,15 @@ from kollabor_tui.render_loop import EventDrivenRenderLoop, RenderTrigger
 
 from .plugin import FullScreenPlugin
 from .renderer import FullScreenRenderer
+
+
+def _get_loop():
+    """Return the running event loop, or create one if none is running."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.new_event_loop()
+
 
 # Platform-specific imports for input handling
 IS_WINDOWS = sys.platform == "win32"

@@ -16,9 +16,9 @@ except ImportError:
     Observer = None
     FileSystemEventHandler = None
 
+from .config_utils import get_global_config_path, get_local_config_path
 from .loader import ConfigLoader
 from .manager import ConfigManager
-from .config_utils import get_global_config_path, get_local_config_path
 
 logger = logging.getLogger(__name__)
 

@@ -1984,7 +1984,7 @@ class TerminalLLMChat:
                 # Try to attach first. If the context doesn't exist,
                 # create it and then attach.
                 try:
-                    snap = await state.attach_to_context(context_name)
+                    context_snap = await state.attach_to_context(context_name)
                 except ValueError as not_found_exc:
                     if "not found" not in str(not_found_exc):
                         raise
@@ -1993,20 +1993,20 @@ class TerminalLLMChat:
                         f"creating it"
                     )
                     await state.create_context(context_name)
-                    snap = await state.attach_to_context(context_name)
+                    context_snap = await state.attach_to_context(context_name)
                 _display(
                     "system",
-                    f"attached to context: {snap.name}"
+                    f"attached to context: {context_snap.name}"
                     + (
-                        f" ({snap.message_count} messages)"
-                        if snap.message_count
+                        f" ({context_snap.message_count} messages)"
+                        if context_snap.message_count
                         else ""
                     ),
                     {"display_type": "info"},
                 )
                 logger.info(
-                    f"attach drain: context -> {snap.name} "
-                    f"({snap.message_count} messages)"
+                    f"attach drain: context -> {context_snap.name} "
+                    f"({context_snap.message_count} messages)"
                 )
             except Exception as e:
                 _display(
@@ -2026,7 +2026,7 @@ class TerminalLLMChat:
             persist = bool(flags.get("save_profile", False)) or make_default_profile
             persist_local = bool(flags.get("save_local", False))
             try:
-                snap = await state.set_active_profile(
+                profile_snap = await state.set_active_profile(
                     profile_name, persist=persist, persist_local=persist_local
                 )
                 save_hint = (
@@ -2040,11 +2040,13 @@ class TerminalLLMChat:
                 )
                 _display(
                     "system",
-                    f"switched to profile: {snap.name} ({snap.model}){save_hint}",
+                    f"switched to profile: {profile_snap.name} "
+                    f"({profile_snap.model}){save_hint}",
                     {"display_type": "info"},
                 )
                 logger.info(
-                    f"attach drain: profile -> {snap.name} (model={snap.model})"
+                    f"attach drain: profile -> {profile_snap.name} "
+                    f"(model={profile_snap.model})"
                 )
             except Exception as e:
                 _display(
@@ -2061,14 +2063,18 @@ class TerminalLLMChat:
         agent_name = flags.get("agent")
         if agent_name:
             try:
-                snap = await state.set_agent(agent_name)
+                agent_snap = await state.set_agent(agent_name)
                 _display(
                     "system",
-                    f"switched to agent: {snap.name}"
-                    + (f" (profile: {snap.profile})" if snap.profile else ""),
+                    f"switched to agent: {agent_snap.name}"
+                    + (
+                        f" (profile: {agent_snap.profile})"
+                        if agent_snap.profile
+                        else ""
+                    ),
                     {"display_type": "info"},
                 )
-                logger.info(f"attach drain: agent -> {snap.name}")
+                logger.info(f"attach drain: agent -> {agent_snap.name}")
             except Exception as e:
                 _display(
                     "error",
@@ -2111,18 +2117,18 @@ class TerminalLLMChat:
                         f"system prompt file not found: {prompt_path}"
                     )
                 content = prompt_path.read_text(encoding="utf-8")
-                snap = await state.set_system_prompt(
+                prompt_snap = await state.set_system_prompt(
                     content, source="file", path=str(prompt_path)
                 )
                 _display(
                     "system",
                     f"installed system prompt from {prompt_path.name} "
-                    f"({snap.size_chars} chars)",
+                    f"({prompt_snap.size_chars} chars)",
                     {"display_type": "info"},
                 )
                 logger.info(
                     f"attach drain: system_prompt -> {prompt_path} "
-                    f"({snap.size_chars} chars)"
+                    f"({prompt_snap.size_chars} chars)"
                 )
             except Exception as e:
                 _display(

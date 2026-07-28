@@ -24,16 +24,16 @@ logger = logging.getLogger(__name__)
 
 def _parse_markdown_bold(text: str) -> str:
     """Parse markdown bold syntax (**bold**) and convert to ANSI codes.
-    
+
     Args:
         text: Text containing markdown bold syntax
-        
+
     Returns:
         Text with **bold** converted to ANSI bold codes
     """
     # Pattern to match **bold** syntax (non-greedy)
     pattern = r'\*\*(.*?)\*\*'
-    
+
     # Replace with ANSI bold codes
     return re.sub(pattern, f'{S.BOLD}\\1{S.RESET_BOLD}', text)
 
