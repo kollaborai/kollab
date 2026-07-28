@@ -182,6 +182,19 @@ class SystemCommandHandler(BaseCommandHandler):
         )
         self.command_registry.register_command(restart_command)
 
+        # Register /upgrade command
+        upgrade_command = CommandDefinition(
+            name="upgrade",
+            description="Update Kollab to the latest release",
+            handler=self.handle_upgrade,
+            plugin_name="system",
+            category=CommandCategory.SYSTEM,
+            mode=CommandMode.INSTANT,
+            aliases=["update"],
+            icon="[UP]",
+        )
+        self.command_registry.register_command(upgrade_command)
+
     async def handle_help(self, command: SlashCommand) -> CommandResult:
         """Handle /help command.
 
@@ -1225,6 +1238,86 @@ Platform: {version_info['platform']}"""
             return CommandResult(
                 success=False,
                 message=f"Error getting version: {str(e)}",
+                display_type="error",
+            )
+
+    async def handle_upgrade(self, command: SlashCommand) -> CommandResult:
+        """Handle /upgrade command - update Kollab to the latest release.
+
+        Detects the install method (source, pipx, brew, pip) and runs
+        the appropriate update command. Shows before/after version info.
+
+        Args:
+            command: Parsed slash command.
+
+        Returns:
+            Command execution result.
+        """
+        try:
+            from ....updates import run_auto_update
+            from ....version import __version__ as current_version
+
+            before_version = current_version
+
+            # run_auto_update is blocking (subprocess calls) - run in thread
+            import asyncio
+
+            result = await asyncio.to_thread(run_auto_update)
+
+            # Try to read the new version after update
+            try:
+                # Force re-import to pick up new version
+                import importlib
+
+                import kollabor.version as ver_mod
+
+                importlib.reload(ver_mod)
+                after_version = ver_mod.__version__
+            except Exception:
+                after_version = before_version
+
+            if result.success:
+                if after_version != before_version:
+                    message = (
+                        f"\033[1;32mUpgrade complete:\033[0m "
+                        f"v{before_version} -> v{after_version}\n"
+                        f"\033[2;36mMethod:\033[0m {result.method}\n"
+                        f"\033[2;36mRestart Kollab to use the new version.\033[0m"
+                    )
+                else:
+                    message = (
+                        f"\033[1;32mUpgrade complete:\033[0m "
+                        f"(method: {result.method})\n"
+                        f"\033[2;36mRestart Kollab to use the new version.\033[0m"
+                    )
+                if result.message:
+                    message += f"\n\033[2m{result.message}\033[0m"
+
+                self.logger.info(
+                    "Upgrade complete: %s -> %s via %s",
+                    before_version,
+                    after_version,
+                    result.method,
+                )
+                return CommandResult(
+                    success=True, message=message, display_type="info"
+                )
+            else:
+                message = (
+                    f"\033[1;31mUpgrade failed:\033[0m "
+                    f"(method: {result.method})\n"
+                    f"\033[2m{result.message}\033[0m"
+                )
+                self.logger.warning("Upgrade failed: %s", result.message)
+                return CommandResult(
+                    success=False, message=message, display_type="error"
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error in upgrade command: {e}")
+            return CommandResult(
+                success=False,
+                message=f"Error during upgrade: {str(e)}",
                 display_type="error",
             )
 
