@@ -7615,12 +7615,12 @@ class HubPlugin(BasePlugin):
             if len(ep) < 2:
                 return "usage: /hub dns endorse <designation> <capability>"
             target, cap = ep[0], ep[1]
-            if not self._dns_reputation or not self._designation:
+            if not self._dns_reputation or not self._identity or not self._identity.identity:
                 return "dns: not running as named agent"
             from .dns.models import Endorsement
 
             endorsement = Endorsement(
-                from_designation=self._designation,
+                from_designation=self._identity.identity,
                 to_designation=target,
                 capability=cap,
                 weight=1.0,
@@ -7629,7 +7629,7 @@ class HubPlugin(BasePlugin):
             return f"endorsed {target} for '{cap}' (new trust: {new_trust:.3f})"
 
         elif sub == "keys":
-            target = rest.strip() or self._designation
+            target = rest.strip() or (self._identity.identity if self._identity else "")
             if not target:
                 return "dns: no designation (not running as agent)"
             record = self._dns_registry.resolve(target)
