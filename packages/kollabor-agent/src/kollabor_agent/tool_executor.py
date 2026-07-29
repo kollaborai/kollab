@@ -1288,14 +1288,6 @@ class ToolExecutor:
         )
         query = query.strip().lower()
 
-        if not query:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                tool_type="tool_search",
-                success=False,
-                error="Missing required parameter: query",
-            )
-
         results: List[Dict[str, str]] = []
 
         # Search built-in tools from the ToolRegistry
@@ -1308,14 +1300,23 @@ class ToolExecutor:
                 if tool.category == "on_demand":
                     continue
 
-                searchable = f"{tool.name} {tool.category} {tool.description}".lower()
-                if query in searchable:
+                if not query:
+                    # No query — return all tools (full catalog)
                     results.append({
                         "name": tool.name,
                         "category": tool.category,
                         "source": "built-in",
                         "description": tool.description.split(".")[0] + ".",
                     })
+                else:
+                    searchable = f"{tool.name} {tool.category} {tool.description}".lower()
+                    if query in searchable:
+                        results.append({
+                            "name": tool.name,
+                            "category": tool.category,
+                            "source": "built-in",
+                            "description": tool.description.split(".")[0] + ".",
+                        })
         except Exception as e:
             logger.warning(f"Tool search: registry query failed: {e}")
 

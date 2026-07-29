@@ -29,9 +29,10 @@ tool_search = ToolDefinition(
             type="string",
             description=(
                 "Search query — matched against tool names, categories, "
-                "and descriptions. Case-insensitive substring match."
+                "and descriptions. Case-insensitive substring match. "
+                "If omitted, returns ALL available tools (full catalog)."
             ),
-            required=True,
+            required=False,
         ),
     ],
     examples=[
