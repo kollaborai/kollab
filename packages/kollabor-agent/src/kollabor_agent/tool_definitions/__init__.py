@@ -8,4 +8,5 @@ from . import (
     scratchpad,  # noqa: F401
     task,  # noqa: F401
     terminal,  # noqa: F401
+    web,  # noqa: F401
 )

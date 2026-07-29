@@ -23,7 +23,9 @@
     "scratchpad-append",
     "scratchpad-get",
     "task-checkpoint",
-    "task-complete"
+    "task-complete",
+    "web-fetch",
+    "web-search"
   ],
   "skills": [
     "dead-code",

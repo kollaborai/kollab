@@ -12,6 +12,7 @@ import asyncio
 import os
 import sys
 import unittest
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -21,6 +22,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from kollabor_agent.tool_definition import ToolDefinition, ToolParameter
 from kollabor_agent.tool_registry import ToolRegistry
+
+
+def _run(coro):
+    """Run a coroutine with a fresh event loop.
+
+    Using asyncio.run() instead of get_event_loop().run_until_complete()
+    avoids conflicts with pytest-asyncio's event loop policy.
+    """
+    try:
+        loop = asyncio.new_event_loop()
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 class TestWebToolDefinitions(unittest.TestCase):
@@ -61,7 +75,7 @@ class TestWebToolDefinitions(unittest.TestCase):
         max_chars_param = next(p for p in tool.parameters if p.name == "max_chars")
         self.assertFalse(max_chars_param.required)
         self.assertEqual(max_chars_param.type, "integer")
-        self.assertEqual(max_chars_param.default, 10000)
+        self.assertEqual(max_chars_param.default, 5000)
 
     def test_web_search_parameters(self):
         """web-search should have query (required) and max_results (optional)."""
@@ -122,12 +136,11 @@ class TestWebToolDefinitions(unittest.TestCase):
         self.assertGreater(len(tool.examples), 0)
 
 
-def _make_mock_aiohttp_get(status=200, text="", url="https://example.com"):
-    """Create a mock for aiohttp ClientSession.get() context manager.
+def _make_mock_aiohttp_response(status=200, text="", url="https://example.com"):
+    """Create a mock for an aiohttp response context manager.
 
-    Returns a MagicMock that can be used as `session.get(...)` in an
-    `async with` block. The returned response has .status, .text(),
-    .url, and .reason attributes.
+    Can be used as the return value of session.get() or session.post()
+    in an `async with` block.
     """
     resp = AsyncMock()
     resp.status = status
@@ -139,11 +152,7 @@ def _make_mock_aiohttp_get(status=200, text="", url="https://example.com"):
     return resp
 
 
-def _make_mock_aiohttp_post(status=200, text="", url="https://example.com"):
-    """Create a mock for aiohttp ClientSession.post() context manager."""
-    return _make_mock_aiohttp_get(status=status, text=text, url=url)
-
-
+@contextmanager
 def _patch_aiohttp_session(mock_get=None, mock_post=None):
     """Patch aiohttp.ClientSession to return a mock session.
 
@@ -157,7 +166,8 @@ def _patch_aiohttp_session(mock_get=None, mock_post=None):
         mock_session.post = MagicMock(return_value=mock_post)
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
-    return patch("aiohttp.ClientSession", return_value=mock_session)
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        yield
 
 
 class TestWebFetchExecution(unittest.TestCase):
@@ -185,14 +195,12 @@ class TestWebFetchExecution(unittest.TestCase):
             "raw": '<web-fetch><url>https://example.com</url></web-fetch>',
         }
 
-        mock_resp = _make_mock_aiohttp_get(
+        mock_resp = _make_mock_aiohttp_response(
             text="<html><body><p>Hello World</p></body></html>"
         )
 
         with _patch_aiohttp_session(mock_get=mock_resp):
-            result = asyncio.get_event_loop().run_until_complete(
-                self.executor._execute_web_fetch(tool_data)
-            )
+            result = _run(self.executor._execute_web_fetch(tool_data))
 
             self.assertTrue(result.success, f"Expected success, got error: {result.error}")
             self.assertIn("Hello World", result.output)
@@ -213,16 +221,13 @@ class TestWebFetchExecution(unittest.TestCase):
             "raw": '<web-fetch><url>https://example.com</url><max_chars>100</max_chars></web-fetch>',
         }
 
-        mock_resp = _make_mock_aiohttp_get(text=html)
+        mock_resp = _make_mock_aiohttp_response(text=html)
 
         with _patch_aiohttp_session(mock_get=mock_resp):
-            result = asyncio.get_event_loop().run_until_complete(
-                self.executor._execute_web_fetch(tool_data)
-            )
+            result = _run(self.executor._execute_web_fetch(tool_data))
 
             self.assertTrue(result.success)
             # Output includes a URL header line + truncated text + truncation marker
-            # The text portion should be <= 100 chars + truncation suffix
             self.assertLessEqual(
                 len(result.output), 200,
                 f"Output should be roughly truncated, got {len(result.output)} chars"
@@ -237,11 +242,8 @@ class TestWebFetchExecution(unittest.TestCase):
             "raw": '<web-fetch><url>not-a-valid-url</url></web-fetch>',
         }
 
-        # No need to mock aiohttp — the URL validation should reject it
-        # before any network call is made
-        result = asyncio.get_event_loop().run_until_complete(
-            self.executor._execute_web_fetch(tool_data)
-        )
+        # URL validation rejects before any network call
+        result = _run(self.executor._execute_web_fetch(tool_data))
 
         self.assertFalse(result.success)
         self.assertIsNotNone(result.error)
@@ -261,9 +263,7 @@ class TestWebFetchExecution(unittest.TestCase):
         mock_session.__aexit__ = AsyncMock(return_value=None)
 
         with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = asyncio.get_event_loop().run_until_complete(
-                self.executor._execute_web_fetch(tool_data)
-            )
+            result = _run(self.executor._execute_web_fetch(tool_data))
 
             self.assertFalse(result.success)
             self.assertIsNotNone(result.error)
@@ -277,9 +277,7 @@ class TestWebFetchExecution(unittest.TestCase):
             "raw": '<web-fetch></web-fetch>',
         }
 
-        result = asyncio.get_event_loop().run_until_complete(
-            self.executor._execute_web_fetch(tool_data)
-        )
+        result = _run(self.executor._execute_web_fetch(tool_data))
 
         self.assertFalse(result.success)
         self.assertIsNotNone(result.error)
@@ -293,12 +291,10 @@ class TestWebFetchExecution(unittest.TestCase):
             "raw": '<web-fetch><url>https://example.com/nonexistent</url></web-fetch>',
         }
 
-        mock_resp = _make_mock_aiohttp_get(status=404, text="Not Found")
+        mock_resp = _make_mock_aiohttp_response(status=404, text="Not Found")
 
         with _patch_aiohttp_session(mock_get=mock_resp):
-            result = asyncio.get_event_loop().run_until_complete(
-                self.executor._execute_web_fetch(tool_data)
-            )
+            result = _run(self.executor._execute_web_fetch(tool_data))
 
             self.assertFalse(result.success)
             self.assertIsNotNone(result.error)
@@ -367,15 +363,12 @@ class TestWebSearchExecution(unittest.TestCase):
             "raw": '<web-search><query>python documentation</query></web-search>',
         }
 
-        mock_resp = _make_mock_aiohttp_post(text=search_html)
+        mock_resp = _make_mock_aiohttp_response(text=search_html)
 
         with _patch_aiohttp_session(mock_post=mock_resp):
-            result = asyncio.get_event_loop().run_until_complete(
-                self.executor._execute_web_search(tool_data)
-            )
+            result = _run(self.executor._execute_web_search(tool_data))
 
             self.assertTrue(result.success, f"Expected success, got error: {result.error}")
-            # Should contain at least one result title
             self.assertTrue(
                 "Python docs" in result.output or
                 "docs.python.org" in result.output or
@@ -398,15 +391,12 @@ class TestWebSearchExecution(unittest.TestCase):
             "raw": '<web-search><query>test query</query><max_results>3</max_results></web-search>',
         }
 
-        mock_resp = _make_mock_aiohttp_post(text=search_html)
+        mock_resp = _make_mock_aiohttp_response(text=search_html)
 
         with _patch_aiohttp_session(mock_post=mock_resp):
-            result = asyncio.get_event_loop().run_until_complete(
-                self.executor._execute_web_search(tool_data)
-            )
+            result = _run(self.executor._execute_web_search(tool_data))
 
             self.assertTrue(result.success, f"Expected success, got error: {result.error}")
-            # Count how many result entries appear (by counting numbered entries)
             result_count = result.output.count("https://example.com/")
             self.assertLessEqual(
                 result_count, 3,
@@ -421,9 +411,7 @@ class TestWebSearchExecution(unittest.TestCase):
             "raw": '<web-search></web-search>',
         }
 
-        result = asyncio.get_event_loop().run_until_complete(
-            self.executor._execute_web_search(tool_data)
-        )
+        result = _run(self.executor._execute_web_search(tool_data))
 
         self.assertFalse(result.success)
         self.assertIsNotNone(result.error)
@@ -443,9 +431,7 @@ class TestWebSearchExecution(unittest.TestCase):
         mock_session.__aexit__ = AsyncMock(return_value=None)
 
         with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = asyncio.get_event_loop().run_until_complete(
-                self.executor._execute_web_search(tool_data)
-            )
+            result = _run(self.executor._execute_web_search(tool_data))
 
             self.assertFalse(result.success)
             self.assertIsNotNone(result.error)

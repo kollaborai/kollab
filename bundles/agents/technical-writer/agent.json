@@ -16,7 +16,9 @@
     "scratchpad-append",
     "scratchpad-get",
     "task-checkpoint",
-    "task-complete"
+    "task-complete",
+    "web-fetch",
+    "web-search"
   ],
   "skills": [
     "api-documentation",

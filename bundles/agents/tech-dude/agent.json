@@ -12,7 +12,9 @@
     "hub-status",
     "scratchpad",
     "scratchpad-append",
-    "scratchpad-get"
+    "scratchpad-get",
+    "web-fetch",
+    "web-search"
   ],
   "skills": [
     "experimentation",

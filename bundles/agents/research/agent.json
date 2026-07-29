@@ -15,7 +15,9 @@
     "task-complete",
     "curate",
     "context-query",
-    "evict"
+    "evict",
+    "web-fetch",
+    "web-search"
   ],
   "skills": [
     "architecture-mapping",

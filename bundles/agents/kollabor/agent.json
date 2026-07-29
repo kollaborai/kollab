@@ -57,7 +57,9 @@
     "task-reject",
     "curate",
     "context-query",
-    "evict"
+    "evict",
+    "web-fetch",
+    "web-search"
   ],
   "skills": [
     "debugging"
