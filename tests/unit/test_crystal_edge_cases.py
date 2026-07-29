@@ -432,12 +432,12 @@ class TestListOutputTruncation(unittest.TestCase):
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.store = CrystalStore(self.tmpdir)
-        # Create 50+ entries
+        # Create 50+ entries with completely unique summaries (avoid summary dedup)
         for i in range(55):
             self.store.add_entry(
-                f"Insight number {i} about topic_{i} with enough text to be substantive "
-                f"and include keywords like keyword_{i} and detail_{i}",
-                manual_keywords=[f"topic_{i}", f"keyword_{i}"],
+                f"unique_topic_{i:03d}_finding about subsystem_{i} "
+                f"with keyword_{i} and detail_{i}",
+                manual_keywords=[f"keyword_{i}", f"detail_{i}"],
             )
 
     def tearDown(self):
