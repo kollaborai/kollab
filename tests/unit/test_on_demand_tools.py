@@ -74,7 +74,7 @@ class TestOnDemandToolDefinitions(unittest.TestCase):
         self.assertEqual(tool.risk_level, "medium")
 
     def test_tool_search_parameters(self):
-        """tool-search should have query (required)."""
+        """tool-search should have query (optional — returns full catalog when omitted)."""
         tool = self.registry.get("tool-search")
         self.assertIsNotNone(tool)
 
@@ -82,7 +82,7 @@ class TestOnDemandToolDefinitions(unittest.TestCase):
         self.assertIn("query", param_names)
 
         query_param = next(p for p in tool.parameters if p.name == "query")
-        self.assertTrue(query_param.required)
+        self.assertFalse(query_param.required)
         self.assertEqual(query_param.type, "string")
 
     def test_tool_load_parameters(self):
@@ -192,7 +192,7 @@ class TestToolSearchExecution(unittest.TestCase):
         self.assertIn("No tools", result.output)
 
     def test_search_missing_query(self):
-        """Missing query parameter should return error."""
+        """Missing query parameter should return full catalog."""
         tool_data = {
             "type": "tool_search",
             "id": "ts_0",
@@ -200,8 +200,8 @@ class TestToolSearchExecution(unittest.TestCase):
 
         result = _run(self.executor._execute_tool_search(tool_data))
 
-        self.assertFalse(result.success)
-        self.assertIsNotNone(result.error)
+        self.assertTrue(result.success)
+        self.assertGreater(result.metadata["result_count"], 0)
 
     def test_search_case_insensitive(self):
         """Search should be case-insensitive."""
@@ -278,7 +278,7 @@ class TestToolSearchExecution(unittest.TestCase):
         self.assertIn("hub", result.output.lower())
 
     def test_search_empty_query_after_strip(self):
-        """Query that becomes empty after strip should error."""
+        """Query that becomes empty after strip should return full catalog."""
         tool_data = {
             "type": "tool_search",
             "id": "ts_0",
@@ -287,7 +287,8 @@ class TestToolSearchExecution(unittest.TestCase):
 
         result = _run(self.executor._execute_tool_search(tool_data))
 
-        self.assertFalse(result.success)
+        self.assertTrue(result.success)
+        self.assertGreater(result.metadata["result_count"], 0)
 
     def test_search_nested_params(self):
         """Query should work when passed via 'parameters' dict."""
