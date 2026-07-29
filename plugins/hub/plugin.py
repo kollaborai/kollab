@@ -4675,11 +4675,32 @@ class HubPlugin(BasePlugin):
                 # Write insights via crystal_store (structured + dedup)
                 if self._crystal_store:
                     # Split multi-paragraph insights into individual entries
-                    paragraphs = [
-                        p.strip()
-                        for p in insights.split("\n\n")
-                        if p.strip() and len(p.strip()) > 50
-                    ]
+                    # Filter out LLM preamble and meta-commentary
+                    _PREAMBLE_PATTERNS = (
+                        "based on the recent activity",
+                        "here are 3-5",
+                        "here are 3 - 5",
+                        "here are some insights",
+                        "here are the insights",
+                        "i'll extract",
+                        "i will extract",
+                        "let me extract",
+                        "the following insights",
+                        "these insights are",
+                        "after reviewing",
+                        "from the recent activity",
+                    )
+                    paragraphs = []
+                    for p in insights.split("\n\n"):
+                        p_stripped = p.strip()
+                        if not p_stripped or len(p_stripped) <= 50:
+                            continue
+                        # Skip LLM preamble/meta-commentary
+                        p_lower = p_stripped.lower()
+                        if any(p_lower.startswith(pat) for pat in _PREAMBLE_PATTERNS):
+                            logger.debug("dreaming: filtered preamble paragraph")
+                            continue
+                        paragraphs.append(p_stripped)
                     for paragraph in paragraphs:
                         self._crystal_store.add_entry(paragraph)
                     added = len(paragraphs)
@@ -5255,9 +5276,26 @@ class HubPlugin(BasePlugin):
 
         stream_text = "\n".join(entry_lines)
 
-        # Get existing crystallized knowledge
-        crystallized = self._vault.get_crystallized()
-        crystal_section = crystallized if crystallized else "(none yet)"
+        # Get existing crystallized knowledge — summaries only, capped.
+        # Injecting the full crystallized.md (which can be 400KB+) drowns
+        # the LLM and causes it to regenerate duplicates because it can't
+        # effectively read all existing entries. Summary lines give enough
+        # context to avoid repetition without blowing the prompt budget.
+        MAX_CRYSTAL_SUMMARIES = 15
+        if self._crystal_store:
+            recent = self._crystal_store.get_recent(MAX_CRYSTAL_SUMMARIES)
+            if recent:
+                crystal_lines = [f"  [{e.id}] {e.summary}" for e in recent]
+                crystal_section = (
+                    f"{len(recent)} most recent insights (do NOT repeat these):\n"
+                    + "\n".join(crystal_lines)
+                )
+            else:
+                crystal_section = "(none yet)"
+        else:
+            # Fallback: first 2000 chars of raw crystallized text
+            crystallized = self._vault.get_crystallized()
+            crystal_section = (crystallized[:2000] + "\n...") if crystallized and len(crystallized) > 2000 else (crystallized or "(none yet)")
 
         return (
             "You are reviewing your recent activity to extract durable insights.\n"
@@ -5277,7 +5315,7 @@ class HubPlugin(BasePlugin):
             "- Mistakes to avoid\n"
             "\n"
             "Format each insight as a single paragraph. Do not repeat insights "
-            "already in your crystallized knowledge."
+            "already in your crystallized knowledge above."
         )
 
     async def _dreaming_llm_call(self, prompt: str) -> Optional[str]:
