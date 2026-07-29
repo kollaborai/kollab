@@ -6568,6 +6568,8 @@ class HubPlugin(BasePlugin):
         if self._identity:
             if self._identity.state != PresenceState.WAITING.value:
                 self._identity.state = AgentState.WORKING.value
+                if self._presence:
+                    self._presence.publish()
             self._last_activity_at = time.time()
             messages = context.get("messages", [])
             for msg in reversed(messages):
@@ -6601,6 +6603,8 @@ class HubPlugin(BasePlugin):
         if self._identity:
             if self._identity.state != PresenceState.WAITING.value:
                 self._identity.state = AgentState.IDLE.value
+                if self._presence:
+                    self._presence.publish()
             self._last_activity_at = time.time()
         return context
 
