@@ -258,5 +258,163 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self.assertEqual(additions, [])
 
 
+class TestMCPToolSummaries(unittest.TestCase):
+    """Tests for lazy MCP tool injection."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.config = MagicMock()
+
+        def config_get(key, default=None):
+            # Enable lazy MCP tools by default
+            if key == "kollabor.llm.lazy_mcp_tools":
+                return True
+            return default if default is not None else False
+
+        self.config.get = MagicMock(side_effect=config_get)
+
+        self.builder = SystemPromptBuilder(config=self.config)
+
+    def test_no_mcp_integration_returns_none(self):
+        """Test that None is returned when MCP integration is not set."""
+        result = self.builder._get_mcp_tool_summaries()
+        self.assertIsNone(result)
+
+    def test_empty_tool_registry_returns_none(self):
+        """Test that None is returned when no MCP tools are registered."""
+        mock_mcp = MagicMock()
+        mock_mcp.tool_registry = {}
+        self.builder.mcp_integration = mock_mcp
+
+        result = self.builder._get_mcp_tool_summaries()
+        self.assertIsNone(result)
+
+    def test_summaries_generated_correctly(self):
+        """Test that MCP tool summaries are generated with correct format."""
+        mock_mcp = MagicMock()
+        mock_mcp.tool_registry = {
+            "mentiko:navigate": {
+                "server": "mentiko",
+                "enabled": True,
+                "definition": {
+                    "name": "mentiko:navigate",
+                    "description": "Navigate to a route",
+                    "parameters": {},
+                },
+            },
+            "mentiko:list_chains": {
+                "server": "mentiko",
+                "enabled": True,
+                "definition": {
+                    "name": "mentiko:list_chains",
+                    "description": "List all chains",
+                    "parameters": {},
+                },
+            },
+            "github:create_issue": {
+                "server": "github",
+                "enabled": True,
+                "definition": {
+                    "name": "github:create_issue",
+                    "description": "Create a GitHub issue",
+                    "parameters": {},
+                },
+            },
+        }
+        self.builder.mcp_integration = mock_mcp
+
+        result = self.builder._get_mcp_tool_summaries()
+
+        self.assertIsNotNone(result)
+        self.assertIn("MCP Tools (3 available", result)
+        self.assertIn("mentiko (2 tools)", result)
+        self.assertIn("github (1 tools)", result)
+        self.assertIn("`mentiko:navigate` — Navigate to a route", result)
+        self.assertIn("`mentiko:list_chains` — List all chains", result)
+        self.assertIn("`github:create_issue` — Create a GitHub issue", result)
+        self.assertIn("tool-search/tool-load", result)
+
+    def test_disabled_tools_excluded(self):
+        """Test that disabled MCP tools are excluded from summaries."""
+        mock_mcp = MagicMock()
+        mock_mcp.tool_registry = {
+            "enabled_tool": {
+                "server": "test",
+                "enabled": True,
+                "definition": {"name": "enabled_tool", "description": "Active"},
+            },
+            "disabled_tool": {
+                "server": "test",
+                "enabled": False,
+                "definition": {"name": "disabled_tool", "description": "Inactive"},
+            },
+        }
+        self.builder.mcp_integration = mock_mcp
+
+        result = self.builder._get_mcp_tool_summaries()
+
+        self.assertIsNotNone(result)
+        self.assertIn("enabled_tool", result)
+        self.assertNotIn("disabled_tool", result)
+
+    def test_long_descriptions_truncated(self):
+        """Test that long descriptions are truncated to 80 chars."""
+        long_desc = "A" * 100
+        mock_mcp = MagicMock()
+        mock_mcp.tool_registry = {
+            "long_tool": {
+                "server": "test",
+                "enabled": True,
+                "definition": {"name": "long_tool", "description": long_desc},
+            },
+        }
+        self.builder.mcp_integration = mock_mcp
+
+        result = self.builder._get_mcp_tool_summaries()
+
+        self.assertIsNotNone(result)
+        self.assertIn("A" * 77 + "...", result)
+        self.assertNotIn("A" * 100, result)
+
+    def test_lazy_disabled_returns_none(self):
+        """Test that summaries are skipped when lazy_mcp_tools is False."""
+        config = MagicMock()
+        config.get = MagicMock(return_value=False)
+
+        mock_mcp = MagicMock()
+        mock_mcp.tool_registry = {"tool": {"server": "s", "enabled": True, "definition": {}}}
+
+        builder = SystemPromptBuilder(config=config, mcp_integration=mock_mcp)
+        result = builder._get_mcp_tool_summaries()
+        self.assertIsNone(result)
+
+    def test_set_mcp_integration(self):
+        """Test the set_mcp_integration setter."""
+        builder = SystemPromptBuilder(config=self.config)
+        self.assertIsNone(builder.mcp_integration)
+
+        mock_mcp = MagicMock()
+        builder.set_mcp_integration(mock_mcp)
+        self.assertEqual(builder.mcp_integration, mock_mcp)
+
+    def test_no_description_shown_gracefully(self):
+        """Test that tools without descriptions are handled."""
+        mock_mcp = MagicMock()
+        mock_mcp.tool_registry = {
+            "no_desc_tool": {
+                "server": "test",
+                "enabled": True,
+                "definition": {"name": "no_desc_tool", "description": ""},
+            },
+        }
+        self.builder.mcp_integration = mock_mcp
+
+        result = self.builder._get_mcp_tool_summaries()
+
+        self.assertIsNotNone(result)
+        self.assertIn("`no_desc_tool`", result)
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -451,6 +451,7 @@ class LLMService:
             agent_manager=self.agent_manager,
             profile_manager=self.profile_manager,
             conversation_logger=self.conversation_logger,
+            mcp_integration=self.mcp_integration,
         )
 
         # Question gate: pending tools queue
@@ -1061,6 +1062,14 @@ class LLMService:
         if self.conversation_logger and hasattr(self.conversation_logger, "session_id"):
             self._prompt_builder.set_session_id(self.conversation_logger.session_id)
 
+    def refresh_mcp_tools(self) -> None:
+        """Refresh MCP integration reference in prompt builder.
+
+        Called after MCP server discovery completes so the prompt builder
+        can generate up-to-date MCP tool summaries on the next build.
+        """
+        self._prompt_builder.set_mcp_integration(self.mcp_integration)
+
     def _build_system_prompt(self) -> str:
         """Build system prompt from file or agent."""
         return cast(str, self._prompt_builder.build())
@@ -1099,6 +1108,8 @@ class LLMService:
     async def _background_mcp_discovery(self) -> None:
         """Discover MCP servers in background."""
         await self._native_tools.background_discovery()
+        # Refresh MCP tools in prompt builder for lazy injection
+        self.refresh_mcp_tools()
 
     async def _load_native_tools(self) -> None:
         """Load MCP tools for native API function calling."""
