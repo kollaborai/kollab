@@ -7220,7 +7220,7 @@ class HubPlugin(BasePlugin):
                 detail=dial_target,
             )
             if not success:
-                await AgentMessenger.send_to_file(agent.agent_id, message)
+                await AgentMessenger.send_to_file(agent.identity, message)
             return True
 
         # Check cooldown only if the target is in waiting state
@@ -7285,21 +7285,13 @@ class HubPlugin(BasePlugin):
             detail=dial_target,
         )
         if not success:
-            await AgentMessenger.send_to_file(agent.agent_id, message)
+            await AgentMessenger.send_to_file(agent.identity, message)
             self._trace_delivery(
                 message,
-                "queued_agent_id_mailbox",
-                target=agent.agent_id,
+                "queued_identity_mailbox",
+                target=agent.identity,
                 detail="socket send failed",
             )
-            if agent.identity and agent.identity != agent.agent_id:
-                await AgentMessenger.send_to_file(agent.identity, message)
-                self._trace_delivery(
-                    message,
-                    "queued_identity_mailbox",
-                    target=agent.identity,
-                    detail="socket send failed",
-                )
         return True
 
     def _resolve_scope(self, target: str) -> str:
