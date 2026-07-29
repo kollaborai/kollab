@@ -93,6 +93,11 @@ class KeyPressHandler:
         # State tracking
         self._command_mode = CommandMode.NORMAL
 
+        # Double Ctrl+C to exit: first press shows a warning,
+        # second press within the window actually exits.
+        self._ctrl_c_first_press_time: float = 0.0
+        self._ctrl_c_window_seconds: float = 3.0
+
         logger.debug("KeyPressHandler initialized")
 
     def set_callbacks(
@@ -334,6 +339,10 @@ class KeyPressHandler:
                 f"modifiers={getattr(key_press, 'modifiers', None)}"
             )
 
+            # Reset double-Ctrl+C state on any non-Ctrl+C key
+            if not self.key_parser.is_control_key(key_press, "Ctrl+C"):
+                self._ctrl_c_first_press_time = 0.0
+
             # Emit KEY_PRESS event (fire-and-forget for config hooks)
             try:
                 import asyncio
@@ -385,8 +394,25 @@ class KeyPressHandler:
 
             # Handle control keys
             if self.key_parser.is_control_key(key_press, "Ctrl+C"):
-                logger.info("Ctrl+C received")
-                raise KeyboardInterrupt
+                now = time.monotonic()
+                if (
+                    self._ctrl_c_first_press_time > 0
+                    and now - self._ctrl_c_first_press_time
+                    <= self._ctrl_c_window_seconds
+                ):
+                    logger.info("Ctrl+C received (second press) - exiting")
+                    raise KeyboardInterrupt
+                else:
+                    # First press: show warning, don't exit
+                    self._ctrl_c_first_press_time = now
+                    logger.info("Ctrl+C received (first press) - waiting for confirmation")
+                    try:
+                        self.renderer.write_hook_message(
+                            "Press Ctrl+C again to exit "
+                            f"(or Esc to cancel request)",
+                        )
+                    except Exception:
+                        pass
 
             elif self.key_parser.is_control_key(key_press, "Enter"):
                 await self._handle_enter()
