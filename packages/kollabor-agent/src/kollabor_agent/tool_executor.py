@@ -460,6 +460,22 @@ class ToolExecutor:
                         logger.debug(
                             f"_execute_mcp_reload completed for {tool_id}"
                         )
+                    elif tool_type in ("tool_search", "tool-search"):
+                        logger.debug(
+                            f"About to call _execute_tool_search for {tool_id}"
+                        )
+                        result = await self._execute_tool_search(tool_data)
+                        logger.debug(
+                            f"_execute_tool_search completed for {tool_id}"
+                        )
+                    elif tool_type in ("tool_load", "tool-load"):
+                        logger.debug(
+                            f"About to call _execute_tool_load for {tool_id}"
+                        )
+                        result = await self._execute_tool_load(tool_data)
+                        logger.debug(
+                            f"_execute_tool_load completed for {tool_id}"
+                        )
                     else:
                         result = ToolExecutionResult(
                             tool_id=tool_id,
@@ -1242,6 +1258,313 @@ class ToolExecutor:
                 error=f"MCP reload failed: {e}",
             )
 
+    async def _execute_tool_search(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Search for available tools by keyword.
+
+        Searches both the built-in ToolRegistry and the MCP integration's
+        tool_registry dict. Returns a compact list (name, category/source,
+        one-line description) without full schemas.
+
+        Args:
+            tool_data: Tool information containing 'query' (required).
+
+        Returns:
+            ToolExecutionResult with formatted search results.
+        """
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract query — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        query = (
+            params.get("query")
+            or params.get("Query")
+            or tool_data.get("query")
+            or ""
+        )
+        query = query.strip().lower()
+
+        if not query:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_search",
+                success=False,
+                error="Missing required parameter: query",
+            )
+
+        results: List[Dict[str, str]] = []
+
+        # Search built-in tools from the ToolRegistry
+        try:
+            from .tool_registry import get_registry
+            registry = get_registry()
+
+            for tool in registry.list():
+                # Skip the on-demand tools themselves — no recursive searching
+                if tool.category == "on_demand":
+                    continue
+
+                searchable = f"{tool.name} {tool.category} {tool.description}".lower()
+                if query in searchable:
+                    results.append({
+                        "name": tool.name,
+                        "category": tool.category,
+                        "source": "built-in",
+                        "description": tool.description.split(".")[0] + ".",
+                    })
+        except Exception as e:
+            logger.warning(f"Tool search: registry query failed: {e}")
+
+        # Search MCP tools from the MCP integration
+        if self.mcp_integration and hasattr(self.mcp_integration, "tool_registry"):
+            for tool_name, tool_info in self.mcp_integration.tool_registry.items():
+                if not tool_info.get("enabled", True):
+                    continue
+
+                server = tool_info.get("server", "unknown")
+                definition = tool_info.get("definition", {})
+                description = definition.get("description", "")
+
+                searchable = f"{tool_name} {server} {description}".lower()
+                if query in searchable:
+                    results.append({
+                        "name": f"mcp:{server}:{tool_name}",
+                        "category": "mcp",
+                        "source": f"MCP ({server})",
+                        "description": description.split(".")[0] + "." if description else "",
+                    })
+
+        # Rank results: name matches first, then description matches
+        def _rank(r: Dict[str, str]) -> int:
+            name_lower = r["name"].lower()
+            if query in name_lower:
+                return 0  # name match = highest relevance
+            return 1
+
+        results.sort(key=_rank)
+
+        if not results:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_search",
+                success=True,
+                output=f"No tools found matching '{query}'.",
+                metadata={"query": query, "result_count": 0},
+            )
+
+        # Format compact output
+        lines = [f"Found {len(results)} tool(s) matching '{query}':\n"]
+        for r in results:
+            desc = r["description"] or "(no description)"
+            lines.append(f"  {r['name']}  [{r['source']}]  {desc}")
+
+        lines.append(f"\nUse tool-load to activate any of these tools.")
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_search",
+            success=True,
+            output="\n".join(lines),
+            metadata={"query": query, "result_count": len(results)},
+        )
+
+    async def _execute_tool_load(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Load a tool's full definition into the active session.
+
+        For built-in tools: adds the tool name to _bundle_tools so it
+        passes the bundle scope check. Returns the full markdown docs.
+        For MCP tools: marks the tool as enabled and returns its schema.
+
+        Args:
+            tool_data: Tool information containing 'name' (required).
+
+        Returns:
+            ToolExecutionResult with the loaded tool's full definition.
+        """
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract name — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        tool_name = (
+            params.get("name")
+            or params.get("Name")
+            or tool_data.get("name")
+            or ""
+        )
+        tool_name = tool_name.strip()
+
+        if not tool_name:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error="Missing required parameter: name",
+            )
+
+        # Check if it's an MCP tool (format: mcp:server:tool_name)
+        if tool_name.startswith("mcp:"):
+            return await self._load_mcp_tool(tool_id, tool_name)
+
+        # Built-in tool — look up in the ToolRegistry
+        try:
+            from .tool_registry import get_registry
+            registry = get_registry()
+        except Exception as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"Tool registry unavailable: {e}",
+            )
+
+        tool_def = registry.get(tool_name)
+        if tool_def is None:
+            # Try native name lookup (user might pass underscore form)
+            tool_def = registry.get_by_native_name(tool_name)
+        if tool_def is None:
+            # Try XML tag lookup
+            tool_def = registry.get_by_xml_tag(tool_name)
+
+        if tool_def is None:
+            available = ", ".join(registry.names())
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"Tool not found: {tool_name}. Use tool-search to find available tools.",
+                metadata={"available_tools": available},
+            )
+
+        # Add to bundle scope if active
+        if self._bundle_tools is not None and tool_def.name not in self._bundle_tools:
+            self._bundle_tools.append(tool_def.name)
+            logger.info(f"Tool loaded into active set: {tool_def.name}")
+
+        # Generate full documentation
+        markdown = tool_def.to_markdown()
+
+        output = (
+            f"Tool loaded: {tool_def.name}\n\n"
+            f"{markdown}"
+        )
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_load",
+            success=True,
+            output=output,
+            metadata={
+                "loaded_tool": tool_def.name,
+                "category": tool_def.category,
+                "already_active": False,
+            },
+        )
+
+    async def _load_mcp_tool(
+        self, tool_id: str, full_name: str
+    ) -> ToolExecutionResult:
+        """Load an MCP tool by its full name (mcp:server:tool_name).
+
+        Args:
+            tool_id: The executing tool's ID.
+            full_name: Full MCP tool name in mcp:server:tool_name format.
+
+        Returns:
+            ToolExecutionResult with the MCP tool's schema.
+        """
+        # Parse mcp:server:tool_name
+        parts = full_name.split(":", 2)
+        if len(parts) < 3:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Invalid MCP tool name format: {full_name}. "
+                    f"Expected: mcp:<server>:<tool_name>"
+                ),
+            )
+
+        _prefix, server, tool_name = parts
+
+        if self.mcp_integration is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error="MCP integration is not available in this session.",
+            )
+
+        # Look up in MCP tool registry
+        mcp_tool = self.mcp_integration.tool_registry.get(tool_name)
+        if mcp_tool is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"MCP tool not found: {tool_name}. Use tool-search to find available tools.",
+            )
+
+        # Verify the server matches
+        actual_server = mcp_tool.get("server", "")
+        if actual_server and server != actual_server:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Tool '{tool_name}' belongs to server '{actual_server}', "
+                    f"not '{server}'. Correct name: mcp:{actual_server}:{tool_name}"
+                ),
+            )
+
+        # Check if server is connected
+        if server not in self.mcp_integration.server_connections:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"MCP server '{server}' is not connected. Use mcp-reload to reconnect.",
+            )
+
+        # Ensure enabled
+        mcp_tool["enabled"] = True
+
+        definition = mcp_tool.get("definition", {})
+        description = definition.get("description", "(no description)")
+        schema = definition.get("parameters", {})
+
+        # Format the schema for the agent
+        import json
+
+        schema_str = json.dumps(schema, indent=2) if schema else "{}"
+
+        output = (
+            f"MCP tool loaded: {full_name}\n"
+            f"  Server: {server}\n"
+            f"  Description: {description}\n"
+            f"  Schema: {schema_str}\n\n"
+            f"This tool is now active. Use it as an MCP tool call with "
+            f"the name '{tool_name}'."
+        )
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_load",
+            success=True,
+            output=output,
+            metadata={
+                "loaded_tool": full_name,
+                "mcp_server": server,
+                "mcp_tool_name": tool_name,
+                "category": "mcp",
+            },
+        )
+
+
     def _update_stats(self, result: ToolExecutionResult):
         """Update execution statistics.
 
@@ -1268,6 +1591,9 @@ class ToolExecutor:
         elif result.tool_type in ("mcp_reload", "mcp-reload"):
             self.stats.setdefault("mcp_reload_executions", 0)
             self.stats["mcp_reload_executions"] += 1
+        elif result.tool_type in ("tool_search", "tool_load"):
+            self.stats.setdefault("on_demand_executions", 0)
+            self.stats["on_demand_executions"] += 1
 
     def get_execution_stats(self) -> Dict[str, Any]:
         """Get execution statistics.
@@ -1858,5 +2184,13 @@ class ToolExecutor:
 
         elif tool_type in ("mcp_reload", "mcp-reload"):
             return "mcp-reload"
+
+        elif tool_type in ("tool_search", "tool-search"):
+            query = tool_data.get("query", "")
+            return f"tool-search: {query[:60]}" if query else "tool-search"
+
+        elif tool_type in ("tool_load", "tool-load"):
+            name = tool_data.get("name", "")
+            return f"tool-load: {name[:60]}" if name else "tool-load"
 
         return str(tool_type)
