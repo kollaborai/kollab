@@ -18,7 +18,8 @@
     "task-checkpoint",
     "task-complete",
     "web-fetch",
-    "web-search"
+    "web-search",
+        "mcp-reload"
   ],
   "skills": [
     "api-documentation",

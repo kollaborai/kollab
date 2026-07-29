@@ -14,7 +14,8 @@
     "scratchpad-append",
     "scratchpad-get",
     "web-fetch",
-    "web-search"
+    "web-search",
+        "mcp-reload"
   ],
   "skills": [
     "character-development",

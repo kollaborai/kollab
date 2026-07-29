@@ -33,7 +33,8 @@
     "context-query",
     "evict",
     "web-fetch",
-    "web-search"
+    "web-search",
+        "mcp-reload"
   ],
   "skills": [
     "debugging",
