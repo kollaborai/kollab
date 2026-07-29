@@ -363,3 +363,62 @@ class TestXmlTagReverseLookup:
         assert registry.get("wait-for-user") is None
         assert registry.get_by_xml_tag("wait_for_user") is None
         assert executor._check_bundle_scope("wait_for_user") is not None
+
+class TestWildcardScope:
+    """Test ["*"] wildcard support for allow-all tool scope."""
+
+    def test_wildcard_in_set_bundle_scope_allows_all(self):
+        """["*"] passed to set_bundle_scope should be treated as None (all allowed)."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        executor = ToolExecutor(
+            mcp_integration=None,
+            event_bus=None,
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["*"])
+
+        # Should be treated as None — all tools allowed
+        assert executor._bundle_tools is None
+        # Any tool should pass scope check
+        assert executor._check_bundle_scope("file-read") is None
+        assert executor._check_bundle_scope("terminal") is None
+        assert executor._check_bundle_scope("web-search") is None
+
+    def test_get_agent_tool_scope_wildcard_returns_none(self):
+        """get_agent_tool_scope should return None for ["*"] wildcard."""
+        from kollabor_agent.runtime import get_agent_tool_scope
+
+        class FakeAgent:
+            tools = ["*"]
+
+        result = get_agent_tool_scope(FakeAgent())
+        assert result is None
+
+    def test_get_agent_tool_scope_wildcard_in_config(self):
+        """get_agent_tool_scope should return None for ["*"] in agent config."""
+        from kollabor_agent.runtime import get_agent_tool_scope
+
+        class FakeConfig:
+            def get(self, key):
+                if key == "tools":
+                    return ["*"]
+                return None
+
+        class FakeAgent:
+            tools = None
+            config = FakeConfig()
+
+        result = get_agent_tool_scope(FakeAgent())
+        assert result is None
+
+    def test_get_agent_tool_scope_normal_list_still_works(self):
+        """Normal tool lists should still be returned as-is."""
+        from kollabor_agent.runtime import get_agent_tool_scope
+
+        class FakeAgent:
+            tools = ["file-read", "terminal"]
+
+        result = get_agent_tool_scope(FakeAgent())
+        assert result == ["file-read", "terminal"]

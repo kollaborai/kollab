@@ -90,22 +90,31 @@ class LaunchStrategy(Enum):
 
 
 def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
-    """Return the active agent's bundle tool scope, if one is defined."""
+    """Return the active agent's bundle tool scope, if one is defined.
+
+    Returns None (all tools allowed) when:
+    - agent is None
+    - no tools field is defined
+    - tools is ["*"] (wildcard = allow all)
+    """
     if agent is None:
         return None
 
     tools = getattr(agent, "tools", None)
-    if tools:
-        return list(tools)
+    if not tools:
+        config = getattr(agent, "config", None)
+        config_get = getattr(config, "get", None)
+        if callable(config_get):
+            tools = config_get("tools")
 
-    config = getattr(agent, "config", None)
-    config_get = getattr(config, "get", None)
-    if callable(config_get):
-        tools = config_get("tools")
-        if tools:
-            return list(tools)
+    if not tools:
+        return None
 
-    return None
+    # Wildcard: allow all tools (same as no scope)
+    if isinstance(tools, list) and len(tools) == 1 and tools[0] == "*":
+        return None
+
+    return list(tools)
 
 
 @dataclass
