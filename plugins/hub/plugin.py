@@ -1554,135 +1554,20 @@ class HubPlugin(BasePlugin):
             "hub_ask_ctx", self._handle_hub_ask_ctx_tool
         )
 
-        # --- web-fetch ---
-        # <web-fetch><url>https://example.com</url></web-fetch>
-        web_fetch_pat = _re.compile(
-            r'<web-fetch(?:\s[^>]*)?>(.*?)</web-fetch>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
-
-        def _extract_web_fetch(m):
-            inner = m.group(1)
-            url = ""
-            url_m = _re.search(r'<url>\s*(.*?)\s*</url>', inner, _re.IGNORECASE)
-            if url_m:
-                url = url_m.group(1).strip()
-            max_chars = 5000
-            mc_m = _re.search(r'<max_chars>\s*(\d+)\s*</max_chars>', inner, _re.IGNORECASE)
-            if mc_m:
-                max_chars = int(mc_m.group(1))
-            extract_main = True
-            em_m = _re.search(r'<extract_main>\s*(\w+)\s*</extract_main>', inner, _re.IGNORECASE)
-            if em_m:
-                extract_main = em_m.group(1).lower() in ("true", "1", "yes")
-            return {"url": url, "max_chars": max_chars, "extract_main": extract_main}
-
-        response_parser.register_plugin_tag(
-            "web-fetch", web_fetch_pat, "web_fetch", _extract_web_fetch
-        )
-
-        # --- web-search ---
-        # <web-search><query>python asyncio</query></web-search>
-        web_search_pat = _re.compile(
-            r'<web-search(?:\s[^>]*)?>(.*?)</web-search>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
-
-        def _extract_web_search(m):
-            inner = m.group(1)
-            query = ""
-            q_m = _re.search(r'<query>\s*(.*?)\s*</query>', inner, _re.IGNORECASE)
-            if q_m:
-                query = q_m.group(1).strip()
-            max_results = 5
-            mr_m = _re.search(r'<max_results>\s*(\d+)\s*</max_results>', inner, _re.IGNORECASE)
-            if mr_m:
-                max_results = int(mr_m.group(1))
-            return {"query": query, "max_results": max_results}
-
-        response_parser.register_plugin_tag(
-            "web-search", web_search_pat, "web_search", _extract_web_search
-        )
-
-        # --- workspace-set ---
-        # <workspace-set><path>/some/dir</path></workspace-set>
-        workspace_set_pat = _re.compile(
-            r'<workspace-set(?:\s[^>]*)?>(.*?)</workspace-set>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
-
-        def _extract_workspace_set(m):
-            inner = m.group(1)
-            path = ""
-            p_m = _re.search(r'<path>\s*(.*?)\s*</path>', inner, _re.IGNORECASE)
-            if p_m:
-                path = p_m.group(1).strip()
-            return {"path": path}
-
-        response_parser.register_plugin_tag(
-            "workspace-set", workspace_set_pat, "workspace_set", _extract_workspace_set
-        )
-
-        # --- mcp-reload ---
-        # <mcp-reload /> or <mcp-reload></mcp-reload>
-        mcp_reload_pat = _re.compile(
-            r'<mcp-reload\s*/?>|<mcp-reload\s*>.*?</mcp-reload>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
-
-        def _extract_mcp_reload(m):
-            return {}
-
-        response_parser.register_plugin_tag(
-            "mcp-reload", mcp_reload_pat, "mcp_reload", _extract_mcp_reload
-        )
-
-        # --- tool-search ---
-        # <tool-search><query>file</query></tool-search>
-        tool_search_pat = _re.compile(
-            r'<tool-search(?:\s[^>]*)?>(.*?)</tool-search>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
-
-        def _extract_tool_search(m):
-            inner = m.group(1)
-            query = ""
-            q_m = _re.search(r'<query>\s*(.*?)\s*</query>', inner, _re.IGNORECASE)
-            if q_m:
-                query = q_m.group(1).strip()
-            return {"query": query}
-
-        response_parser.register_plugin_tag(
-            "tool-search", tool_search_pat, "tool_search", _extract_tool_search
-        )
-
-        # --- tool-load ---
-        # <tool-load><name>mcp:github:create_issue</name></tool-load>
-        tool_load_pat = _re.compile(
-            r'<tool-load(?:\s[^>]*)?>(.*?)</tool-load>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
-
-        def _extract_tool_load(m):
-            inner = m.group(1)
-            name = ""
-            n_m = _re.search(r'<name>\s*(.*?)\s*</name>', inner, _re.IGNORECASE)
-            if n_m:
-                name = n_m.group(1).strip()
-            return {"name": name}
-
-        response_parser.register_plugin_tag(
-            "tool-load", tool_load_pat, "tool_load", _extract_tool_load
-        )
+        # NOTE: web-fetch, web-search, workspace-set, mcp-reload,
+        # tool-search, and tool-load are NO LONGER registered here.
+        # They are ToolRegistry tools and auto-enroll via
+        # llm_coordinator._register_registry_tool_tags() which iterates
+        # the registry and registers every tool's XML tag dynamically.
+        # This is the single source of truth — drop a tool in the
+        # registry and it's immediately available in the parser.
 
         logger.info(
-            "Registered 49 hub pipeline tags "
+            "Registered 43 hub pipeline tags "
             "(hub_msg, hub_broadcast, hub_stop, hub_status, "
             "scratchpad*, state_update, task_*, change feed, "
             "agent ops, vault_write, global_vault_write, crystal_*, "
-            "curate, context_query, evict, hub_ask_ctx, "
-            "web-fetch, web-search, workspace-set, mcp-reload, "
-            "tool-search, tool-load)"
+            "curate, context_query, evict, hub_ask_ctx)"
         )
 
     async def _handle_curate_tool(self, tool_data: dict[str, Any]):
@@ -6937,7 +6822,9 @@ class HubPlugin(BasePlugin):
         )
         cleaned = wait_tag_pat.sub("", cleaned).strip()
         # All hub XML tags are now handled by the pipeline.
-        # See _register_pipeline_tools for the full list of 33 tags.
+        # See _register_pipeline_tools for the full list of 43 hub tags.
+        # ToolRegistry tools (web-fetch, web-search, etc.) are registered
+        # separately by llm_coordinator._register_registry_tool_tags().
 
         # --- Nudge engine: observe behavior and maybe remind ---
         # NOTE: `response` (from data["response_text"]) is the RAW pre-parser
