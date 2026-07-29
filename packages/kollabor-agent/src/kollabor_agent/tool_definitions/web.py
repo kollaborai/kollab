@@ -31,11 +31,11 @@ web_fetch = ToolDefinition(
             name="max_chars",
             type="integer",
             description=(
-                "Maximum characters of text to return (default: 10000). "
+                "Maximum characters of text to return (default: 5000). "
                 "Content is truncated to this limit after extraction."
             ),
             required=False,
-            default=10000,
+            default=5000,
         ),
         ToolParameter(
             name="extract_main",
