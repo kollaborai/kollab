@@ -1199,12 +1199,12 @@ class ToolExecutor:
             # Extract main content and strip HTML
             text = self._html_to_text(raw)
 
-            # Truncate
-            if len(text) > max_chars:
-                text = text[:max_chars] + "\n...[truncated]"
-
+            # Truncate to max_chars (accounting for the URL header)
             final_url = str(resp.url) if resp.url != url else url
             header = f"URL: {final_url}\n\n"
+            available = max(100, max_chars - len(header))
+            if len(text) > available:
+                text = text[:available] + "\n...[truncated]"
 
             return ToolExecutionResult(
                 tool_id=tool_id,
@@ -1219,7 +1219,7 @@ class ToolExecutor:
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error="Request timed out after 30 seconds",
+                error="Request timeout after 30 seconds",
             )
         except aiohttp.ClientError as e:
             return ToolExecutionResult(
