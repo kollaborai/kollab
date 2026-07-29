@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -286,6 +287,7 @@ Aliases: /t, /term, /tmux"""
                 shell=False,
                 cwd=str(Path.cwd()),
                 env=env,
+                start_new_session=True,  # isolate from kollab's process group
             )
 
             ring_buf = RingBuffer()
@@ -505,7 +507,7 @@ Aliases: /t, /term, /tmux"""
     # ------------------------------------------------------------------
 
     def _kill_process(self, session: TerminalSession) -> bool:
-        """Terminate subprocess: SIGTERM -> wait -> SIGKILL."""
+        """Terminate subprocess and its children: SIGTERM group -> wait -> SIGKILL group."""
         if session.proc is None:
             return False
         if session.proc.poll() is not None:
@@ -517,11 +519,22 @@ Aliases: /t, /term, /tmux"""
                     session.proc.stdin.close()
                 except Exception:
                     pass
-            session.proc.terminate()
+            # Kill the entire process group (sessions use start_new_session=True)
+            try:
+                pgid = os.getpgid(session.proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                # Fallback to single-process terminate
+                session.proc.terminate()
             try:
                 session.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                session.proc.kill()
+                # Force kill the entire group
+                try:
+                    pgid = os.getpgid(session.proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    session.proc.kill()
                 session.proc.wait(timeout=2)
             return True
         except Exception as e:
@@ -701,6 +714,7 @@ Aliases: /t, /term, /tmux"""
                 shell=False,
                 cwd=effective_cwd,
                 env=env,
+                start_new_session=True,  # isolate from kollab's process group
             )
 
             ring_buf = RingBuffer()
