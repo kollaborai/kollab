@@ -2364,12 +2364,39 @@ class HubPlugin(BasePlugin):
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
         content = tool_data.get("message", tool_data.get("content", ""))
 
+        # Salvage: LLMs sometimes emit hub_msg as a native tool call with
+        # the entire message body jammed inside the `to` param after an
+        # escaped quote (e.g. to='lapis">actual message here'). When this
+        # happens, content is empty and target contains everything.
+        # Try to split the malformed target into real_target + message.
+        if not content and target:
+            # Look for patterns like: identity">message  or  identity" >message
+            import re as _re
+            _salvage = _re.match(
+                r'^([a-zA-Z0-9_-]+)["\']\s*>\s*(.+)',
+                target.strip(),
+                _re.DOTALL,
+            )
+            if _salvage:
+                target = _salvage.group(1)
+                content = _salvage.group(2).strip()
+                logger.warning(
+                    "hub_msg: salvaged malformed native tool call — "
+                    "target=%r, content=%d chars",
+                    target,
+                    len(content),
+                )
+
         if not content:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_msg",
-                success=True,
+                success=False,
                 output="",
+                error=(
+                    f"hub_msg to {target!r} has empty message. "
+                    f"Use: <hub_msg to=\"{target}\">your message here</hub_msg>"
+                ),
             )
 
         # Auto-detect idle chatter
@@ -2537,8 +2564,12 @@ class HubPlugin(BasePlugin):
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_broadcast",
-                success=True,
+                success=False,
                 output="",
+                error=(
+                    "hub_broadcast has empty message. "
+                    "Use: <hub_broadcast>your message here</hub_broadcast>"
+                ),
             )
 
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
