@@ -15,7 +15,8 @@
     "scratchpad-get",
     "web-fetch",
     "web-search",
-        "mcp-reload"
+    "mcp-reload",
+    "workspace-set"
   ],
   "skills": [
     "character-development",

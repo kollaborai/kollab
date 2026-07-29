@@ -61,7 +61,8 @@
     "evict",
     "web-fetch",
     "web-search",
-        "mcp-reload"
+    "mcp-reload",
+    "workspace-set"
   ],
   "skills": [
     "explore-agent-system"

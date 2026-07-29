@@ -19,7 +19,8 @@
     "task-complete",
     "web-fetch",
     "web-search",
-        "mcp-reload"
+    "mcp-reload",
+    "workspace-set"
   ],
   "skills": [
     "api-documentation",
