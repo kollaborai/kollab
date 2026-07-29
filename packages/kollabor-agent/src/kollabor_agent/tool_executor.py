@@ -426,6 +426,14 @@ class ToolExecutor:
                         logger.debug(f"About to call _execute_mcp_tool for {tool_id}")
                         result = await self._execute_mcp_tool(tool_data)
                         logger.debug(f"_execute_mcp_tool completed for {tool_id}")
+                    elif tool_type in ("web_fetch", "web-fetch"):
+                        logger.debug(f"About to call _execute_web_fetch for {tool_id}")
+                        result = await self._execute_web_fetch(tool_data)
+                        logger.debug(f"_execute_web_fetch completed for {tool_id}")
+                    elif tool_type in ("web_search", "web-search"):
+                        logger.debug(f"About to call _execute_web_search for {tool_id}")
+                        result = await self._execute_web_search(tool_data)
+                        logger.debug(f"_execute_web_search completed for {tool_id}")
                     elif (
                         tool_type.startswith("file_")
                         or tool_type == "malformed_file_op"
@@ -1070,6 +1078,9 @@ class ToolExecutor:
             self.stats["mcp_executions"] += 1
         elif result.tool_type.startswith("file_"):
             self.stats["file_op_executions"] += 1
+        elif result.tool_type in ("web_fetch", "web_search"):
+            self.stats.setdefault("web_executions", 0)
+            self.stats["web_executions"] += 1
 
     def get_execution_stats(self) -> Dict[str, Any]:
         """Get execution statistics.
@@ -1114,6 +1125,328 @@ class ToolExecutor:
         }
         logger.info("Tool execution statistics reset")
 
+    # ------------------------------------------------------------------
+    # WEB TOOLS (web-fetch, web-search)
+    # ------------------------------------------------------------------
+
+    async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Fetch a URL and return cleaned text content.
+
+        Uses aiohttp with a 30-second timeout. HTML is stripped to plain
+        text with main-content extraction heuristics (skip nav/footer/script/
+        style tags, find the densest text block). Output is truncated to
+        max_chars (default 10 000).
+
+        Args:
+            tool_data: Dict with 'url' (required) and 'max_chars' (optional).
+
+        Returns:
+            ToolExecutionResult with the cleaned text or an error message.
+        """
+        import aiohttp
+
+        tool_id = tool_data.get("id", "unknown")
+        url = tool_data.get("url", "").strip()
+        max_chars = int(tool_data.get("max_chars", 10000))
+
+        if not url:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="No URL provided",
+            )
+
+        # Basic URL validation
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Invalid URL: {url}",
+            )
+        if parsed.scheme not in ("http", "https"):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Unsupported scheme: {parsed.scheme} (only http/https)",
+            )
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                    "+https://github.com/kollaborai/kollab)"
+                ),
+            }
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers, allow_redirects=True) as resp:
+                    if resp.status >= 400:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type="web_fetch",
+                            success=False,
+                            error=f"HTTP {resp.status} {resp.reason}",
+                        )
+
+                    raw = await resp.text(errors="replace")
+
+            # Extract main content and strip HTML
+            text = self._html_to_text(raw)
+
+            # Truncate
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n...[truncated]"
+
+            final_url = str(resp.url) if resp.url != url else url
+            header = f"URL: {final_url}\n\n"
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=True,
+                output=header + text,
+                metadata={"url": final_url, "chars": len(text)},
+            )
+
+        except asyncio.TimeoutError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="Request timed out after 30 seconds",
+            )
+        except aiohttp.ClientError as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Network error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"web_fetch error for {url}: {e}", exc_info=True)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Fetch error: {e}",
+            )
+
+    async def _execute_web_search(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Search the web using DuckDuckGo's HTML endpoint and return results.
+
+        No API key required. Parses the top N results (title, URL, snippet)
+        from the DuckDuckGo HTML search page.
+
+        Args:
+            tool_data: Dict with 'query' (required) and 'max_results' (optional).
+
+        Returns:
+            ToolExecutionResult with formatted search results.
+        """
+        import aiohttp
+
+        tool_id = tool_data.get("id", "unknown")
+        query = tool_data.get("query", "").strip()
+        max_results = int(tool_data.get("max_results", 5))
+
+        if not query:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error="No search query provided",
+            )
+
+        search_url = "https://html.duckduckgo.com/html/"
+        params = {"q": query}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                "+https://github.com/kollaborai/kollab)"
+            ),
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    search_url, data=params, headers=headers, allow_redirects=True
+                ) as resp:
+                    if resp.status >= 400:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type="web_search",
+                            success=False,
+                            error=f"Search failed: HTTP {resp.status}",
+                        )
+                    html = await resp.text(errors="replace")
+
+            results = self._parse_ddg_results(html, max_results)
+
+            if not results:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="web_search",
+                    success=True,
+                    output=f"No results found for: {query}",
+                    metadata={"query": query, "count": 0},
+                )
+
+            lines = [f"Search results for: {query}", ""]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. {r['title']}")
+                lines.append(f"   {r['url']}")
+                if r.get("snippet"):
+                    lines.append(f"   {r['snippet']}")
+                lines.append("")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=True,
+                output="\n".join(lines).strip(),
+                metadata={"query": query, "count": len(results)},
+            )
+
+        except asyncio.TimeoutError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error="Search timed out after 30 seconds",
+            )
+        except aiohttp.ClientError as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error=f"Network error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"web_search error for '{query}': {e}", exc_info=True)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error=f"Search error: {e}",
+            )
+
+    # ------------------------------------------------------------------
+    # HTML / search-result helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        """Convert HTML to clean text with main-content extraction.
+
+        Strategy:
+        1. Remove script/style/nav/footer/aside/header tags and their content.
+        2. Strip all remaining HTML tags.
+        3. Decode common HTML entities.
+        4. Collapse whitespace.
+        """
+        import html as html_mod
+        import re
+
+        # Remove non-content tags entirely (tag + inner content)
+        non_content = re.compile(
+            r"<(script|style|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            re.DOTALL | re.IGNORECASE,
+        )
+        html = non_content.sub("", html)
+
+        # Remove HTML comments
+        html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+
+        # Insert newlines for block-level tags before stripping
+        block_tags = re.compile(
+            r"</?(p|div|br|h[1-6]|li|tr|td|th|section|article|blockquote|pre)\b[^>]*>",
+            re.IGNORECASE,
+        )
+        html = block_tags.sub("\n", html)
+
+        # Strip all remaining tags
+        html = re.sub(r"<[^>]+>", "", html)
+
+        # Decode HTML entities
+        html = html_mod.unescape(html)
+
+        # Collapse whitespace: split into lines, strip each, drop empties
+        lines = [line.strip() for line in html.split("\n")]
+        lines = [line for line in lines if line]
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_ddg_results(html: str, max_results: int) -> list:
+        """Parse DuckDuckGo HTML search results into structured data.
+
+        Extracts result links and snippets from the DDG HTML endpoint.
+        Returns a list of dicts: {title, url, snippet}.
+        """
+        import re
+
+        results = []
+
+        # DDG HTML results have result blocks in <div class="result ...">
+        # Each contains an <a class="result__a" href="...">title</a>
+        # and an <a class="result__snippet">snippet</a>
+
+        # Extract result blocks
+        result_blocks = re.findall(
+            r'<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+
+        # Extract snippets
+        snippets = re.findall(
+            r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+
+        # Also try the newer DDG layout with result__url
+        if not result_blocks:
+            result_blocks = re.findall(
+                r'<a[^>]+rel="nofollow"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+                html,
+                re.DOTALL,
+            )
+
+        for i, (raw_url, raw_title) in enumerate(result_blocks[:max_results]):
+            # DDG wraps URLs in a redirect; extract actual URL
+            # Format: //duckduckgo.com/l/?uddg=ENCODED_URL&...
+            if "uddg=" in raw_url:
+                from urllib.parse import parse_qs, urlparse
+
+                parsed = urlparse(raw_url)
+                qs = parse_qs(parsed.query)
+                actual_url = qs.get("uddg", [raw_url])[0]
+            elif raw_url.startswith("//"):
+                actual_url = "https:" + raw_url
+            else:
+                actual_url = raw_url
+
+            # Strip HTML from title
+            title = re.sub(r"<[^>]+>", "", raw_title).strip()
+            if not title:
+                title = actual_url
+
+            snippet = ""
+            if i < len(snippets):
+                snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+
+            results.append({"title": title, "url": actual_url, "snippet": snippet})
+
+        return results
+
     def _get_display_name(self, tool_data: Dict[str, Any]) -> str:
         """Get a human-readable display name for the tool.
 
@@ -1150,5 +1483,13 @@ class ToolExecutor:
         elif tool_type.startswith("file_"):
             # For file operations, show the operation type
             return str(tool_type)
+
+        elif tool_type in ("web_fetch", "web-fetch"):
+            url = tool_data.get("url", "")
+            return f"web-fetch: {url[:60]}" if url else "web-fetch"
+
+        elif tool_type in ("web_search", "web-search"):
+            query = tool_data.get("query", "")
+            return f"web-search: {query[:60]}" if query else "web-search"
 
         return str(tool_type)
