@@ -114,6 +114,7 @@ class WidgetContext:
         config: Any = None,
         tmux_plugin: Any = None,
         background_tasks_plugin: Any = None,
+        terminal_plugin: Any = None,
         navigation_state: Any = None,
         layout_manager: Any = None,
         event_bus: Any = None,
@@ -124,6 +125,7 @@ class WidgetContext:
         self.config = config
         self.tmux_plugin = tmux_plugin
         self.background_tasks_plugin = background_tasks_plugin
+        self.terminal_plugin = terminal_plugin
         self.navigation_state = navigation_state
         self.layout_manager = layout_manager
         self.event_bus = event_bus
@@ -677,14 +679,27 @@ def render_tmux(width: int, ctx: Optional[WidgetContext]) -> str:
 
 
 def render_bg_tasks(width: int, ctx: Optional[WidgetContext]) -> str:
-    """Render background tasks count widget."""
+    """Render background tasks count widget.
+
+    Counts both LLM background tasks and live terminal background sessions
+    so the status bar reflects all running background work.
+    """
     try:
         bg_count = 0
 
+        # LLM background tasks
         if ctx and ctx.background_tasks_plugin:
             registry = getattr(ctx.background_tasks_plugin, "registry", None)
             if registry and hasattr(registry, "count_running"):
-                bg_count = registry.count_running()
+                bg_count += registry.count_running()
+
+        # Terminal background sessions (subprocess.Popen via terminal_plugin)
+        if ctx and ctx.terminal_plugin:
+            sessions = getattr(ctx.terminal_plugin, "sessions", {})
+            if sessions:
+                bg_count += sum(
+                    1 for s in sessions.values() if s.is_alive()
+                )
 
         # Attach mode fallback
         if bg_count == 0 and ctx and ctx.remote_state:

@@ -22,6 +22,7 @@ RESERVED_COMMANDS: Set[str] = {
     "model",
     "mode",
     "cd",
+    "upgrade",
 }
 
 

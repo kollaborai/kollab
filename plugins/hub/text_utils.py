@@ -57,31 +57,82 @@ def stem(word: str) -> str:
     """Light stemmer that removes common english suffixes.
 
     Strategy: strip longest matching suffix first, but only if
-    the remaining stem is at least 3 chars. Handles doubled
-    consonants before -ing/-ed (debugging -> debug).
-    Preserves file paths and identifiers (anything with / _ or .).
+    the remaining stem is at least 4 chars. Handles doubled
+    consonants before -ing/-ed (debugging -> debug). Restores
+    silent 'e' for -ing/-ed stems (arriving -> arrive).
+    Preserves file paths, identifiers, pure numbers, and short tokens.
+
+    Common words that would produce garbage stems are preserved
+    (during, rather, etc.).
     """
     # Don't stem file paths, identifiers, or very short words
     if "/" in word or "_" in word or "." in word or len(word) < 4:
         return word
 
-    # Try suffixes longest-first
-    for suffix in (
-        "ation", "ction", "ating",
-        "ment", "ness", "ally", "edly",
-        "able", "ible",
-        "ing", "ied", "ies", "ers", "ful",
-        "ed", "er", "ly",
+    # Skip pure numbers
+    if word.isdigit():
+        return word
+
+    # Common words that should never be stemmed (would produce garbage)
+    _PRESERVE = frozenset({
+        "during", "rather", "other", "after", "where", "there", "their",
+        "which", "would", "could", "should", "every", "still", "being",
+        "thing", "things", "going", "since", "until", "though",
+        "while", "these", "those", "whose",
+    })
+    if word in _PRESERVE:
+        return word
+
+    # Try suffixes longest-first with optional replacement text
+    for suffix, replacement in (
+        ("ation", ""),
+        ("ction", "ct"),
+        ("ating", "ate"),
+        ("ment", ""),
+        ("ness", ""),
+        ("ally", ""),
+        ("edly", ""),
+        ("able", ""),
+        ("ible", ""),
+        ("ing", ""),
+        ("ied", "y"),
+        ("ies", "y"),
+        ("ers", ""),
+        ("ful", ""),
+        ("ed", ""),
+        ("er", ""),
+        ("ly", ""),
     ):
-        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
-            candidate = word[: -len(suffix)]
+        if word.endswith(suffix) and len(word) - len(suffix) + len(replacement) >= 3:
+            candidate = word[: -len(suffix)] + replacement
             # De-double trailing consonant: debugging -> debugg -> debug
+            # Only for actual doubled consonants from suffix addition.
+            # "ss" pairs (process) and "ll" pairs (install) are inherent.
+            _dedoubled = False
             if (
                 len(candidate) >= 4
                 and candidate[-1] == candidate[-2]
                 and candidate[-1] not in "aeiou"
+                and candidate[-1] not in "sl"
             ):
                 candidate = candidate[:-1]
+                _dedoubled = True
+            # Restore silent 'e' for -ing/-ed stems (skip if de-doubled):
+            # arriving -> arriv -> arrive, truncated -> truncat -> truncate
+            if (
+                suffix in ("ing", "ed")
+                and not replacement
+                and not _dedoubled
+                and len(candidate) >= 4
+            ):
+                _VOWELS = "aeiou"
+                if (
+                    candidate[-1] not in _VOWELS
+                    and candidate[-2] in _VOWELS
+                    and candidate[-3] not in _VOWELS
+                    and candidate[-1] not in "wxy"
+                ):
+                    candidate = candidate + "e"
             return candidate
 
     # Plural -s (not -ss, -us, -is)
@@ -120,6 +171,12 @@ def extract_keywords(text: str, apply_stem: bool = True) -> List[str]:
     def _add(term: str) -> None:
         norm = normalize_token(term)
         if not norm or norm in STOPWORDS or len(norm) < 2:
+            return
+        # Skip pure numbers and short numeric-ish tokens (noise)
+        if norm.isdigit() or (len(norm) <= 2 and not norm.isalpha()):
+            return
+        # Skip "e.g", "i.e", etc.
+        if "." in norm and len(norm) <= 3:
             return
         # Apply stemming for content words (not paths/identifiers)
         stemmed = stem(norm) if apply_stem else norm
@@ -174,6 +231,37 @@ def generate_ngrams(tokens: List[str], n: int = 3) -> List[Tuple[str, ...]]:
     if len(tokens) < n:
         return [tuple(tokens)]
     return [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
+
+
+def summary_similarity(summary_a: str, summary_b: str) -> float:
+    """Compute word-level overlap between two summary strings.
+
+    Tokenizes and stems both summaries (removing stopwords), then
+    computes a blended score:
+      - overlap coefficient (intersection / min(|A|, |B|))
+      - weighted by a size confidence factor
+
+    Short summaries (fewer than 4 content tokens) get penalized
+    because a single shared word can produce a high overlap score
+    by chance. This prevents false merges like "First insight about
+    hub" vs "Second insight about config" (sharing only "insight").
+
+    Returns 0.0 to 1.0.
+    """
+    tokens_a = set(stem(t) for t in tokenize(summary_a))
+    tokens_b = set(stem(t) for t in tokenize(summary_b))
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = tokens_a & tokens_b
+    smaller = min(len(tokens_a), len(tokens_b))
+    overlap = len(intersection) / smaller if smaller else 0.0
+
+    # Size confidence: penalize very short summaries where 1 shared
+    # word can produce a high score by chance.
+    # 4+ tokens = full confidence, 3 = 0.75, 2 = 0.50, 1 = 0.25
+    size_confidence = min(smaller / 4.0, 1.0)
+
+    return overlap * size_confidence
 
 
 def keyword_overlap(keywords_a: List[str], keywords_b: List[str]) -> float:

@@ -451,6 +451,7 @@ class LLMService:
             agent_manager=self.agent_manager,
             profile_manager=self.profile_manager,
             conversation_logger=self.conversation_logger,
+            mcp_integration=self.mcp_integration,
         )
 
         # Question gate: pending tools queue
@@ -718,6 +719,11 @@ class LLMService:
         # Register hooks
         await self.hook_system.register_hooks()
 
+        # Register registry tool XML tags with the response parser
+        # This bridges ToolDefinitions (web, workspace, on_demand, etc.)
+        # into the XML tag parser so they're recognized in agent responses
+        self._register_registry_tool_tags()
+
         # Discover MCP servers in background (non-blocking startup)
         # This allows the UI to start immediately while MCP servers connect
         try:
@@ -752,6 +758,120 @@ class LLMService:
 
         logger.info("Core LLM Service initialized and ready")
         return True
+
+    def _register_registry_tool_tags(self) -> None:
+        """Register all registry ToolDefinitions as XML tags with the response parser.
+
+        The response parser uses hardcoded regex patterns for legacy tools
+        (terminal, file ops, etc.) and a plugin-tag system for dynamically
+        registered tags. Tools that are defined in the unified ToolRegistry
+        but NOT hardcoded in the parser (web, workspace, on_demand, mcp, etc.)
+        need to be registered here so their XML tags are recognized in agent
+        responses.
+
+        This bridges the gap between ToolDefinition.get_xml_regex() and
+        ResponseParser.register_plugin_tag().
+        """
+        import re
+
+        try:
+            from kollabor_agent.tool_generators.xml_regex import build_regex_for_tool
+            from kollabor_agent.tool_registry import get_registry
+
+            registry = get_registry()
+
+            # Tags already hardcoded in response_parser — don't double-register
+            hardcoded_tags = {
+                "terminal", "terminal-status", "terminal-output", "terminal-kill",
+                "tool", "tool_call",
+                "read", "edit", "create", "create-overwrite", "delete", "move",
+                "copy", "copy-overwrite", "append", "insert-after", "insert-before",
+                "grep", "mkdir", "rmdir",
+            }
+
+            # Also skip tags registered by plugins (hub, agent_orchestrator, etc.)
+            # We check by seeing if the tag is already in _plugin_tags
+            existing_plugin_tags = {
+                t["tool_type"] for t in self.response_parser._plugin_tags
+            }
+            existing_plugin_tags.update(
+                t["tool_type"].replace("_", "-") for t in self.response_parser._plugin_tags
+            )
+
+            count = 0
+            for tool in registry.list():
+                tag_name = tool.xml_tag_name
+
+                # Skip hardcoded tags
+                if tag_name in hardcoded_tags:
+                    continue
+
+                # Skip tags already registered by plugins
+                tool_type_hyphen = tool.name  # e.g. "web-search"
+                tool_type_underscore = tool_type_hyphen.replace("-", "_")  # e.g. "web_search"
+
+                if tool_type_underscore in existing_plugin_tags:
+                    continue
+                if tool_type_hyphen in existing_plugin_tags:
+                    continue
+
+                # Build regex pattern from the ToolDefinition
+                pattern_str = build_regex_for_tool(tool)
+                pattern = re.compile(pattern_str, re.DOTALL | re.IGNORECASE)
+
+                # Create extract function based on xml_form
+                if tool.xml_form == "nested":
+                    def _make_extract(tl):
+                        def _extract(m):
+                            raw = m.group(1)
+                            params = {}
+                            for param in tl.parameters:
+                                param_pattern = re.compile(
+                                    rf"<{re.escape(param.name)}>(.*?)</{re.escape(param.name)}>",
+                                    re.DOTALL | re.IGNORECASE,
+                                )
+                                pm = param_pattern.search(raw)
+                                if pm:
+                                    params[param.name] = pm.group(1).strip()
+                            return params
+                        return _extract
+                    extract_fn = _make_extract(tool)
+                elif tool.xml_form == "body":
+                    def _make_body_extract(tl):
+                        body_param = tl.xml_body_param or tl.parameters[0].name if tl.parameters else "command"
+                        def _extract(m):
+                            return {body_param: m.group(1).strip()}
+                        return _extract
+                    extract_fn = _make_body_extract(tool)
+                else:
+                    # attributes or mixed — extract all groups as positional
+                    def _make_attr_extract(tl):
+                        def _extract(m):
+                            params = {}
+                            for i, param in enumerate(tl.parameters):
+                                if i + 1 <= m.lastindex:
+                                    val = m.group(i + 1)
+                                    if val is not None:
+                                        params[param.name] = val.strip()
+                            return params
+                        return _extract
+                    extract_fn = _make_attr_extract(tool)
+
+                self.response_parser.register_plugin_tag(
+                    tag_name,
+                    pattern,
+                    tool_type_underscore,
+                    extract_fn,
+                )
+                count += 1
+
+            if count > 0:
+                logger.info(
+                    f"Registered {count} registry tool XML tags with response parser "
+                    f"(web, workspace, on_demand, etc.)"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to register registry tool tags: {e}", exc_info=True)
 
     # --- SessionManager forwarding methods ---
 
@@ -1061,6 +1181,14 @@ class LLMService:
         if self.conversation_logger and hasattr(self.conversation_logger, "session_id"):
             self._prompt_builder.set_session_id(self.conversation_logger.session_id)
 
+    def refresh_mcp_tools(self) -> None:
+        """Refresh MCP integration reference in prompt builder.
+
+        Called after MCP server discovery completes so the prompt builder
+        can generate up-to-date MCP tool summaries on the next build.
+        """
+        self._prompt_builder.set_mcp_integration(self.mcp_integration)
+
     def _build_system_prompt(self) -> str:
         """Build system prompt from file or agent."""
         return cast(str, self._prompt_builder.build())
@@ -1099,6 +1227,8 @@ class LLMService:
     async def _background_mcp_discovery(self) -> None:
         """Discover MCP servers in background."""
         await self._native_tools.background_discovery()
+        # Refresh MCP tools in prompt builder for lazy injection
+        self.refresh_mcp_tools()
 
     async def _load_native_tools(self) -> None:
         """Load MCP tools for native API function calling."""
@@ -1289,6 +1419,17 @@ class LLMService:
             self.cancel_processing = True
             # Cancel API request through API service (KISS refactoring)
             self.api_service.cancel_current_request()
+            # Cancel any running shell subprocess so ESC interrupts
+            # long-running terminal commands, not just API streaming.
+            try:
+                coord = self  # alias for clarity in the closure
+                if coord.tool_executor is not None:
+                    coord.create_background_task(
+                        coord.tool_executor.cancel_running_tool(),
+                        name="esc_cancel_tool",
+                    )
+            except Exception as e:
+                logger.debug(f"Could not cancel running tool: {e}")
             logger.info("Processing cancellation requested")
 
     # --- StreamingHandler forwarding methods ---

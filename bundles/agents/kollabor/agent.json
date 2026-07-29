@@ -57,7 +57,13 @@
     "task-reject",
     "curate",
     "context-query",
-    "evict"
+    "evict",
+    "web-fetch",
+    "web-search",
+    "workspace-set",
+    "mcp-reload",
+    "tool-search",
+    "tool-load"
   ],
   "skills": [
     "debugging"

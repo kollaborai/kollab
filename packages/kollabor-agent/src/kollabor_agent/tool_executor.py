@@ -156,6 +156,9 @@ class ToolExecutor:
         # Cancellation callback - checked between tool executions
         self._cancel_callback = None
 
+        # Track active shell executor so ESC can cancel running subprocesses
+        self._active_shell_executor: Optional[ShellExecutor] = None
+
         logger.info(
             "Tool executor initialized with terminal, MCP, and file operations support"
         )
@@ -175,7 +178,10 @@ class ToolExecutor:
             allowed_tools: List of registry tool names (e.g. ['file-read',
                 'terminal', 'hub-msg']) this agent has access to.
                 None = all tools allowed (legacy default).
+                ["*"] = wildcard, treated as None (all tools allowed).
         """
+        if allowed_tools == ["*"]:
+            allowed_tools = None
         self._bundle_tools = allowed_tools
         logger.debug(
             f"Bundle scope set: {len(allowed_tools) if allowed_tools else 'all'} tools"
@@ -304,6 +310,25 @@ class ToolExecutor:
             return self._cancel_callback()
         return False
 
+    async def cancel_running_tool(self) -> None:
+        """Cancel any currently running shell subprocess.
+
+        Called by the ESC/cancel handler to interrupt a long-running
+        terminal command that is stuck inside asyncio.wait_for().
+        """
+        if self._active_shell_executor is not None:
+            logger.info("Cancelling active shell executor subprocess")
+            await self._active_shell_executor.cancel()
+            self._active_shell_executor = None
+
+        # Also cancel via tmux plugin if it has a running foreground process
+        if self.tmux_plugin and hasattr(self.tmux_plugin, "_active_executor"):
+            active = getattr(self.tmux_plugin, "_active_executor", None)
+            if active is not None:
+                logger.info("Cancelling tmux plugin foreground subprocess")
+                await active.cancel()
+                self.tmux_plugin._active_executor = None
+
     async def execute_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
         """Execute a single tool (terminal, MCP, or file operation).
 
@@ -404,6 +429,14 @@ class ToolExecutor:
                         logger.debug(f"About to call _execute_mcp_tool for {tool_id}")
                         result = await self._execute_mcp_tool(tool_data)
                         logger.debug(f"_execute_mcp_tool completed for {tool_id}")
+                    elif tool_type in ("web_fetch", "web-fetch"):
+                        logger.debug(f"About to call _execute_web_fetch for {tool_id}")
+                        result = await self._execute_web_fetch(tool_data)
+                        logger.debug(f"_execute_web_fetch completed for {tool_id}")
+                    elif tool_type in ("web_search", "web-search"):
+                        logger.debug(f"About to call _execute_web_search for {tool_id}")
+                        result = await self._execute_web_search(tool_data)
+                        logger.debug(f"_execute_web_search completed for {tool_id}")
                     elif (
                         tool_type.startswith("file_")
                         or tool_type == "malformed_file_op"
@@ -414,6 +447,38 @@ class ToolExecutor:
                         )
                         result = await self._execute_file_operation(tool_data)
                         logger.debug(f"_execute_file_operation completed for {tool_id}")
+                    elif tool_type in ("workspace_set", "workspace-set"):
+                        logger.debug(
+                            f"About to call _execute_workspace_set for {tool_id}"
+                        )
+                        result = await self._execute_workspace_set(tool_data)
+                        logger.debug(
+                            f"_execute_workspace_set completed for {tool_id}"
+                        )
+                    elif tool_type in ("mcp_reload", "mcp-reload"):
+                        logger.debug(
+                            f"About to call _execute_mcp_reload for {tool_id}"
+                        )
+                        result = await self._execute_mcp_reload(tool_data)
+                        logger.debug(
+                            f"_execute_mcp_reload completed for {tool_id}"
+                        )
+                    elif tool_type in ("tool_search", "tool-search"):
+                        logger.debug(
+                            f"About to call _execute_tool_search for {tool_id}"
+                        )
+                        result = await self._execute_tool_search(tool_data)
+                        logger.debug(
+                            f"_execute_tool_search completed for {tool_id}"
+                        )
+                    elif tool_type in ("tool_load", "tool-load"):
+                        logger.debug(
+                            f"About to call _execute_tool_load for {tool_id}"
+                        )
+                        result = await self._execute_tool_load(tool_data)
+                        logger.debug(
+                            f"_execute_tool_load completed for {tool_id}"
+                        )
                     else:
                         result = ToolExecutionResult(
                             tool_id=tool_id,
@@ -657,11 +722,15 @@ class ToolExecutor:
                 logger.debug("Falling back to ShellExecutor for command execution")
 
         # Fallback: Use ShellExecutor (no terminal plugin available or it failed)
-        result = await self.shell_executor.run(
-            command,
-            timeout=self.terminal_timeout,
-            cwd=cwd,
-        )
+        self._active_shell_executor = self.shell_executor
+        try:
+            result = await self.shell_executor.run(
+                command,
+                timeout=self.terminal_timeout,
+                cwd=cwd,
+            )
+        finally:
+            self._active_shell_executor = None
 
         if result.error:
             return ToolExecutionResult(
@@ -1024,6 +1093,482 @@ class ToolExecutor:
             path = self.workspace / path
         return path.resolve()
 
+    async def _execute_workspace_set(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Switch the agent's working directory.
+
+        Updates self.workspace and calls os.chdir() so the status bar
+        cwd widget reflects the change immediately.
+
+        Args:
+            tool_data: Tool information containing the path parameter.
+
+        Returns:
+            ToolExecutionResult with confirmation or error.
+        """
+        import os
+
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract path from tool_data — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        raw_path = (
+            params.get("path")
+            or params.get("Path")
+            or tool_data.get("path")
+        )
+
+        if not raw_path:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error="Missing required parameter: path",
+            )
+
+        try:
+            # Expand ~ and resolve relative to current workspace
+            expanded = Path(raw_path).expanduser()
+            if not expanded.is_absolute() and self.workspace is not None:
+                expanded = self.workspace / expanded
+            resolved = expanded.resolve()
+
+            if not resolved.exists():
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="workspace_set",
+                    success=False,
+                    error=f"Directory not found: {raw_path}",
+                )
+
+            if not resolved.is_dir():
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="workspace_set",
+                    success=False,
+                    error=f"Not a directory: {raw_path}",
+                )
+
+            # Update workspace + process cwd
+            old_workspace = str(self.workspace) if self.workspace else str(Path.cwd())
+            self.workspace = resolved
+            os.chdir(str(resolved))
+
+            logger.info(f"Workspace switched: {old_workspace} -> {resolved}")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=True,
+                output=f"Workspace changed to: {resolved}",
+                metadata={
+                    "old_workspace": old_workspace,
+                    "new_workspace": str(resolved),
+                },
+            )
+
+        except PermissionError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error=f"Permission denied: {raw_path}",
+            )
+        except Exception as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error=f"Failed to switch workspace: {e}",
+            )
+
+    async def _execute_mcp_reload(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Reload MCP server connections and rediscover tools.
+
+        Calls mcp_integration.reload_mcp_servers() to close active
+        connections, reload config files, and reconnect.
+
+        Args:
+            tool_data: Tool information (no required params).
+
+        Returns:
+            ToolExecutionResult with reload summary or error.
+        """
+        import time
+
+        tool_id = tool_data.get("id", "unknown")
+        start_time = time.time()
+
+        if self.mcp_integration is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=False,
+                error="MCP integration is not available in this session.",
+            )
+
+        try:
+            counts = await self.mcp_integration.reload_mcp_servers()
+            elapsed = time.time() - start_time
+
+            configured = counts.get("configured", 0)
+            discovered = counts.get("discovered", 0)
+            reconnected = counts.get("reconnected", 0)
+
+            # Count total tools discovered
+            total_tools = 0
+            if hasattr(self.mcp_integration, "get_tool_definitions_for_api"):
+                total_tools = len(
+                    self.mcp_integration.get_tool_definitions_for_api()
+                )
+
+            output = (
+                f"MCP servers reloaded.\n"
+                f"  Configured: {configured}\n"
+                f"  Discovered: {discovered}\n"
+                f"  Reconnected: {reconnected}\n"
+                f"  Tools available: {total_tools}"
+            )
+
+            logger.info(
+                f"MCP reload complete: {reconnected}/{configured} servers, "
+                f"{total_tools} tools ({elapsed:.1f}s)"
+            )
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=True,
+                output=output,
+                metadata={
+                    "configured": configured,
+                    "discovered": discovered,
+                    "reconnected": reconnected,
+                    "total_tools": total_tools,
+                    "elapsed": round(elapsed, 2),
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"MCP reload failed: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=False,
+                error=f"MCP reload failed: {e}",
+            )
+
+    async def _execute_tool_search(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Search for available tools by keyword.
+
+        Searches both the built-in ToolRegistry and the MCP integration's
+        tool_registry dict. Returns a compact list (name, category/source,
+        one-line description) without full schemas.
+
+        Args:
+            tool_data: Tool information containing 'query' (required).
+
+        Returns:
+            ToolExecutionResult with formatted search results.
+        """
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract query — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        query = (
+            params.get("query")
+            or params.get("Query")
+            or tool_data.get("query")
+            or ""
+        )
+        query = query.strip().lower()
+
+        results: List[Dict[str, str]] = []
+
+        # Search built-in tools from the ToolRegistry
+        try:
+            from .tool_registry import get_registry
+            registry = get_registry()
+
+            for tool in registry.list():
+                # Skip the on-demand tools themselves — no recursive searching
+                if tool.category == "on_demand":
+                    continue
+
+                if not query:
+                    # No query — return all tools (full catalog)
+                    results.append({
+                        "name": tool.name,
+                        "category": tool.category,
+                        "source": "built-in",
+                        "description": tool.description.split(".")[0] + ".",
+                    })
+                else:
+                    searchable = f"{tool.name} {tool.category} {tool.description}".lower()
+                    if query in searchable:
+                        results.append({
+                            "name": tool.name,
+                            "category": tool.category,
+                            "source": "built-in",
+                            "description": tool.description.split(".")[0] + ".",
+                        })
+        except Exception as e:
+            logger.warning(f"Tool search: registry query failed: {e}")
+
+        # Search MCP tools from the MCP integration
+        if self.mcp_integration and hasattr(self.mcp_integration, "tool_registry"):
+            for tool_name, tool_info in self.mcp_integration.tool_registry.items():
+                if not tool_info.get("enabled", True):
+                    continue
+
+                server = tool_info.get("server", "unknown")
+                definition = tool_info.get("definition", {})
+                description = definition.get("description", "")
+
+                searchable = f"{tool_name} {server} {description}".lower()
+                if query in searchable:
+                    results.append({
+                        "name": f"mcp:{server}:{tool_name}",
+                        "category": "mcp",
+                        "source": f"MCP ({server})",
+                        "description": description.split(".")[0] + "." if description else "",
+                    })
+
+        # Rank results: name matches first, then description matches
+        def _rank(r: Dict[str, str]) -> int:
+            name_lower = r["name"].lower()
+            if query in name_lower:
+                return 0  # name match = highest relevance
+            return 1
+
+        results.sort(key=_rank)
+
+        if not results:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_search",
+                success=True,
+                output=f"No tools found matching '{query}'.",
+                metadata={"query": query, "result_count": 0},
+            )
+
+        # Format compact output
+        lines = [f"Found {len(results)} tool(s) matching '{query}':\n"]
+        for r in results:
+            desc = r["description"] or "(no description)"
+            lines.append(f"  {r['name']}  [{r['source']}]  {desc}")
+
+        lines.append(f"\nUse tool-load to activate any of these tools.")
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_search",
+            success=True,
+            output="\n".join(lines),
+            metadata={"query": query, "result_count": len(results)},
+        )
+
+    async def _execute_tool_load(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Load a tool's full definition into the active session.
+
+        For built-in tools: adds the tool name to _bundle_tools so it
+        passes the bundle scope check. Returns the full markdown docs.
+        For MCP tools: marks the tool as enabled and returns its schema.
+
+        Args:
+            tool_data: Tool information containing 'name' (required).
+
+        Returns:
+            ToolExecutionResult with the loaded tool's full definition.
+        """
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract name — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        tool_name = (
+            params.get("name")
+            or params.get("Name")
+            or tool_data.get("name")
+            or ""
+        )
+        tool_name = tool_name.strip()
+
+        if not tool_name:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error="Missing required parameter: name",
+            )
+
+        # Check if it's an MCP tool (format: mcp:server:tool_name)
+        if tool_name.startswith("mcp:"):
+            return await self._load_mcp_tool(tool_id, tool_name)
+
+        # Built-in tool — look up in the ToolRegistry
+        try:
+            from .tool_registry import get_registry
+            registry = get_registry()
+        except Exception as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"Tool registry unavailable: {e}",
+            )
+
+        tool_def = registry.get(tool_name)
+        if tool_def is None:
+            # Try native name lookup (user might pass underscore form)
+            tool_def = registry.get_by_native_name(tool_name)
+        if tool_def is None:
+            # Try XML tag lookup
+            tool_def = registry.get_by_xml_tag(tool_name)
+
+        if tool_def is None:
+            available = ", ".join(registry.names())
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"Tool not found: {tool_name}. Use tool-search to find available tools.",
+                metadata={"available_tools": available},
+            )
+
+        # Add to bundle scope if active
+        if self._bundle_tools is not None and tool_def.name not in self._bundle_tools:
+            self._bundle_tools.append(tool_def.name)
+            logger.info(f"Tool loaded into active set: {tool_def.name}")
+
+        # Generate full documentation
+        markdown = tool_def.to_markdown()
+
+        output = (
+            f"Tool loaded: {tool_def.name}\n\n"
+            f"{markdown}"
+        )
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_load",
+            success=True,
+            output=output,
+            metadata={
+                "loaded_tool": tool_def.name,
+                "category": tool_def.category,
+                "already_active": False,
+            },
+        )
+
+    async def _load_mcp_tool(
+        self, tool_id: str, full_name: str
+    ) -> ToolExecutionResult:
+        """Load an MCP tool by its full name (mcp:server:tool_name).
+
+        Args:
+            tool_id: The executing tool's ID.
+            full_name: Full MCP tool name in mcp:server:tool_name format.
+
+        Returns:
+            ToolExecutionResult with the MCP tool's schema.
+        """
+        # Parse mcp:server:tool_name
+        parts = full_name.split(":", 2)
+        if len(parts) < 3:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Invalid MCP tool name format: {full_name}. "
+                    f"Expected: mcp:<server>:<tool_name>"
+                ),
+            )
+
+        _prefix, server, tool_name = parts
+
+        if self.mcp_integration is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error="MCP integration is not available in this session.",
+            )
+
+        # Look up in MCP tool registry
+        mcp_tool = self.mcp_integration.tool_registry.get(tool_name)
+        if mcp_tool is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"MCP tool not found: {tool_name}. Use tool-search to find available tools.",
+            )
+
+        # Verify the server matches
+        actual_server = mcp_tool.get("server", "")
+        if actual_server and server != actual_server:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Tool '{tool_name}' belongs to server '{actual_server}', "
+                    f"not '{server}'. Correct name: mcp:{actual_server}:{tool_name}"
+                ),
+            )
+
+        # Check if server is connected
+        if server not in self.mcp_integration.server_connections:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"MCP server '{server}' is not connected. Use mcp-reload to reconnect.",
+            )
+
+        # Ensure enabled
+        mcp_tool["enabled"] = True
+
+        definition = mcp_tool.get("definition", {})
+        description = definition.get("description", "(no description)")
+        schema = definition.get("parameters", {})
+
+        # Format the schema for the agent
+        import json
+
+        schema_str = json.dumps(schema, indent=2) if schema else "{}"
+
+        output = (
+            f"MCP tool loaded: {full_name}\n"
+            f"  Server: {server}\n"
+            f"  Description: {description}\n"
+            f"  Schema: {schema_str}\n\n"
+            f"This tool is now active. Use it as an MCP tool call with "
+            f"the name '{tool_name}'."
+        )
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_load",
+            success=True,
+            output=output,
+            metadata={
+                "loaded_tool": full_name,
+                "mcp_server": server,
+                "mcp_tool_name": tool_name,
+                "category": "mcp",
+            },
+        )
+
+
     def _update_stats(self, result: ToolExecutionResult):
         """Update execution statistics.
 
@@ -1044,6 +1589,15 @@ class ToolExecutor:
             self.stats["mcp_executions"] += 1
         elif result.tool_type.startswith("file_"):
             self.stats["file_op_executions"] += 1
+        elif result.tool_type in ("web_fetch", "web_search"):
+            self.stats.setdefault("web_executions", 0)
+            self.stats["web_executions"] += 1
+        elif result.tool_type in ("mcp_reload", "mcp-reload"):
+            self.stats.setdefault("mcp_reload_executions", 0)
+            self.stats["mcp_reload_executions"] += 1
+        elif result.tool_type in ("tool_search", "tool_load"):
+            self.stats.setdefault("on_demand_executions", 0)
+            self.stats["on_demand_executions"] += 1
 
     def get_execution_stats(self) -> Dict[str, Any]:
         """Get execution statistics.
@@ -1088,6 +1642,505 @@ class ToolExecutor:
         }
         logger.info("Tool execution statistics reset")
 
+    # ------------------------------------------------------------------
+    # WEB TOOLS (web-fetch, web-search)
+    # ------------------------------------------------------------------
+
+    async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Fetch a URL and return cleaned text content.
+
+        Uses aiohttp with a 30-second timeout. Content extraction follows
+        a priority chain: JSON-LD → meta tags → semantic HTML5 → readability
+        heuristic. If the extracted text is suspiciously sparse (<500 chars
+        from a 200 OK), retries with Playwright headless browser (if installed)
+        to handle JS-rendered pages.
+
+        Output is truncated to max_chars (default 5000).
+
+        Args:
+            tool_data: Dict with 'url' (required), 'max_chars' (optional),
+                       and 'extract_main' (optional, default true).
+
+        Returns:
+            ToolExecutionResult with the cleaned text or an error message.
+        """
+        import aiohttp
+
+        tool_id = tool_data.get("id", "unknown")
+        url = tool_data.get("url", "").strip()
+        max_chars = int(tool_data.get("max_chars", 5000))
+        extract_main = tool_data.get("extract_main", True)
+
+        if not url:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="No URL provided",
+            )
+
+        # Basic URL validation
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Invalid URL: {url}",
+            )
+        if parsed.scheme not in ("http", "https"):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Unsupported scheme: {parsed.scheme} (only http/https)",
+            )
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                    "+https://github.com/kollaborai/kollab)"
+                ),
+            }
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers, allow_redirects=True) as resp:
+                    if resp.status >= 400:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type="web_fetch",
+                            success=False,
+                            error=f"HTTP {resp.status} {resp.reason}",
+                        )
+
+                    # Content-Length check: warn on very large pages
+                    try:
+                        content_length = resp.headers.get("Content-Length", "")
+                        if content_length and int(content_length) > 500_000:
+                            logger.warning(
+                                f"web_fetch: large page {url} ({content_length} bytes)"
+                            )
+                    except (ValueError, TypeError):
+                        pass
+
+                    final_url = str(resp.url)
+                    raw = await resp.text(errors="replace")
+
+            # Extract main content using priority chain
+            text = self._extract_main_content(raw, extract_main)
+
+            # Playwright fallback: if aiohttp got suspiciously little text
+            # from a valid response, the page may be JS-rendered.
+            if len(text) < 500:
+                pw_text = await self._playwright_fetch(url)
+                if pw_text and len(pw_text) > len(text):
+                    text = pw_text
+                    logger.info(f"web_fetch: used Playwright fallback for {url}")
+
+            # Truncate to max_chars (accounting for the URL header)
+            header = f"URL: {final_url}\n\n"
+            available = max(100, max_chars - len(header))
+            if len(text) > available:
+                text = text[:available] + "\n...[truncated]"
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=True,
+                output=header + text,
+                metadata={"url": final_url, "chars": len(text)},
+            )
+
+        except asyncio.TimeoutError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="Request timeout after 30 seconds",
+            )
+        except aiohttp.ClientError as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Network error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"web_fetch error for {url}: {e}", exc_info=True)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Fetch error: {e}",
+            )
+
+    async def _execute_web_search(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Search the web using DuckDuckGo's HTML endpoint and return results.
+
+        No API key required. Parses the top N results (title, URL, snippet)
+        from the DuckDuckGo HTML search page.
+
+        Args:
+            tool_data: Dict with 'query' (required) and 'max_results' (optional).
+
+        Returns:
+            ToolExecutionResult with formatted search results.
+        """
+        import aiohttp
+
+        tool_id = tool_data.get("id", "unknown")
+        query = tool_data.get("query", "").strip()
+        max_results = int(tool_data.get("max_results", 5))
+
+        if not query:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error="No search query provided",
+            )
+
+        search_url = "https://html.duckduckgo.com/html/"
+        params = {"q": query}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                "+https://github.com/kollaborai/kollab)"
+            ),
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    search_url, data=params, headers=headers, allow_redirects=True
+                ) as resp:
+                    if resp.status >= 400:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type="web_search",
+                            success=False,
+                            error=f"Search failed: HTTP {resp.status}",
+                        )
+                    html = await resp.text(errors="replace")
+
+            results = self._parse_ddg_results(html, max_results)
+
+            if not results:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="web_search",
+                    success=True,
+                    output=f"No results found for: {query}",
+                    metadata={"query": query, "count": 0},
+                )
+
+            lines = [f"Search results for: {query}", ""]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. {r['title']}")
+                lines.append(f"   {r['url']}")
+                if r.get("snippet"):
+                    lines.append(f"   {r['snippet']}")
+                lines.append("")
+
+            lines.append("Use web-fetch to get full content from any result.")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=True,
+                output="\n".join(lines).strip(),
+                metadata={"query": query, "count": len(results)},
+            )
+
+        except asyncio.TimeoutError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error="Search timed out after 30 seconds",
+            )
+        except aiohttp.ClientError as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error=f"Network error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"web_search error for '{query}': {e}", exc_info=True)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error=f"Search error: {e}",
+            )
+
+    # ------------------------------------------------------------------
+    # HTML / search-result helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        """Backward-compatible alias for _extract_main_content."""
+        return ToolExecutor._extract_main_content(html)
+
+    @staticmethod
+    def _extract_main_content(html: str, extract_main: bool = True) -> str:
+        """Extract main content from HTML using a priority chain.
+
+        Priority order:
+        1. JSON-LD structured data (articleBody / description)
+        2. Semantic HTML5 (<article>, <main>, <section>)
+        3. Readability heuristic (highest text-to-tag ratio element)
+        4. Fallback: strip non-content tags, extract remaining text
+
+        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
+        extraction if bs4 is not available.
+        """
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+        except ImportError:
+            # bs4 not available — fall back to regex-based extraction
+            return ToolExecutor._html_to_text_regex(html)
+
+        # Remove non-content elements entirely
+        for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
+                                   "header", "noscript", "svg", "form",
+                                   "button", "iframe"]):
+            tag.decompose()
+
+        if extract_main:
+            # Priority 1: JSON-LD structured data
+            text = ToolExecutor._extract_json_ld(soup)
+            if text and len(text) > 200:
+                return text
+
+            # Priority 2: Semantic HTML5 — <article>, <main>
+            for selector in ["article", "main", "[role='main']"]:
+                element = soup.select_one(selector)
+                if element:
+                    text = ToolExecutor._soup_to_text(element)
+                    if len(text) > 200:
+                        return text
+
+            # Priority 3: Readability heuristic — find densest content block
+            text = ToolExecutor._readability_extract(soup)
+            if text and len(text) > 200:
+                return text
+
+        # Priority 4: Fallback — extract all remaining text
+        return ToolExecutor._soup_to_text(soup)
+
+    @staticmethod
+    def _extract_json_ld(soup) -> str:
+        """Extract articleBody or description from JSON-LD script tags."""
+        import json
+
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                # Handle both single objects and arrays
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    # Look for articleBody first (richest content)
+                    body = item.get("articleBody") or item.get("text", "")
+                    if body and len(body) > 200:
+                        # Collapse whitespace
+                        lines = [l.strip() for l in body.split("\n") if l.strip()]
+                        return "\n".join(lines)
+                    # Fall back to description
+                    desc = item.get("description", "")
+                    if desc and len(desc) > 100:
+                        return desc.strip()
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return ""
+
+    @staticmethod
+    def _readability_extract(soup) -> str:
+        """Find the element with the highest text-to-tag ratio.
+
+        Scores each <div> and <section> by text length / number of child
+        tags. Returns the text from the highest-scoring element.
+        """
+        best_text = ""
+        best_score = 0
+
+        for element in soup.find_all(["div", "section"]):
+            # Skip tiny elements
+            text = element.get_text(separator=" ", strip=True)
+            if len(text) < 200:
+                continue
+
+            # Score: text length weighted by text-to-tag ratio
+            tag_count = len(element.find_all())
+            if tag_count == 0:
+                continue
+            ratio = len(text) / tag_count
+            # Prefer elements with more text, but penalize high tag density
+            score = len(text) * min(ratio / 10, 1.0)
+
+            if score > best_score:
+                best_score = score
+                best_text = text
+
+        if best_text:
+            lines = [l.strip() for l in best_text.split("\n") if l.strip()]
+            return "\n".join(lines)
+        return ""
+
+    @staticmethod
+    def _soup_to_text(element) -> str:
+        """Extract clean text from a BeautifulSoup element.
+
+        Inserts newlines for block-level tags, decodes entities,
+        collapses whitespace.
+        """
+        # Insert newlines for block-level elements
+        for tag in element.find_all(["p", "div", "br", "h1", "h2", "h3",
+                                      "h4", "h5", "h6", "li", "tr", "blockquote",
+                                      "pre"]):
+            tag.append("\n")
+
+        text = element.get_text()
+        lines = [line.strip() for line in text.split("\n")]
+        lines = [line for line in lines if line]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _html_to_text_regex(html: str) -> str:
+        """Regex-based HTML to text fallback (no bs4 dependency).
+
+        Used when beautifulsoup4 is not installed.
+        """
+        import html as html_mod
+        import re
+
+        # Remove non-content tags entirely (tag + inner content)
+        non_content = re.compile(
+            r"<(script|style|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            re.DOTALL | re.IGNORECASE,
+        )
+        html = non_content.sub("", html)
+
+        # Remove HTML comments
+        html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+
+        # Insert newlines for block-level tags before stripping
+        block_tags = re.compile(
+            r"</?(p|div|br|h[1-6]|li|tr|td|th|section|article|blockquote|pre)\b[^>]*>",
+            re.IGNORECASE,
+        )
+        html = block_tags.sub("\n", html)
+
+        # Strip all remaining tags
+        html = re.sub(r"<[^>]+>", "", html)
+
+        # Decode HTML entities
+        html = html_mod.unescape(html)
+
+        # Collapse whitespace
+        lines = [line.strip() for line in html.split("\n")]
+        lines = [line for line in lines if line]
+
+        return "\n".join(lines)
+
+    async def _playwright_fetch(self, url: str) -> str:
+        """Fetch a URL using Playwright headless browser (optional).
+
+        Used as a fallback for JS-rendered pages where aiohttp returns
+        sparse content. Returns extracted text or empty string if
+        Playwright is not available or fails.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return ""
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.goto(url, timeout=20000, wait_until="networkidle")
+                html = await page.content()
+                await browser.close()
+
+            return self._extract_main_content(html)
+        except Exception as e:
+            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            return ""
+
+    @staticmethod
+    def _parse_ddg_results(html: str, max_results: int) -> list:
+        """Parse DuckDuckGo HTML search results into structured data.
+
+        Extracts result links and snippets from the DDG HTML endpoint.
+        Returns a list of dicts: {title, url, snippet}.
+        """
+        import re
+
+        results = []
+
+        # DDG HTML results have result blocks in <div class="result ...">
+        # Each contains an <a class="result__a" href="...">title</a>
+        # and an <a class="result__snippet">snippet</a>
+
+        # Extract result blocks
+        result_blocks = re.findall(
+            r'<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+
+        # Extract snippets
+        snippets = re.findall(
+            r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+
+        # Also try the newer DDG layout with result__url
+        if not result_blocks:
+            result_blocks = re.findall(
+                r'<a[^>]+rel="nofollow"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+                html,
+                re.DOTALL,
+            )
+
+        for i, (raw_url, raw_title) in enumerate(result_blocks[:max_results]):
+            # DDG wraps URLs in a redirect; extract actual URL
+            # Format: //duckduckgo.com/l/?uddg=ENCODED_URL&...
+            if "uddg=" in raw_url:
+                from urllib.parse import parse_qs, urlparse
+
+                parsed = urlparse(raw_url)
+                qs = parse_qs(parsed.query)
+                actual_url = qs.get("uddg", [raw_url])[0]
+            elif raw_url.startswith("//"):
+                actual_url = "https:" + raw_url
+            else:
+                actual_url = raw_url
+
+            # Strip HTML from title
+            title = re.sub(r"<[^>]+>", "", raw_title).strip()
+            if not title:
+                title = actual_url
+
+            snippet = ""
+            if i < len(snippets):
+                snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+
+            results.append({"title": title, "url": actual_url, "snippet": snippet})
+
+        return results
+
     def _get_display_name(self, tool_data: Dict[str, Any]) -> str:
         """Get a human-readable display name for the tool.
 
@@ -1124,5 +2177,24 @@ class ToolExecutor:
         elif tool_type.startswith("file_"):
             # For file operations, show the operation type
             return str(tool_type)
+
+        elif tool_type in ("web_fetch", "web-fetch"):
+            url = tool_data.get("url", "")
+            return f"web-fetch: {url[:60]}" if url else "web-fetch"
+
+        elif tool_type in ("web_search", "web-search"):
+            query = tool_data.get("query", "")
+            return f"web-search: {query[:60]}" if query else "web-search"
+
+        elif tool_type in ("mcp_reload", "mcp-reload"):
+            return "mcp-reload"
+
+        elif tool_type in ("tool_search", "tool-search"):
+            query = tool_data.get("query", "")
+            return f"tool-search: {query[:60]}" if query else "tool-search"
+
+        elif tool_type in ("tool_load", "tool-load"):
+            name = tool_data.get("name", "")
+            return f"tool-load: {name[:60]}" if name else "tool-load"
 
         return str(tool_type)

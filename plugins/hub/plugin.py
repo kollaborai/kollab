@@ -337,7 +337,7 @@ class HubPlugin(BasePlugin):
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
-                    "dreaming_interval": 3600,
+                    "dreaming_interval": 900,
                     "dreaming_stream_depth": 100,
                     "notify_enabled": False,
                     "notify_channel": "",
@@ -1554,6 +1554,14 @@ class HubPlugin(BasePlugin):
             "hub_ask_ctx", self._handle_hub_ask_ctx_tool
         )
 
+        # NOTE: web-fetch, web-search, workspace-set, mcp-reload,
+        # tool-search, and tool-load are NO LONGER registered here.
+        # They are ToolRegistry tools and auto-enroll via
+        # llm_coordinator._register_registry_tool_tags() which iterates
+        # the registry and registers every tool's XML tag dynamically.
+        # This is the single source of truth — drop a tool in the
+        # registry and it's immediately available in the parser.
+
         logger.info(
             "Registered 43 hub pipeline tags "
             "(hub_msg, hub_broadcast, hub_stop, hub_status, "
@@ -2364,12 +2372,39 @@ class HubPlugin(BasePlugin):
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
         content = tool_data.get("message", tool_data.get("content", ""))
 
+        # Salvage: LLMs sometimes emit hub_msg as a native tool call with
+        # the entire message body jammed inside the `to` param after an
+        # escaped quote (e.g. to='lapis">actual message here'). When this
+        # happens, content is empty and target contains everything.
+        # Try to split the malformed target into real_target + message.
+        if not content and target:
+            # Look for patterns like: identity">message  or  identity" >message
+            import re as _re
+            _salvage = _re.match(
+                r'^([a-zA-Z0-9_-]+)["\']\s*>\s*(.+)',
+                target.strip(),
+                _re.DOTALL,
+            )
+            if _salvage:
+                target = _salvage.group(1)
+                content = _salvage.group(2).strip()
+                logger.warning(
+                    "hub_msg: salvaged malformed native tool call — "
+                    "target=%r, content=%d chars",
+                    target,
+                    len(content),
+                )
+
         if not content:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_msg",
-                success=True,
+                success=False,
                 output="",
+                error=(
+                    f"hub_msg to {target!r} has empty message. "
+                    f"Use: <hub_msg to=\"{target}\">your message here</hub_msg>"
+                ),
             )
 
         # Auto-detect idle chatter
@@ -2537,8 +2572,12 @@ class HubPlugin(BasePlugin):
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_broadcast",
-                success=True,
+                success=False,
                 output="",
+                error=(
+                    "hub_broadcast has empty message. "
+                    "Use: <hub_broadcast>your message here</hub_broadcast>"
+                ),
             )
 
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
@@ -4604,7 +4643,7 @@ class HubPlugin(BasePlugin):
                         "plugins.hub.dreaming_idle_threshold", 300
                     )
                     dream_interval = self.config.get(
-                        "plugins.hub.dreaming_interval", 3600
+                        "plugins.hub.dreaming_interval", 900
                     )
                     stream_depth = self.config.get(
                         "plugins.hub.dreaming_stream_depth", 100
@@ -4675,11 +4714,32 @@ class HubPlugin(BasePlugin):
                 # Write insights via crystal_store (structured + dedup)
                 if self._crystal_store:
                     # Split multi-paragraph insights into individual entries
-                    paragraphs = [
-                        p.strip()
-                        for p in insights.split("\n\n")
-                        if p.strip() and len(p.strip()) > 50
-                    ]
+                    # Filter out LLM preamble and meta-commentary
+                    _PREAMBLE_PATTERNS = (
+                        "based on the recent activity",
+                        "here are 3-5",
+                        "here are 3 - 5",
+                        "here are some insights",
+                        "here are the insights",
+                        "i'll extract",
+                        "i will extract",
+                        "let me extract",
+                        "the following insights",
+                        "these insights are",
+                        "after reviewing",
+                        "from the recent activity",
+                    )
+                    paragraphs = []
+                    for p in insights.split("\n\n"):
+                        p_stripped = p.strip()
+                        if not p_stripped or len(p_stripped) <= 50:
+                            continue
+                        # Skip LLM preamble/meta-commentary
+                        p_lower = p_stripped.lower()
+                        if any(p_lower.startswith(pat) for pat in _PREAMBLE_PATTERNS):
+                            logger.debug("dreaming: filtered preamble paragraph")
+                            continue
+                        paragraphs.append(p_stripped)
                     for paragraph in paragraphs:
                         self._crystal_store.add_entry(paragraph)
                     added = len(paragraphs)
@@ -5255,9 +5315,26 @@ class HubPlugin(BasePlugin):
 
         stream_text = "\n".join(entry_lines)
 
-        # Get existing crystallized knowledge
-        crystallized = self._vault.get_crystallized()
-        crystal_section = crystallized if crystallized else "(none yet)"
+        # Get existing crystallized knowledge — summaries only, capped.
+        # Injecting the full crystallized.md (which can be 400KB+) drowns
+        # the LLM and causes it to regenerate duplicates because it can't
+        # effectively read all existing entries. Summary lines give enough
+        # context to avoid repetition without blowing the prompt budget.
+        MAX_CRYSTAL_SUMMARIES = 15
+        if self._crystal_store:
+            recent = self._crystal_store.get_recent(MAX_CRYSTAL_SUMMARIES)
+            if recent:
+                crystal_lines = [f"  [{e.id}] {e.summary}" for e in recent]
+                crystal_section = (
+                    f"{len(recent)} most recent insights (do NOT repeat these):\n"
+                    + "\n".join(crystal_lines)
+                )
+            else:
+                crystal_section = "(none yet)"
+        else:
+            # Fallback: first 2000 chars of raw crystallized text
+            crystallized = self._vault.get_crystallized()
+            crystal_section = (crystallized[:2000] + "\n...") if crystallized and len(crystallized) > 2000 else (crystallized or "(none yet)")
 
         return (
             "You are reviewing your recent activity to extract durable insights.\n"
@@ -5277,7 +5354,7 @@ class HubPlugin(BasePlugin):
             "- Mistakes to avoid\n"
             "\n"
             "Format each insight as a single paragraph. Do not repeat insights "
-            "already in your crystallized knowledge."
+            "already in your crystallized knowledge above."
         )
 
     async def _dreaming_llm_call(self, prompt: str) -> Optional[str]:
@@ -5829,6 +5906,33 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     f"Auto-created task {card.id} from" f" {message.from_identity}"
                 )
+
+        # Auto-approve task_complete reports addressed to this agent.
+        # When a worker calls task_complete, the report is sent to the
+        # coordinator/reviewer with metadata task_complete=True. Instead
+        # of letting it sit in qa_review forever, auto-approve it so the
+        # task transitions to closed. The reviewer can still reject later
+        # if needed (qa_reject re-activates the task).
+        if (
+            self._task_ledger
+            and self._identity
+            and message.metadata
+            and message.metadata.get("task_complete")
+            and message.to == self._identity.identity
+        ):
+            task_id = str(message.metadata.get("task_id", ""))
+            if task_id:
+                card = self._task_ledger.get(task_id)
+                if card and card.status == "qa_review":
+                    self._task_ledger.qa_approve(
+                        task_id,
+                        self._identity.identity,
+                        notes="auto-approved on receipt",
+                    )
+                    logger.info(
+                        f"Auto-approved task {task_id} from "
+                        f"{message.from_identity}"
+                    )
 
         # Track active thread so <hub_reply> can auto-fill thread_id/reply_to
         if getattr(message, "thread_id", "") and message.thread_id != message.id:
@@ -6499,6 +6603,8 @@ class HubPlugin(BasePlugin):
         if self._identity:
             if self._identity.state != PresenceState.WAITING.value:
                 self._identity.state = AgentState.WORKING.value
+                if self._presence:
+                    self._presence.publish()
             self._last_activity_at = time.time()
             messages = context.get("messages", [])
             for msg in reversed(messages):
@@ -6532,6 +6638,8 @@ class HubPlugin(BasePlugin):
         if self._identity:
             if self._identity.state != PresenceState.WAITING.value:
                 self._identity.state = AgentState.IDLE.value
+                if self._presence:
+                    self._presence.publish()
             self._last_activity_at = time.time()
         return context
 
@@ -6714,7 +6822,9 @@ class HubPlugin(BasePlugin):
         )
         cleaned = wait_tag_pat.sub("", cleaned).strip()
         # All hub XML tags are now handled by the pipeline.
-        # See _register_pipeline_tools for the full list of 33 tags.
+        # See _register_pipeline_tools for the full list of 43 hub tags.
+        # ToolRegistry tools (web-fetch, web-search, etc.) are registered
+        # separately by llm_coordinator._register_registry_tool_tags().
 
         # --- Nudge engine: observe behavior and maybe remind ---
         # NOTE: `response` (from data["response_text"]) is the RAW pre-parser
@@ -7147,7 +7257,7 @@ class HubPlugin(BasePlugin):
                 detail=dial_target,
             )
             if not success:
-                await AgentMessenger.send_to_file(agent.agent_id, message)
+                await AgentMessenger.send_to_file(agent.identity, message)
             return True
 
         # Check cooldown only if the target is in waiting state
@@ -7212,21 +7322,13 @@ class HubPlugin(BasePlugin):
             detail=dial_target,
         )
         if not success:
-            await AgentMessenger.send_to_file(agent.agent_id, message)
+            await AgentMessenger.send_to_file(agent.identity, message)
             self._trace_delivery(
                 message,
-                "queued_agent_id_mailbox",
-                target=agent.agent_id,
+                "queued_identity_mailbox",
+                target=agent.identity,
                 detail="socket send failed",
             )
-            if agent.identity and agent.identity != agent.agent_id:
-                await AgentMessenger.send_to_file(agent.identity, message)
-                self._trace_delivery(
-                    message,
-                    "queued_identity_mailbox",
-                    target=agent.identity,
-                    detail="socket send failed",
-                )
         return True
 
     def _resolve_scope(self, target: str) -> str:

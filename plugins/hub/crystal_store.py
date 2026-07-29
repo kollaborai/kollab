@@ -24,7 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .text_utils import extract_keywords, keyword_overlap, score_relevance, tokenize
+from .text_utils import (
+    extract_keywords,
+    keyword_overlap,
+    score_relevance,
+    summary_similarity,
+    tokenize,
+)
 
 
 def normalize_crystal_id(raw: str) -> str:
@@ -46,6 +52,13 @@ logger = logging.getLogger(__name__)
 # 0.55 catches semantic duplicates (same concept, different wording).
 # Higher values (0.70+) miss many real duplicates in natural language.
 DEDUP_THRESHOLD = 0.45
+
+# Summary-level dedup threshold: entries whose summary lines have
+# word overlap above this merge. Uses a size-penalized overlap
+# coefficient from text_utils.summary_similarity.
+# 0.40 catches semantic duplicates while avoiding false merges on
+# short summaries that share common words like "insight" or "about".
+SUMMARY_DEDUP_THRESHOLD = 0.40
 
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
@@ -241,7 +254,7 @@ class CrystalStore:
         summary = self._extract_summary(text)
 
         # Check for duplicates
-        merge_target = self._find_merge_target(all_keywords)
+        merge_target = self._find_merge_target(all_keywords, summary)
         if merge_target is not None:
             existing = self._entries[merge_target]
             # Merge: keep newer date, union keywords, keep longer body
@@ -275,14 +288,42 @@ class CrystalStore:
         logger.debug("crystal_store: added %s (%d keywords)", entry.id, len(entry.keywords))
         return entry
 
-    def _find_merge_target(self, new_keywords: List[str]) -> Optional[int]:
-        """Find an existing entry to merge with based on keyword overlap."""
+    def _summary_similarity(self, summary_a: str, summary_b: str) -> float:
+        """Compute word-level overlap ratio between two summaries.
+
+        Delegates to text_utils.summary_similarity which tokenizes,
+        removes stopwords, and stems both summaries before computing
+        Jaccard overlap. This catches semantic duplicates that keyword
+        Jaccard misses because summaries distill the same concept.
+        """
+        return summary_similarity(summary_a, summary_b)
+
+    def _find_merge_target(
+        self, new_keywords: List[str], new_summary: str = ""
+    ) -> Optional[int]:
+        """Find an existing entry to merge with.
+
+        Uses two-layer matching:
+        1. Summary-level word overlap (catches semantic duplicates)
+        2. Keyword Jaccard (catches content overlap)
+
+        Either signal above its threshold triggers a merge.
+        """
         best_idx = None
-        best_overlap = 0.0
+        best_score = 0.0
         for i, existing in enumerate(self._entries):
+            # Layer 1: summary similarity (primary)
+            if new_summary and existing.summary:
+                sim = self._summary_similarity(new_summary, existing.summary)
+                if sim > SUMMARY_DEDUP_THRESHOLD and sim > best_score:
+                    best_score = sim
+                    best_idx = i
+                    continue
+
+            # Layer 2: keyword overlap (secondary)
             overlap = keyword_overlap(new_keywords, existing.keywords)
-            if overlap > DEDUP_THRESHOLD and overlap > best_overlap:
-                best_overlap = overlap
+            if overlap > DEDUP_THRESHOLD and overlap > best_score:
+                best_score = overlap
                 best_idx = i
         return best_idx
 
@@ -370,7 +411,10 @@ class CrystalStore:
         return count
 
     def deduplicate(self) -> int:
-        """Merge entries with keyword overlap above threshold.
+        """Merge entries with keyword or summary overlap above threshold.
+
+        Uses two-layer matching: summary word overlap (primary) and
+        keyword Jaccard (secondary). Either signal triggers a merge.
 
         Returns number of entries merged.
         """
@@ -383,11 +427,26 @@ class CrystalStore:
         while i < len(self._entries):
             j = i + 1
             while j < len(self._entries):
-                overlap = keyword_overlap(
-                    self._entries[i].keywords,
-                    self._entries[j].keywords,
-                )
-                if overlap > DEDUP_THRESHOLD:
+                # Layer 1: summary similarity
+                should_merge = False
+                if self._entries[i].summary and self._entries[j].summary:
+                    sim = self._summary_similarity(
+                        self._entries[i].summary,
+                        self._entries[j].summary,
+                    )
+                    if sim > SUMMARY_DEDUP_THRESHOLD:
+                        should_merge = True
+
+                # Layer 2: keyword overlap
+                if not should_merge:
+                    overlap = keyword_overlap(
+                        self._entries[i].keywords,
+                        self._entries[j].keywords,
+                    )
+                    if overlap > DEDUP_THRESHOLD:
+                        should_merge = True
+
+                if should_merge:
                     # Merge j into i
                     target = self._entries[i]
                     source = self._entries[j]

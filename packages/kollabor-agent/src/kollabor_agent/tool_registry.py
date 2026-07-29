@@ -50,9 +50,13 @@ class ToolRegistry:
             file_ops,
             git,
             hub,
+            on_demand,
             scratchpad,
             task,
             terminal,
+            web,
+            workspace,
+            mcp,
         )
 
         # Always explicitly register — handles post-reset reinit
@@ -63,6 +67,10 @@ class ToolRegistry:
         context.register_all()
         scratchpad.register_all()
         task.register_all()
+        web.register_all()
+        workspace.register_all()
+        mcp.register_all()
+        on_demand.register_all()
 
     def register(self, tool_def: ToolDefinition, replace: bool = False) -> None:
         """Register a tool definition.

@@ -874,7 +874,6 @@ class TerminalLLMChat:
 
         except KeyboardInterrupt:
             print("\r\n")
-            # print("\r\nInterrupted by user")
             logger.info("Application interrupted by user")
         except Exception as e:
             logger.error(f"Application error during startup: {e}")
@@ -2336,6 +2335,15 @@ class TerminalLLMChat:
                 logger.info(
                     "Injected TmuxPlugin into ToolExecutor for subprocess terminal execution"
                 )
+
+                # Wire terminal_plugin into widget context so render_bg_tasks
+                # can count live terminal sessions alongside LLM background tasks.
+                if hasattr(self, "_widget_context") and self._widget_context:
+                    self._widget_context.terminal_plugin = tmux_plugin
+                    logger.info(
+                        "Wired TmuxPlugin into WidgetContext for bg-tasks counting"
+                    )
+
             elif not tmux_plugin:
                 logger.debug(
                     "TmuxPlugin not available - ToolExecutor will use fallback ShellExecutor"
@@ -2619,6 +2627,14 @@ class TerminalLLMChat:
         # Check if we need to stop
         if not self.running:
             return False
+
+        # Auto-expire the double-Ctrl+C quit hint
+        try:
+            kph = getattr(self.input_handler, "_key_press_handler", None)
+            if kph and hasattr(kph, "_check_ctrl_c_expiry"):
+                kph._check_ctrl_c_expiry()
+        except Exception:
+            pass
 
         # Render active area
         try:

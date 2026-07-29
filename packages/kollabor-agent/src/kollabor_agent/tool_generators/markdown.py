@@ -17,6 +17,10 @@ CATEGORY_TITLES = {
     "task": "Task Lifecycle",
     "wait": "Waiting for Input",
     "curate": "Context Curation",
+    "web": "Web",
+    "workspace": "Workspace",
+    "mcp": "MCP",
+    "on_demand": "On-Demand Tools",
 }
 
 

@@ -36,7 +36,7 @@ class SystemPromptBuilder:
     which are passed via dependency injection for testing and modular use.
     """
 
-    def __init__(self, config, agent_manager=None, util_imports=None, profile_manager=None, conversation_logger=None):
+    def __init__(self, config, agent_manager=None, util_imports=None, profile_manager=None, conversation_logger=None, mcp_integration=None):
         """Initialize the system prompt builder.
 
         Args:
@@ -50,11 +50,13 @@ class SystemPromptBuilder:
                 - format_aliases_for_prompt: function to format shell aliases (from kollabor_agent)
                 If None, will import from kollabor_agent (default behavior)
             profile_manager: ProfileManager for reading active model/provider info (optional)
+            mcp_integration: MCPIntegration instance for MCP tool discovery (optional)
         """
         self.config = config
         self.agent_manager = agent_manager
         self.profile_manager = profile_manager
         self.conversation_logger = conversation_logger
+        self.mcp_integration = mcp_integration
         self._util_imports = util_imports or {}
 
         # Plugin instances reference (set after plugins are loaded)
@@ -91,6 +93,17 @@ class SystemPromptBuilder:
     def set_session_id(self, session_id: str) -> None:
         """Set the current session ID for logging context."""
         self._session_id = session_id
+
+    def set_mcp_integration(self, mcp_integration) -> None:
+        """Set the MCP integration instance for lazy tool summaries.
+
+        Called by the application after MCP integration is initialized.
+
+        Args:
+            mcp_integration: MCPIntegration instance
+        """
+        self.mcp_integration = mcp_integration
+        logger.debug(f"MCP integration set: {mcp_integration is not None}")
 
     def set_plugin_instances(self, plugin_instances: Dict[str, Any]) -> None:
         """Set plugin instances reference for system prompt additions.
@@ -325,6 +338,11 @@ class SystemPromptBuilder:
         if tool_ref:
             prompt_parts.append(tool_ref)
 
+        # Add lazy MCP tool summaries (compact list, not full schemas)
+        mcp_summaries = self._get_mcp_tool_summaries()
+        if mcp_summaries:
+            prompt_parts.append(mcp_summaries)
+
         # Add shell aliases if interactive shell is enabled
         if self.config.get("terminal.interactive_shell", False):
             utils = self._get_utils()
@@ -379,6 +397,84 @@ class SystemPromptBuilder:
                 return render_for_bundle(all_names, registry=registry)
         except Exception as e:
             logger.debug(f"Registry tool reference unavailable: {e}")
+            return None
+
+    def _get_mcp_tool_summaries(self) -> Optional[str]:
+        """Generate compact MCP tool summaries for the system prompt.
+
+        When lazy MCP injection is enabled, MCP tools from external servers
+        are listed as one-line summaries grouped by server, instead of having
+        their full schemas injected. The agent can then use tool-search and
+        tool-load (on-demand loading) to discover and activate specific tools.
+
+        Returns None if:
+        - Lazy MCP injection is disabled in config
+        - MCP integration is not available
+        - No MCP tools are registered
+
+        Returns:
+            Markdown section with compact MCP tool summaries, or None.
+        """
+        try:
+            lazy_enabled = self.config.get(
+                "kollabor.llm.lazy_mcp_tools", True
+            )
+            if not lazy_enabled:
+                return None
+
+            if not self.mcp_integration:
+                return None
+
+            tool_registry = getattr(self.mcp_integration, "tool_registry", {})
+            if not tool_registry:
+                return None
+
+            # Group tools by server
+            by_server: Dict[str, List[tuple]] = {}
+            for tool_name, tool_info in tool_registry.items():
+                if not tool_info.get("enabled", True):
+                    continue
+                server = tool_info.get("server", "unknown")
+                definition = tool_info.get("definition", {})
+                description = definition.get("description", "")
+                # Truncate description to one line, max 80 chars
+                if len(description) > 80:
+                    description = description[:77] + "..."
+                by_server.setdefault(server, []).append(
+                    (tool_name, description)
+                )
+
+            if not by_server:
+                return None
+
+            total = sum(len(tools) for tools in by_server.values())
+            lines = [
+                f"## MCP Tools ({total} available, use tool-search/tool-load to activate)",
+                "",
+            ]
+
+            for server in sorted(by_server.keys()):
+                tools = by_server[server]
+                lines.append(f"### {server} ({len(tools)} tools)")
+                lines.append("")
+                for tool_name, desc in sorted(tools):
+                    if desc:
+                        lines.append(f"- `{tool_name}` — {desc}")
+                    else:
+                        lines.append(f"- `{tool_name}`")
+                lines.append("")
+
+            # Remove trailing blank line
+            while lines and lines[-1] == "":
+                lines.pop()
+
+            logger.info(
+                f"Lazy MCP injection: {total} tools from {len(by_server)} servers "
+                f"(summaries only — full schemas loaded on demand)"
+            )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"MCP tool summaries unavailable: {e}")
             return None
 
     def _get_plugin_system_prompt_additions(self) -> List[str]:
