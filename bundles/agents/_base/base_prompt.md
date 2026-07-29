@@ -16,6 +16,7 @@
 <trender type="include" path="sections/tool-reference/mcp.md" />
 <trender type="include" path="sections/tool-reference/session-logs.md" />
 <trender type="include" path="sections/tool-reference/web.md" />
+<trender type="include" path="sections/tool-reference/on-demand.md" />
 
 <trender type="include" path="sections/meta/quality-assurance.md" />
 <trender type="include" path="sections/meta/thoroughness-mandate.md" />

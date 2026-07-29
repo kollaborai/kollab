@@ -50,6 +50,7 @@ class ToolRegistry:
             file_ops,
             git,
             hub,
+            on_demand,
             scratchpad,
             task,
             terminal,
@@ -69,6 +70,7 @@ class ToolRegistry:
         web.register_all()
         workspace.register_all()
         mcp.register_all()
+        on_demand.register_all()
 
     def register(self, tool_def: ToolDefinition, replace: bool = False) -> None:
         """Register a tool definition.

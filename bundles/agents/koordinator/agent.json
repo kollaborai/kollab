@@ -62,7 +62,9 @@
     "web-fetch",
     "web-search",
     "mcp-reload",
-    "workspace-set"
+    "workspace-set",
+    "tool-search",
+    "tool-load"
   ],
   "skills": [
     "explore-agent-system"

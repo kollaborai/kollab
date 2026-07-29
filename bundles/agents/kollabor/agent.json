@@ -61,7 +61,9 @@
     "web-fetch",
     "web-search",
     "workspace-set",
-    "mcp-reload"
+    "mcp-reload",
+    "tool-search",
+    "tool-load"
   ],
   "skills": [
     "debugging"

@@ -6,6 +6,7 @@ from . import (
     git,  # noqa: F401
     hub,  # noqa: F401
     mcp,  # noqa: F401
+    on_demand,  # noqa: F401
     scratchpad,  # noqa: F401
     task,  # noqa: F401
     terminal,  # noqa: F401

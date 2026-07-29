@@ -20,6 +20,7 @@ CATEGORY_TITLES = {
     "web": "Web",
     "workspace": "Workspace",
     "mcp": "MCP",
+    "on_demand": "On-Demand Tools",
 }
 
 
