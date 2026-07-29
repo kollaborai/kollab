@@ -1289,6 +1289,17 @@ class LLMService:
             self.cancel_processing = True
             # Cancel API request through API service (KISS refactoring)
             self.api_service.cancel_current_request()
+            # Cancel any running shell subprocess so ESC interrupts
+            # long-running terminal commands, not just API streaming.
+            try:
+                coord = self  # alias for clarity in the closure
+                if coord.tool_executor is not None:
+                    coord.create_background_task(
+                        coord.tool_executor.cancel_running_tool(),
+                        name="esc_cancel_tool",
+                    )
+            except Exception as e:
+                logger.debug(f"Could not cancel running tool: {e}")
             logger.info("Processing cancellation requested")
 
     # --- StreamingHandler forwarding methods ---

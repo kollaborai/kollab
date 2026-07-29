@@ -100,6 +100,7 @@ class TmuxPlugin:
         self.command_registry: Optional[Any] = None
         self.input_handler = None
         self._current_session: Optional[str] = None
+        self._active_executor = None  # Track for ESC cancellation
 
         self.logger = logger
 
@@ -627,9 +628,13 @@ Aliases: /t, /term, /tmux"""
             )
 
             executor = ShellExecutor()
-            result = await executor.run(
-                command, timeout=timeout, cwd=effective_cwd, env=env
-            )
+            self._active_executor = executor
+            try:
+                result = await executor.run(
+                    command, timeout=timeout, cwd=effective_cwd, env=env
+                )
+            finally:
+                self._active_executor = None
 
             if result.timed_out:
                 return {

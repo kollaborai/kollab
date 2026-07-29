@@ -156,6 +156,9 @@ class ToolExecutor:
         # Cancellation callback - checked between tool executions
         self._cancel_callback = None
 
+        # Track active shell executor so ESC can cancel running subprocesses
+        self._active_shell_executor: Optional[ShellExecutor] = None
+
         logger.info(
             "Tool executor initialized with terminal, MCP, and file operations support"
         )
@@ -303,6 +306,25 @@ class ToolExecutor:
         if self._cancel_callback:
             return self._cancel_callback()
         return False
+
+    async def cancel_running_tool(self) -> None:
+        """Cancel any currently running shell subprocess.
+
+        Called by the ESC/cancel handler to interrupt a long-running
+        terminal command that is stuck inside asyncio.wait_for().
+        """
+        if self._active_shell_executor is not None:
+            logger.info("Cancelling active shell executor subprocess")
+            await self._active_shell_executor.cancel()
+            self._active_shell_executor = None
+
+        # Also cancel via tmux plugin if it has a running foreground process
+        if self.tmux_plugin and hasattr(self.tmux_plugin, "_active_executor"):
+            active = getattr(self.tmux_plugin, "_active_executor", None)
+            if active is not None:
+                logger.info("Cancelling tmux plugin foreground subprocess")
+                await active.cancel()
+                self.tmux_plugin._active_executor = None
 
     async def execute_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
         """Execute a single tool (terminal, MCP, or file operation).
@@ -657,11 +679,15 @@ class ToolExecutor:
                 logger.debug("Falling back to ShellExecutor for command execution")
 
         # Fallback: Use ShellExecutor (no terminal plugin available or it failed)
-        result = await self.shell_executor.run(
-            command,
-            timeout=self.terminal_timeout,
-            cwd=cwd,
-        )
+        self._active_shell_executor = self.shell_executor
+        try:
+            result = await self.shell_executor.run(
+                command,
+                timeout=self.terminal_timeout,
+                cwd=cwd,
+            )
+        finally:
+            self._active_shell_executor = None
 
         if result.error:
             return ToolExecutionResult(
