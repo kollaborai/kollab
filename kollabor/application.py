@@ -2335,6 +2335,15 @@ class TerminalLLMChat:
                 logger.info(
                     "Injected TmuxPlugin into ToolExecutor for subprocess terminal execution"
                 )
+
+                # Wire terminal_plugin into widget context so render_bg_tasks
+                # can count live terminal sessions alongside LLM background tasks.
+                if hasattr(self, "_widget_context") and self._widget_context:
+                    self._widget_context.terminal_plugin = tmux_plugin
+                    logger.info(
+                        "Wired TmuxPlugin into WidgetContext for bg-tasks counting"
+                    )
+
             elif not tmux_plugin:
                 logger.debug(
                     "TmuxPlugin not available - ToolExecutor will use fallback ShellExecutor"
