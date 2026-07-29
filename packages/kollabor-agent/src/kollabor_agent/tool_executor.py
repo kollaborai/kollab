@@ -444,6 +444,22 @@ class ToolExecutor:
                         )
                         result = await self._execute_file_operation(tool_data)
                         logger.debug(f"_execute_file_operation completed for {tool_id}")
+                    elif tool_type in ("workspace_set", "workspace-set"):
+                        logger.debug(
+                            f"About to call _execute_workspace_set for {tool_id}"
+                        )
+                        result = await self._execute_workspace_set(tool_data)
+                        logger.debug(
+                            f"_execute_workspace_set completed for {tool_id}"
+                        )
+                    elif tool_type in ("mcp_reload", "mcp-reload"):
+                        logger.debug(
+                            f"About to call _execute_mcp_reload for {tool_id}"
+                        )
+                        result = await self._execute_mcp_reload(tool_data)
+                        logger.debug(
+                            f"_execute_mcp_reload completed for {tool_id}"
+                        )
                     else:
                         result = ToolExecutionResult(
                             tool_id=tool_id,
@@ -1058,6 +1074,174 @@ class ToolExecutor:
             path = self.workspace / path
         return path.resolve()
 
+    async def _execute_workspace_set(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Switch the agent's working directory.
+
+        Updates self.workspace and calls os.chdir() so the status bar
+        cwd widget reflects the change immediately.
+
+        Args:
+            tool_data: Tool information containing the path parameter.
+
+        Returns:
+            ToolExecutionResult with confirmation or error.
+        """
+        import os
+
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract path from tool_data — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        raw_path = (
+            params.get("path")
+            or params.get("Path")
+            or tool_data.get("path")
+        )
+
+        if not raw_path:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error="Missing required parameter: path",
+            )
+
+        try:
+            # Expand ~ and resolve relative to current workspace
+            expanded = Path(raw_path).expanduser()
+            if not expanded.is_absolute() and self.workspace is not None:
+                expanded = self.workspace / expanded
+            resolved = expanded.resolve()
+
+            if not resolved.exists():
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="workspace_set",
+                    success=False,
+                    error=f"Directory not found: {raw_path}",
+                )
+
+            if not resolved.is_dir():
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="workspace_set",
+                    success=False,
+                    error=f"Not a directory: {raw_path}",
+                )
+
+            # Update workspace + process cwd
+            old_workspace = str(self.workspace) if self.workspace else str(Path.cwd())
+            self.workspace = resolved
+            os.chdir(str(resolved))
+
+            logger.info(f"Workspace switched: {old_workspace} -> {resolved}")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=True,
+                output=f"Workspace changed to: {resolved}",
+                metadata={
+                    "old_workspace": old_workspace,
+                    "new_workspace": str(resolved),
+                },
+            )
+
+        except PermissionError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error=f"Permission denied: {raw_path}",
+            )
+        except Exception as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error=f"Failed to switch workspace: {e}",
+            )
+
+    async def _execute_mcp_reload(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Reload MCP server connections and rediscover tools.
+
+        Calls mcp_integration.reload_mcp_servers() to close active
+        connections, reload config files, and reconnect.
+
+        Args:
+            tool_data: Tool information (no required params).
+
+        Returns:
+            ToolExecutionResult with reload summary or error.
+        """
+        import time
+
+        tool_id = tool_data.get("id", "unknown")
+        start_time = time.time()
+
+        if self.mcp_integration is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=False,
+                error="MCP integration is not available in this session.",
+            )
+
+        try:
+            counts = await self.mcp_integration.reload_mcp_servers()
+            elapsed = time.time() - start_time
+
+            configured = counts.get("configured", 0)
+            discovered = counts.get("discovered", 0)
+            reconnected = counts.get("reconnected", 0)
+
+            # Count total tools discovered
+            total_tools = 0
+            if hasattr(self.mcp_integration, "get_tool_definitions_for_api"):
+                total_tools = len(
+                    self.mcp_integration.get_tool_definitions_for_api()
+                )
+
+            output = (
+                f"MCP servers reloaded.\n"
+                f"  Configured: {configured}\n"
+                f"  Discovered: {discovered}\n"
+                f"  Reconnected: {reconnected}\n"
+                f"  Tools available: {total_tools}"
+            )
+
+            logger.info(
+                f"MCP reload complete: {reconnected}/{configured} servers, "
+                f"{total_tools} tools ({elapsed:.1f}s)"
+            )
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=True,
+                output=output,
+                metadata={
+                    "configured": configured,
+                    "discovered": discovered,
+                    "reconnected": reconnected,
+                    "total_tools": total_tools,
+                    "elapsed": round(elapsed, 2),
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"MCP reload failed: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=False,
+                error=f"MCP reload failed: {e}",
+            )
+
     def _update_stats(self, result: ToolExecutionResult):
         """Update execution statistics.
 
@@ -1081,6 +1265,9 @@ class ToolExecutor:
         elif result.tool_type in ("web_fetch", "web_search"):
             self.stats.setdefault("web_executions", 0)
             self.stats["web_executions"] += 1
+        elif result.tool_type in ("mcp_reload", "mcp-reload"):
+            self.stats.setdefault("mcp_reload_executions", 0)
+            self.stats["mcp_reload_executions"] += 1
 
     def get_execution_stats(self) -> Dict[str, Any]:
         """Get execution statistics.
@@ -1132,13 +1319,17 @@ class ToolExecutor:
     async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
         """Fetch a URL and return cleaned text content.
 
-        Uses aiohttp with a 30-second timeout. HTML is stripped to plain
-        text with main-content extraction heuristics (skip nav/footer/script/
-        style tags, find the densest text block). Output is truncated to
-        max_chars (default 10 000).
+        Uses aiohttp with a 30-second timeout. Content extraction follows
+        a priority chain: JSON-LD → meta tags → semantic HTML5 → readability
+        heuristic. If the extracted text is suspiciously sparse (<500 chars
+        from a 200 OK), retries with Playwright headless browser (if installed)
+        to handle JS-rendered pages.
+
+        Output is truncated to max_chars (default 5000).
 
         Args:
-            tool_data: Dict with 'url' (required) and 'max_chars' (optional).
+            tool_data: Dict with 'url' (required), 'max_chars' (optional),
+                       and 'extract_main' (optional, default true).
 
         Returns:
             ToolExecutionResult with the cleaned text or an error message.
@@ -1147,7 +1338,8 @@ class ToolExecutor:
 
         tool_id = tool_data.get("id", "unknown")
         url = tool_data.get("url", "").strip()
-        max_chars = int(tool_data.get("max_chars", 10000))
+        max_chars = int(tool_data.get("max_chars", 5000))
+        extract_main = tool_data.get("extract_main", True)
 
         if not url:
             return ToolExecutionResult(
@@ -1194,13 +1386,31 @@ class ToolExecutor:
                             error=f"HTTP {resp.status} {resp.reason}",
                         )
 
+                    # Content-Length check: warn on very large pages
+                    try:
+                        content_length = resp.headers.get("Content-Length", "")
+                        if content_length and int(content_length) > 500_000:
+                            logger.warning(
+                                f"web_fetch: large page {url} ({content_length} bytes)"
+                            )
+                    except (ValueError, TypeError):
+                        pass
+
+                    final_url = str(resp.url)
                     raw = await resp.text(errors="replace")
 
-            # Extract main content and strip HTML
-            text = self._html_to_text(raw)
+            # Extract main content using priority chain
+            text = self._extract_main_content(raw, extract_main)
+
+            # Playwright fallback: if aiohttp got suspiciously little text
+            # from a valid response, the page may be JS-rendered.
+            if len(text) < 500:
+                pw_text = await self._playwright_fetch(url)
+                if pw_text and len(pw_text) > len(text):
+                    text = pw_text
+                    logger.info(f"web_fetch: used Playwright fallback for {url}")
 
             # Truncate to max_chars (accounting for the URL header)
-            final_url = str(resp.url) if resp.url != url else url
             header = f"URL: {final_url}\n\n"
             available = max(100, max_chars - len(header))
             if len(text) > available:
@@ -1306,6 +1516,8 @@ class ToolExecutor:
                     lines.append(f"   {r['snippet']}")
                 lines.append("")
 
+            lines.append("Use web-fetch to get full content from any result.")
+
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_search",
@@ -1343,13 +1555,140 @@ class ToolExecutor:
 
     @staticmethod
     def _html_to_text(html: str) -> str:
-        """Convert HTML to clean text with main-content extraction.
+        """Backward-compatible alias for _extract_main_content."""
+        return ToolExecutor._extract_main_content(html)
 
-        Strategy:
-        1. Remove script/style/nav/footer/aside/header tags and their content.
-        2. Strip all remaining HTML tags.
-        3. Decode common HTML entities.
-        4. Collapse whitespace.
+    @staticmethod
+    def _extract_main_content(html: str, extract_main: bool = True) -> str:
+        """Extract main content from HTML using a priority chain.
+
+        Priority order:
+        1. JSON-LD structured data (articleBody / description)
+        2. Semantic HTML5 (<article>, <main>, <section>)
+        3. Readability heuristic (highest text-to-tag ratio element)
+        4. Fallback: strip non-content tags, extract remaining text
+
+        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
+        extraction if bs4 is not available.
+        """
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+        except ImportError:
+            # bs4 not available — fall back to regex-based extraction
+            return ToolExecutor._html_to_text_regex(html)
+
+        # Remove non-content elements entirely
+        for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
+                                   "header", "noscript", "svg", "form",
+                                   "button", "iframe"]):
+            tag.decompose()
+
+        if extract_main:
+            # Priority 1: JSON-LD structured data
+            text = ToolExecutor._extract_json_ld(soup)
+            if text and len(text) > 200:
+                return text
+
+            # Priority 2: Semantic HTML5 — <article>, <main>
+            for selector in ["article", "main", "[role='main']"]:
+                element = soup.select_one(selector)
+                if element:
+                    text = ToolExecutor._soup_to_text(element)
+                    if len(text) > 200:
+                        return text
+
+            # Priority 3: Readability heuristic — find densest content block
+            text = ToolExecutor._readability_extract(soup)
+            if text and len(text) > 200:
+                return text
+
+        # Priority 4: Fallback — extract all remaining text
+        return ToolExecutor._soup_to_text(soup)
+
+    @staticmethod
+    def _extract_json_ld(soup) -> str:
+        """Extract articleBody or description from JSON-LD script tags."""
+        import json
+
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                # Handle both single objects and arrays
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    # Look for articleBody first (richest content)
+                    body = item.get("articleBody") or item.get("text", "")
+                    if body and len(body) > 200:
+                        # Collapse whitespace
+                        lines = [l.strip() for l in body.split("\n") if l.strip()]
+                        return "\n".join(lines)
+                    # Fall back to description
+                    desc = item.get("description", "")
+                    if desc and len(desc) > 100:
+                        return desc.strip()
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return ""
+
+    @staticmethod
+    def _readability_extract(soup) -> str:
+        """Find the element with the highest text-to-tag ratio.
+
+        Scores each <div> and <section> by text length / number of child
+        tags. Returns the text from the highest-scoring element.
+        """
+        best_text = ""
+        best_score = 0
+
+        for element in soup.find_all(["div", "section"]):
+            # Skip tiny elements
+            text = element.get_text(separator=" ", strip=True)
+            if len(text) < 200:
+                continue
+
+            # Score: text length weighted by text-to-tag ratio
+            tag_count = len(element.find_all())
+            if tag_count == 0:
+                continue
+            ratio = len(text) / tag_count
+            # Prefer elements with more text, but penalize high tag density
+            score = len(text) * min(ratio / 10, 1.0)
+
+            if score > best_score:
+                best_score = score
+                best_text = text
+
+        if best_text:
+            lines = [l.strip() for l in best_text.split("\n") if l.strip()]
+            return "\n".join(lines)
+        return ""
+
+    @staticmethod
+    def _soup_to_text(element) -> str:
+        """Extract clean text from a BeautifulSoup element.
+
+        Inserts newlines for block-level tags, decodes entities,
+        collapses whitespace.
+        """
+        # Insert newlines for block-level elements
+        for tag in element.find_all(["p", "div", "br", "h1", "h2", "h3",
+                                      "h4", "h5", "h6", "li", "tr", "blockquote",
+                                      "pre"]):
+            tag.append("\n")
+
+        text = element.get_text()
+        lines = [line.strip() for line in text.split("\n")]
+        lines = [line for line in lines if line]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _html_to_text_regex(html: str) -> str:
+        """Regex-based HTML to text fallback (no bs4 dependency).
+
+        Used when beautifulsoup4 is not installed.
         """
         import html as html_mod
         import re
@@ -1377,11 +1716,36 @@ class ToolExecutor:
         # Decode HTML entities
         html = html_mod.unescape(html)
 
-        # Collapse whitespace: split into lines, strip each, drop empties
+        # Collapse whitespace
         lines = [line.strip() for line in html.split("\n")]
         lines = [line for line in lines if line]
 
         return "\n".join(lines)
+
+    async def _playwright_fetch(self, url: str) -> str:
+        """Fetch a URL using Playwright headless browser (optional).
+
+        Used as a fallback for JS-rendered pages where aiohttp returns
+        sparse content. Returns extracted text or empty string if
+        Playwright is not available or fails.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return ""
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.goto(url, timeout=20000, wait_until="networkidle")
+                html = await page.content()
+                await browser.close()
+
+            return self._extract_main_content(html)
+        except Exception as e:
+            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            return ""
 
     @staticmethod
     def _parse_ddg_results(html: str, max_results: int) -> list:
@@ -1491,5 +1855,8 @@ class ToolExecutor:
         elif tool_type in ("web_search", "web-search"):
             query = tool_data.get("query", "")
             return f"web-search: {query[:60]}" if query else "web-search"
+
+        elif tool_type in ("mcp_reload", "mcp-reload"):
+            return "mcp-reload"
 
         return str(tool_type)

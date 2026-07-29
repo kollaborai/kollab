@@ -54,6 +54,8 @@ class ToolRegistry:
             task,
             terminal,
             web,
+            workspace,
+            mcp,
         )
 
         # Always explicitly register — handles post-reset reinit
@@ -65,6 +67,8 @@ class ToolRegistry:
         scratchpad.register_all()
         task.register_all()
         web.register_all()
+        workspace.register_all()
+        mcp.register_all()
 
     def register(self, tool_def: ToolDefinition, replace: bool = False) -> None:
         """Register a tool definition.

@@ -5,8 +5,10 @@ from . import (
     file_ops,  # noqa: F401
     git,  # noqa: F401
     hub,  # noqa: F401
+    mcp,  # noqa: F401
     scratchpad,  # noqa: F401
     task,  # noqa: F401
     terminal,  # noqa: F401
     web,  # noqa: F401
+    workspace,  # noqa: F401
 )

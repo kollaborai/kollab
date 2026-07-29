@@ -59,7 +59,9 @@
     "context-query",
     "evict",
     "web-fetch",
-    "web-search"
+    "web-search",
+    "workspace-set",
+    "mcp-reload"
   ],
   "skills": [
     "debugging"
