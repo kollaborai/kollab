@@ -10,6 +10,7 @@ resource tracking (RSS, uptime, restart count).
 import asyncio
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -331,6 +332,7 @@ class SubprocessStrategy(SpawnStrategy):
                 stderr=subprocess.STDOUT,
                 cwd=cwd,
                 env=env,
+                start_new_session=True,  # isolate from kollab's process group
             )
         except Exception as e:
             return SpawnResult(success=False, error=str(e))
@@ -361,13 +363,22 @@ class SubprocessStrategy(SpawnStrategy):
 
         loop = _get_loop()
         try:
-            proc.terminate()
+            # Kill the entire process group (sessions use start_new_session=True)
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.terminate()
             try:
                 await loop.run_in_executor(
                     None, lambda: proc.wait(timeout=graceful_timeout)
                 )
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.kill()
                 await loop.run_in_executor(None, lambda: proc.wait(timeout=2))
             return True
         except Exception as e:
