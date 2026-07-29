@@ -142,6 +142,9 @@ class TerminalRenderer:
         self._tool_executing = False
         self._tool_name = ""
 
+        # Transient quit hint (shown after first Ctrl+C)
+        self._quit_hint: str = ""
+
         # Spinner frames for different states
         self._thinking_frames = [
             "⠋",
@@ -273,6 +276,15 @@ class TerminalRenderer:
         """
         self.thinking_animation.messages = deque(maxlen=limit)
         logger.debug(f"Configured thinking message limit: {limit}")
+
+    def set_quit_hint(self, hint: str) -> None:
+        """Set or clear the transient quit hint shown after first Ctrl+C.
+
+        Pass empty string to clear.
+        """
+        if hint != self._quit_hint:
+            self._quit_hint = hint
+            self.invalidate_render_cache()
 
     def set_tool_executing(self, active: bool, tool_name: str = "") -> None:
         """Set tool execution state for spinner animation.
@@ -432,6 +444,10 @@ class TerminalRenderer:
         if not lines or lines[-1] != "":
             lines.append("")
         await self._render_input_area(lines)
+
+        # Transient quit hint (after first Ctrl+C)
+        if self._quit_hint:
+            lines.append(self._quit_hint)
 
         # Status area (command menu, status modal, or status views)
         status_lines = await self._build_status_lines()

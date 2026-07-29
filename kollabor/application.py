@@ -874,7 +874,6 @@ class TerminalLLMChat:
 
         except KeyboardInterrupt:
             print("\r\n")
-            # print("\r\nInterrupted by user")
             logger.info("Application interrupted by user")
         except Exception as e:
             logger.error(f"Application error during startup: {e}")
@@ -2619,6 +2618,14 @@ class TerminalLLMChat:
         # Check if we need to stop
         if not self.running:
             return False
+
+        # Auto-expire the double-Ctrl+C quit hint
+        try:
+            kph = getattr(self.input_handler, "_key_press_handler", None)
+            if kph and hasattr(kph, "_check_ctrl_c_expiry"):
+                kph._check_ctrl_c_expiry()
+        except Exception:
+            pass
 
         # Render active area
         try:

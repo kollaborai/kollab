@@ -341,7 +341,9 @@ class KeyPressHandler:
 
             # Reset double-Ctrl+C state on any non-Ctrl+C key
             if not self.key_parser.is_control_key(key_press, "Ctrl+C"):
-                self._ctrl_c_first_press_time = 0.0
+                if self._ctrl_c_first_press_time > 0:
+                    self._ctrl_c_first_press_time = 0.0
+                    self._set_quit_hint("")
 
             # Emit KEY_PRESS event (fire-and-forget for config hooks)
             try:
@@ -394,25 +396,8 @@ class KeyPressHandler:
 
             # Handle control keys
             if self.key_parser.is_control_key(key_press, "Ctrl+C"):
-                now = time.monotonic()
-                if (
-                    self._ctrl_c_first_press_time > 0
-                    and now - self._ctrl_c_first_press_time
-                    <= self._ctrl_c_window_seconds
-                ):
-                    logger.info("Ctrl+C received (second press) - exiting")
-                    raise KeyboardInterrupt
-                else:
-                    # First press: show warning, don't exit
-                    self._ctrl_c_first_press_time = now
-                    logger.info("Ctrl+C received (first press) - waiting for confirmation")
-                    try:
-                        self.renderer.write_hook_message(
-                            "Press Ctrl+C again to exit "
-                            f"(or Esc to cancel request)",
-                        )
-                    except Exception:
-                        pass
+                await self._handle_ctrl_c()
+                return
 
             elif self.key_parser.is_control_key(key_press, "Enter"):
                 await self._handle_enter()
@@ -615,6 +600,62 @@ class KeyPressHandler:
                     "buffer_manager": self.buffer_manager,
                 },
             )
+
+    async def _handle_ctrl_c(self) -> None:
+        """Handle Ctrl+C with double-press-to-quit and tool cancellation.
+
+        Behavior:
+        - If a tool/API is running: first Ctrl+C cancels it (like ESC),
+          shows hint. Second Ctrl+C within window quits.
+        - If idle: first Ctrl+C shows hint. Second within window quits.
+        - Window expires after _ctrl_c_window_seconds -> reset.
+        """
+        now = time.monotonic()
+        window_active = (
+            self._ctrl_c_first_press_time > 0
+            and now - self._ctrl_c_first_press_time
+            <= self._ctrl_c_window_seconds
+        )
+
+        if window_active:
+            # Second press within window -> quit
+            logger.info("Ctrl+C received (second press) - exiting")
+            self._set_quit_hint("")
+            raise KeyboardInterrupt
+
+        # First press (or expired)
+        self._ctrl_c_first_press_time = now
+        logger.info("Ctrl+C received (first press) - waiting for confirmation")
+        self._set_quit_hint("Press Ctrl+C again to quit")
+
+        # If a tool/API is running, also cancel it (same as ESC)
+        try:
+            await self.event_bus.emit_with_hooks(
+                EventType.CANCEL_REQUEST,
+                {"reason": "user_ctrl_c", "source": "input_handler"},
+                "input",
+            )
+        except Exception as e:
+            logger.debug(f"Could not emit cancel request on Ctrl+C: {e}")
+
+    def _set_quit_hint(self, hint: str) -> None:
+        """Set or clear the transient quit hint on the renderer."""
+        try:
+            if hasattr(self.renderer, "set_quit_hint"):
+                self.renderer.set_quit_hint(hint)
+        except Exception:
+            pass
+
+    def _check_ctrl_c_expiry(self) -> None:
+        """Clear the quit hint if the double-press window has expired.
+
+        Called from the render path so the hint auto-disappears.
+        """
+        if self._ctrl_c_first_press_time > 0:
+            now = time.monotonic()
+            if now - self._ctrl_c_first_press_time > self._ctrl_c_window_seconds:
+                self._ctrl_c_first_press_time = 0.0
+                self._set_quit_hint("")
 
     async def _handle_enter(self) -> None:
         """Handle Enter key press with enhanced validation."""
