@@ -841,7 +841,16 @@ class TerminalRenderer:
         return []
 
     async def _render_lines(self, lines: List[str], size_changed: bool = False) -> None:
-        """Render lines to terminal with proper clearing.
+        """Render lines to terminal with per-line diffing.
+
+        Instead of clearing and rewriting the entire active area every frame,
+        only the lines that actually changed are rewritten.  This eliminates
+        status-bar flicker during typing and tool execution.
+
+        Falls back to full clear+rewrite when:
+        - Terminal was resized
+        - Line count changed (lines added or removed)
+        - No previous render exists (first frame)
 
         Args:
             lines: Lines to render.
@@ -850,30 +859,33 @@ class TerminalRenderer:
         render_generation = self._render_generation + 1
         self._render_generation = render_generation
 
-        # --- Skip if cached and unchanged ---
-        cache_enabled = self._should_enable_render_cache()
+        # --- Fast-path: nothing changed at all ---
         if (
-            cache_enabled
-            and not size_changed
+            not size_changed
             and not self._resize_redraw_pending
             and self._last_render_content == lines
         ):
             return
 
-        self._last_render_content = lines.copy()
+        prev_content = self._last_render_content
         current_line_count = len(lines)
+
+        # --- Decide: per-line diff vs full rewrite ---
+        # Full rewrite when: resize, line count mismatch, or no previous render.
+        needs_full_rewrite = (
+            size_changed
+            or self._resize_redraw_pending
+            or not self.input_line_written
+            or not prev_content
+            or len(prev_content) != current_line_count
+        )
 
         self._start_buffered_write()
 
-        # --- Clear previous render ---
-        self._clear_previous_render(current_line_count, size_changed)
-
-        # --- Render new content ---
-        for i, line in enumerate(lines):
-            if i > 0:
-                self._write("\n")
-            self._write("\r\033[2K")
-            self._write(line)
+        if needs_full_rewrite:
+            self._render_lines_full(lines, current_line_count, size_changed)
+        else:
+            self._render_lines_diff(lines, prev_content, current_line_count)
 
         self._write("\033[?25l")  # Hide cursor
 
@@ -883,29 +895,66 @@ class TerminalRenderer:
             logger.debug("Skipping stale render state commit")
             return
 
+        self._last_render_content = lines.copy()
         self.last_line_count = current_line_count
         self.input_line_written = True
         self._resize_redraw_pending = False
 
+    def _render_lines_full(
+        self, lines: List[str], current_line_count: int, size_changed: bool
+    ) -> None:
+        """Full clear-and-rewrite of the active area (fallback path)."""
+        self._clear_previous_render(current_line_count, size_changed)
+
+        for i, line in enumerate(lines):
+            if i > 0:
+                self._write("\n")
+            self._write("\r\033[2K")
+            self._write(line)
+
+    def _render_lines_diff(
+        self,
+        lines: List[str],
+        prev_content: List[str],
+        current_line_count: int,
+    ) -> None:
+        """Per-line diff: rewrite only the lines that changed.
+
+        Cursor math: after the previous render the cursor sits at the
+        bottom of the active area (line ``current_line_count - 1``).
+        Line 0 is at the top.  To address line *i* we move up
+        ``(current_line_count - 1 - i)`` rows, clear+write, then move
+        back down the same amount.
+        """
+        bottom = current_line_count - 1
+
+        for i, line in enumerate(lines):
+            if i < len(prev_content) and prev_content[i] == line:
+                continue  # unchanged — skip
+
+            # Move cursor up to line *i*.
+            up = bottom - i
+            if up > 0:
+                self._write(f"\033[{up}A")
+            self._write("\r\033[2K")
+            self._write(line)
+            # Move cursor back down to the bottom.
+            if up > 0:
+                self._write(f"\033[{up}B")
+
     def _should_enable_render_cache(self) -> bool:
-        """Check if render cache should be enabled."""
+        """Check if render cache should be enabled.
+
+        With per-line diffing the idle-timeout gate is no longer needed —
+        unchanged lines are skipped regardless of animation state.  We keep
+        the config flag and the tool/thinking gates for safety.
+        """
         if self._app_config is not None:
             cache_enabled: bool = self._app_config.get(
                 "terminal.render_cache_enabled", True
             )
         else:
             cache_enabled = self._render_cache_enabled
-
-        # Disable during animations (spinner, shimmer)
-        if cache_enabled:
-            now = time.time()
-            is_animating = (
-                self._tool_executing
-                or self.thinking_active
-                or (now - self._last_activity) <= self._idle_timeout
-            )
-            if is_animating:
-                return False
 
         return cache_enabled
 
