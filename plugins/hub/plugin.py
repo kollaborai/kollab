@@ -337,7 +337,7 @@ class HubPlugin(BasePlugin):
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
-                    "dreaming_interval": 3600,
+                    "dreaming_interval": 900,
                     "dreaming_stream_depth": 100,
                     "notify_enabled": False,
                     "notify_channel": "",
@@ -4635,7 +4635,7 @@ class HubPlugin(BasePlugin):
                         "plugins.hub.dreaming_idle_threshold", 300
                     )
                     dream_interval = self.config.get(
-                        "plugins.hub.dreaming_interval", 3600
+                        "plugins.hub.dreaming_interval", 900
                     )
                     stream_depth = self.config.get(
                         "plugins.hub.dreaming_stream_depth", 100
@@ -5898,6 +5898,33 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     f"Auto-created task {card.id} from" f" {message.from_identity}"
                 )
+
+        # Auto-approve task_complete reports addressed to this agent.
+        # When a worker calls task_complete, the report is sent to the
+        # coordinator/reviewer with metadata task_complete=True. Instead
+        # of letting it sit in qa_review forever, auto-approve it so the
+        # task transitions to closed. The reviewer can still reject later
+        # if needed (qa_reject re-activates the task).
+        if (
+            self._task_ledger
+            and self._identity
+            and message.metadata
+            and message.metadata.get("task_complete")
+            and message.to == self._identity.identity
+        ):
+            task_id = str(message.metadata.get("task_id", ""))
+            if task_id:
+                card = self._task_ledger.get(task_id)
+                if card and card.status == "qa_review":
+                    self._task_ledger.qa_approve(
+                        task_id,
+                        self._identity.identity,
+                        notes="auto-approved on receipt",
+                    )
+                    logger.info(
+                        f"Auto-approved task {task_id} from "
+                        f"{message.from_identity}"
+                    )
 
         # Track active thread so <hub_reply> can auto-fill thread_id/reply_to
         if getattr(message, "thread_id", "") and message.thread_id != message.id:

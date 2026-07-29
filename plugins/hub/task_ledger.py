@@ -440,7 +440,10 @@ class TaskLedger:
         cutoff = time.time() - (max_age_hours * 3600)
         count = 0
         for card in self.get_all():
-            if card.status in ("closed", "failed", "done") and card.updated_at < cutoff:
+            if (
+                card.status in ("closed", "failed", "done", "qa_review")
+                and card.updated_at < cutoff
+            ):
                 self._task_path(card.id).unlink(missing_ok=True)
                 count += 1
         return count
