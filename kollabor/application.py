@@ -263,7 +263,43 @@ class TerminalLLMChat:
         if profile_name:
             # CLI --profile is a one-time override, don't persist active selection
             if not self.profile_manager.set_active_profile(profile_name, persist=False):
-                logger.warning(f"Profile '{profile_name}' not found, using default")
+                # Not an existing profile -- try resolving it as a loadout (a
+                # named preset of provider profile + model + params that
+                # layers on top of profiles; see loadout_manager.py). Applied
+                # in memory only: a launch flag must not rewrite the user's
+                # saved config fields.
+                from kollabor_ai.loadout_manager import LoadoutManager
+
+                loadout_manager = LoadoutManager(self.profile_manager)
+                loadout, suggestions = loadout_manager.resolve(profile_name)
+                activated_via_loadout = False
+                if loadout is not None:
+                    update_kwargs = {"model": loadout.model, "save_to_config": False}
+                    if loadout.temperature is not None:
+                        update_kwargs["temperature"] = loadout.temperature
+                    if loadout.effort:
+                        update_kwargs["effort"] = loadout.effort
+                    if loadout.max_tokens is not None:
+                        update_kwargs["max_tokens"] = loadout.max_tokens
+
+                    if self.profile_manager.update_profile(
+                        loadout.provider_profile, **update_kwargs
+                    ) and self.profile_manager.set_active_profile(
+                        loadout.provider_profile, persist=False
+                    ):
+                        activated_via_loadout = True
+                        logger.info(
+                            f"Resolved '{profile_name}' as loadout -> "
+                            f"profile '{loadout.provider_profile}', "
+                            f"model '{loadout.model}'"
+                        )
+                        profile_name = loadout.provider_profile
+
+                if not activated_via_loadout:
+                    msg = f"Profile '{profile_name}' not found, using default"
+                    if suggestions:
+                        msg += f". Did you mean: {', '.join(suggestions)}?"
+                    logger.warning(msg)
             elif save_profile or make_default_profile:
                 # Save profile values to config if --save/--default was used
                 profile = self.profile_manager.get_profile(profile_name)
@@ -1162,7 +1198,7 @@ class TerminalLLMChat:
                     )
                     print(f"{error_msg}")
                     print()
-                    print("Use /profile to fix the configuration.")
+                    print("Use /setup to fix the configuration.")
                     # Clean up before exiting
                     await self.cleanup()
                     return
@@ -2230,7 +2266,7 @@ class TerminalLLMChat:
                     f"\033[33m{'=' * 60}\033[0m\n"
                     f"\033[1;33m[!] LLM Provider Configuration Error\033[0m\n\n"
                     f"\033[33m{error_msg}\033[0m\n\n"
-                    f"\033[1;37mUse /profile to fix the configuration.\033[0m\n"
+                    f"\033[1;37mUse /setup to fix the configuration.\033[0m\n"
                     f"\033[33m{'=' * 60}\033[0m"
                 )
                 self.renderer.message_coordinator.display_raw_text(warning_text)

@@ -35,7 +35,7 @@ Use arrow keys to navigate, Enter to execute.
 | `/help` | `?` | Show available commands |
 | `/version` | - | Display version information |
 | `/save` | - | Save conversation (transcript, markdown, jsonl, clipboard) |
-| `/profile` | `/prof`, `/llm` | Manage LLM profiles (list, set, create) |
+| `/llm` | `/loadout`, `/ld` | Switch model loadouts (provider + model + params) |
 | `/permissions` | `/perms`, `/security` | Manage permission modes |
 | `/mcp` | `/mcps`, `/servers` | Open the MCP manager |
 | `/resume` | - | Resume previous conversation |
@@ -49,10 +49,9 @@ Use arrow keys to navigate, Enter to execute.
 Many commands support subcommands:
 
 ```
-/profile          → Shows profile list
-/profile list     → Lists available profiles
-/profile set claude → Switches to claude profile
-/profile create   → Create new profile
+/llm              → Opens the loadout picker
+/llm fable-slim   → Activates a loadout by name
+/llm new          → Create a loadout (pre-filled form)
 
 /mcp              → Opens MCP manager
 /mcp show         → Shows server details

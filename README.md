@@ -212,7 +212,8 @@ the formula SHA is available. Maintainer notes live in
 New here? Launch Kollab and run **`/setup`** — a guided wizard walks you through
 picking a provider, entering your API key, choosing a model, optionally testing
 the connection, and saving it as your active profile. No env vars or JSON
-required. (ChatGPT sign-in delegates to `/login`; Azure/advanced go to `/profile`.)
+required. (ChatGPT sign-in delegates to `/login`; Azure/advanced is configured
+in `config.json` — see [docs/providers.md](docs/providers.md).)
 
 Prefer environment variables? Kollab also auto-detects common provider vars:
 
@@ -249,7 +250,7 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL="glm-4.7"
 kollab
 ```
 
-Use `/profile` inside Kollab to list, switch, and create profiles. For more
+Use `/llm` inside Kollab to switch models and presets. For more
 configuration options, see [docs/configuration.md](docs/configuration.md),
 [docs/providers.md](docs/providers.md), and
 [docs/reference/env-vars.md](docs/reference/env-vars.md).
@@ -258,11 +259,12 @@ You can also define profiles directly from environment variables:
 
 ```bash
 # Pattern: KOLLAB_{PROFILE}_{FIELD}
-export KOLLAB_WORK_MODEL=claude-sonnet-4-6
+export KOLLAB_WORK_MODEL=claude-sonnet-5
 export KOLLAB_WORK_PROVIDER=anthropic
 export KOLLAB_WORK_API_KEY="<your-anthropic-api-key>"
 export KOLLAB_WORK_BASE_URL="https://api.anthropic.com"
-# Optional tuning fields
+# Optional tuning fields (TEMPERATURE/TOP_P are ignored on models that
+# reject sampling params -- see bundles/data/models.json supports_sampling)
 export KOLLAB_WORK_MAX_TOKENS=4096
 export KOLLAB_WORK_TEMPERATURE=0.3
 export KOLLAB_WORK_TIMEOUT=30000
@@ -376,7 +378,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 
 | Command | Description |
 | --- | --- |
-| `/profile` | List, switch, and create LLM profiles |
+| `/llm` | Switch model loadouts — provider + model + param presets |
 | `/agent` | Switch agent definitions when available |
 | `/skill` | Load or unload agent skills when available |
 | `/save` | Save conversation output |

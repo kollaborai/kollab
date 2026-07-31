@@ -111,14 +111,14 @@ class SetupCommandHandler(BaseCommandHandler):
         if getattr(view, "result_launch_oauth", False):
             return await self._run_oauth_login()
 
-        # Advanced branch — Azure / fully custom go through /profile.
+        # Advanced branch — Azure / fully custom are configured in config.json.
         if getattr(view, "result_advanced", False):
             return CommandResult(
                 success=True,
                 message=(
-                    "for Azure OpenAI or a fully-custom profile, use /profile:\n"
-                    "  /profile create   open the profile form\n"
-                    "  /profile list     see configured profiles"
+                    "for Azure OpenAI or a fully-custom endpoint, add a profile under\n"
+                    "kollabor.llm.profiles in ~/.kollab/config.json (see docs/providers.md),\n"
+                    "then switch models and presets with /llm."
                 ),
                 display_type="info",
             )
@@ -141,7 +141,7 @@ class SetupCommandHandler(BaseCommandHandler):
         # Wizard exited without saving (e.g. an error the user backed out of).
         return CommandResult(
             success=False,
-            message="setup did not complete. run /setup to try again, or /profile to configure manually.",
+            message="setup did not complete. run /setup to try again, or edit ~/.kollab/config.json manually.",
             display_type="info",
         )
 

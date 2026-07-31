@@ -163,10 +163,10 @@ For plugin config, check plugin_config.json in plugin directory.
 
 Symptom: "Profile not found" error.
 
-List available profiles:
+List available profiles and loadouts:
 ```bash
 kollab
-/profile list
+/llm
 ```
 
 Check profile in config:

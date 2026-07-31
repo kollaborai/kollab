@@ -39,7 +39,8 @@ first LLM provider — no environment variables or hand-edited JSON required.
 
 - **OpenAI — sign in with ChatGPT**: delegates to the existing OAuth device-code
   flow (the same one `/login openai` runs). No API key is requested.
-- **Azure / Advanced**: routed to `/profile`, since Azure profiles need an
+- **Azure / Advanced**: routed to manual `config.json` editing (see
+  [`docs/providers.md`](../providers.md)), since Azure profiles need an
   endpoint + deployment that the guided flow does not capture.
 
 ## Where things live
@@ -52,9 +53,8 @@ first LLM provider — no environment variables or hand-edited JSON required.
 | Profile persistence | `ProfileManager.create_profile(..., save_to_config=True)` |
 | Activation | State service profile switch (daemon-safe in attach mode), with coordinator fallback |
 
-The wizard reuses the same profile system as [`/profile`](../../CLAUDE.md); a
-profile created via `/setup` is an ordinary profile you can later edit, switch,
-or delete there.
+The wizard writes an ordinary profile; after setup, switch models and
+presets on top of it with `/llm` (see [loadouts.md](loadouts.md)).
 
 ## Tests
 

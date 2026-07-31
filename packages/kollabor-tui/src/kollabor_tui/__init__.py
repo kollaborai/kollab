@@ -61,15 +61,6 @@ from .modals import (
     Modal,
 )
 
-# Profile modal builders
-from .profile_modal_builder import (
-    build_create_profile_modal,
-    build_delete_profile_confirm_modal,
-    build_duplicate_profile_modal,
-    build_edit_profile_modal,
-    build_profiles_modal,
-)
-
 # Layout
 from .render_layout import (
     AreaAlignment,
@@ -263,12 +254,6 @@ __all__ = [
     "MessageDisplayService",
     # Thinking display
     "ThinkingDisplayFormatter",
-    # Profile modal builders
-    "build_profiles_modal",
-    "build_create_profile_modal",
-    "build_duplicate_profile_modal",
-    "build_edit_profile_modal",
-    "build_delete_profile_confirm_modal",
     # Fullscreen plugin framework
     "FullScreenManager",
     "FullScreenRenderer",

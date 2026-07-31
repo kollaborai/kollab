@@ -74,17 +74,17 @@ Encoded path: `/home/user/myproject` becomes `home_user_myproject`. Global confi
 
 ### How do I switch models?
 
-Use the profile command interactively:
-  /profile
+Use the loadout picker interactively:
+  /llm
 
-Or specify a configured profile via flag:
+Or specify a configured profile or loadout via flag:
   kollab --profile my-profile
 
-List available profiles:
-  /profile list
+Browse and switch loadouts:
+  /llm
 
-Create new profile:
-  /profile create
+Create a loadout preset:
+  /llm new
 
 See [features/profiles.md](features/profiles.md) for profile management.
 
@@ -107,7 +107,7 @@ In pipe mode, stdin is context, query is instruction.
 
 Type / to see the menu. Common commands:
 
-  /profile     Manage LLM profiles
+  /llm         Switch model loadouts
   /save        Export conversation (markdown, jsonl, clipboard)
   /permissions Configure tool approvals
   /login       OAuth login
@@ -203,7 +203,7 @@ creates:
   /setup
   kollab --profile my-anthropic-profile
 
-Profiles are stored in config.json. Switch anytime via /profile.
+Profiles are stored in config.json. Switch anytime via /llm.
 
 ## Troubleshooting
 

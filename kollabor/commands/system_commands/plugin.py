@@ -14,9 +14,9 @@ if TYPE_CHECKING:
         AgentCommandHandler,
         ContextCommandHandler,
         DirectoryCommandHandler,
+        LoadoutCommandHandler,
         LoginCommandHandler,
         ModelCommandHandler,
-        ProfileCommandHandler,
         SetupCommandHandler,
         SkillCommandHandler,
         SystemCommandHandler,
@@ -37,7 +37,6 @@ class SystemCommandsPlugin:
 
     # Class-level type annotations for mypy (body of untyped __init__ is skipped)
     _agent_handler: AgentCommandHandler | None
-    _profile_handler: ProfileCommandHandler | None
     _skill_handler: SkillCommandHandler | None
     _system_handler: SystemCommandHandler | None
     _model_handler: ModelCommandHandler | None
@@ -45,6 +44,7 @@ class SystemCommandsPlugin:
     _login_handler: LoginCommandHandler | None
     _setup_handler: SetupCommandHandler | None
     _context_handler: ContextCommandHandler | None
+    _loadout_handler: LoadoutCommandHandler | None
 
     def __init__(
         self,
@@ -56,12 +56,12 @@ class SystemCommandsPlugin:
         llm_service=None,
         permission_manager=None,
         agent_command_handler=None,
-        profile_command_handler=None,
         skill_command_handler=None,
         system_command_handler=None,
         model_command_handler=None,
         directory_command_handler=None,
         login_command_handler=None,
+        loadout_command_handler=None,
     ):
         """Initialize plugin facade with handlers.
 
@@ -74,11 +74,11 @@ class SystemCommandsPlugin:
             llm_service: LLM service instance.
             permission_manager: Permission manager instance.
             agent_command_handler: Optional AgentCommandHandler instance.
-            profile_command_handler: Optional ProfileCommandHandler instance.
             skill_command_handler: Optional SkillCommandHandler instance.
             system_command_handler: Optional SystemCommandHandler instance.
             model_command_handler: Optional ModelCommandHandler instance.
             directory_command_handler: Optional DirectoryCommandHandler instance.
+            loadout_command_handler: Optional LoadoutCommandHandler instance.
         """
         self.name = "system"
         self.command_registry = command_registry
@@ -91,7 +91,6 @@ class SystemCommandsPlugin:
 
         # Lazy init - create handlers on first use or explicitly provided
         self._agent_handler: AgentCommandHandler | None = agent_command_handler
-        self._profile_handler: ProfileCommandHandler | None = profile_command_handler
         self._skill_handler: SkillCommandHandler | None = skill_command_handler
         self._system_handler: SystemCommandHandler | None = system_command_handler
         self._model_handler: ModelCommandHandler | None = model_command_handler
@@ -101,6 +100,7 @@ class SystemCommandsPlugin:
         self._login_handler: LoginCommandHandler | None = login_command_handler
         self._setup_handler: SetupCommandHandler | None = None
         self._context_handler: ContextCommandHandler | None = None
+        self._loadout_handler: LoadoutCommandHandler | None = loadout_command_handler
 
         # Initialize handlers if not provided
         self._init_handlers()
@@ -109,16 +109,15 @@ class SystemCommandsPlugin:
         """Initialize handlers if not already provided."""
         if (
             self._agent_handler is None
-            or self._profile_handler is None
             or self._skill_handler is None
         ):
             from .handlers import (
                 AgentCommandHandler,
                 ContextCommandHandler,
                 DirectoryCommandHandler,
+                LoadoutCommandHandler,
                 LoginCommandHandler,
                 ModelCommandHandler,
-                ProfileCommandHandler,
                 SetupCommandHandler,
                 SkillCommandHandler,
                 SystemCommandHandler,
@@ -129,14 +128,6 @@ class SystemCommandsPlugin:
                     self.command_registry,
                     self.event_bus,
                     self.agent_manager,
-                    self.profile_manager,
-                    self.llm_service,
-                )
-
-            if self._profile_handler is None:
-                self._profile_handler = ProfileCommandHandler(
-                    self.command_registry,
-                    self.event_bus,
                     self.profile_manager,
                     self.llm_service,
                 )
@@ -187,6 +178,14 @@ class SystemCommandsPlugin:
                     login_handler=self._login_handler,
                 )
 
+            if self._loadout_handler is None:
+                self._loadout_handler = LoadoutCommandHandler(
+                    self.command_registry,
+                    self.event_bus,
+                    self.profile_manager,
+                    self.llm_service,
+                )
+
             if not hasattr(self, "_context_handler") or self._context_handler is None:
                 self._context_handler = ContextCommandHandler(
                     self.command_registry,
@@ -199,8 +198,6 @@ class SystemCommandsPlugin:
         actions = set()
         if self._agent_handler:
             actions.update(self._agent_handler.MODAL_ACTIONS)
-        if self._profile_handler:
-            actions.update(self._profile_handler.MODAL_ACTIONS)
         if self._skill_handler:
             actions.update(self._skill_handler.MODAL_ACTIONS)
         if self._system_handler:
@@ -215,14 +212,14 @@ class SystemCommandsPlugin:
             actions.update(self._setup_handler.MODAL_ACTIONS)
         if self._context_handler:
             actions.update(self._context_handler.MODAL_ACTIONS)
+        if self._loadout_handler:
+            actions.update(self._loadout_handler.MODAL_ACTIONS)
         return actions
 
     def register_all_commands(self):
         """Register all commands from all handlers."""
         if self._agent_handler:
             self._agent_handler.register_commands()
-        if self._profile_handler:
-            self._profile_handler.register_commands()
         if self._skill_handler:
             self._skill_handler.register_commands()
         if self._system_handler:
@@ -237,6 +234,8 @@ class SystemCommandsPlugin:
             self._setup_handler.register_commands()
         if self._context_handler:
             self._context_handler.register_commands()
+        if self._loadout_handler:
+            self._loadout_handler.register_commands()
 
     def register_commands(self):
         """Alias for register_all_commands for backward compatibility."""
@@ -274,16 +273,6 @@ class SystemCommandsPlugin:
             return await self._model_handler.handle_model(command)
         return CommandResult(
             success=False, message="Model handler not initialized", display_type="error"
-        )
-
-    async def handle_profile(self, command: SlashCommand) -> CommandResult:
-        """Handle /profile command."""
-        if self._profile_handler:
-            return await self._profile_handler.handle_profile(command)
-        return CommandResult(
-            success=False,
-            message="Profile handler not initialized",
-            display_type="error",
         )
 
     async def handle_agent(self, command: SlashCommand) -> CommandResult:
@@ -392,6 +381,16 @@ class SystemCommandsPlugin:
             display_type="error",
         )
 
+    async def handle_loadout(self, command: SlashCommand) -> CommandResult:
+        """Handle /llm (loadout) command."""
+        if self._loadout_handler:
+            return await self._loadout_handler.handle_loadout(command)
+        return CommandResult(
+            success=False,
+            message="Loadout handler not initialized",
+            display_type="error",
+        )
+
     # Modal action handler
     async def handle_modal_action(self, data: dict, event: Event) -> dict:
         """Handle modal actions by delegating to appropriate handler.
@@ -434,19 +433,6 @@ class SystemCommandsPlugin:
             "toggle_global_default",
         ):
             handler = self._agent_handler
-        elif action in (
-            "select_profile",
-            "run_setup",
-            "create_profile_submit",
-            "edit_profile_prompt",
-            "edit_profile_submit",
-            "delete_profile_prompt",
-            "delete_profile_confirm",
-            "save_profile_to_config",
-            "toggle_project_default_profile",
-            "toggle_global_default_profile",
-        ):
-            handler = self._profile_handler
         elif action in ("select_model",):
             handler = self._model_handler
         elif action in (
@@ -485,12 +471,6 @@ class SystemCommandsPlugin:
 
                     return await handle_agent_modal_actions(
                         data, event, cast("AgentCommandHandler", handler)
-                    )
-                elif handler_name == "ProfileCommandHandler":
-                    from .handlers.profile_actions import handle_profile_modal_actions
-
-                    return await handle_profile_modal_actions(
-                        data, event, cast("ProfileCommandHandler", handler)
                     )
                 elif handler_name == "ModelCommandHandler":
                     from .handlers.model_actions import handle_model_modal_actions

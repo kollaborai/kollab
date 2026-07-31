@@ -168,7 +168,7 @@ due to cross-process messaging or streaming requirements.
 fully migrated (works in attach mode):
   /help /version /config /matrix /widgets
   /status /restart
-  /profile set
+  /llm <name>
   /agent set /agent clear
   /skills load /skills unload
   /permissions (all subcommands)
@@ -247,7 +247,11 @@ type / in the input box to open the command menu.
   /model [name]                   quick model selector
     aliases: /mod, /m
     list                          show model selection
+    search <query>                search the provider catalog
     set <name>                    switch model
+    effort [level]                show/set reasoning effort
+                                  (low|medium|high|xhigh|max|ultra,
+                                   "default" clears it)
 
   /deepthought <sub>              deep thought engine
     aliases: /dt, /ponder
@@ -259,11 +263,11 @@ type / in the input box to open the command menu.
 
 ### profile and agent
 
-  /profile [sub]                  manage LLM API profiles
-    aliases: /prof, /llm
-    list                          show profile selection
-    set <name>                    switch to profile
-    create                        create new profile
+  /llm [sub]                      switch model loadouts
+    aliases: /loadout, /ld
+    (none)                        open the loadout picker
+    <name>                        activate a loadout by name
+    new                           create a loadout (pre-filled form)
 
   /agent [sub]                    manage agents
     aliases: /ag
