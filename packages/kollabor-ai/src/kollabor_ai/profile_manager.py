@@ -31,18 +31,27 @@ logger = logging.getLogger(__name__)
 # Sentinel prefix for keys stored in OS keyring
 KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 
+# Reasoning effort levels, cheapest first. Anthropic documents low..max;
+# the ChatGPT codex backend also advertises "ultra" on its top tiers
+# (see query_codex_model_details). Providers 400 on anything else.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
+
 
 def _keyring_get(key_name: str) -> Optional[str]:
     """Retrieve a value from OS keyring (sync, graceful fallback).
 
     Uses the same service name as APIKeyManager from security.py
     so keys are interchangeable between the async and sync paths.
+    Skipped entirely when the keyring is disabled (KOLLAB_NO_KEYRING, tests) --
+    on macOS a lookup of a missing entry pops a Keychain dialog.
     """
     try:
         import keyring
 
-        from kollabor_ai.providers.security import APIKeyManager
+        from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
 
+        if not keyring_enabled():
+            return None
         return keyring.get_password(APIKeyManager.SERVICE_NAME, key_name)
     except Exception:
         return None
@@ -51,13 +60,17 @@ def _keyring_get(key_name: str) -> Optional[str]:
 def _keyring_set(key_name: str, value: str) -> bool:
     """Store a value in OS keyring (sync, graceful fallback).
 
-    Returns True on success, False if keyring is unavailable or fails.
+    Returns True on success, False if keyring is unavailable, disabled, or
+    fails. A False return keeps the caller on its plaintext path -- see
+    get_api_key()'s auto-migration, which must not prompt during tests.
     """
     try:
         import keyring
 
-        from kollabor_ai.providers.security import APIKeyManager
+        from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
 
+        if not keyring_enabled():
+            return False
         keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
         return True
     except Exception:
@@ -105,6 +118,7 @@ class LLMProfile:
     api_key: str = field(default="", repr=False)
     base_url: str = ""  # For custom providers
     top_p: Optional[float] = None  # Nucleus sampling (0.0-1.0)
+    effort: str = ""  # Reasoning effort: low|medium|high|xhigh|max|ultra
     streaming: bool = True  # Enable streaming responses
     supports_tools: bool = True  # Enable tool/function calling
     auth_type: str = ""  # "oauth" for OAuth tokens, empty for api_key
@@ -324,6 +338,29 @@ class LLMProfile:
                 pass
         return self.top_p
 
+    def get_effort(self) -> str:
+        """Get reasoning effort, checking env var first. OPTIONAL field.
+
+        Empty means "don't send it" -- the model uses its own default. An
+        unrecognized value is dropped with a warning rather than sent, since
+        providers reject unknown effort levels with a 400.
+        """
+        value = (
+            self._get_env_value("EFFORT")
+            or self._get_global_env_value("EFFORT")
+            or self.effort
+            or ""
+        ).strip().lower()
+        if not value:
+            return ""
+        if value not in EFFORT_LEVELS:
+            logger.warning(
+                f"Profile '{self.name}': effort '{value}' is not one of "
+                f"{'/'.join(EFFORT_LEVELS)} — ignoring"
+            )
+            return ""
+        return value
+
     def get_streaming(self) -> bool:
         """Get streaming setting, checking env var first. Default: True."""
         env_val = self._get_env_value("STREAMING")
@@ -360,6 +397,7 @@ class LLMProfile:
             "TEMPERATURE",
             "TIMEOUT",
             "TOP_P",
+            "EFFORT",
             "STREAMING",
             "SUPPORTS_TOOLS",
             "DESCRIPTION",
@@ -433,6 +471,10 @@ class LLMProfile:
         if top_p is not None:
             result["top_p"] = top_p
 
+        effort = self.get_effort()
+        if effort:
+            result["effort"] = effort
+
         if self.extra_headers:
             result["extra_headers"] = self.extra_headers
 
@@ -480,6 +522,7 @@ class LLMProfile:
             extra_headers=data.get("extra_headers", {}),
             base_url=data.get("base_url", ""),
             top_p=data.get("top_p"),
+            effort=data.get("effort", ""),
             streaming=data.get("streaming", True),
             supports_tools=data.get("supports_tools", True),
             auth_type=data.get("auth_type", ""),
@@ -507,7 +550,7 @@ class ProfileManager:
             "model_env": "ANTHROPIC_MODEL",
             "model_envs": ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"],
             "provider": "anthropic",
-            "model": "claude-sonnet-4-6",
+            "model": "claude-sonnet-5",
             "profile_name": "anthropic-auto",
             "description": "Auto-detected from Anthropic-compatible env vars",
             "base_url_env": "ANTHROPIC_BASE_URL",
@@ -516,7 +559,8 @@ class ProfileManager:
             "env_var": "OPENAI_API_KEY",
             "model_env": "OPENAI_MODEL",
             "provider": "openai",
-            "model": "gpt-5.4",
+            # Terra tier: same $/token as gpt-5.4, current generation
+            "model": "gpt-5.6-terra",
             "profile_name": "openai-auto",
             "description": "Auto-detected from OPENAI_API_KEY",
         },
@@ -524,7 +568,9 @@ class ProfileManager:
             "env_var": "AZURE_OPENAI_API_KEY",
             "model_env": "AZURE_OPENAI_MODEL",
             "provider": "azure_openai",
-            "model": "gpt-5.4",
+            # Azure serves models under a user-chosen deployment name, so this
+            # is only a starting point -- AZURE_OPENAI_MODEL overrides it.
+            "model": "gpt-5.6-terra",
             "profile_name": "azure-auto",
             "description": "Auto-detected from AZURE_OPENAI_API_KEY",
             "requires_env": "AZURE_OPENAI_ENDPOINT",
@@ -533,7 +579,7 @@ class ProfileManager:
             "env_var": "GEMINI_API_KEY",
             "model_env": "GEMINI_MODEL",
             "provider": "gemini",
-            "model": "gemini-3.1-pro-preview",
+            "model": "gemini-3.6-flash",
             "profile_name": "gemini-auto",
             "description": "Auto-detected from GEMINI_API_KEY",
         },
@@ -896,7 +942,9 @@ class ProfileManager:
                 profile = LLMProfile(
                     name=profile_name,
                     provider="openai_responses",
-                    model="gpt-5.4",
+                    # Must be a slug the codex backend actually serves (see
+                    # query_codex_model_details); bare "gpt-5.6" is not one.
+                    model="gpt-5.6-sol",
                     api_key=tokens.access_token,
                     base_url=CODEX_API_BASE_URL,
                     extra_headers=extra_headers,
@@ -1179,6 +1227,7 @@ class ProfileManager:
             KOLLAB_{NAME}_TEMPERATURE    - Temperature (float, 0.0-2.0)
             KOLLAB_{NAME}_TIMEOUT        - Timeout in ms (integer)
             KOLLAB_{NAME}_TOP_P          - Nucleus sampling (float, 0.0-1.0)
+            KOLLAB_{NAME}_EFFORT         - Reasoning effort (low..max, ultra)
             KOLLAB_{NAME}_STREAMING      - Enable streaming (true/false)
             KOLLAB_{NAME}_SUPPORTS_TOOLS - Enable tool calling (true/false)
             KOLLAB_{NAME}_DESCRIPTION    - Human-readable description
@@ -1241,6 +1290,8 @@ class ProfileManager:
             except ValueError:
                 logger.warning(f"Invalid TOP_P value: {top_p_str}")
 
+        effort = os.environ.get(f"{prefix}EFFORT", "").strip().lower()
+
         # Parse boolean fields
         streaming = True
         streaming_str = os.environ.get(f"{prefix}STREAMING", "").strip().lower()
@@ -1275,6 +1326,7 @@ class ProfileManager:
             temperature=temperature,
             timeout=timeout,
             top_p=top_p,
+            effort=effort,
             streaming=streaming,
             supports_tools=supports_tools,
             description=description or "Created from env vars",
@@ -1409,6 +1461,8 @@ class ProfileManager:
                         )
                 if profile.top_p is not None:
                     profile_dict["top_p"] = profile.top_p
+                if profile.effort:
+                    profile_dict["effort"] = profile.effort
                 if not profile.streaming:
                     profile_dict["streaming"] = profile.streaming
                 if not profile.supports_tools:
@@ -1606,9 +1660,11 @@ class ProfileManager:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         provider: Optional[str] = None,
         supports_tools: Optional[bool] = None,
         description: Optional[str] = None,
+        effort: Optional[str] = None,
         save_to_config: bool = False,
     ) -> bool:
         """
@@ -1621,9 +1677,11 @@ class ProfileManager:
             model: Model name
             api_key: API key (None to keep existing)
             temperature: Temperature setting
+            max_tokens: Max tokens limit (None to keep existing)
             provider: Provider type (openai, anthropic, etc.)
             supports_tools: Enable tool/function calling
             description: Profile description
+            effort: Reasoning effort level ("" clears it)
             save_to_config: Whether to persist changes to config file
 
         Returns:
@@ -1644,12 +1702,16 @@ class ProfileManager:
             profile.api_key = api_key
         if temperature is not None:
             profile.temperature = temperature
+        if max_tokens is not None:
+            profile.max_tokens = max_tokens
         if provider is not None:
             profile.provider = provider
         if supports_tools is not None:
             profile.supports_tools = supports_tools
         if description is not None:
             profile.description = description
+        if effort is not None:
+            profile.effort = effort
 
         # Handle rename
         if new_name and new_name != original_name:

@@ -1,0 +1,170 @@
+{
+  "name": "model-picker-and-effort",
+  "description": "Regression for '/model shows no options for openai'. Shell steps drive the handler and provider payload builders directly (deterministic, no network): registry seeding per provider, the codex /models request+parse shape, and reasoning effort in each provider's native field. The TUI half then proves the picker renders the seeded list in the real app. Runs with --no-daemon and an isolated HOME so it cannot attach to a developer's live daemon; /model effort's own display is covered by tests/unit/test_reasoning_effort.py rather than a second TUI interaction, which raced app startup.",
+  "config": {
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}},\\\"kollabor\\\":{\\\"llm\\\":{\\\"profiles\\\":{\\\"openai\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.6\\\",\\\"api_key\\\":\\\"sk-not-a-real-key-for-tests\\\"}},\\\"active_profile\\\":\\\"openai\\\"}}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py --no-daemon'",
+    "app_init_sleep": 14,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "registry seed: every provider offers models without a network call"
+    },
+    {
+      "action": "shell",
+      "command": "\"$PWD/.venv/bin/python\" - <<'PY'\nfrom types import SimpleNamespace\nfrom kollabor.commands.system_commands.handlers.model import ModelCommandHandler\n\nclass Profile:\n    name = 'openai'\n    def get_provider(self): return 'openai'\n    def get_model(self): return 'gpt-5.6'\n\nhandler = ModelCommandHandler(\n    command_registry=None,\n    event_bus=SimpleNamespace(get_service=lambda name: None),\n    profile_manager=SimpleNamespace(list_profiles=lambda: [Profile()]),\n)\nfor provider in ('openai', 'anthropic', 'gemini', 'custom'):\n    known = handler._build_known_models(provider, 'gpt-5.6')\n    ids = [m['id'] for m in known]\n    print(f'{provider} count {len(ids)}')\n    print(f'{provider} retired-offered {any(i == \"gpt-4.1\" for i in ids)}')\nrow = next(m for m in handler._build_known_models('openai', 'gpt-5.6') if m['id'] == 'gpt-5.6-terra')\nprint('note', row['note'])\nPY",
+      "description": "Seed the picker list from bundles/data/models.json"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "openai count (?:[4-9]|[1-9][0-9])",
+      "description": "openai lists real models (was 1: the current model only)"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "anthropic count (?:[4-9]|[1-9][0-9])",
+      "description": "anthropic seeded too"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "gemini count (?:[4-9]|[1-9][0-9])",
+      "description": "gemini seeded too"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "custom count (?:[4-9]|[1-9][0-9])",
+      "description": "custom (xAI/Z.AI/DeepSeek) seeded too"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "retired-offered True",
+      "description": "retired models are never offered"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "note .*ctx.*\\$",
+      "description": "rows carry context window + price"
+    },
+    {
+      "action": "section",
+      "label": "codex catalog parsing: client_version + {models:[{slug}]} shape"
+    },
+    {
+      "action": "shell",
+      "command": "\"$PWD/.venv/bin/python\" - <<'PY'\nimport asyncio\nfrom kollabor_ai.oauth import openai_oauth\n\nPAYLOAD = {'models': [\n    {'slug': 'gpt-5.6-sol', 'context_window': 272000,\n     'supported_reasoning_levels': [{'effort': 'low'}, {'effort': 'ultra'}]},\n    {'slug': 'gpt-5.3-codex-spark'},\n    {'slug': 'codex-auto-review'},\n]}\n\nclass Resp:\n    status = 200\n    async def json(self): return PAYLOAD\n    async def __aenter__(self): return self\n    async def __aexit__(self, *a): return False\n\nclass Session:\n    urls = []\n    def __init__(self, *a, **k): pass\n    async def __aenter__(self): return self\n    async def __aexit__(self, *a): return False\n    def get(self, url):\n        Session.urls.append(url)\n        return Resp()\n\nopenai_oauth.aiohttp.ClientSession = Session\nmodels = asyncio.run(openai_oauth.query_codex_model_details('tok', 'acct'))\nprint('url', Session.urls[0])\nprint('slugs', ','.join(m['slug'] for m in models))\nprint('best', openai_oauth.pick_best_model([m['slug'] for m in models]))\nPY",
+      "description": "Query shape and ranking against a canned codex payload"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "url .*client_version=1\\.0\\.0",
+      "description": "client_version is sent (missing = HTTP 400)"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "slugs gpt-5\\.6-sol,gpt-5\\.3-codex-spark,codex-auto-review",
+      "description": "{models:[{slug}]} shape parses (not {data:[{id}]})"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "best gpt-5\\.6-sol",
+      "description": "frontier wins over spark tier and the auto-review helper"
+    },
+    {
+      "action": "section",
+      "label": "reasoning effort round trip"
+    },
+    {
+      "action": "shell",
+      "command": "\"$PWD/.venv/bin/python\" - <<'PY'\nfrom kollabor_ai.profile_manager import LLMProfile\nfrom kollabor_ai.providers.registry import create_config_from_profile\nfrom kollabor_ai.providers.anthropic_provider import AnthropicProvider\nfrom kollabor_ai.providers.openai_provider import OpenAIProvider\n\nMSGS = [{'role': 'user', 'content': 'hi'}]\n\ndef cfg(provider, model, **kw):\n    return create_config_from_profile(\n        LLMProfile(name='p', provider=provider, model=model, api_key='sk-testkey', **kw).to_dict()\n    )\n\nreq = AnthropicProvider(cfg('anthropic', 'claude-opus-5', effort='xhigh')).\\\n    _prepare_request(list(MSGS))\nprint('anthropic output_config', req.get('output_config'))\nprint('anthropic temperature-present', 'temperature' in req)\n\nparams = OpenAIProvider(cfg('openai', 'gpt-5.6', effort='high')).\\\n    _prepare_request_params(list(MSGS), None, False)\nprint('openai reasoning_effort', params.get('reasoning_effort'))\n\nbare = AnthropicProvider(cfg('anthropic', 'claude-opus-5')).\\\n    _prepare_request(list(MSGS))\nprint('unset-effort keys', ' '.join(sorted(bare.keys())))\n\nbogus = LLMProfile(name='p', provider='anthropic', model='claude-opus-5', effort='turbo')\nprint('bogus effort', repr(bogus.get_effort()))\nPY",
+      "description": "Profile effort -> per-provider payload, and the omit/validate paths"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "anthropic output_config \\{'effort': 'xhigh'\\}",
+      "description": "Anthropic gets output_config.effort"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "anthropic temperature-present False",
+      "description": "Claude 4.7+ never receives sampling params (400 otherwise)"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "openai reasoning_effort high",
+      "description": "OpenAI chat completions gets reasoning_effort"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "unset-effort keys max_tokens messages model",
+      "description": "no effort set -> no effort field at all"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "bogus effort ''",
+      "description": "an unknown level is dropped, never sent"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "\u276f",
+      "timeout": 25,
+      "description": "app ready at prompt"
+    },
+    {
+      "action": "sleep",
+      "seconds": 4
+    },
+    {
+      "action": "section",
+      "label": "/model picker renders a populated list"
+    },
+    {
+      "action": "slash_command",
+      "command": "model",
+      "delay": 0.12,
+      "palette_delay": 1.5
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "SELECT MODEL",
+      "timeout": 25,
+      "description": "picker opened"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "gpt-5\\.6-terra",
+      "description": "registry-seeded model listed (status bar only shows the active model)"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "[2-9]\\d* models",
+      "description": "status line shows a real count (not the 1-row bug)"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "gpt-4\\.1",
+      "description": "retired model not shown"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

@@ -299,8 +299,9 @@ class PromptRenderer:
                 )
             return result
 
-        # Get formatted aliases (uses cached detection)
-        alias_content = alias_utils["format_aliases_for_prompt"]()
+        # Get formatted aliases from the session cache to avoid re-detecting
+        aliases = alias_utils["get_cached_aliases"]()
+        alias_content = alias_utils["format_aliases_for_prompt"](aliases)
 
         # Process in reverse order to maintain string positions
         result = content

@@ -26,7 +26,10 @@ Monorepo with extracted packages:
 - `conversation_logger.py` - Conversation persistence (KollaborConversationLogger)
 - `conversation_manager.py` - Conversation state and history
 - `model_router.py` - Model selection and routing
-- `profile_manager.py` - LLM profile management
+- `model_registry.py` - Reads `bundles/data/models.json`: context windows, `supports_sampling`, per-provider model lists. Lookup is **longest-prefix match** on the model string, so every point release whose specs differ from its family needs its own entry (`grok-4.5` vs `grok-4`). `supports_sampling: false` means the model 400s on temperature/top_p/top_k and every provider omits them. Freshness gated by `scripts/validate_models.py`.
+- `model_catalog.py` - Live "what models does this provider offer?" for the `/model` picker (codex backend, OpenRouter, Anthropic, any OpenAI-compatible `{base_url}/models`). Never raises; empty list on failure.
+- `pricing_registry.py` - Cost rates. Seeded from `models.json` (authoritative) on top of `default_pricing.json`, then `~/.kollab/pricing.json`. Falls back across providers for the same model id, since rates belong to the model not the transport.
+- `profile_manager.py` - LLM profile management (`EFFORT_LEVELS`, per-field env resolution)
 - `response_processor.py` - Response processing
 - `response_parser.py` - Response parsing (includes Question Gate detection)
 - `prompt_renderer.py` - Dynamic system prompt rendering

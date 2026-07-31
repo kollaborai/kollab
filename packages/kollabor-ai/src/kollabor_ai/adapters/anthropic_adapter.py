@@ -85,7 +85,7 @@ class AnthropicAdapter(BaseAPIAdapter):
         system_content, conversation_messages = self._separate_system_message(messages)
 
         payload: Dict[str, Any] = {
-            "model": kwargs.get("model", "claude-sonnet-4-6"),
+            "model": kwargs.get("model", "claude-sonnet-5"),
             "max_tokens": kwargs.get("max_tokens", 4096),  # Required for Anthropic
             "messages": conversation_messages,
         }

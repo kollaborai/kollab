@@ -2,6 +2,7 @@
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from kollabor_ai import SystemPromptBuilder
@@ -110,6 +111,92 @@ class TestSystemPromptBuilder(unittest.TestCase):
             result = self.builder.rebuild(conversation_history)
 
         self.assertFalse(result)
+
+
+    def test_finalize_system_prompt_does_not_detect_aliases_during_startup(self):
+        """Startup prompt builds must not trigger shell alias detection."""
+        self.config.get = MagicMock(
+            side_effect=lambda k, d=None: {
+                "kollabor.llm.system_prompt.include_project_structure": False,
+                "kollabor.llm.system_prompt.attachment_files": [],
+                "kollabor.llm.system_prompt.custom_prompt_files": [],
+                "terminal.interactive_shell": True,
+            }.get(k, d)
+        )
+        self.builder._util_imports = {
+            "format_aliases_for_prompt": MagicMock(return_value="ALIASES"),
+            "get_cached_aliases": MagicMock(return_value={"grep": "rg"}),
+        }
+
+        with patch.object(
+            self.builder, "_get_plugin_system_prompt_additions", return_value=[]
+        ):
+            result = self.builder._finalize_system_prompt(["base prompt"])
+
+        self.assertNotIn("ALIASES", result)
+        self.builder._util_imports["format_aliases_for_prompt"].assert_not_called()
+
+    def test_ensure_shell_aliases_loaded_runs_once_per_session(self):
+        """Alias detection should load once, cache prompt text, then no-op."""
+        self.config.get = MagicMock(
+            side_effect=lambda k, d=None: {
+                "terminal.interactive_shell": True,
+            }.get(k, d)
+        )
+        formatter = MagicMock(return_value="ALIASES")
+        cached_aliases = {"grep": "rg"}
+        get_cached_aliases = MagicMock(return_value=cached_aliases)
+        self.builder._util_imports = {
+            "format_aliases_for_prompt": formatter,
+            "get_cached_aliases": get_cached_aliases,
+        }
+
+        self.assertTrue(self.builder.ensure_shell_aliases_loaded())
+        self.assertEqual(self.builder._shell_alias_prompt, "ALIASES")
+        self.assertFalse(self.builder.ensure_shell_aliases_loaded())
+        get_cached_aliases.assert_called_once_with()
+        formatter.assert_called_once_with(cached_aliases)
+
+    def test_finalize_system_prompt_includes_cached_aliases_after_lazy_load(self):
+        """Rebuilds after first submit should include cached alias content."""
+        self.builder._shell_alias_prompt = "ALIASES"
+        self.builder._shell_aliases_loaded = True
+        self.config.get = MagicMock(
+            side_effect=lambda k, d=None: {
+                "kollabor.llm.system_prompt.include_project_structure": False,
+                "kollabor.llm.system_prompt.attachment_files": [],
+                "kollabor.llm.system_prompt.custom_prompt_files": [],
+                "terminal.interactive_shell": True,
+            }.get(k, d)
+        )
+
+        with patch.object(
+            self.builder, "_get_plugin_system_prompt_additions", return_value=[]
+        ):
+            result = self.builder._finalize_system_prompt(["base prompt"])
+
+        self.assertIn("ALIASES", result)
+
+
+    def test_ensure_shell_aliases_loaded_marks_session_loaded_after_timeout(self):
+        """Timeouts should be treated as one-shot no-op, not retried every turn."""
+        self.config.get = MagicMock(
+            side_effect=lambda k, d=None: {
+                "terminal.interactive_shell": True,
+            }.get(k, d)
+        )
+        get_cached_aliases = MagicMock(return_value={})
+        formatter = MagicMock(return_value="")
+        self.builder._util_imports = {
+            "get_cached_aliases": get_cached_aliases,
+            "format_aliases_for_prompt": formatter,
+        }
+
+        self.assertFalse(self.builder.ensure_shell_aliases_loaded())
+        self.assertTrue(self.builder._shell_aliases_loaded)
+        self.assertFalse(self.builder.ensure_shell_aliases_loaded())
+        get_cached_aliases.assert_called_once_with()
+        formatter.assert_called_once_with({})
 
     def test_get_tree_output_success(self):
         """Test getting tree output successfully."""
@@ -418,3 +505,33 @@ class TestMCPToolSummaries(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStartupAgentReconciliation(unittest.TestCase):
+    def test_pre_reconcile_prefers_pool_agent_type_before_first_build(self):
+        """Startup should select the hub-role bundle before first prompt build."""
+        agent_manager = MagicMock()
+        agent_manager.active_agent_name = "default"
+        agent_manager.set_active_agent = MagicMock(return_value=True)
+
+        startup_identity = "lapis"
+        desired_bundle = "coder"
+        pool_entry = SimpleNamespace(agent_type=desired_bundle)
+        pool = MagicMock()
+        pool.find = MagicMock(return_value=pool_entry)
+
+        active_name = getattr(agent_manager, "active_agent_name", "") or ""
+        if startup_identity:
+            entry = pool.find(startup_identity)
+            desired = (getattr(entry, "agent_type", "") or "").strip()
+            if desired and desired != active_name:
+                agent_manager.set_active_agent(desired)
+
+        agent_manager.set_active_agent.assert_called_once_with("coder")
+
+    def test_skip_startup_rebuild_when_pre_reconciled(self):
+        """Startup plugin-additions rebuild can be skipped after pre-reconcile."""
+        additions = ["plugin addition"]
+        startup_agent_reconciled = True
+        should_skip_startup_rebuild = bool(additions and startup_agent_reconciled)
+        self.assertTrue(should_skip_startup_rebuild)

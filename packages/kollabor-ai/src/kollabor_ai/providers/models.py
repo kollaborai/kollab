@@ -62,6 +62,12 @@ class ProviderConfig(BaseModel):
     # (200k, the common floor) so an unknown model can't silently over-send.
     context_window: int = Field(default=200000, ge=1)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # Reasoning effort. Opt-in: empty/None means the request carries no effort
+    # field at all and the model uses its own default, so models that don't
+    # accept one keep working. Each provider sends it in its native shape
+    # (Anthropic output_config.effort, OpenAI reasoning_effort, Responses
+    # reasoning.effort).
+    effort: Optional[str] = None
     timeout: Optional[float] = Field(default=120.0, ge=0)
     extra_headers: Optional[Dict[str, str]] = None
 
@@ -375,13 +381,13 @@ class GeminiConfig(ProviderConfig):
 
     Configuration:
         api_key: Gemini API key (no specific prefix requirement)
-        model: Model identifier (default: gemini-3.1-pro-preview)
+        model: Model identifier (default: gemini-3.6-flash)
         project_id: Optional Vertex AI project ID
         location: Optional Vertex AI location (e.g., 'us-central1')
     """
 
     provider: Literal[ProviderType.GEMINI] = ProviderType.GEMINI
-    model: str = Field(default="gemini-3.1-pro-preview")
+    model: str = Field(default="gemini-3.6-flash")
     project_id: Optional[str] = None
     location: Optional[str] = None
 

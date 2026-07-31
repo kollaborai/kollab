@@ -35,6 +35,7 @@ from .models import (
 )
 from .openai_responses_transformer import OpenAIResponsesTransformer
 from .registry import register_provider
+from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class OpenAIResponsesProvider(LLMProvider):
 
     Configuration:
         api_key: OpenAI API key (sk- or sk-proj- prefix)
-        model: Model identifier (default: gpt-5.4)
+        model: Model identifier (default: gpt-5.6-sol)
         store_responses: Enable server-side response storage for state management
         base_url: Optional custom endpoint (default: https://api.openai.com/v1)
         temperature: Sampling temperature (0.0-2.0)
@@ -576,15 +577,34 @@ class OpenAIResponsesProvider(LLMProvider):
 
         # ChatGPT codex backend rejects temperature and max_tokens
         if not self._requires_streaming:
+            # ...and so does any reasoning model the registry marks, on the
+            # plain Responses API too (see providers/tuning.py).
+            sampling = sampling_params(self.config, self.model)
             if "temperature" in kwargs:
                 params["temperature"] = kwargs["temperature"]
-            else:
-                params["temperature"] = self.config.temperature
+            elif "temperature" in sampling:
+                params["temperature"] = sampling["temperature"]
 
             if "max_tokens" in kwargs:
                 params["max_tokens"] = kwargs["max_tokens"]
             else:
                 params["max_tokens"] = self.config.max_tokens
+
+        # Reasoning effort (opt-in). The Responses API nests it under
+        # reasoning; the codex backend reports the levels each model accepts
+        # (see query_codex_model_details). Omitted entirely when unset.
+        if kwargs.get("effort"):
+            params["reasoning"] = {
+                **params.get("reasoning", {}),
+                "effort": kwargs["effort"],
+            }
+        else:
+            effort = effort_params(self.config, EffortStyle.RESPONSES)
+            if effort:
+                params["reasoning"] = {
+                    **params.get("reasoning", {}),
+                    **effort["reasoning"],
+                }
 
         # Add previous_response_id for state chaining
         if "previous_response_id" in kwargs:

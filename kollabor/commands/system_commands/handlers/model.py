@@ -51,6 +51,11 @@ class ModelCommandHandler(BaseCommandHandler):
         """Get LLM service via override or service registry."""
         if self._llm_service_override is not None:
             return self._llm_service_override
+        if not self.event_bus:
+            # Without an event bus there is no registry to ask. Returning None
+            # keeps callers on their "no live service" path instead of raising
+            # after they have already persisted a profile edit.
+            return None
         return self.event_bus.get_service("llm_service")
 
     def register_commands(self) -> None:
@@ -69,6 +74,9 @@ class ModelCommandHandler(BaseCommandHandler):
                 SubcommandInfo("search", "<query>", "Search provider model catalog"),
                 SubcommandInfo(
                     "set", "<name>", "Switch to profile with specified model"
+                ),
+                SubcommandInfo(
+                    "effort", "[level]", "Show or set reasoning effort (low..max)"
                 ),
             ],
             ui_config=UIConfig(
@@ -119,6 +127,9 @@ class ModelCommandHandler(BaseCommandHandler):
                     return self._openrouter_catalog_hint_result()
                 query = " ".join(args[1:]).strip()
                 return await self._show_models_modal(query)
+            elif args[0] in ("effort", "reasoning"):
+                # Show or set reasoning effort: /model effort [level]
+                return await self._handle_effort(args[1] if len(args) > 1 else "")
             elif args[0] == "set" and len(args) >= 2:
                 # Switch to model: /model set <name>
                 model_name = args[1]
@@ -416,8 +427,30 @@ class ModelCommandHandler(BaseCommandHandler):
             "custom": "Custom",
         }.get((provider or "").lower(), provider or "provider")
 
+    @staticmethod
+    def _registry_note(info: Dict[str, Any]) -> str:
+        """Short right-aligned descriptor for a registry model row."""
+        parts = []
+        window = info.get("context_window")
+        if isinstance(window, int) and window > 0:
+            parts.append(
+                f"{window / 1_000_000:.2f}M ctx".replace(".00M", "M")
+                if window >= 1_000_000
+                else f"{window // 1000}K ctx"
+            )
+        price_in, price_out = info.get("pricing_in"), info.get("pricing_out")
+        if isinstance(price_in, (int, float)) and isinstance(price_out, (int, float)):
+            parts.append(f"${price_in:g}/${price_out:g}")
+        return " • ".join(parts)
+
     def _build_known_models(self, provider: str, current_model: str) -> list:
-        """Models we already know for a provider: current + same-provider profiles."""
+        """Models we already know for a provider, before the live catalog lands.
+
+        Order sets picker priority: current model, then same-provider saved
+        profiles, then the bundled registry. The registry seed is what gives
+        providers without a listing API (plain OpenAI keys, Gemini, custom
+        OpenAI-compatible endpoints) a populated list instead of one row.
+        """
         known: list = []
         if current_model:
             known.append({"id": current_model, "note": "current"})
@@ -426,6 +459,17 @@ class ModelCommandHandler(BaseCommandHandler):
             for p in pm.list_profiles():
                 if (p.get_provider() or "") == provider and p.get_model():
                     known.append({"id": p.get_model(), "note": f"via {p.name}"})
+
+        try:
+            from kollabor_ai.model_registry import list_models_for_provider
+
+            for name, info in list_models_for_provider(provider):
+                known.append({"id": name, "note": self._registry_note(info)})
+        except Exception as e:  # noqa: BLE001 - registry must never block the picker
+            logger.warning(
+                "model registry seed failed for provider=%s: %s", provider, e
+            )
+
         return known
 
     def _get_altview_stack_manager(self):
@@ -496,6 +540,146 @@ class ModelCommandHandler(BaseCommandHandler):
 
         # Apply the chosen model to the active profile (persisted + reinit)
         return await self._set_active_profile_model(selected)
+
+    async def _model_effort_levels(self, profile) -> list:
+        """Effort levels the active model accepts, best-effort.
+
+        The codex backend publishes them per model; everything else gets the
+        canonical list, since no other provider exposes a capability endpoint.
+        """
+        from kollabor_ai.profile_manager import EFFORT_LEVELS
+
+        if (profile.get_provider() or "").lower() == "openai_responses":
+            try:
+                from kollabor_ai.oauth import OAuthTokenStorage
+                from kollabor_ai.oauth.openai_oauth import query_codex_model_details
+
+                tokens = await OAuthTokenStorage().load_tokens(
+                    "openai", auto_refresh=True
+                )
+                if tokens:
+                    details = await query_codex_model_details(
+                        tokens.access_token, tokens.account_id
+                    )
+                    model = profile.get_model()
+                    for entry in details:
+                        if entry.get("slug") != model:
+                            continue
+                        levels = [
+                            str(level.get("effort"))
+                            for level in entry.get("supported_reasoning_levels") or []
+                            if isinstance(level, dict) and level.get("effort")
+                        ]
+                        if levels:
+                            return levels
+            except Exception as e:  # noqa: BLE001 - fall back to the canonical set
+                self.logger.debug("codex effort levels unavailable: %s", e)
+
+        return list(EFFORT_LEVELS)
+
+    async def _handle_effort(self, level: str) -> CommandResult:
+        """Show or set the active profile's reasoning effort.
+
+        Effort is opt-in: with no level stored, requests carry no effort field
+        and the model uses its own default.
+        """
+        profile_manager = self.profile_manager
+        profile = profile_manager.get_active_profile() if profile_manager else None
+        if not profile:
+            return CommandResult(
+                success=False,
+                message="Active profile not available",
+                display_type="error",
+            )
+
+        from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
+
+        provider = (profile.get_provider() or "").lower()
+        if provider not in EFFORT_SUPPORTED_PROVIDERS:
+            # Reporting success here would be a lie: the field is dropped when
+            # the payload is built (Gemini has no effort parameter at all).
+            return CommandResult(
+                success=False,
+                message=(
+                    f"{self._provider_label(provider)} has no reasoning-effort "
+                    f"parameter — nothing to set.\n"
+                    f"  Supported: {', '.join(sorted(EFFORT_SUPPORTED_PROVIDERS))}"
+                ),
+                display_type="error",
+            )
+
+        levels = await self._model_effort_levels(profile)
+        current = profile.get_effort() or "(model default)"
+
+        if not level:
+            return CommandResult(
+                success=True,
+                message=(
+                    f"Reasoning effort: {current}\n"
+                    f"  Model: {profile.get_model()}\n"
+                    f"  Available: {', '.join(levels)}\n"
+                    f"  Set with: /model effort <level>  (or 'default' to clear)"
+                ),
+                display_type="info",
+            )
+
+        requested = level.strip().lower()
+        if requested in ("default", "none", "clear", "off"):
+            requested = ""
+        elif requested not in levels:
+            return CommandResult(
+                success=False,
+                message=(
+                    f"Unknown effort level: {level}\n"
+                    f"  Available: {', '.join(levels)}"
+                ),
+                display_type="error",
+            )
+
+        if not profile_manager.update_profile(
+            profile.name, effort=requested, save_to_config=True
+        ):
+            return CommandResult(
+                success=False,
+                message=f"Unable to update effort on profile: {profile.name}",
+                display_type="error",
+            )
+
+        await self._reload_active_profile(profile.name)
+
+        return CommandResult(
+            success=True,
+            message=(
+                f"Reasoning effort: {requested or '(model default)'}\n"
+                f"  Profile: {profile.name}\n"
+                f"  Model: {profile.get_model()}"
+            ),
+            display_type="success",
+        )
+
+    async def _reload_active_profile(self, profile_name: str) -> None:
+        """Re-activate a profile so an edited field reaches the live provider.
+
+        In attach mode the daemon owns the provider, so activation has to go
+        through state_service with an explicit registry reload; otherwise the
+        local llm_service reinitializes directly.
+        """
+        state_service = None
+        if self.event_bus and hasattr(self.event_bus, "get_service"):
+            state_service = self.event_bus.get_service("state_service")
+        if state_service and hasattr(state_service, "set_active_profile"):
+            try:
+                await state_service.set_active_profile(
+                    profile_name, reload_profile=True
+                )
+                return
+            except Exception as exc:
+                self.logger.warning("state-service activation failed: %s", exc)
+
+        llm_service = self.llm_service
+        if llm_service and hasattr(llm_service, "api_service"):
+            profile = self.profile_manager.get_active_profile()
+            await llm_service.api_service.reinitialize_provider(profile)
 
     async def _switch_to_model(self, model_name: str) -> CommandResult:
         """Switch to profile with specified model.

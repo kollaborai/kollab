@@ -141,9 +141,10 @@ uppercased. Examples:
 | `PROVIDER` | string | Provider type (default: `custom`) |
 | `BASE_URL` | string | API endpoint URL |
 | `MAX_TOKENS` | integer | Max response tokens |
-| `TEMPERATURE` | float | Sampling temperature (0.0–2.0) |
+| `TEMPERATURE` | float | Sampling temperature (0.0–2.0). Omitted for models that reject sampling params (`supports_sampling: false` in `bundles/data/models.json`) |
 | `TIMEOUT` | integer | Request timeout in ms |
-| `TOP_P` | float | Nucleus sampling (0.0–1.0) |
+| `TOP_P` | float | Nucleus sampling (0.0–1.0). Omitted alongside `TEMPERATURE` for those models |
+| `EFFORT` | string | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Unset = the model's own default (nothing is sent) |
 | `STREAMING` | bool | Enable streaming (`true`/`false`) |
 | `SUPPORTS_TOOLS` | bool | Enable tool calling (`true`/`false`) |
 | `DESCRIPTION` | string | Human-readable description |
@@ -152,7 +153,7 @@ uppercased. Examples:
 
 ```bash
 # Override the active profile's model globally
-KOLLAB_MODEL=gpt-5.4 kollab
+KOLLAB_MODEL=gpt-5.6-terra kollab
 
 # Profile-specific: create a "fast" profile from env
 KOLLAB_FAST_MODEL=claude-haiku-4-5 \
@@ -231,6 +232,29 @@ Only set this when:
 
 Never set this on a developer workstation or shared machine. Prefer
 `pip install keyring` and let the OS keychain handle encryption.
+
+### KOLLAB_NO_KEYRING
+
+Never touch the OS keyring — no reads, no writes, no auto-migration of a
+plaintext config key into it.
+
+```bash
+KOLLAB_NO_KEYRING=1 kollab
+```
+
+Set this for tests and headless runs. On macOS, every read or store of a
+missing Keychain entry pops a system dialog, so booting the app with a key in
+`config.json` prompts on every launch. The tmux harness
+(`tests/tmux/lib/test_runner.sh`) exports it for every spec and shell step, and
+it is off automatically under pytest (`PYTEST_CURRENT_TEST`) — a test run must
+never prompt the developer.
+
+With the keyring off, keys resolve from env vars and `config.json` as-is.
+
+Storing *fails loudly* while off: `APIKeyManager.store_key()` raises
+`KeyringDisabledError` rather than returning quietly, because callers treat a
+successful store as permission to delete their plaintext copy. Migration then
+falls through to the next storage tier, or leaves the key in `config.json`.
 
 ### KOLLAB_KEY_ENCRYPTION_PASSWORD
 

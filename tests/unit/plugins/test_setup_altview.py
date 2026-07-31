@@ -100,11 +100,13 @@ class TestSetupAltViewRender(unittest.TestCase):
         self.assertTrue(view._base_url.startswith("https://api.openai.com"))
 
         # accept default -> model list with the recommended model
+        # (read from the catalogue so a registry refresh doesn't break this)
+        recommended = next(p for p in PROVIDERS if p.key == "openai").default_model
         _run(view.handle_input(_key(name="Enter")))
         self.assertEqual(view._stage, STAGE_MODEL)
         _run(view.render_frame(0.1))
         scr = renderer.text()
-        self.assertIn("gpt-5.4", scr)
+        self.assertIn(recommended, scr)
         self.assertIn("recommended", scr)
 
         # select highlighted model -> review
@@ -114,7 +116,7 @@ class TestSetupAltViewRender(unittest.TestCase):
         scr = renderer.text()
         self.assertIn("Review", scr)
         self.assertIn("openai", scr)
-        self.assertIn("gpt-5.4", scr)
+        self.assertIn(recommended, scr)
         self.assertIn("test the connection", scr)
 
     def test_escape_cancels_from_provider_stage(self):

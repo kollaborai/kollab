@@ -1,6 +1,7 @@
 """ModelPickerAltView: filter, navigate, select, free-form entry, catalog merge."""
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,6 +98,18 @@ async def test_freeform_typed_id_used_when_no_match():
 
 
 @pytest.mark.asyncio
+async def test_typed_slash_command_is_not_taken_as_a_model_id():
+    # Typing "/model effort" into the filter used to set the profile's model
+    # to that literal string. A command-like entry cancels instead.
+    p = _picker()
+    for ch in "/model effort":
+        await p.handle_input(_char(ch))
+    assert p._filtered == []
+    assert await p.handle_input(_key("Enter")) is True
+    assert p.selected_model is None
+
+
+@pytest.mark.asyncio
 async def test_escape_cancels():
     p = _picker()
     assert await p.handle_input(_key("Escape")) is True
@@ -127,6 +140,44 @@ async def test_dedup_keeps_first_and_marks_current():
     assert ids == ["m1", "m2"]
     assert p._all_models[0]["current"] is True
     assert p._all_models[1]["current"] is False
+
+
+def test_known_models_seeded_from_registry():
+    """A provider with no live listing API must still offer real models.
+
+    Before this, /model on a plain OpenAI key showed exactly one row (the
+    current model) because the only source was the live catalog.
+    """
+    from kollabor.commands.system_commands.handlers.model import ModelCommandHandler
+
+    class _Prof:
+        name = "openai"
+
+        def get_provider(self):
+            return "openai"
+
+        def get_model(self):
+            return "gpt-5.6"
+
+    handler = ModelCommandHandler(
+        command_registry=None,
+        event_bus=SimpleNamespace(get_service=lambda name: None),
+        profile_manager=SimpleNamespace(list_profiles=lambda: [_Prof()]),
+    )
+
+    known = handler._build_known_models("openai", "gpt-5.6")
+    ids = [m["id"] for m in known]
+
+    assert known[0] == {"id": "gpt-5.6", "note": "current"}  # current stays first
+    assert len(ids) > 3, ids
+    assert "gpt-5.6-terra" in ids  # registry seed
+    assert "gpt-4.1" not in ids  # retired models are not offered
+    # notes carry window + price so the picker rows are informative
+    terra = next(m for m in known if m["id"] == "gpt-5.6-terra")
+    assert "ctx" in terra["note"] and "$" in terra["note"]
+
+    # unknown provider -> just the current model, no crash
+    assert handler._build_known_models("nope", "x") == [{"id": "x", "note": "current"}]
 
 
 @pytest.mark.asyncio

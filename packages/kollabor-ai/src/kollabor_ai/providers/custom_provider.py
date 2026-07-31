@@ -24,6 +24,7 @@ from .models import (
     UsageInfo,
 )
 from .registry import ProviderRegistry
+from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -125,14 +126,14 @@ class CustomProvider(LLMProvider):
                 )
             payload["tools"] = openai_tools
 
-        if self.config.temperature is not None:
-            payload["temperature"] = self.config.temperature
-
         if self.config.max_tokens:
             payload["max_tokens"] = self.config.max_tokens
 
-        if self.config.top_p is not None:
-            payload["top_p"] = self.config.top_p
+        # Sampling params (omitted for reasoning models that reject them) plus
+        # opt-in reasoning effort, spelled reasoning_effort on OpenAI-compatible
+        # endpoints. See providers/tuning.py.
+        payload.update(sampling_params(self.config, self.model))
+        payload.update(effort_params(self.config, EffortStyle.OPENAI))
 
         self.last_request_payload = payload
 
@@ -282,14 +283,14 @@ class CustomProvider(LLMProvider):
                 )
             payload["tools"] = openai_tools
 
-        if self.config.temperature is not None:
-            payload["temperature"] = self.config.temperature
-
         if self.config.max_tokens:
             payload["max_tokens"] = self.config.max_tokens
 
-        if self.config.top_p is not None:
-            payload["top_p"] = self.config.top_p
+        # Sampling params (omitted for reasoning models that reject them) plus
+        # opt-in reasoning effort, spelled reasoning_effort on OpenAI-compatible
+        # endpoints. See providers/tuning.py.
+        payload.update(sampling_params(self.config, self.model))
+        payload.update(effort_params(self.config, EffortStyle.OPENAI))
 
         self.last_request_payload = payload
 

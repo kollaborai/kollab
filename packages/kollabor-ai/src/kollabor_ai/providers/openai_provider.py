@@ -28,6 +28,7 @@ from .transformers import (
     ToolCallAccumulator,
     ToolSchemaTransformer,
 )
+from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -321,18 +322,17 @@ class OpenAIProvider(LLMProvider):
             "model": self.model,
             "messages": strip_local_message_metadata(messages),
             "stream": stream,
-            "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+
+        # Sampling params (omitted for reasoning models) + opt-in effort.
+        params.update(sampling_params(self.config, self.model))
+        params.update(effort_params(self.config, EffortStyle.OPENAI))
 
         # Request usage object on streaming calls (needed for cached_tokens
         # and full token accounting - openai omits usage by default on streams)
         if stream:
             params["stream_options"] = {"include_usage": True}
-
-        # Add optional parameters
-        if self.config.top_p is not None:
-            params["top_p"] = self.config.top_p
 
         # Transform tools to OpenAI format
         if tools:
