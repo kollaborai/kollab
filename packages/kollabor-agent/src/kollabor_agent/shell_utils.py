@@ -37,7 +37,7 @@ for standard, replacements in SYNTAX_CHANGING_ALIASES.items():
         REPLACEMENT_TO_STANDARD[replacement] = standard
 
 
-def detect_shell_aliases(timeout: int = 5) -> Dict[str, str]:
+def detect_shell_aliases(timeout: int = 1) -> Dict[str, str]:
     """Detect user's shell aliases.
 
     Runs the user's shell in interactive mode to source rc files

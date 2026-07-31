@@ -15,6 +15,7 @@ from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_ai.cost_calculator import calculate_cost
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
+from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
 
 logger = logging.getLogger(__name__)
@@ -798,6 +799,7 @@ class QueueProcessor:
                     + cache_read_tokens
                 )
 
+
                 # Cost calculation
                 provider_type = getattr(
                     self.api_service, "provider_type", ""
@@ -972,6 +974,14 @@ class QueueProcessor:
                     self.pending_tools.clear()
                     self.pending_tools.extend(all_tools)
                     self.question_gate_active = True
+                    publish_semantic(
+                        self.renderer,
+                        "question_gate",
+                        question=parsed_response.get("components", {}).get(
+                            "question", ""
+                        ),
+                        pending_tools=len(all_tools),
+                    )
                     logger.info(
                         f"Question gate: suspended {len(all_tools)} tool(s) pending user response"
                     )
@@ -1258,6 +1268,20 @@ class QueueProcessor:
                 )
             self.message_display_service.display_error_message(error_msg)
             self.turn_completed = True
+
+        # A turn is only done once no tool results need to go back to the model.
+        # Publishing earlier would tell remote clients the turn ended while its
+        # tools were still running, and they would stop reading the stream.
+        if self.turn_completed:
+            publish_semantic(
+                self.renderer,
+                "turn_complete",
+                input_tokens=self.session_stats.get("input_tokens", 0),
+                output_tokens=self.session_stats.get("output_tokens", 0),
+                tool_calls=self.tool_executor.take_executed_count(),
+                stop_reason=getattr(self.api_service, "last_stop_reason", "")
+                or "end_turn",
+            )
 
         return parent_uuid
 

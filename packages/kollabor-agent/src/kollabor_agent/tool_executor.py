@@ -124,6 +124,11 @@ class ToolExecutor:
         # interrupted. Independent of the renderer so it works headless.
         self.tool_executing = False
 
+        # Tools executed since the last turn_complete. Counted here because
+        # every tool path funnels through execute_tool, and one turn can span
+        # several continuation passes.
+        self._executed_count = 0
+
         # File operations executor
         self.file_ops_executor = FileOperationsExecutor(
             config=config,
@@ -329,7 +334,52 @@ class ToolExecutor:
                 await active.cancel()
                 self.tmux_plugin._active_executor = None
 
+    def take_executed_count(self) -> int:
+        """Return tools executed since the last call, then reset the counter."""
+        count = self._executed_count
+        self._executed_count = 0
+        return count
+
     async def execute_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Execute a single tool and emit tool_start/tool_result to the tap.
+
+        Every tool path funnels through here - XML tools from queue_processor
+        and native tool calls via native_tools_handler - so this is the one
+        place remote clients need instrumented.
+        """
+        from kollabor_tui.display_tap import publish_semantic
+
+        tool_id = tool_data.get("id", "unknown")
+        tool_name = self._get_display_name(tool_data)
+
+        publish_semantic(
+            self.event_bus,
+            "tool_start",
+            tool_id=tool_id,
+            tool_name=tool_name,
+            tool_type=tool_data.get("type", "unknown"),
+            input=tool_data.get("input", tool_data.get("params", {})),
+        )
+
+        result = await self._execute_tool_inner(tool_data)
+        self._executed_count += 1
+
+        publish_semantic(
+            self.event_bus,
+            "tool_result",
+            tool_id=result.tool_id,
+            tool_name=tool_name,
+            success=result.success,
+            output=result.output,
+            error=result.error,
+            execution_time=result.execution_time,
+            metadata=result.metadata or {},
+        )
+        return result
+
+    async def _execute_tool_inner(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
         """Execute a single tool (terminal, MCP, or file operation).
 
         Args:
@@ -1363,7 +1413,7 @@ class ToolExecutor:
             desc = r["description"] or "(no description)"
             lines.append(f"  {r['name']}  [{r['source']}]  {desc}")
 
-        lines.append(f"\nUse tool-load to activate any of these tools.")
+        lines.append("\nUse tool-load to activate any of these tools.")
 
         return ToolExecutionResult(
             tool_id=tool_id,
@@ -1953,7 +2003,7 @@ class ToolExecutor:
                     body = item.get("articleBody") or item.get("text", "")
                     if body and len(body) > 200:
                         # Collapse whitespace
-                        lines = [l.strip() for l in body.split("\n") if l.strip()]
+                        lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
                         return "\n".join(lines)
                     # Fall back to description
                     desc = item.get("description", "")
@@ -1992,7 +2042,7 @@ class ToolExecutor:
                 best_text = text
 
         if best_text:
-            lines = [l.strip() for l in best_text.split("\n") if l.strip()]
+            lines = [ln.strip() for ln in best_text.split("\n") if ln.strip()]
             return "\n".join(lines)
         return ""
 
