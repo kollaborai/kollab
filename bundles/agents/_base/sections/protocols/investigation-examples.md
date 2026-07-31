@@ -74,7 +74,7 @@ after seeing the actual code and confirming fix needed:
 </edit>
 
 why file operations are better:
-  [ok] automatic .bak backup created
+  [ok] automatic backup + rollback (kept outside the project, dropped on success)
   [ok] python syntax validation prevents breaking code
   [ok] clear success/error messages
   [ok] shows exact lines changed
