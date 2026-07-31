@@ -24,7 +24,10 @@ class TextInputWidget(BaseWidget):
             config_service: ConfigService instance for reading/writing config values.
         """
         super().__init__(config, config_path, config_service)
-        self.cursor_position = 0
+        # Cursor starts at the END of any prefilled value. At 0, Backspace
+        # is a no-op and typing prepends -- broken editing on every
+        # prefilled form field.
+        self.cursor_position = len(str(self.get_pending_value() or ""))
         self._show_cursor = True
 
     def render(self) -> List[str]:
@@ -50,9 +53,7 @@ class TextInputWidget(BaseWidget):
         # Apply block cursor when focused
         if self.focused and self._show_cursor:
             cursor_pos = min(self.cursor_position, len(display_text))
-            display_with_cursor = self._apply_block_cursor(
-                display_text, cursor_pos
-            )
+            display_with_cursor = self._apply_block_cursor(display_text, cursor_pos)
         else:
             display_with_cursor = display_text
 
@@ -167,17 +168,22 @@ class TextInputWidget(BaseWidget):
             True if key was handled.
         """
         current_text = str(self.get_pending_value() or "")
+        # External set_value() can shrink the text; never operate past the end.
+        self.cursor_position = min(self.cursor_position, len(current_text))
 
         # Handle special keys
         if key_press.name == "Backspace":
             if self.cursor_position > 0:
-                # Remove character before cursor
+                # Remove character before cursor. Move the cursor BEFORE
+                # set_value(): set_value clamps cursor to the new length,
+                # so decrementing afterwards subtracted twice when deleting
+                # at the end of the text.
                 new_text = (
                     current_text[: self.cursor_position - 1]
                     + current_text[self.cursor_position :]
                 )
+                self.cursor_position -= 1
                 self.set_value(new_text)
-                self.cursor_position = max(0, self.cursor_position - 1)
             return True
 
         elif key_press.name == "Delete":
