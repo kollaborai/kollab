@@ -435,6 +435,12 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except Exception as e:
             return {"error": str(e)}
 
+    async def _send_message(params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await state_service.send_message(params.get("message", ""))
+        except Exception as e:
+            return {"error": str(e)}
+
     handlers: dict[str, Any] = {
         "state.get_conversation": _get_conversation,
         "state.save_conversation": _save_conversation,
@@ -487,6 +493,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.hub_broadcast": _hub_broadcast,
         # Phase 4.6: cancel (ESC in attach mode)
         "state.cancel_current_request": _cancel_current_request,
+        # Input: submit a user turn (engine / web UI clients)
+        "state.send_message": _send_message,
     }
 
     registered: list[str] = []

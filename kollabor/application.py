@@ -315,6 +315,33 @@ class TerminalLLMChat:
             else:
                 logger.warning("Cannot load skills without an active agent")
 
+        # If the hub is active and this process has a fixed identity, reconcile
+        # the startup agent bundle before llm_service initializes the first
+        # conversation so we avoid building the prompt for a stale default
+        # agent and immediately rebuilding for the hub role bundle.
+        self._startup_agent_reconciled = False
+        try:
+            from plugins.hub.identity import resolve_identity_name
+            from plugins.hub.pool_registry import PoolRegistry
+
+            startup_identity = resolve_identity_name(self.args)
+            if startup_identity:
+                pool = PoolRegistry.from_env()
+                if pool:
+                    entry = pool.find(startup_identity)
+                    desired_bundle = (getattr(entry, "agent_type", "") or "").strip()
+                    active_name = getattr(self.agent_manager, "active_agent_name", "") or ""
+                    if desired_bundle and desired_bundle != active_name:
+                        if self.agent_manager.set_active_agent(desired_bundle):
+                            self._startup_agent_reconciled = True
+                            logger.info(
+                                "Pre-reconciled startup agent bundle to '%s' for identity=%s",
+                                desired_bundle,
+                                startup_identity,
+                            )
+        except Exception as e:
+            logger.debug(f"Startup agent pre-reconciliation skipped: {e}")
+
         # Reconfigure logging now that config system is available
         # Skip for help mode to avoid creating log files
         if not getattr(self.args, "_help_pending", False):
@@ -2349,14 +2376,25 @@ class TerminalLLMChat:
                     "TmuxPlugin not available - ToolExecutor will use fallback ShellExecutor"
                 )
 
-            # Check if any plugin wants to add to system prompt and rebuild if needed
+            # Check if any plugin wants to add to system prompt and rebuild if needed.
+            # Skip the eager rebuild when startup already pre-reconciled the
+            # final agent bundle before the initial conversation build; that
+            # path ensures the first build already includes the final startup
+            # agent and plugin additions.
             additions = (
                 self.llm_service._prompt_builder._get_plugin_system_prompt_additions()
             )
-            if additions:
+            should_skip_startup_rebuild = bool(
+                additions and getattr(self, "_startup_agent_reconciled", False)
+            )
+            if additions and not should_skip_startup_rebuild:
                 self.llm_service.rebuild_system_prompt()
                 logger.info(
                     f"System prompt rebuilt with {len(additions)} plugin additions"
+                )
+            elif should_skip_startup_rebuild:
+                logger.info(
+                    "Skipped startup system prompt rebuild; initial build already used reconciled agent bundle"
                 )
 
     async def _load_config_hooks(self) -> None:

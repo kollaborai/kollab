@@ -15,6 +15,7 @@ from typing import Callable, List, Optional
 from kollabor_ai.streaming_thinking_parser import (
     StreamingThinkingParser,
 )
+from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
 
 # Delegated thinking display formatting (kollabor_tui)
@@ -138,6 +139,7 @@ class StreamingHandler:
 
         # Display thinking content (delegated to kollabor_tui)
         if result.thinking_content:
+            publish_semantic(self.renderer, "thinking", text=result.thinking_content)
             display_text = self._thinking_formatter.format(
                 result.thinking_content, final=result.thinking_complete
             )
@@ -189,6 +191,9 @@ class StreamingHandler:
         # since they complete lines in the preview buffer.
         if not chunk or (not chunk.strip() and "\n" not in chunk and "\r" not in chunk):
             return
+
+        # Structured mirror of the chunk for non-terminal attach clients
+        publish_semantic(self.renderer, "token", text=chunk)
 
         # Initialize streaming response if this is the first chunk
         if not self._response_started:

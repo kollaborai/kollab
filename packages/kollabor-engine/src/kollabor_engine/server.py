@@ -44,13 +44,6 @@ def create_app() -> FastAPI:
         version="0.1.0",
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],  # local only - bound to 127.0.0.1
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     # Auth middleware
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -80,6 +73,16 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
         return await call_next(request)
+
+    # Registered last so it wraps auth_middleware: a short-circuited 401 still
+    # gets CORS headers, otherwise the browser reports an opaque CORS failure
+    # instead of the real "unauthorized".
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # local only - bound to 127.0.0.1
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # Global exception handler - ensures all 500s return JSON (not plain text)
     @app.exception_handler(Exception)

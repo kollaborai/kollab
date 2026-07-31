@@ -741,6 +741,22 @@ class RemoteStateService(StateService):
 
     # === Resume (phase 4.5 step 7) ===
 
+    async def send_message(self, message: str) -> dict[str, Any]:
+        """Submit a user turn to the daemon. Returns once accepted, not done."""
+        logger.debug("state rpc: send_message len=%d", len(message or ""))
+        result = await self._rpc.call(
+            "state.send_message",
+            {"message": message},
+            timeout=self._timeout,
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"state.send_message expected dict, got {type(result).__name__}"
+            )
+        if "error" in result and result.get("error"):
+            raise ValueError(str(result["error"]))
+        return result
+
     async def cancel_current_request(self) -> dict[str, Any]:
         """Ask the daemon to cancel the currently processing LLM request."""
         logger.debug("state rpc: cancel_current_request")

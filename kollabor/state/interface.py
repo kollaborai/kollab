@@ -595,3 +595,22 @@ class StateService(Protocol):
                 target session isn't found/loadable.
         """
         ...
+
+    # === Input ===
+
+    async def send_message(self, message: str) -> dict[str, Any]:
+        """Submit a user turn to the daemon.
+
+        Returns as soon as the turn is accepted, not when it finishes - a turn
+        can run for minutes and the caller should not hold an RPC connection
+        open for it. Follow the DisplayTap for `token` / `tool_start` /
+        `tool_result` / `turn_complete` events to track progress.
+
+        Args:
+            message: The user's message.
+
+        Returns:
+            {"accepted": bool, "reason": str}. `accepted` is False when no LLM
+            service is wired or a turn is already in flight.
+        """
+        ...

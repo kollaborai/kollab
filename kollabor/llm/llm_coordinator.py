@@ -928,7 +928,7 @@ class LLMService:
         backward compatibility with legacy HTTP system.
 
         Also syncs ``profile_manager`` active state so the runtime provider,
-        the status bar, ``/model``, and ``/profile`` all agree. With
+        the status bar, ``/model``, and ``/loadout`` all agree. With
         ``persist=True`` (default) the choice is written to config so it
         survives restart and becomes the startup default; callers that only
         want a session-scoped switch (e.g. ``/login`` when the user declines
@@ -1240,22 +1240,31 @@ class LLMService:
             List[Any], await self._native_tools.execute_tool_calls(self.tool_executor)
         )
 
-    async def process_user_input(self, message: str) -> Dict[str, Any]:
+    async def process_user_input(
+        self, message: str, pre_displayed: bool = False
+    ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
         This is the main entry point for user messages.
 
         Args:
             message: User's input message
+            pre_displayed: Whether the user message was already echoed to the UI
+                before startup gating released.
 
         Returns:
             Status information about processing
         """
         # Display user message using MessageDisplayService (DRY refactoring)
-        logger.debug(
-            f"DISPLAY DEBUG: About to display user message: '{message[:100]}...' ({len(message)} chars)"
-        )
-        self.message_display_service.display_user_message(message)
+        if not pre_displayed:
+            logger.debug(
+                f"DISPLAY DEBUG: About to display user message: '{message[:100]}...' ({len(message)} chars)"
+            )
+            self.message_display_service.display_user_message(message)
+
+        prompt_builder = getattr(self, "_prompt_builder", None)
+        if prompt_builder and prompt_builder.ensure_shell_aliases_loaded():
+            self.rebuild_system_prompt()
 
         # Question gate: if enabled and there are pending tools, execute them now
         # and inject results into conversation before processing user message

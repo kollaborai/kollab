@@ -216,12 +216,20 @@ async def create_session(body: CreateSessionRequest, request: Request):
             system_prompt=safe_system_prompt,
             mcp_server_names=effective_mcp_servers,
             user_token=user_token,
+            agent=body.agent,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    ok = await session.initialize()
-    if not ok:
-        logger.warning(f"Session {session_id} initialized with provider errors")
+
+    # Spawning the daemon is the slow part of session creation (plugin
+    # discovery plus the hub join). Surface a failure as a real error instead
+    # of registering a session with no process behind it.
+    try:
+        await session.initialize()
+    except (TimeoutError, RuntimeError) as e:
+        logger.error(f"Session {session_id} daemon failed to start: {e}")
+        await session.shutdown()
+        raise HTTPException(status_code=503, detail=f"daemon failed to start: {e}")
 
     registry[session_id] = session
     logger.info(f"Session {session_id} created")
@@ -374,7 +382,9 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    history = session.history
+    # The daemon owns the conversation; pull a fresh copy rather than trusting
+    # the local mirror, which only refreshes on turn_complete.
+    history = await session.refresh_history()
     if limit:
         history = history[-limit:]
     return {"session_id": session_id, "history": history}
@@ -387,12 +397,10 @@ async def clear_history(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Keep system prompt if present
-    if session.history and session.history[0].get("role") == "system":
-        session.history = session.history[:1]
-    else:
-        session.history = []
-
+    # state.restart_session clears the conversation and rebuilds the system
+    # prompt, which is what "clear history but keep the prompt" means here.
+    await session.state.restart_session()
+    await session.refresh_history()
     return {"ok": True, "session_id": session_id}
 
 
@@ -403,10 +411,14 @@ async def get_system_prompt(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Return session.system_prompt if set, otherwise extract from history
-    prompt = session.system_prompt
-    if not prompt and session.history and session.history[0].get("role") == "system":
-        prompt = session.history[0].get("content", "")
+    # The daemon's rendered prompt is the live one; fall back to what the
+    # session was created with if the daemon can't answer.
+    try:
+        snapshot = await session.state.get_system_prompt()
+        prompt = snapshot.content
+    except Exception as e:
+        logger.debug(f"Session {session_id}: system prompt read failed: {e}")
+        prompt = session.system_prompt
 
     return {"session_id": session_id, "system_prompt": prompt or ""}
 
@@ -423,21 +435,14 @@ async def rebuild_system_prompt(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Check if a turn is in progress - warn about potential race condition
-    if session._active_turn_task and not session._active_turn_task.done():
-        logger.warning(
-            f"Session {session_id}: rebuild_system_prompt called during active turn. "
-            "History modification may cause inconsistent state."
-        )
-
-    # Get raw prompt
+    # Get raw prompt - what the session was created with, falling back to
+    # whatever the daemon currently has installed.
     raw_prompt = session.system_prompt or ""
-    if (
-        not raw_prompt
-        and session.history
-        and session.history[0].get("role") == "system"
-    ):
-        raw_prompt = session.history[0].get("content", "")
+    if not raw_prompt:
+        try:
+            raw_prompt = (await session.state.get_system_prompt()).content
+        except Exception as e:
+            logger.debug(f"Session {session_id}: system prompt read failed: {e}")
 
     if not raw_prompt:
         return {"session_id": session_id, "system_prompt": ""}
@@ -476,16 +481,40 @@ async def rebuild_system_prompt(session_id: str):
             "warning": f"Rendering failed: {type(e).__name__}",
         }
 
-    # Update storage and history
+    # Install the rendered prompt on the daemon, which owns the conversation
     session.system_prompt = rendered
-    if session.history and session.history[0].get("role") == "system":
-        session.history[0]["content"] = rendered
+    try:
+        await session.state.set_system_prompt(rendered, source="engine")
+    except Exception as e:
+        logger.error(f"Session {session_id}: failed to install system prompt: {e}")
+        return {
+            "session_id": session_id,
+            "system_prompt": rendered,
+            "warning": f"Rendered but not installed: {type(e).__name__}",
+        }
 
     return {"session_id": session_id, "system_prompt": rendered}
 
 
 # Session-specific MCP endpoints
-# These are in the sessions router (not mcp router) to avoid double /mcp prefix
+# These are in the sessions router (not mcp router) to avoid double /mcp prefix.
+# MCP lives in the session's daemon, so these read and write through state.*
+# rather than owning an MCPIntegration of their own.
+
+
+async def _mcp_snapshot(session):
+    try:
+        return await session.state.get_mcp_state()
+    except Exception as e:
+        logger.error(f"Session {session.session_id}: MCP state read failed: {e}")
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {e}")
+
+
+def _find_server(snapshot, server_name: str):
+    for server in snapshot.servers:
+        if server.name == server_name:
+            return server
+    return None
 
 
 @router.get("/{session_id}/mcp")
@@ -497,128 +526,90 @@ async def get_session_mcp(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    mcp = session.mcp_integration
-    connections = mcp.server_connections
-    tools = mcp.tool_registry
+    snapshot = await _mcp_snapshot(session)
 
     result: Dict[str, Any] = {"session_id": session_id, "servers": {}}
-
-    for server_name, server_config in mcp.mcp_servers.items():
-        conn = connections.get(server_name)
-        server_tools = [
-            name for name, info in tools.items() if info.get("server") == server_name
-        ]
-
-        if conn and conn.initialized:
-            result["servers"][server_name] = {
+    for server in snapshot.servers:
+        if server.connected:
+            result["servers"][server.name] = {
                 "status": "connected",
-                "tool_count": len(server_tools),
-                "tools": server_tools,
+                "tool_count": server.tool_count,
+                "tools": server.tools,
             }
-        elif server_config.get("enabled", True):
-            result["servers"][server_name] = {
+        elif server.enabled:
+            result["servers"][server.name] = {
                 "status": "disconnected",
                 "error": "Connection not attempted or failed",
             }
         else:
-            result["servers"][server_name] = {
+            result["servers"][server.name] = {
                 "status": "disconnected",
                 "error": "Server disabled in configuration",
             }
 
-    result["total_tools"] = len(tools)
+    result["total_tools"] = snapshot.total_tools
     return result
 
 
 @router.post("/{session_id}/mcp/{server_name}/connect")
 async def connect_server(session_id: str, server_name: str):
-    """Connect to an MCP server for a specific session."""
+    """Enable an MCP server for a session's daemon."""
     registry = get_session_registry()
     session = registry.get(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    mcp = session.mcp_integration
-
-    if server_name not in mcp.mcp_servers:
+    snapshot = await _mcp_snapshot(session)
+    server = _find_server(snapshot, server_name)
+    if server is None:
         raise HTTPException(
             status_code=404,
             detail=f"MCP server '{server_name}' not found in configuration",
         )
-
-    if server_name in mcp.server_connections:
-        conn = mcp.server_connections[server_name]
-        if conn.initialized:
-            raise HTTPException(
-                status_code=409, detail=f"Server '{server_name}' is already connected"
-            )
-
-    server_config = mcp.mcp_servers[server_name]
-    if not server_config.get("enabled", True):
+    if server.connected:
         raise HTTPException(
-            status_code=400, detail=f"Server '{server_name}' is disabled"
+            status_code=409, detail=f"Server '{server_name}' is already connected"
         )
 
-    command = server_config.get("command")
-    if not command:
-        raise HTTPException(
-            status_code=400, detail=f"Server '{server_name}' has no command configured"
-        )
-
-    tools = await mcp._connect_and_list_tools(server_name, command)
-    conn = mcp.server_connections.get(server_name)
-    if not conn or not conn.initialized:
-        raise HTTPException(
-            status_code=502, detail=f"Failed to connect MCP server '{server_name}'"
-        )
+    await session.state.enable_mcp_server(server_name)
+    updated = await session.state.reload_mcp_servers()
+    server = _find_server(updated, server_name)
 
     return {
         "ok": True,
         "server_name": server_name,
-        "status": "connected",
-        "tool_count": len(tools),
-        "tools": [t.get("name") for t in tools if t.get("name")],
+        "status": "connected" if server and server.connected else "enabled",
+        "tool_count": server.tool_count if server else 0,
+        "tools": server.tools if server else [],
         "session_id": session_id,
     }
 
 
 @router.post("/{session_id}/mcp/{server_name}/disconnect")
 async def disconnect_server(session_id: str, server_name: str):
-    """Disconnect from an MCP server for a session."""
+    """Disable an MCP server for a session's daemon."""
     registry = get_session_registry()
     session = registry.get(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    mcp = session.mcp_integration
-
-    if server_name not in mcp.server_connections:
+    snapshot = await _mcp_snapshot(session)
+    server = _find_server(snapshot, server_name)
+    if server is None:
         raise HTTPException(
-            status_code=404, detail=f"No active connection to '{server_name}'"
+            status_code=404, detail=f"No such MCP server '{server_name}'"
         )
 
-    # Count tools to be removed
-    tools_to_remove = [
-        name
-        for name, info in mcp.tool_registry.items()
-        if info.get("server") == server_name
-    ]
-
-    # Close connection
-    await mcp.server_connections[server_name].close()
-    del mcp.server_connections[server_name]
-
-    # Remove tools
-    for tool_name in tools_to_remove:
-        del mcp.tool_registry[tool_name]
+    tools_removed = server.tool_count
+    await session.state.disable_mcp_server(server_name)
 
     return {
         "ok": True,
         "server_name": server_name,
         "status": "disconnected",
-        "tools_removed": len(tools_to_remove),
+        "tools_removed": tools_removed,
         "session_id": session_id,
     }
 
@@ -632,21 +623,20 @@ async def list_server_tools(session_id: str, server_name: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    mcp = session.mcp_integration
+    try:
+        grouped = await session.state.get_mcp_tools(server_filter=server_name)
+    except Exception as e:
+        logger.error(f"Session {session_id}: MCP tool list failed: {e}")
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {e}")
 
-    tools = []
-    for tool_name, tool_info in mcp.tool_registry.items():
-        if tool_info.get("server") == server_name:
-            definition = tool_info.get("definition", {})
-            tools.append(
-                {
-                    "name": tool_name,
-                    "description": definition.get("description", ""),
-                    "parameters": definition.get(
-                        "parameters", definition.get("inputSchema", {})
-                    ),
-                }
-            )
+    tools = [
+        {
+            "name": tool.get("name", ""),
+            "description": tool.get("description", ""),
+            "parameters": tool.get("parameters", tool.get("inputSchema", {})),
+        }
+        for tool in grouped.get(server_name, [])
+    ]
 
     return {
         "server_name": server_name,
@@ -665,37 +655,27 @@ async def get_server_status(session_id: str, server_name: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    mcp = session.mcp_integration
-    conn = mcp.server_connections.get(server_name)
+    snapshot = await _mcp_snapshot(session)
+    server = _find_server(snapshot, server_name)
 
-    server_tools = [
-        name
-        for name, info in mcp.tool_registry.items()
-        if info.get("server") == server_name
-    ]
-
-    if conn and conn.initialized:
+    if server is not None and server.connected:
         return {
             "server_name": server_name,
             "status": "connected",
             "connected_at": None,
             "uptime_seconds": 0,
-            "tool_count": len(server_tools),
-            "tools": server_tools,
-            "process": {
-                "pid": conn.process.pid if conn.process else None,
-                "command": conn.command,
-            },
+            "tool_count": server.tool_count,
+            "tools": server.tools,
+            "process": {"pid": None, "command": ""},
             "error": None,
         }
-    else:
-        mcp.mcp_servers.get(server_name, {})
-        return {
-            "server_name": server_name,
-            "status": "disconnected",
-            "error": "Not connected",
-            "connected_at": None,
-            "uptime_seconds": 0,
-            "tool_count": 0,
-            "tools": [],
-        }
+
+    return {
+        "server_name": server_name,
+        "status": "disconnected",
+        "error": "Not connected",
+        "connected_at": None,
+        "uptime_seconds": 0,
+        "tool_count": 0,
+        "tools": [],
+    }

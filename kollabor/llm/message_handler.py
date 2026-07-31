@@ -88,20 +88,31 @@ class MessageHandler:
         Returns:
             Result of processing
         """
-        # Wait for startup to complete before processing user input
+        message = data.get("message", "")
+        if not message.strip():
+            return {"status": "empty_message"}
+
+        pre_displayed = bool(data.get("message_pre_displayed", False))
+
+        # Wait for startup to complete before processing user input.
+        # If startup is still pending, echo the user's message immediately
+        # so typed input is visible during boot, but keep LLM processing gated.
         startup_ready = self._coordinator.event_bus.get_service("startup_ready")
         if startup_ready and not startup_ready.is_set():
+            if not pre_displayed:
+                self._coordinator.message_display_service.display_user_message(message)
+                data["message_pre_displayed"] = True
+                pre_displayed = True
             try:
                 await asyncio.wait_for(startup_ready.wait(), timeout=30)
             except asyncio.TimeoutError:
                 logger.error("Timed out waiting for startup to complete")
                 return {"status": "startup_timeout"}
 
-        message = data.get("message", "")
-        if message.strip():
-            result = await self._coordinator.process_user_input(message)
-            return result  # type: ignore[no-any-return]
-        return {"status": "empty_message"}
+        result = await self._coordinator.process_user_input(
+            message, pre_displayed=pre_displayed
+        )
+        return result  # type: ignore[no-any-return]
 
     async def handle_cancel_request(
         self, data: Dict[str, Any], event

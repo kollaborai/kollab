@@ -16,6 +16,7 @@ Either way, there's exactly ONE place where the business logic lives.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -792,7 +793,7 @@ class LocalStateService(StateService):
     ) -> ProfileSnapshot:
         """Switch the active LLM profile and trigger a provider reinitialize.
 
-        Mirrors the existing `/profile set` behavior in the system command
+        Mirrors the legacy `/profile set` behavior from the old system command
         handler: delegates to profile_manager.set_active_profile, then
         re-initializes the request provider before returning. The write is
         not complete until the next request will use the selected profile.
@@ -851,7 +852,7 @@ class LocalStateService(StateService):
             except Exception as e:
                 logger.debug("profile reload before activation failed: %s", e)
         if not ok:
-            # Match the error vocabulary used by the existing /profile handler.
+            # Match the error vocabulary used by the legacy /profile handler.
             try:
                 available = list(self._profile_manager.get_profile_names())
             except Exception:
@@ -887,7 +888,7 @@ class LocalStateService(StateService):
             except Exception as e:
                 logger.warning(f"failed to persist profile {name!r}: {e}")
 
-        # Mirror the legacy /profile set path: reinitialize the provider
+        # Mirror the legacy profile-switch path: reinitialize the provider
         # synchronously so a chat turn sent immediately after the RPC cannot
         # race the switch and use the previous provider/error state. Reload
         # native tools in the background because that work is independent of
@@ -1377,6 +1378,25 @@ class LocalStateService(StateService):
         except Exception as e:
             logger.debug(f"get_system_prompt read error: {e}")
             content = ""
+
+        if not content:
+            # LLMCoordinator exposes neither shape - its prompt builder keeps
+            # the prompt as the leading system message in the conversation, so
+            # read it from there rather than reporting an empty prompt.
+            try:
+                for message in getattr(llm, "conversation_history", None) or []:
+                    role = getattr(message, "role", None) or (
+                        message.get("role") if isinstance(message, dict) else None
+                    )
+                    if role != "system":
+                        break
+                    body = getattr(message, "content", None) or (
+                        message.get("content") if isinstance(message, dict) else ""
+                    )
+                    content = str(body or "")
+                    break
+            except Exception as e:
+                logger.debug(f"get_system_prompt history fallback error: {e}")
 
         # Determine source via known attributes.
         try:
@@ -1924,6 +1944,35 @@ class LocalStateService(StateService):
             return f"hub broadcast error: {e}"
 
     # === Cancel (phase 4.6) ===
+
+    # === Input ===
+
+    async def send_message(self, message: str) -> dict[str, Any]:
+        """Submit a user turn, running it in the background.
+
+        `process_user_input` runs the whole turn, which can take minutes. The
+        RPC caller must not wait on that, so the turn is scheduled as a tracked
+        background task and progress is followed on the DisplayTap instead.
+        """
+        text = (message or "").strip()
+        if not text:
+            return {"accepted": False, "reason": "empty message"}
+
+        llm = self._llm_service
+        if llm is None:
+            return {"accepted": False, "reason": "no llm service"}
+
+        if getattr(llm, "is_processing", False):
+            return {"accepted": False, "reason": "turn already in flight"}
+
+        coro = llm.process_user_input(text)
+        create_task = getattr(llm, "create_background_task", None)
+        if callable(create_task):
+            create_task(coro, name="rpc_send_message")
+        else:
+            asyncio.get_running_loop().create_task(coro)
+
+        return {"accepted": True, "reason": ""}
 
     async def cancel_current_request(self) -> dict[str, Any]:
         """Cancel the currently processing LLM request.
