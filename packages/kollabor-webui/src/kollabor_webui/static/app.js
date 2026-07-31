@@ -27,7 +27,24 @@ class EngineAPI {
     return h;
   }
 
-  async request(method, path, body = null) {
+  async refreshTokenFromServer() {
+    // Restarting the engine rotates ~/.kollab/engine.token. Without this a
+    // token cached in localStorage shadows the live one forever and the only
+    // way out is "Clear All Data".
+    try {
+      const cfg = await (await fetch('/api/config')).json();
+      if (cfg.token && cfg.token !== this.token) {
+        this.token = cfg.token;
+        localStorage.removeItem('kollabor_token');
+        return true;
+      }
+    } catch (e) {
+      // Served standalone - nothing to refresh from
+    }
+    return false;
+  }
+
+  async request(method, path, body = null, retryOn401 = true) {
     const url = `${this.baseUrl}${path}`;
     const opts = {
       method,
@@ -36,6 +53,11 @@ class EngineAPI {
     if (body) opts.body = JSON.stringify(body);
 
     const resp = await fetch(url, opts);
+
+    if (resp.status === 401 && retryOn401 && (await this.refreshTokenFromServer())) {
+      return this.request(method, path, body, false);
+    }
+
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ detail: resp.statusText }));
       throw new Error(err.detail || `HTTP ${resp.status}`);
@@ -128,6 +150,20 @@ class EngineAPI {
         'Accept': 'text/event-stream',
       },
       body: JSON.stringify({ content }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    return resp.body.getReader();
+  }
+
+  async streamEvents(sessionId) {
+    // Follow an in-progress turn without submitting one - used after a reload,
+    // where the original POST /message stream died with the page.
+    const url = `${this.baseUrl}/sessions/${sessionId}/events`;
+    const resp = await fetch(url, {
+      headers: { ...this.headers(), 'Accept': 'text/event-stream' },
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ detail: resp.statusText }));
@@ -329,15 +365,15 @@ class TerminalSession {
     this.container.addEventListener('click', () => this.input.focus());
 
     // Panel controls
-    panel.querySelector('.close-btn').addEventListener('click', () => {
+    this.panel.querySelector('.close-btn').addEventListener('click', () => {
       this.manager.closeSession(this.id);
     });
 
-    panel.querySelector('.minimize-btn').addEventListener('click', () => {
+    this.panel.querySelector('.minimize-btn').addEventListener('click', () => {
       this.toggleMinimize();
     });
 
-    panel.querySelector('.popout-btn').addEventListener('click', () => {
+    this.panel.querySelector('.popout-btn').addEventListener('click', () => {
       this.manager.popoutSession(this.id);
     });
   }
@@ -541,20 +577,7 @@ class TerminalSession {
     this.currentAiElement = null;
 
     try {
-      const reader = await this.api.sendMessage(this.id, message);
-      const decoder = new TextDecoder();
-      const parser = new SSEParser();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        parser.feed(decoder.decode(value, { stream: true }));
-
-        for (const event of parser.parse()) {
-          this.handleSSEEvent(event);
-        }
-      }
+      await this.consumeStream(await this.api.sendMessage(this.id, message));
     } catch (e) {
       this.printError(`connection error: ${e.message}`);
     }
@@ -631,6 +654,7 @@ class TerminalSession {
     this.statusEl.className = `session-status ${streaming ? 'streaming' : ''}`;
     this.sendBtn.disabled = streaming;
     this.sendBtn.textContent = streaming ? '...' : 'SEND';
+    this.manager.renderSessionList();
   }
 
   setTitle(title) {
@@ -760,6 +784,48 @@ class TerminalSession {
     this.scrollToBottom();
   }
 
+  async consumeStream(reader) {
+    const decoder = new TextDecoder();
+    const parser = new SSEParser();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      parser.feed(decoder.decode(value, { stream: true }));
+      for (const event of parser.parse()) {
+        this.handleSSEEvent(event);
+      }
+    }
+  }
+
+  async restorePendingPermissions() {
+    // A prompt raised before a reload is still blocking the daemon, and the
+    // daemon will not re-send it. Without this the session looks idle but
+    // every new message comes back "turn already in flight".
+    try {
+      const data = await this.api.getPermissions(this.id);
+      const prompts = data.pending_prompts || [];
+      if (!prompts.length) return;
+
+      this.printSystem(
+        `${prompts.length} permission request(s) still waiting from before reload`
+      );
+      for (const prompt of prompts) {
+        this.printPermissionRequest(prompt);
+      }
+      this.setStreaming(true);
+
+      // Follow the rest of the turn: answering the prompt unblocks the daemon,
+      // but this tab has no stream left from before the reload.
+      this.consumeStream(await this.api.streamEvents(this.id))
+        .catch(e => this.printError(`reconnect failed: ${e.message}`))
+        .finally(() => this.setStreaming(false));
+    } catch (e) {
+      // Session may have no daemon yet - nothing to restore
+    }
+  }
+
   printPermissionRequest(event) {
     const line = document.createElement('div');
     line.className = 'output-line permission';
@@ -886,17 +952,13 @@ class TerminalManager {
     document.getElementById('mcp-btn').addEventListener('click', () => this.showMCPModal());
     document.getElementById('settings-btn').addEventListener('click', () => this.showSettingsModal());
 
-    // Config panel (right panel toggle)
-    document.getElementById('config-toggle')?.addEventListener('click', () => {
-      document.getElementById('right-panel')?.classList.toggle('open');
-    });
-
-    // Load token and config
+    // Load theme, token and config
+    this.loadTheme();
     this.loadConfig();
     this.loadToken();
 
-    // Initial check
-    this.bootSequence();
+    // Initial check - server config first, it supplies the engine auth token
+    this.loadServerConfig().then(() => this.bootSequence());
 
     // Network status
     window.addEventListener('offline', () => this.handleOffline());
@@ -927,10 +989,29 @@ class TerminalManager {
     }
   }
 
+  loadTheme() {
+    // Was only applied inside the settings save handler, so a saved theme was
+    // forgotten on every refresh.
+    document.documentElement.dataset.theme =
+      localStorage.getItem('kollabor_theme') || 'slate';
+  }
+
   loadToken() {
     const stored = localStorage.getItem('kollabor_token');
     if (stored) {
       this.api.setToken(stored);
+    }
+  }
+
+  async loadServerConfig() {
+    // /api/config is served by kollabor-webui and carries the engine URL plus
+    // the engine bearer token. Anything the user set explicitly wins.
+    try {
+      const cfg = await (await fetch('/api/config')).json();
+      if (cfg.engine_url && !this.engineUrlFromUser) this.api.setBaseUrl(cfg.engine_url);
+      if (cfg.token && !this.api.token) this.api.setToken(cfg.token);
+    } catch (e) {
+      // served standalone - fall back to localStorage / defaults
     }
   }
 
@@ -940,17 +1021,14 @@ class TerminalManager {
       const config = JSON.parse(saved);
       if (config.engineUrl) {
         this.api.setBaseUrl(config.engineUrl);
-        document.getElementById('engine-url').value = config.engineUrl;
+        this.engineUrlFromUser = true;
       }
-      if (config.profile) {
-        document.getElementById('profile').value = config.profile;
-      }
-      if (config.approvalMode) {
-        document.getElementById('approval-mode').value = config.approvalMode;
-      }
-      if (config.workspace) {
-        document.getElementById('workspace').value = config.workspace;
-      }
+      // Config-panel inputs are optional - they only exist once that panel renders
+      const set = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
+      set('engine-url', config.engineUrl);
+      set('profile', config.profile);
+      set('approval-mode', config.approvalMode);
+      set('workspace', config.workspace);
     }
 
     // Listen for config changes (elements may not exist until modal opens)
@@ -959,15 +1037,20 @@ class TerminalManager {
     });
   }
 
-  saveConfig() {
-    const config = {
-      engineUrl: document.getElementById('engine-url').value,
-      profile: document.getElementById('profile').value,
-      approvalMode: document.getElementById('approval-mode').value,
-      workspace: document.getElementById('workspace').value,
+  saveConfig(overrides = {}) {
+    const val = id => document.getElementById(id)?.value;
+    const config = JSON.parse(localStorage.getItem('kollabor_config') || '{}');
+    const fields = {
+      engineUrl: val('engine-url'),
+      profile: val('profile'),
+      approvalMode: val('approval-mode'),
+      workspace: val('workspace'),
+      ...overrides,
     };
+    // Only overwrite what is actually present - the panel may not be rendered
+    for (const [k, v] of Object.entries(fields)) if (v !== undefined) config[k] = v;
     localStorage.setItem('kollabor_config', JSON.stringify(config));
-    this.api.setBaseUrl(config.engineUrl);
+    if (config.engineUrl) this.api.setBaseUrl(config.engineUrl);
   }
 
   async bootSequence() {
@@ -989,11 +1072,14 @@ class TerminalManager {
   async checkEngineStatus() {
     try {
       const data = await this.api.health();
+      // /health skips auth - hit an authed route too, or the pill reads
+      // "connected" while every real request is coming back 401
+      await this.api.listSessions();
       this.setConnected(true);
       this.printGlobal(`[ok] engine online [uptime: ${data.uptime}s]`);
     } catch (e) {
       this.setConnected(false);
-      this.printGlobal('[err] engine not responding');
+      this.printGlobal(`[err] engine unreachable or unauthorized: ${e.message}`);
       this.printGlobal('[sys] start engine with: kollabor-engine serve');
     }
   }
@@ -1069,6 +1155,44 @@ class TerminalManager {
 
   updateSessionCount() {
     this.sessionCount.textContent = this.sessions.size;
+    this.renderSessionList();
+  }
+
+  renderSessionList() {
+    // The sidebar has full .session-item styling but nothing ever populated it,
+    // so an open session showed an empty SESSIONS list.
+    const list = document.getElementById('session-list');
+    if (!list) return;
+
+    list.innerHTML = '';
+    for (const [sessionId, terminal] of this.sessions) {
+      const item = document.createElement('div');
+      item.className = 'session-item';
+      if (terminal.isStreaming) item.classList.add('streaming');
+      if (this.activePanelId === sessionId) item.classList.add('active');
+
+      const dot = document.createElement('span');
+      dot.className = 'session-dot';
+
+      const name = document.createElement('div');
+      name.className = 'session-name';
+      name.textContent = sessionId;
+
+      const meta = document.createElement('div');
+      meta.className = 'session-meta';
+      meta.textContent = terminal.isStreaming ? 'streaming' : 'ready';
+
+      const info = document.createElement('div');
+      info.className = 'session-info';
+      info.append(name, meta);
+      item.append(dot, info);
+      item.addEventListener('click', () => {
+        this.activePanelId = sessionId;
+        terminal.focus();
+        this.renderSessionList();
+      });
+      list.appendChild(item);
+    }
   }
 
   // Session management
@@ -1099,6 +1223,8 @@ class TerminalManager {
       </div>
     `;
 
+    // Boot log only exists while there are no panels - drop it before the grid
+    this.sessionsContainer.querySelectorAll('.boot-log').forEach(el => el.remove());
     this.sessionsContainer.appendChild(panel);
 
     const terminal = new TerminalSession(sessionId, panel, this.api, this);
@@ -1120,10 +1246,11 @@ class TerminalManager {
     if (!this.ensureConnected()) return null;
 
     try {
+      const val = id => document.getElementById(id)?.value;
       const data = await this.api.createSession({
-        profile: document.getElementById('profile').value || 'default',
-        approvalMode: document.getElementById('approval-mode').value || 'confirm_all',
-        workspace: document.getElementById('workspace').value || undefined,
+        profile: val('profile') || 'default',
+        approvalMode: val('approval-mode') || 'confirm_all',
+        workspace: val('workspace') || undefined,
         ...config,
       });
 
@@ -1143,6 +1270,7 @@ class TerminalManager {
   async restoreSession(sessionId) {
     const terminal = this.createPanel(sessionId);
     terminal.boot();
+    await terminal.restorePendingPermissions();
     return terminal;
   }
 
@@ -1218,14 +1346,34 @@ class TerminalManager {
   }
 
   printGlobal(text) {
-    // Print to all terminals
+    // No panels open yet (boot, or every session closed) - terminals would
+    // swallow the message, so put it on screen where the panels go
+    if (this.sessions.size === 0) {
+      // One container, not one grid child per line - the sessions container is
+      // a CSS grid, so appending lines directly spreads them down the page.
+      let log = this.sessionsContainer.querySelector('.boot-log');
+      if (!log) {
+        log = document.createElement('div');
+        log.className = 'boot-log';
+        this.sessionsContainer.appendChild(log);
+      }
+      const line = document.createElement('div');
+      line.className = 'boot-log-line';
+      line.textContent = text;
+      log.appendChild(line);
+    }
+
+    // Print to all terminals. Each print* helper adds its own tag, so strip the
+    // one already in the text - otherwise every line reads "[sys] [sys] ready."
+    const match = text.match(/^\[(sys|ok|err|warn)\]\s*/);
+    const kind = match ? match[1] : 'sys';
+    const body = match ? text.slice(match[0].length) : text;
+
     for (const terminal of this.sessions.values()) {
-      terminal.printSystem(text.replace(/^\[(sys|ok|err|warn)\]\s*/, (m, type) => {
-        if (type === 'ok') return '[ok] ';
-        if (type === 'err') return '[err] ';
-        if (type === 'warn') return '[warn] ';
-        return '[sys] ';
-      }));
+      if (kind === 'ok') terminal.printSuccess(body);
+      else if (kind === 'err') terminal.printError(body);
+      else if (kind === 'warn') terminal.printWarning(body);
+      else terminal.printSystem(body);
     }
   }
 
@@ -1279,20 +1427,9 @@ class TerminalManager {
       </div>
     `);
 
-    // Load profiles
-    try {
-      const data = await this.api.listProfiles();
-      const select = document.getElementById('new-session-profile');
-      data.profiles.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p.name;
-        opt.textContent = p.name;
-        select.appendChild(opt);
-      });
-    } catch (e) {
-      // Ignore
-    }
-
+    // Wire the buttons BEFORE awaiting profiles. Attaching them after the
+    // fetch left Create and Cancel visible but inert until it returned, so an
+    // early click silently did nothing.
     document.getElementById('new-session-cancel').addEventListener('click', () => this.closeModal());
     document.getElementById('new-session-create').addEventListener('click', async () => {
       const config = {
@@ -1314,6 +1451,24 @@ class TerminalManager {
       this.closeModal();
       await this.createSession(config);
     });
+
+    // Populate the profile list after the buttons are live
+    try {
+      const data = await this.api.listProfiles();
+      const select = document.getElementById('new-session-profile');
+      // The modal may have been closed while this was in flight
+      if (!select) return;
+      // Drop the placeholder so "default" isn't listed twice
+      select.innerHTML = '';
+      (data.profiles || []).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = p.name;
+        select.appendChild(opt);
+      });
+    } catch (e) {
+      // Keep the placeholder option; the engine may not expose profiles
+    }
   }
 
   async showProfilesModal() {
@@ -1462,13 +1617,13 @@ class TerminalManager {
       let html = `
         <div class="mcp-list">
           ${Object.entries(servers).map(([name, config]) => `
-            <div class="mcp-item">
-              <div class="mcp-info">
-                <span class="mcp-name">${name}</span>
-                <span class="mcp-command">${config.command || 'N/A'}</span>
-                <span class="mcp-status ${config.enabled ? 'enabled' : 'disabled'}">${config.enabled ? 'enabled' : 'disabled'}</span>
+            <div class="mcp-server-item">
+              <div class="mcp-server-header">
+                <span class="mcp-server-name">${name}</span>
+                <span class="mcp-server-status ${config.enabled ? 'connected' : 'disconnected'}">${config.enabled ? 'enabled' : 'disabled'}</span>
               </div>
-              <div class="mcp-actions">
+              <div class="mcp-server-command">${config.command || 'N/A'}</div>
+              <div class="mcp-server-actions">
                 <button class="btn btn-small" data-server="${name}" data-action="toggle">${config.enabled ? 'Disable' : 'Enable'}</button>
                 <button class="btn btn-small btn-danger" data-server="${name}" data-action="delete">Delete</button>
               </div>
@@ -1579,10 +1734,11 @@ class TerminalManager {
       <div class="form-group">
         <label>Theme</label>
         <select id="settings-theme">
-          <option value="hacker">Hacker (Green)</option>
-          <option value="amber">Amber</option>
-          <option value="matrix">Matrix</option>
+          <option value="slate">Slate (default)</option>
+          <option value="nord">Nord</option>
           <option value="dracula">Dracula</option>
+          <option value="amber">Amber</option>
+          <option value="hacker">Hacker (Green)</option>
         </select>
       </div>
       <div class="form-actions">
@@ -1599,13 +1755,14 @@ class TerminalManager {
       this.api.setBaseUrl(engineUrl);
       this.api.setToken(token);
       localStorage.setItem('kollabor_token', token);
-      this.saveConfig();
+      this.saveConfig({ engineUrl });
 
-      document.body.dataset.theme = theme;
+      // Themes are declared on :root, so set it there - body was ignored
+      document.documentElement.dataset.theme = theme;
       localStorage.setItem('kollabor_theme', theme);
 
-      this.closeModal();
-      this.checkEngineStatus();
+      // Reload so the whole boot sequence reruns against the new credentials
+      location.reload();
     });
 
     document.getElementById('settings-clear').addEventListener('click', () => {
@@ -1616,7 +1773,7 @@ class TerminalManager {
     });
 
     // Load saved theme
-    const savedTheme = localStorage.getItem('kollabor_theme') || 'hacker';
+    const savedTheme = localStorage.getItem('kollabor_theme') || 'slate';
     document.getElementById('settings-theme').value = savedTheme;
   }
 
