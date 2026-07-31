@@ -529,9 +529,19 @@ python -m twine upload --repository testpypi dist/*
 }
 ```
 
-2. **Available actions:** `start_app`, `slash_command`, `type`, `send_keys`, `capture`, `assert_contains`, `assert_not_contains`, `sleep`, `section`
+2. **Available actions:** `start_app`, `slash_command`, `type`, `send_keys`, `capture`, `assert_contains`, `assert_not_contains`, `wait_for`, `shell`, `escape`, `enter`, `arrow`, `control`, `sleep`, `section`
+   - `send_keys` types **literal text** — use `escape` / `enter` / `arrow` for special keys
+   - `slash_command` sends `/`, waits for the palette, types the command — prefer it over `type` + `enter`
+   - prefer `wait_for` over `sleep` before an assertion, and pass `--no-daemon` in `config.command` so the spec can't attach to a developer's live daemon
 
 3. **Run:** `tests/tmux/lib/test_runner.sh tests/tmux/specs/your-test.json`
+
+**Never let a test touch the OS keyring.** On macOS every read/store of a
+missing Keychain entry pops a system dialog, so a spec that boots the app with
+an `api_key` in its config prompts on every run. The harness exports
+`KOLLAB_NO_KEYRING=1` for the app and every `shell` step, and
+`keyring_enabled()` (`kollabor_ai.providers.security`) is off automatically
+under pytest. Any new harness must do the same.
 
 4. **Report:**
 ```
