@@ -346,6 +346,11 @@ class TestSystemCommandHandler(unittest.TestCase):
             "llm_service": object(),
         }
         handler = self._make_handler(extra_services=services)
+        # Pin the git probe: `git branch --show-current` is empty on a detached
+        # HEAD, which is exactly what actions/checkout produces for a PR. Left
+        # ambient, doctor warns and the verdict is "degraded" on every CI run
+        # while passing on a developer's branch.
+        handler._read_git_branch = lambda cwd: "main"
         result = _safe_run(handler.handle_doctor(_make_slash_command()))
         _assert_result(result)
         from kollabor_events.models import CommandResult
