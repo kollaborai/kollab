@@ -429,16 +429,21 @@ def create_config_from_profile(
         provider_type = detect_provider_from_profile(profile)
 
     # Common fields
-    # Set default model based on provider type
-    default_model = "claude-sonnet-4-6"  # Default for Anthropic
+    # Fallback model when the profile does not name one. Keep these in step
+    # with PROVIDER_ENV_MAP in profile_manager and bundles/data/models.json.
+    # These are deliberately the cost-safe tier: nobody chose them, so a silent
+    # fallback must not land on frontier pricing. /setup, where the user IS
+    # choosing, suggests the headline alias instead (see setup_altview).
+    default_model = "claude-sonnet-5"  # Default for Anthropic
     if provider_type == ProviderType.OPENAI:
-        default_model = "gpt-5.4"
+        default_model = "gpt-5.6-terra"
     elif provider_type == ProviderType.OPENAI_RESPONSES:
-        default_model = "codex-mini"
+        # Must be a slug the codex backend serves (query_codex_model_details)
+        default_model = "gpt-5.6-sol"
     elif provider_type == ProviderType.GEMINI:
-        default_model = "gemini-3.1-pro-preview"
+        default_model = "gemini-3.6-flash"
     elif provider_type == ProviderType.AZURE_OPENAI:
-        default_model = "gpt-5.4"
+        default_model = "gpt-5.6-terra"
 
     base_fields = {
         "provider": provider_type,
@@ -466,6 +471,17 @@ def create_config_from_profile(
     if timeout and timeout > 0:
         base_fields["timeout"] = timeout
 
+    # top_p and effort are opt-in: absent means the request omits them, so
+    # models that reject either keep working. Without this pass-through the
+    # documented profile/env values were silently dropped here.
+    top_p = profile.get("top_p")
+    if top_p is not None:
+        base_fields["top_p"] = top_p
+
+    effort = profile.get("effort")
+    if effort:
+        base_fields["effort"] = effort
+
     # Bound the context-budget guard to the model's real window: an explicit
     # profile value wins, otherwise resolve it from the model registry by
     # name/provider. Falls through to the config default if unresolved.
@@ -476,9 +492,7 @@ def create_config_from_profile(
         try:
             from kollabor_ai.model_registry import resolve_context_window
 
-            resolved = resolve_context_window(
-                base_fields["model"], provider_type.value
-            )
+            resolved = resolve_context_window(base_fields["model"], provider_type.value)
             if resolved:
                 base_fields["context_window"] = resolved
         except Exception:  # registry is best-effort; never block config creation
@@ -553,7 +567,6 @@ def create_config_from_profile(
     elif provider_type == ProviderType.OPENAI_RESPONSES:
         # Optional Responses API-specific fields
         base_fields["store_responses"] = profile.get("store_responses", False)
-        base_fields["model"] = profile.get("model", "gpt-5.4")
 
         return OpenAIResponsesConfig(**base_fields)
 

@@ -33,6 +33,7 @@ from .transformers import (
     OpenAIResponseTransformer,
     ToolSchemaTransformer,
 )
+from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -237,16 +238,15 @@ class OpenRouterProvider(LLMProvider):
             request_params = {
                 "model": self.model,
                 "messages": strip_local_message_metadata(messages),
-                "temperature": self.config.temperature,
                 "max_tokens": effective_max,
             }
 
             if openai_tools:
                 request_params["tools"] = openai_tools
 
-            # Add optional parameters
-            if self.config.top_p is not None:
-                request_params["top_p"] = self.config.top_p
+            # Sampling params (omitted for reasoning models) + opt-in effort.
+            request_params.update(sampling_params(self.config, self.model))
+            request_params.update(effort_params(self.config, EffortStyle.OPENAI))
 
             # Add OpenRouter-specific parameters from kwargs
             for key in ["models", "route", "provider", "transforms"]:
@@ -325,7 +325,6 @@ class OpenRouterProvider(LLMProvider):
             request_params = {
                 "model": self.model,
                 "messages": strip_local_message_metadata(messages),
-                "temperature": self.config.temperature,
                 "max_tokens": effective_max,
                 "stream": True,
                 # Request usage on streams (cached_tokens + full accounting)
@@ -335,8 +334,9 @@ class OpenRouterProvider(LLMProvider):
             if openai_tools:
                 request_params["tools"] = openai_tools
 
-            if self.config.top_p is not None:
-                request_params["top_p"] = self.config.top_p
+            # Sampling params (omitted for reasoning models) + opt-in effort.
+            request_params.update(sampling_params(self.config, self.model))
+            request_params.update(effort_params(self.config, EffortStyle.OPENAI))
 
             # Add OpenRouter-specific parameters
             for key in ["models", "route", "provider", "transforms"]:

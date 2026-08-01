@@ -273,11 +273,18 @@ class ModelPickerAltView(AltView):
             return True
 
         if name == "Enter":
+            typed = self._query.strip()
             if self._filtered and 0 <= self._selected_index < len(self._filtered):
                 self._result = str(self._filtered[self._selected_index]["id"])
-            elif self._query.strip():
+            elif typed.startswith("/"):
+                # A slash command typed into the filter is a mistake, not a
+                # model id -- accepting it would set the profile's model to
+                # something like "/model effort". Cancel instead.
+                logger.info("ModelPickerAltView: ignoring command-like entry %r", typed)
+                self._result = None
+            elif typed:
                 # free-form entry: use exactly what was typed
-                self._result = self._query.strip()
+                self._result = typed
             else:
                 self._result = None
             logger.info("ModelPickerAltView: selected %r", self._result)

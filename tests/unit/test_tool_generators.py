@@ -3,15 +3,15 @@
 import re
 
 from kollabor_agent.tool_definition import ToolDefinition, ToolParameter
+from kollabor_agent.tool_generators.markdown import (
+    render_for_bundle,
+    render_tool_markdown,
+)
 from kollabor_agent.tool_generators.native_json import (
     generate_anthropic_tools,
     generate_openai_tools,
 )
 from kollabor_agent.tool_generators.xml_regex import build_regex_for_tool
-from kollabor_agent.tool_generators.markdown import (
-    render_tool_markdown,
-    render_for_bundle,
-)
 
 
 class TestNativeJson:

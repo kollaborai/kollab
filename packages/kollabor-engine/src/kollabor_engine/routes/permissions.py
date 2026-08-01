@@ -31,7 +31,7 @@ async def respond_to_permission(session_id: str, body: PermissionResponseRequest
             status_code=400, detail="decision must be 'approve' or 'deny'"
         )
 
-    resolved = session.resolve_permission(
+    resolved = await session.resolve_permission(
         tool_id=body.tool_id,
         decision=body.decision,
         scope=body.scope,
@@ -52,12 +52,18 @@ async def get_permissions(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    pm = session.permission_manager
+    snapshot = await session.state.get_permission_state()
     return {
         "session_id": session_id,
-        "approval_mode": pm.approval_mode.value,
+        "approval_mode": snapshot.approval_mode,
         "pending": list(session._pending_permissions.keys()),
-        "stats": pm._stats,
+        # Full prompt payloads so a client that reloaded mid-prompt can
+        # re-render it. The daemon is still blocked waiting for an answer and
+        # will not re-send the request.
+        "pending_prompts": list(session._pending_permissions.values()),
+        "stats": snapshot.stats,
+        "session_approvals": snapshot.session_approvals_count,
+        "project_approvals": snapshot.project_approvals_count,
     }
 
 
@@ -81,5 +87,8 @@ async def set_permissions_mode(session_id: str, body: SetModeRequest):
             detail=f"Unknown mode '{body.mode}'. Valid: confirm_all, default, auto_approve_edits, trust_all",
         )
 
-    session.permission_manager.set_approval_mode(mode, persist=False)
-    return {"ok": True, "mode": body.mode}
+    # The daemon owns the permission manager; state.set_approval_mode takes the
+    # canonical enum name.
+    snapshot = await session.state.set_approval_mode(mode.name)
+    session.approval_mode = body.mode
+    return {"ok": True, "mode": body.mode, "approval_mode": snapshot.approval_mode}

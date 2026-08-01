@@ -34,6 +34,97 @@ from kollabor_ai.profile_manager import (
 )
 
 
+def _keyring_on():
+    """Re-enable the keyring for tests that exercise the success path.
+
+    keyring_enabled() is off by default under pytest so a test run never pops
+    an OS Keychain dialog; these tests supply a fake keyring module, so they
+    opt back in explicitly.
+    """
+    return patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+
+
+class TestKeyringDisabledByDefault(unittest.TestCase):
+    """A test run must never touch the developer's OS keyring.
+
+    On macOS every read or store of a missing entry pops a Keychain dialog, so
+    a suite (or a tmux spec booting the app with a config key) would otherwise
+    spam prompts that have to be clicked away one by one.
+    """
+
+    def test_disabled_under_pytest(self):
+        from kollabor_ai.providers.security import keyring_enabled
+
+        self.assertIn("PYTEST_CURRENT_TEST", os.environ)
+        self.assertFalse(keyring_enabled())
+
+    def test_env_flag_and_normal_runs(self):
+        """KOLLAB_NO_KEYRING off it; a normal run still gets the keyring."""
+        from kollabor_ai.providers import security
+
+        env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"}
+
+        with patch.dict(os.environ, {**env, "KOLLAB_NO_KEYRING": "1"}, clear=True):
+            self.assertFalse(security.keyring_enabled())
+
+        # not a test run, flag unset -> the product keeps using the keyring
+        env.pop("KOLLAB_NO_KEYRING", None)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(security.keyring_enabled(), security.KEYRING_AVAILABLE)
+
+    def test_disabled_store_raises_so_callers_keep_their_copy(self):
+        """A silent no-op here would delete a user's only copy of a key.
+
+        ``_try_os_keyring`` treats "no exception" as "safely stored" and then
+        drops the plaintext key from the migrated profile. With the keyring off
+        it must report failure so the migration falls through to the next tier
+        (or leaves the key in config).
+        """
+        import asyncio
+
+        from kollabor_ai.providers.security import (
+            APIKeyManager,
+            KeyringDisabledError,
+        )
+
+        fake_keyring = SimpleNamespace(
+            set_password=MagicMock(),
+            get_password=MagicMock(return_value=None),
+            get_keyring=MagicMock(return_value=SimpleNamespace()),
+        )
+        with patch.dict(sys.modules, {"keyring": fake_keyring}):
+            manager = APIKeyManager()
+            with self.assertRaises(KeyringDisabledError):
+                asyncio.run(manager.store_key("p", "sk-secret"))
+        fake_keyring.set_password.assert_not_called()
+
+    def test_migrator_keeps_plaintext_key_when_keyring_is_off(self):
+        from kollabor_config.migration import ProfileMigrator
+
+        migrator = ProfileMigrator()
+        self.assertFalse(migrator._try_os_keyring("p", "sk-secret"))
+
+        with patch.dict(os.environ, {"KOLLAB_ALLOW_PLAINTEXT_KEYS": "false"}):
+            migrated = migrator._migrate_profile(
+                "p", {"api_key": "sk-secret", "model": "gpt-5.6", "provider": "openai"}
+            )
+        # every tier failed -> the key must still be in the config, not gone
+        self.assertEqual(migrated.get("api_key"), "sk-secret")
+
+    def test_plaintext_key_does_not_reach_keyring(self):
+        """The auto-migrate-to-keyring path is what triggered the prompts."""
+        mock_sp = MagicMock()
+        fake_keyring = SimpleNamespace(
+            set_password=mock_sp, get_password=MagicMock(return_value=None)
+        )
+        profile = LLMProfile(
+            name="plain", provider="anthropic", api_key="sk-ant-plaintext"
+        )
+        with patch.dict(sys.modules, {"keyring": fake_keyring}):
+            self.assertEqual(profile.get_api_key(), "sk-ant-plaintext")
+        mock_sp.assert_not_called()
+
+
 class TestKeyringHelpers(unittest.TestCase):
     """Test _keyring_get and _keyring_set sync helpers."""
 
@@ -41,7 +132,7 @@ class TestKeyringHelpers(unittest.TestCase):
         """Retrieve key from keyring successfully."""
         mock_gp = MagicMock(return_value="sk-ant-real-key")
         fake_keyring = SimpleNamespace(get_password=mock_gp)
-        with patch.dict(sys.modules, {"keyring": fake_keyring}):
+        with patch.dict(sys.modules, {"keyring": fake_keyring}), _keyring_on():
             result = _keyring_get("claude")
             self.assertEqual(result, "sk-ant-real-key")
             mock_gp.assert_called_once_with("kollab", "claude")
@@ -67,7 +158,7 @@ class TestKeyringHelpers(unittest.TestCase):
         """Store key in keyring successfully."""
         mock_sp = MagicMock()
         fake_keyring = SimpleNamespace(set_password=mock_sp)
-        with patch.dict(sys.modules, {"keyring": fake_keyring}):
+        with patch.dict(sys.modules, {"keyring": fake_keyring}), _keyring_on():
             result = _keyring_set("claude", "sk-ant-key-123")
             self.assertTrue(result)
             mock_sp.assert_called_once_with("kollab", "claude", "sk-ant-key-123")

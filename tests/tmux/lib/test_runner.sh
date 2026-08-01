@@ -93,6 +93,9 @@ def _shell(command: str) -> subprocess.CompletedProcess[str]:
         text=True,
         capture_output=True,
         check=False,
+        # same reason as _start_app: a shell step that loads profiles must not
+        # pop a Keychain dialog
+        env={**os.environ, "KOLLAB_NO_KEYRING": "1"},
     )
 
 
@@ -188,7 +191,16 @@ def _start_app(step: dict[str, Any]) -> None:
         str(TERM_HEIGHT),
     )
     STARTED = True
-    _send_literal(command)
+    # Never touch the developer's OS keyring from a test: on macOS every
+    # lookup/store of a missing entry pops a Keychain dialog, and a spec that
+    # boots the app with a config key would prompt on every run.
+    #
+    # Prefixed with `env` (an external binary) rather than typed as
+    # `export VAR=1` or set via tmux's `-e`: `export` is bash/zsh syntax that a
+    # fish/csh default shell would reject -- silently booting the app
+    # unguarded -- and tmux's session environment does not reach the initial
+    # pane's shell (verified: `show-environment` has it, the pane does not).
+    _send_literal(f"env KOLLAB_NO_KEYRING=1 {command}")
     _send_special("Enter")
     time.sleep(float(step.get("sleep", APP_INIT_SLEEP)))
 

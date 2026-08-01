@@ -36,7 +36,15 @@ class SystemPromptBuilder:
     which are passed via dependency injection for testing and modular use.
     """
 
-    def __init__(self, config, agent_manager=None, util_imports=None, profile_manager=None, conversation_logger=None, mcp_integration=None):
+    def __init__(
+        self,
+        config,
+        agent_manager=None,
+        util_imports=None,
+        profile_manager=None,
+        conversation_logger=None,
+        mcp_integration=None,
+    ):
         """Initialize the system prompt builder.
 
         Args:
@@ -48,6 +56,7 @@ class SystemPromptBuilder:
                 - render_system_prompt: function to render trender tags
                 - get_system_prompt_path: function to get prompt path
                 - format_aliases_for_prompt: function to format shell aliases (from kollabor_agent)
+                - get_cached_aliases: function to read cached shell aliases (from kollabor_agent)
                 If None, will import from kollabor_agent (default behavior)
             profile_manager: ProfileManager for reading active model/provider info (optional)
             mcp_integration: MCPIntegration instance for MCP tool discovery (optional)
@@ -67,13 +76,17 @@ class SystemPromptBuilder:
         self._rebuild_count = 0
         self._session_id: Optional[str] = None
 
+        # Lazy shell-alias state (load only after first real submit)
+        self._shell_alias_prompt: Optional[str] = None
+        self._shell_aliases_loaded = False
+
     def _get_utils(self):
         """Lazy import kollabor utils if not provided."""
         if self._util_imports:
             return self._util_imports
 
         # Import from kollabor_config (kollabor-specific dependency)
-        from kollabor_agent import format_aliases_for_prompt
+        from kollabor_agent import format_aliases_for_prompt, get_cached_aliases
         from kollabor_ai.prompt_renderer import render_system_prompt
         from kollabor_config.config_utils import (
             get_system_prompt_content,
@@ -87,12 +100,45 @@ class SystemPromptBuilder:
             "render_system_prompt": render_system_prompt,
             "get_system_prompt_path": get_system_prompt_path,
             "format_aliases_for_prompt": format_aliases_for_prompt,
+            "get_cached_aliases": get_cached_aliases,
         }
         return self._util_imports
 
     def set_session_id(self, session_id: str) -> None:
         """Set the current session ID for logging context."""
         self._session_id = session_id
+
+
+    def ensure_shell_aliases_loaded(self) -> bool:
+        """Load shell aliases lazily for this session.
+
+        Returns:
+            True if alias prompt content was newly loaded and the system prompt
+            should be rebuilt, False if aliases were already loaded, disabled,
+            or produced no prompt content.
+        """
+        if self._shell_aliases_loaded:
+            return False
+
+        self._shell_aliases_loaded = True
+
+        if not self.config.get("terminal.interactive_shell", False):
+            return False
+
+        try:
+            utils = self._get_utils()
+            aliases = utils["get_cached_aliases"]()
+            alias_content = utils["format_aliases_for_prompt"](aliases)
+        except Exception as e:
+            logger.warning(f"Failed to load shell aliases for session: {e}")
+            return False
+
+        if not alias_content:
+            return False
+
+        self._shell_alias_prompt = alias_content
+        logger.info("Loaded shell aliases for session")
+        return True
 
     def set_mcp_integration(self, mcp_integration) -> None:
         """Set the MCP integration instance for lazy tool summaries.
@@ -343,13 +389,10 @@ class SystemPromptBuilder:
         if mcp_summaries:
             prompt_parts.append(mcp_summaries)
 
-        # Add shell aliases if interactive shell is enabled
-        if self.config.get("terminal.interactive_shell", False):
-            utils = self._get_utils()
-            alias_content = utils["format_aliases_for_prompt"]()
-            if alias_content:
-                prompt_parts.append(alias_content)
-                logger.info("Added shell aliases to system prompt")
+        # Add shell aliases only after lazy session load has populated them
+        if self._shell_alias_prompt:
+            prompt_parts.append(self._shell_alias_prompt)
+            logger.info("Added cached shell aliases to system prompt")
 
         # Add closing statement
         prompt_parts.append(

@@ -124,7 +124,9 @@ DREAMING -> SUSPENDED -> DYING -> DEAD.
 
 `FileOperationsExecutor` (`file_operations_executor.py`) provides 14 safe file
 operations with:
-- Automatic `.bak` backups before destructive operations
+- Automatic backup + rollback before destructive operations (backups are written
+  to `~/.kollab/projects/<encoded-path>/backups/`, never into the project tree,
+  and are deleted once the operation succeeds)
 - Protected path checking (kollabor/, main.py, .git/, venv/)
 - Path traversal prevention
 - Binary file detection and rejection

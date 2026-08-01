@@ -86,7 +86,10 @@ class KeyParser:
         5: "Ctrl+E",
         6: "Ctrl+F",
         7: "Ctrl+G",
-        8: "Ctrl+H",
+        # 0x08 (BS / Ctrl+H) is what tmux and screen send for the backspace
+        # key (their kbs capability is ^H). Naming it Ctrl+H made backspace
+        # a dead key in every text widget under tmux.
+        8: "Backspace",
         9: "Tab",
         10: "Ctrl+J",
         11: "Ctrl+K",

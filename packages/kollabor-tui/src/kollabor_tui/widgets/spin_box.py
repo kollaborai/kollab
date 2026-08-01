@@ -4,7 +4,6 @@ from typing import Any, List
 
 from kollabor_tui.design_system import T, TagBox
 from kollabor_tui.key_parser import KeyPress
-from kollabor_tui.visual_effects import ColorPalette
 
 from .base_widget import BaseWidget
 
@@ -47,89 +46,32 @@ class SpinBoxWidget(BaseWidget):
         self.show_buttons = self.config.get("show_buttons", True)
         self.wrap_around = self.config.get("wrap_around", False)
 
-        # Current value
-        initial_value = self.get_value()
-        if initial_value is None:
-            self.current_value = (self.min_value + self.max_value) / 2
-        else:
+        # Current value. Read via the base class: this subclass overrides
+        # get_value() to return self.current_value, which doesn't exist yet.
+        # Non-numeric stored values (None, "", garbage) fall back to midpoint.
+        initial_value = super().get_value()
+        try:
             self.current_value = float(initial_value)
-
-        # Colors
-        self.colors = ColorPalette()
+        except (TypeError, ValueError):
+            self.current_value = (self.min_value + self.max_value) / 2
 
     def render(self) -> List[str]:
-        """Render spin box widget.
+        """Render spin box widget using the real theme system.
+
+        Delegates to render_modern()'s T() + TagBox chrome (the same
+        focused/unfocused color pattern as SliderWidget.render_modern()) --
+        nothing in the codebase calls this plain render() directly, only
+        render_modern() (see BaseWidget.render_modern's fallback: `.render()`
+        is used only when a widget has no render_modern at all), so there is
+        no separate "simple" format to preserve. Delegating avoids keeping a
+        second, easily-neglected copy of the same color logic -- which is
+        exactly how this method ended up dead against a phantom ColorPalette
+        API in the first place.
 
         Returns:
             List of strings representing widget display lines.
         """
-        lines = []
-
-        # Label line
-        label = self.get_label()
-        if label:
-            label_color = (
-                self.colors.accent_color if self.focused else self.colors.primary_color
-            )
-            lines.append(f"{label_color}{label}{self.colors.reset}")
-
-        # Value display with buttons
-        value_str = self._format_value(self.current_value)
-
-        if self.show_buttons:
-            # Decrement button | Value | Increment button
-            dec_color = self.colors.muted_color
-            inc_color = self.colors.muted_color
-            value_color = (
-                self.colors.highlight if self.focused else self.colors.primary_color
-            )
-
-            # Highlight buttons on focus
-            if self.focused:
-                dec_color = self.colors.accent_color
-                inc_color = self.colors.accent_color
-
-            # Build display
-            width = 20  # Total width
-            button_width = 3
-            value_width = width - 2 * button_width - 4  # Account for borders and spaces
-
-            value_display = f"{value_color}{value_str}{self.colors.reset}"
-
-            if self.unit:
-                value_display += (
-                    f" {self.colors.muted_color}{self.unit}{self.colors.reset}"
-                )
-
-            # Align and pad
-            value_display = value_display.center(value_width)
-
-            display = f"{dec_color}[−]{self.colors.reset} {value_display} {inc_color}[+]{self.colors.reset}"
-            lines.append(display)
-        else:
-            # Simple value display
-            value_color = (
-                self.colors.highlight if self.focused else self.colors.primary_color
-            )
-            display = f"{value_color}{value_str}{self.colors.reset}"
-
-            if self.unit:
-                display += f" {self.colors.muted_color}{self.unit}{self.colors.reset}"
-
-            lines.append(display)
-
-        # Range indicator when focused
-        if self.focused:
-            min_val = self._format_value(self.min_value)
-            max_val = self._format_value(self.max_value)
-            step_val = self._format_value(self.step)
-            range_info = (
-                f"{self.colors.muted_color}Range: {min_val} - {max_val} | "
-                f"Step: {step_val}{self.colors.reset}"
-            )
-            lines.append(range_info)
-
-        return lines
+        return self.render_modern()
 
     def render_modern(self, width: int = 50) -> List[str]:  # type: ignore[override]
         """Render spin box with modern design system styling.
@@ -223,12 +165,17 @@ class SpinBoxWidget(BaseWidget):
             max_val = self._format_value(self.max_value)
             step_val = self._format_value(self.step)
             range_info = f"     Range: {min_val} - {max_val} | Step: {step_val}"
+            # T() has no .dim gradient (that was another phantom-API bug --
+            # same shape as the ColorPalette one above, verified empirically
+            # while wiring this up). T().dark + text_dim is the same
+            # de-emphasized combo this file already uses for its unfocused
+            # chrome a few lines up.
             range_line = TagBox.render(
                 lines=[range_info],
-                tag_bg=T().dim[0],
+                tag_bg=T().dark[0],
                 tag_fg=T().text_dim,
                 tag_width=tag_width,
-                content_colors=T().dim[0],
+                content_colors=T().dark[0],
                 content_fg=T().text_dim,
                 content_width=content_width,
                 tag_chars=["   "],

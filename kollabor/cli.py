@@ -422,7 +422,7 @@ Telegram bridge setup (run inside interactive mode):
         type=str,
         default=None,
         metavar="PROFILE",
-        help="Use a configured LLM profile (created via /setup or /profile)",
+        help="Use a configured LLM profile or loadout name (see /setup, /llm)",
     )
 
     parser.add_argument(

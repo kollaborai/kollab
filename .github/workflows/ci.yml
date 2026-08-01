@@ -26,17 +26,14 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      - name: Run focused unit tests
-        run: |
-          uv run python -m pytest \
-            tests/unit/test_openai_streaming_finish_reason.py \
-            tests/unit/test_turn_runner_tool_loop.py \
-            tests/unit/test_hub_project_scope.py \
-            tests/unit/test_provider_models.py \
-            tests/unit/test_provider_security.py \
-            tests/unit/test_gemini_provider.py \
-            tests/unit/test_agent_skills_contract.py \
-            tests/unit/test_bundled_skills_shipped.py
+      # Run the whole unit suite, not a hand-listed subset. The old list named
+      # tests/unit/test_turn_runner_tool_loop.py, which was deleted with the
+      # turn_runner module in dca5e73 -- pytest then exited 4 ("collected 0
+      # items") and every other file in the list was skipped too, so CI
+      # reported failure without ever running a test. A directory can't rot
+      # that way, and it covers ~2700 tests instead of 8.
+      - name: Run unit tests
+        run: uv run python -m pytest tests/unit/ -q
 
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py

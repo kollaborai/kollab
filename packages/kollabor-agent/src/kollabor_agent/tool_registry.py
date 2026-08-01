@@ -50,13 +50,13 @@ class ToolRegistry:
             file_ops,
             git,
             hub,
+            mcp,
             on_demand,
             scratchpad,
             task,
             terminal,
             web,
             workspace,
-            mcp,
         )
 
         # Always explicitly register — handles post-reset reinit

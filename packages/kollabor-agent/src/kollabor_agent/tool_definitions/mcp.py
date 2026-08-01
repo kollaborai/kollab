@@ -3,7 +3,7 @@
 Tools for managing MCP server connections at runtime.
 """
 
-from ..tool_definition import ToolDefinition, ToolParameter
+from ..tool_definition import ToolDefinition
 from ..tool_registry import get_registry
 
 mcp_reload = ToolDefinition(

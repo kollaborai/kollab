@@ -5334,7 +5334,10 @@ class HubPlugin(BasePlugin):
         else:
             # Fallback: first 2000 chars of raw crystallized text
             crystallized = self._vault.get_crystallized()
-            crystal_section = (crystallized[:2000] + "\n...") if crystallized and len(crystallized) > 2000 else (crystallized or "(none yet)")
+            if crystallized and len(crystallized) > 2000:
+                crystal_section = crystallized[:2000] + "\n..."
+            else:
+                crystal_section = crystallized or "(none yet)"
 
         return (
             "You are reviewing your recent activity to extract durable insights.\n"

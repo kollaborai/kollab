@@ -17,7 +17,7 @@ Profiles define how you connect to LLM providers. Each profile specifies the pro
 | Field | Type | Description |
 |-------|------|-------------|
 | `provider` | string | `openai`, `anthropic`, `azure_openai`, `gemini`, `openai_responses`, `openrouter`, `custom`, `auto` |
-| `model` | string | Model identifier (e.g., `gpt-5.4`, `claude-sonnet-4-6`) |
+| `model` | string | Model identifier (e.g., `gpt-5.6-terra`, `claude-sonnet-5`) |
 | `api_key` | string | API authentication key |
 | `base_url` | string | Custom endpoint URL (for custom providers) |
 | `temperature` | float | Sampling randomness (0.0-2.0, default: 0.7) |
@@ -32,7 +32,7 @@ Create profiles on-the-fly using `KOLLAB_{NAME}_{FIELD}`:
 # Syntax: KOLLAB_<PROFILE_NAME>_<FIELD>=value
 KOLLAB_WORK_PROVIDER=anthropic
 KOLLAB_WORK_API_KEY="<your-anthropic-api-key>"
-KOLLAB_WORK_MODEL=claude-sonnet-4-6
+KOLLAB_WORK_MODEL=claude-sonnet-5
 KOLLAB_WORK_TEMPERATURE=0.5
 
 kollab --profile work
@@ -42,14 +42,13 @@ Profile names are case-insensitive but typically use uppercase for consistency.
 
 ### Managing Profiles Interactively
 
-The `/profile` command provides interactive profile management:
+Provider connections are created with `/setup`; day-to-day switching happens
+through `/llm` (model loadouts — see [features/loadouts.md](features/loadouts.md)):
 
 ```
-/profile list                    # List all profiles
-/profile show <name>             # Show profile details
-/profile set <name>              # Switch active profile
-/profile create                  # Create new profile interactively
-/profile delete <name>           # Delete a profile
+/llm                             # Browse and switch loadouts
+/llm <name>                      # Activate a loadout by name
+/llm new                         # Create a loadout (pre-filled form)
 ```
 
 Profiles are stored in `config.json` under the `kollabor.llm.profiles` key.
@@ -96,7 +95,7 @@ When settings conflict, the priority is:
 local > project > global > defaults
 ```
 
-Changes via `/profile` and other commands save to the highest-priority existing config.
+Changes via `/llm`, `/setup`, and other commands save to the highest-priority existing config.
 
 ## Configuration Structure
 
@@ -294,4 +293,4 @@ Plugins can define their own configuration sections, which merge into the main c
 }
 ```
 
-Plugin config schemas are auto-discovered and validated. Use `/profile` or edit `config.json` directly to modify plugin settings.
+Plugin config schemas are auto-discovered and validated. Use `/config` or edit `config.json` directly to modify plugin settings.

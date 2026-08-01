@@ -110,7 +110,39 @@ class TestMessageHandler(unittest.TestCase):
             self.handler.handle_user_input(data, event)
         )
 
-        self.coordinator.process_user_input.assert_called_once_with("hello")
+        self.coordinator.process_user_input.assert_called_once_with(
+            "hello", pre_displayed=False
+        )
+        self.assertEqual(result, {"status": "processed"})
+
+    def test_handle_user_input_pre_displays_while_startup_pending(self):
+        """Non-empty input should echo immediately while startup is still pending."""
+        startup_ready = asyncio.Event()
+
+        def get_service(name):
+            if name == "startup_ready":
+                return startup_ready
+            return None
+
+        self.coordinator.event_bus.get_service = MagicMock(side_effect=get_service)
+        self.coordinator.message_display_service.display_user_message = MagicMock()
+
+        async def release_startup():
+            await asyncio.sleep(0.01)
+            startup_ready.set()
+
+        self.loop.create_task(release_startup())
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_user_input({"message": "hello"}, MagicMock())
+        )
+
+        self.coordinator.message_display_service.display_user_message.assert_called_once_with(
+            "hello"
+        )
+        self.coordinator.process_user_input.assert_called_once_with(
+            "hello", pre_displayed=True
+        )
         self.assertEqual(result, {"status": "processed"})
 
     def test_handle_user_input_empty(self):

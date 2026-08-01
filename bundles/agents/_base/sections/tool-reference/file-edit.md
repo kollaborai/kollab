@@ -23,7 +23,9 @@ delete files:
   <delete><file>path/to/old_file.py</file></delete>
 
 safety features:
-  [ok] auto backups: .bak before edits, .deleted before deletion
+  [ok] auto rollback: the file is restored if a write or syntax check fails
+  [ok] backups live outside the project (~/.kollab/projects/<project>/backups/)
+       and are deleted on success -- never write .bak files yourself
   [ok] protected files: kollabor/, main.py, .git/, venv/
   [ok] python syntax validation with automatic rollback on errors
   [ok] file size limits: 10MB edit, 5MB create

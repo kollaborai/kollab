@@ -112,7 +112,7 @@ class ToolDefinition:
 
     safety_features: List[str] = field(default_factory=list)
     """Safety guarantees the tool provides.
-    E.g. 'auto backups: .bak before edits'"""
+    E.g. 'auto rollback: the file is restored if the write fails'"""
 
     key_rules: List[str] = field(default_factory=list)
     """Critical usage rules the agent must follow.

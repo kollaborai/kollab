@@ -24,6 +24,7 @@ from .models import (
 )
 from .registry import register_provider
 from .transformers import AnthropicResponseTransformer
+from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -420,8 +421,12 @@ class AnthropicProvider(LLMProvider):
             "model": self.model,
             "messages": merged_messages,
             "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
         }
+
+        # Sampling params are a 400 on reasoning models (Claude 4.7+, Fable 5,
+        # Mythos 5); effort is opt-in. Both decided in providers/tuning.py.
+        request.update(sampling_params(self.config, self.model))
+        request.update(effort_params(self.config, EffortStyle.ANTHROPIC))
 
         # Add system message as cacheable content block
         # Anthropic prompt caching requires content block array format
@@ -433,10 +438,6 @@ class AnthropicProvider(LLMProvider):
                     "cache_control": {"type": "ephemeral"},
                 }
             ]
-
-        # Add optional parameters
-        if self.config.top_p is not None:
-            request["top_p"] = self.config.top_p
 
         # Normalize tools to Anthropic format (input_schema required)
         # Mark last tool as cacheable breakpoint for prompt caching

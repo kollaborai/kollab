@@ -75,8 +75,7 @@ file_read = ToolDefinition(
 file_edit = ToolDefinition(
     name="file-edit",
     description=(
-        "Find and replace text in a file. Replaces ALL occurrences "
-        "of the pattern."
+        "Find and replace text in a file. Replaces ALL occurrences " "of the pattern."
     ),
     category="file_ops",
     risk_level="medium",
@@ -106,16 +105,14 @@ file_edit = ToolDefinition(
     examples=[
         "<edit><file>src/main.py</file><find>old_func</find><replace>new_func</replace></edit>",
     ],
-    result_format=(
-        "Reports number of replacements made. Creates .bak backup."
-    ),
+    result_format=("Reports number of replacements made."),
     error_modes=[
         "File not found",
         "Pattern not found in file",
         "Syntax error after edit (auto-rollback)",
     ],
     safety_features=[
-        "auto backups: .bak before edits",
+        "auto rollback: the file is restored if the write or syntax check fails",
         "python syntax validation with automatic rollback on errors",
         "protected files: kollabor/, main.py, .git/, venv/",
         "file size limits: 10MB edit, 5MB create",
@@ -155,7 +152,7 @@ file_create = ToolDefinition(
         ),
     ],
     examples=[
-        "<create><file>src/new_module.py</file><content>\"\"\"New module.\"\"\"</content></create>",
+        '<create><file>src/new_module.py</file><content>"""New module."""</content></create>',
     ],
     result_format="Confirms file created with path.",
     error_modes=[
@@ -163,7 +160,7 @@ file_create = ToolDefinition(
         "Cannot write to path",
     ],
     safety_features=[
-        "auto backups: .bak before edits, .deleted before deletion",
+        "auto rollback: an overwritten file is restored if the write fails",
         "file size limits: 5MB create",
     ],
     anti_patterns=[
@@ -176,8 +173,7 @@ file_create = ToolDefinition(
 file_create_overwrite = ToolDefinition(
     name="file-create-overwrite",
     description=(
-        "Create or overwrite a file with content. Creates backup "
-        "if file exists."
+        "Create or overwrite a file with content. Creates backup " "if file exists."
     ),
     category="file_ops",
     risk_level="medium",
@@ -228,7 +224,7 @@ file_delete = ToolDefinition(
         "<delete><file>src/old_module.py</file></delete>",
     ],
     safety_features=[
-        "auto backups: .deleted before deletion",
+        "recovery copy kept outside the project before deletion",
     ],
     result_format="Confirmation that file was deleted.",
 )
@@ -353,8 +349,7 @@ file_append = ToolDefinition(
 file_insert_after = ToolDefinition(
     name="file-insert-after",
     description=(
-        "Insert content after a pattern in a file. Pattern must "
-        "match exactly."
+        "Insert content after a pattern in a file. Pattern must " "match exactly."
     ),
     category="file_ops",
     risk_level="medium",
@@ -382,7 +377,7 @@ file_insert_after = ToolDefinition(
         ),
     ],
     examples=[
-        '<insert_after><file>main.py</file><pattern>class MyClass:</pattern>'
+        "<insert_after><file>main.py</file><pattern>class MyClass:</pattern>"
         '<content>    """Docstring."""</content></insert_after>',
     ],
     key_rules=[
@@ -396,8 +391,7 @@ file_insert_after = ToolDefinition(
 file_insert_before = ToolDefinition(
     name="file-insert-before",
     description=(
-        "Insert content before a pattern in a file. Pattern must "
-        "match exactly."
+        "Insert content before a pattern in a file. Pattern must " "match exactly."
     ),
     category="file_ops",
     risk_level="medium",
@@ -425,8 +419,8 @@ file_insert_before = ToolDefinition(
         ),
     ],
     examples=[
-        '<insert_before><file>main.py</file><pattern>def main():</pattern>'
-        '<content># Entry point\n</content></insert_before>',
+        "<insert_before><file>main.py</file><pattern>def main():</pattern>"
+        "<content># Entry point\n</content></insert_before>",
     ],
     key_rules=[
         "pattern must be UNIQUE — errors if 0 or 2+ matches",
@@ -486,9 +480,7 @@ directory_remove = ToolDefinition(
 # --- file-grep ---
 file_grep = ToolDefinition(
     name="file-grep",
-    description=(
-        "Search for a pattern in a file and return matching lines."
-    ),
+    description=("Search for a pattern in a file and return matching lines."),
     category="file_ops",
     risk_level="low",
     requires_permission=False,

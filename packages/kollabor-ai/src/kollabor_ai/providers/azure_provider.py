@@ -17,6 +17,7 @@ from .models import (
 )
 from .openai_provider import OpenAIProvider
 from .registry import register_provider
+from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -232,13 +233,13 @@ class AzureOpenAIProvider(OpenAIProvider):
             "model": self.config.deployment_id or self.model,
             "messages": messages,
             "stream": stream,
-            "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
 
-        # Add optional parameters
-        if self.config.top_p is not None:
-            params["top_p"] = self.config.top_p
+        # Sampling params + opt-in effort. Matched on the model name, not the
+        # Azure deployment id.
+        params.update(sampling_params(self.config, self.model))
+        params.update(effort_params(self.config, EffortStyle.OPENAI))
 
         # Transform tools to OpenAI format
         if tools:

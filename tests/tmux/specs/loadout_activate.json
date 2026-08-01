@@ -1,0 +1,37 @@
+{
+  "name": "loadout-activate",
+  "description": "Real-flow spec for /loadout with a configured provider: implicit models listed, filter-as-you-type (incl. letters n/e/d), Enter activates, confirmation reaches chat.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "show_captures": false,
+    "app_init_sleep": 8,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.25,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯|>", "timeout": 15, "description": "app ready" },
+    { "action": "slash_command", "command": "llm" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "wait_for", "pattern": "Models", "timeout": 15, "description": "implicit model sections rendered" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "OpenAI", "description": "provider section title present" },
+    { "action": "assert_contains", "pattern": "gpt-5.6", "description": "implicit catalog models listed" },
+    { "action": "section", "name": "filter typing including reserved-letter e" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "type", "text": "terra", "delay": 0.15 },
+    { "action": "wait_for", "pattern": "filter: terra", "timeout": 8, "description": "filter accepted all 5 letters" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "gpt-5.6-terra", "description": "matching model visible" },
+    { "action": "assert_not_contains", "pattern": "gpt-5.4-mini", "description": "non-matching models filtered out" },
+    { "action": "section", "name": "activate filtered model" },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "loadout active", "timeout": 20, "description": "activation confirmation rendered" },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "❯|>", "timeout": 8, "description": "returned to input prompt" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "gpt-5.6-terra", "description": "chat success message names the activated loadout" }
+  ]
+}

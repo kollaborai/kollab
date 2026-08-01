@@ -1,6 +1,7 @@
 """Tests for startup banner rendering."""
 
 import re
+from pathlib import Path
 
 from kollabor_tui import terminal_state
 from kollabor_tui.design_system import T, solid_fg
@@ -18,6 +19,9 @@ def test_startup_banner_uses_compact_header(monkeypatch):
     """Startup banner is compact, width-safe, and not the old block logo."""
     monkeypatch.setattr(terminal_state, "get_global_width", lambda: 72)
 
+    # Build the path from the real home dir: the banner abbreviates $HOME to
+    # "~", so a hardcoded /Users/<someone> path only collapses on that one
+    # machine and renders in full everywhere else.
     banner = BannerRenderer.create_kollabor_banner(
         "v1.2.3",
         context={
@@ -25,7 +29,7 @@ def test_startup_banner_uses_compact_header(monkeypatch):
             "model": "gpt-5.5",
             "profile": "work",
             "skills": 4,
-            "directory": "/Users/malmazan/dev/kollab",
+            "directory": str(Path.home() / "dev" / "kollab"),
         },
     )
     plain_lines = [visible(line) for line in banner.strip("\n").splitlines()]

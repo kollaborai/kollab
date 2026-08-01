@@ -1,6 +1,7 @@
 """Profile validation functions for profile wizard.
 
-Extracted from kollabor/commands/profile_command.py Phase 8A.
+Extracted from the legacy profile command (Phase 8A); the command is gone,
+the validation helpers remain shared.
 Pure validator functions with no UI dependencies.
 
 NOTE: Add these exports to __init__.py:

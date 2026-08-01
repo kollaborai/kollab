@@ -20,7 +20,14 @@ from pathlib import Path
 REGISTRY = Path(__file__).resolve().parents[1] / "bundles" / "data" / "models.json"
 MAX_AGE_DAYS = 120
 REQUIRED_FIELDS = ("provider", "context_window")
-BOOL_FIELDS = ("supports_tools", "supports_thinking", "supports_streaming", "supports_vision")
+BOOL_FIELDS = (
+    "supports_tools",
+    "supports_thinking",
+    "supports_streaming",
+    "supports_vision",
+    "supports_sampling",
+    "retired",
+)
 
 
 def validate(data: dict) -> list[str]:
@@ -42,7 +49,9 @@ def validate(data: dict) -> list[str]:
             errors.append(f"{name}: context_window must be a positive int, got {cw!r}")
         out = info.get("max_output")
         if out is not None and (not isinstance(out, int) or out <= 0):
-            errors.append(f"{name}: max_output must be a positive int or null, got {out!r}")
+            errors.append(
+                f"{name}: max_output must be a positive int or null, got {out!r}"
+            )
         for field in BOOL_FIELDS:
             if field in info and not isinstance(info[field], bool):
                 errors.append(f"{name}: {field} must be true/false")

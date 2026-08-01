@@ -13,7 +13,7 @@ Profiles are named LLM configurations that define how you connect to AI provider
 Profile activation follows this priority (highest to lowest):
 
 1. CLI `--profile` flag (e.g., `kollab --profile openai-oauth`)
-2. Persisted `active_profile` from config.json (set by `/profile set` or `/config`)
+2. Persisted `active_profile` from config.json (set by `/llm` or `/config`)
 3. OAuth profile auto-registration (openai-oauth from stored tokens)
 4. Environment variable auto-detection (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
 5. Fallback to `default` profile
@@ -23,7 +23,7 @@ important: OAuth profiles are registered BEFORE env detection, so
 
 ### Persisted Active Profile
 
-When you use `/profile set <name>` or save via `/config`, the active
+When you activate a loadout via `/llm` or save via `/config`, the active
 profile name is persisted to config.json. On startup, this persisted
 value is restored. If the persisted profile isn't found (e.g., an
 oauth profile before tokens are loaded), a WARN log is emitted and the
@@ -92,39 +92,22 @@ Detection order:
 2. OpenAI (keys starting with `sk-`)
 3. Falls back to OpenAI if unknown format
 
-## Profile Command
+## Switching and Presets: `/llm`
 
-The `/profile` command (aliases: `/prof`, `/llm`) manages profiles interactively:
-
-```
-/profile list                    # List all profiles with details
-/profile set <name>              # Switch active profile
-/profile create                  # Create new profile (interactive wizard)
-```
-
-note: `show` and `delete` subcommands are not implemented.
-
-### Creating Profiles Interactively
+The `/profile` command was replaced by `/llm` (aliases: `/loadout`, `/ld`).
+Provider connections are created once with `/setup`; `/llm` handles everything
+after that — browsing models, switching, and parameterized presets
+("loadouts"). See [loadouts.md](loadouts.md).
 
 ```
-/profile create
+/llm                             # Browse and switch loadouts
+/llm <name>                      # Activate a loadout by name
+/llm new                         # Create a loadout (pre-filled form)
 ```
 
-Prompts you for:
-1. Profile name (e.g., `work-azure`)
-2. Provider (auto, openai, anthropic, azure_openai, gemini, openrouter, custom)
-3. API key (masked input, shown as `<your-api-key>-xyz`)
-4. Model name
-5. Temperature (0.0-2.0)
-6. Max tokens
-7. Base URL (for custom providers)
-8. Organization ID (OpenAI only)
-
-After basic setup, you can configure advanced settings:
-- Description
-- Timeout (milliseconds, 0 = no timeout)
-- Tool calling support
-- Streaming enabled
+Azure OpenAI and fully-custom endpoints are added by hand under
+`kollabor.llm.profiles` in `config.json` — see
+[../providers.md](../providers.md).
 
 ## Environment Variable Pattern
 
@@ -139,13 +122,14 @@ KOLLAB_{NAME}_{FIELD}=value
 | Field | Description | Example |
 |-------|-------------|---------|
 | `PROVIDER` | Provider type | `anthropic`, `openai`, `custom`, `azure_openai`, `gemini`, `openai_responses`, `openrouter` |
-| `MODEL` | Model identifier | `claude-sonnet-4-6`, `gpt-5.4` |
+| `MODEL` | Model identifier | `claude-sonnet-5`, `gpt-5.6-terra` |
 | `API_KEY` | Authentication key | `<your-anthropic-api-key>` |
 | `BASE_URL` | Custom endpoint | `http://localhost:11434/v1` |
-| `TEMPERATURE` | Sampling randomness | `0.7` (0.0-2.0) |
+| `TEMPERATURE` | Sampling randomness | `0.7` (0.0-2.0; ignored on models that reject sampling params) |
 | `MAX_TOKENS` | Response length limit | `4096` |
 | `TIMEOUT` | Request timeout | `30000` (milliseconds, 0 = none) |
 | `TOP_P` | Nucleus sampling | `0.9` (0.0-1.0) |
+| `EFFORT` | Reasoning effort | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (unset = model default) |
 | `STREAMING` | Stream responses | `true` / `false` |
 | `SUPPORTS_TOOLS` | Enable tool calling | `true` / `false` |
 
@@ -155,7 +139,7 @@ KOLLAB_{NAME}_{FIELD}=value
 ```bash
 export KOLLAB_WORK_PROVIDER=anthropic
 export KOLLAB_WORK_API_KEY="<your-anthropic-api-key>"
-export KOLLAB_WORK_MODEL=claude-sonnet-4-6
+export KOLLAB_WORK_MODEL=claude-sonnet-4-6   # accepts temperature
 export KOLLAB_WORK_TEMPERATURE=0.5
 
 kollab --profile work
@@ -175,7 +159,7 @@ kollab --profile local
 ```bash
 export KOLLAB_ENTERPRISE_PROVIDER=azure_openai
 export KOLLAB_ENTERPRISE_API_KEY=...
-export KOLLAB_ENTERPRISE_MODEL=gpt-5.4
+export KOLLAB_ENTERPRISE_MODEL=gpt-5.6-terra
 export KOLLAB_ENTERPRISE_BASE_URL=https://your-resource.openai.azure.com
 export KOLLAB_ENTERPRISE_API_VERSION=2025-01-01-preview
 
@@ -210,16 +194,15 @@ Example for model field with profile named `work`:
 
 ### Save to Global Config
 ```bash
-/profile create
-# ... fill in wizard ...
+/setup
+# ... walk the wizard ...
 kollab --profile work    # Profile saved to ~/.kollab/config.json
 ```
 
 ### Save to Project Config
-```bash
-/profile create --local
-# Profile saved to .kollab/config.json (project-specific)
-```
+
+Add the profile under `kollabor.llm.profiles` in `.kollab/config.json`
+(project-specific).
 
 ### Store API Key in Config
 
@@ -267,7 +250,7 @@ provider env var or copy the profile to a named profile and save from `/config`.
 ### Persisting Active Profile
 
 The active profile name is persisted when you:
-- Use `/profile set <name>`
+- Activate a loadout via `/llm <name>`
 - Edit config via `/config` and modify `kollabor.llm.active_profile`
 
 On startup, this persisted value is restored. This survives restarts
@@ -316,7 +299,7 @@ Once logged in, the profile is available immediately:
 kollab --profile openai-oauth
 
 # Set as active profile
-/profile set openai-oauth
+/llm openai-oauth
 
 # Save to config for auto-activation on startup
 kollab --profile openai-oauth --save openai-oauth
@@ -328,10 +311,10 @@ registered and attempts to use it will fall back to "default".
 
 ## Switching Profiles at Runtime
 
-Use `/profile set` to switch without restarting:
+Use `/llm` to switch without restarting:
 
 ```
-/profile set local
+/llm local
 ```
 
 Profile switch takes effect immediately for the next message.
@@ -357,7 +340,7 @@ export KOLLAB_LOCAL_MODEL=llama3.3
 # Cheap: Gemini for quick tasks
 export KOLLAB_CHEAP_PROVIDER=gemini
 export KOLLAB_CHEAP_API_KEY=...
-export KOLLAB_CHEAP_MODEL=gemini-3.1-pro-preview
+export KOLLAB_CHEAP_MODEL=gemini-3.6-flash
 export KOLLAB_CHEAP_MAX_TOKENS=1024
 ```
 
@@ -439,7 +422,7 @@ Profiles are stored in `config.json`:
 ## Built-in Profiles
 
 Only the fallback profile is built in. Provider-specific profiles are created
-by `/setup` (or manually through `/profile`):
+by `/setup` (or manually in `config.json`):
 
 | Name | Provider | Model | Description |
 |------|----------|-------|-------------|
@@ -454,10 +437,10 @@ When provider env vars are set, ephemeral auto-profiles are created:
 
 | Env Var | Profile Name | Provider | Model |
 |---------|--------------|----------|-------|
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | anthropic-auto | anthropic | claude-sonnet-4-6 |
-| `OPENAI_API_KEY` | openai-auto | openai | gpt-5.4 |
-| `AZURE_OPENAI_API_KEY` | azure-auto | azure_openai | gpt-5.4 |
-| `GEMINI_API_KEY` | gemini-auto | gemini | gemini-3.1-pro-preview |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | anthropic-auto | anthropic | claude-sonnet-5 |
+| `OPENAI_API_KEY` | openai-auto | openai | gpt-5.6-terra |
+| `AZURE_OPENAI_API_KEY` | azure-auto | azure_openai | gpt-5.6-terra |
+| `GEMINI_API_KEY` | gemini-auto | gemini | gemini-3.6-flash |
 | `OPENROUTER_API_KEY` | openrouter-auto | openrouter | deepseek/deepseek-v3.2 |
 | `XAI_API_KEY` | xai-auto | custom | grok-4-1-fast-reasoning |
 | `ZAI_API_KEY` | zai-auto | custom | glm-5 |

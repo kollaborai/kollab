@@ -65,9 +65,37 @@ class TestPricingRegistryMatching(unittest.TestCase):
 
     def test_no_match_returns_none(self):
         self.assertIsNone(self.reg.get_pricing("openai", "nonexistent-model-999"))
+        self.assertIsNone(self.reg.get_pricing("nobody", "nonexistent-model-999"))
 
-    def test_unknown_provider_returns_none(self):
-        self.assertIsNone(self.reg.get_pricing("nobody", "gpt-4o"))
+    def test_known_model_resolves_through_any_provider(self):
+        # Rates belong to the model, not the transport: GLM served through an
+        # Anthropic-compatible gateway still costs Z.AI's price. Falling back
+        # to another provider's entry beats a cost display that reads zero.
+        p = self.reg.get_pricing("anthropic", "glm-5")
+        self.assertIsNotNone(p)
+        self.assertEqual(p.prompt_per_token, 0.000001)  # the "custom" entry
+        self.assertIsNotNone(self.reg.get_pricing("nobody", "gpt-4o"))
+
+    def test_cross_provider_fallback_is_deterministic(self):
+        # Load order must not decide the rate. glm-5.2 is provider "custom" in
+        # the model registry, so that entry wins over an unrelated proxy's.
+        for order in (("custom", "proxy"), ("proxy", "custom")):
+            PricingRegistry.reset()
+            reg = PricingRegistry()
+            for provider in order:
+                rate = 0.000001 if provider == "custom" else 0.000009
+                reg.register_provider_pricing(
+                    provider, "glm-5.2", ModelPricing(rate, rate * 3, 0.5)
+                )
+            resolved = reg.get_pricing("anthropic", "glm-5.2")
+            self.assertEqual(resolved.prompt_per_token, 0.000001, order)
+
+    def test_own_provider_entry_wins_over_fallback(self):
+        self.reg.register_provider_pricing(
+            "proxy", "gpt-4o", ModelPricing(0.00009, 0.0009, 0.5)
+        )
+        p = self.reg.get_pricing("proxy", "gpt-4o")
+        self.assertEqual(p.prompt_per_token, 0.00009)
 
 
 class TestPricingRegistryLoad(unittest.TestCase):
@@ -81,6 +109,33 @@ class TestPricingRegistryLoad(unittest.TestCase):
         self.assertIsNotNone(p)
         p2 = reg.get_pricing("anthropic", "claude-sonnet-4-6")
         self.assertIsNotNone(p2)
+
+    def test_model_registry_seeds_pricing_and_wins_over_stale_file(self):
+        """Every registry model must price, at the registry's rate.
+
+        default_pricing.json is hand-maintained and had drifted (Opus 4.7 at
+        the old 15/75), so models.json -- which is staleness-gated -- wins.
+        """
+        reg = PricingRegistry()
+        reg.load_defaults()
+
+        opus = reg.get_pricing("anthropic", "claude-opus-4-7")
+        self.assertAlmostEqual(opus.prompt_per_token * 1_000_000, 5.00)
+        self.assertAlmostEqual(opus.completion_per_token * 1_000_000, 25.00)
+
+        # models added by a registry refresh price without touching this file
+        for provider, model in (
+            ("openai", "gpt-5.6-terra"),
+            ("anthropic", "claude-opus-5"),
+            ("gemini", "gemini-3.6-flash"),
+            ("custom", "grok-4.5"),
+            # aliased surfaces: codex backend + azure serve openai models
+            ("openai_responses", "gpt-5.6-sol"),
+            ("azure_openai", "gpt-5.6-terra"),
+        ):
+            self.assertIsNotNone(
+                reg.get_pricing(provider, model), f"{provider}/{model}"
+            )
 
 
 class TestCostCalculator(unittest.TestCase):

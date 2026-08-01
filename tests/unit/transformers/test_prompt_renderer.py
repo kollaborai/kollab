@@ -131,6 +131,27 @@ Some text here
 
         self.assertIn("timed out", result.lower())
 
+
+    def test_shell_alias_trender_uses_cached_aliases(self):
+        """shell_aliases trender should not trigger a second alias detection."""
+        alias_utils = {
+            "get_cached_aliases": unittest.mock.MagicMock(
+                return_value={"grep": "rg"}
+            ),
+            "format_aliases_for_prompt": unittest.mock.MagicMock(
+                return_value="alias block"
+            ),
+        }
+        renderer = PromptRenderer(timeout=1, shell_alias_utils=alias_utils)
+
+        result = renderer.render('before <trender type="shell_aliases" /> after')
+
+        self.assertIn("alias block", result)
+        alias_utils["get_cached_aliases"].assert_called_once_with()
+        alias_utils["format_aliases_for_prompt"].assert_called_once_with(
+            {"grep": "rg"}
+        )
+
     def test_special_characters_in_output(self):
         """Test handling of special characters in command output."""
         prompt = '<trender>echo "special chars: <>&"</trender>'

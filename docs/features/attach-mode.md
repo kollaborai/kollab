@@ -64,7 +64,7 @@ Two implementations:
 - LocalStateService: in-process direct access (local mode)
 - RemoteStateService: RPC wrapper around daemon's LocalStateService (attach mode)
 
-Commands and widgets use the protocol, never the implementation. This is why /profile set, /agent set, /skills load, /permissions, /mcp, /resume, /restart all work in both modes without code changes.
+Commands and widgets use the protocol, never the implementation. This is why /llm, /agent set, /skills load, /permissions, /mcp, /resume, /restart all work in both modes without code changes.
 
 ### StateService Methods
 

@@ -346,6 +346,11 @@ class TestSystemCommandHandler(unittest.TestCase):
             "llm_service": object(),
         }
         handler = self._make_handler(extra_services=services)
+        # Pin the git probe: `git branch --show-current` is empty on a detached
+        # HEAD, which is exactly what actions/checkout produces for a PR. Left
+        # ambient, doctor warns and the verdict is "degraded" on every CI run
+        # while passing on a developer's branch.
+        handler._read_git_branch = lambda cwd: "main"
         result = _safe_run(handler.handle_doctor(_make_slash_command()))
         _assert_result(result)
         from kollabor_events.models import CommandResult
@@ -513,38 +518,6 @@ class TestAgentCommandHandler(unittest.TestCase):
         am.list_agents.return_value = []
         handler = self._make_handler(agent_manager=am)
         result = _safe_run(handler.handle_agent(_make_slash_command()))
-        _assert_result(result)
-
-
-# ---------------------------------------------------------------------------
-# ProfileCommandHandler (/profile)
-# ---------------------------------------------------------------------------
-
-
-class TestProfileCommandHandler(unittest.TestCase):
-    def _make_handler(self, profile_manager=None):
-        from kollabor.commands.system_commands.handlers.profile import (
-            ProfileCommandHandler,
-        )
-
-        eb = _make_event_bus()
-        return ProfileCommandHandler(
-            command_registry=MagicMock(),
-            event_bus=eb,
-            profile_manager=profile_manager,
-        )
-
-    def test_profile_no_profile_manager(self):
-        handler = self._make_handler(profile_manager=None)
-        result = _safe_run(handler.handle_profile(_make_slash_command()))
-        _assert_result(result)
-
-    def test_profile_list(self):
-        pm = MagicMock()
-        pm.list_profiles.return_value = []
-        pm.get_current_profile.return_value = None
-        handler = self._make_handler(profile_manager=pm)
-        result = _safe_run(handler.handle_profile(_make_slash_command("list")))
         _assert_result(result)
 
 

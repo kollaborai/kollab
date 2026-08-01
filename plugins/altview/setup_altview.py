@@ -17,7 +17,7 @@ reflect real behavior.
 
 OpenAI's ChatGPT sign-in (OAuth) is delegated back to the existing `/login`
 flow: selecting it sets ``result_launch_oauth`` and exits. Azure / fully
-custom setups are routed to ``/profile`` via ``result_advanced``.
+custom setups are routed to manual config.json editing via ``result_advanced``.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class ProviderChoice:
     base_url_required: bool = False  # endpoint must be non-empty (custom)
     base_url_advanced: bool = True  # endpoint is optional/prefilled (press enter)
     oauth: bool = False  # delegate to /login instead of asking for a key
-    advanced: bool = False  # route to /profile instead of finishing here
+    advanced: bool = False  # route to manual config editing instead of finishing here
 
 
 PROVIDERS: List[ProviderChoice] = [
@@ -66,7 +66,7 @@ PROVIDERS: List[ProviderChoice] = [
         default_base_url="https://api.anthropic.com",
         key_hint="sk-ant-...",
         key_url="https://console.anthropic.com/settings/keys",
-        default_model="claude-sonnet-4-6",
+        default_model="claude-sonnet-5",
     ),
     ProviderChoice(
         key="openai",
@@ -76,7 +76,7 @@ PROVIDERS: List[ProviderChoice] = [
         default_base_url="https://api.openai.com/v1",
         key_hint="sk-... / sk-proj-...",
         key_url="https://platform.openai.com/api-keys",
-        default_model="gpt-5.4",
+        default_model="gpt-5.6",
     ),
     ProviderChoice(
         key="openai-chatgpt",
@@ -93,7 +93,7 @@ PROVIDERS: List[ProviderChoice] = [
         default_base_url="https://generativelanguage.googleapis.com",
         key_hint="AIza...",
         key_url="https://aistudio.google.com/app/apikey",
-        default_model="gemini-3.1-pro",
+        default_model="gemini-3.6-flash",
     ),
     ProviderChoice(
         key="openrouter",
@@ -120,9 +120,9 @@ PROVIDERS: List[ProviderChoice] = [
     ),
     ProviderChoice(
         key="advanced",
-        label="Azure / Advanced  ->  use /profile",
+        label="Azure / Advanced  ->  manual config",
         provider="",
-        blurb="Azure OpenAI and fully-custom profiles are set up via /profile.",
+        blurb="Azure OpenAI and fully-custom endpoints are configured in config.json.",
         advanced=True,
     ),
 ]
@@ -169,7 +169,9 @@ def _load_model_suggestions(provider_value: str) -> List[str]:
     names = [
         name
         for name, meta in models.items()
-        if isinstance(meta, dict) and meta.get("provider") == provider_value
+        if isinstance(meta, dict)
+        and meta.get("provider") == provider_value
+        and not meta.get("retired")
     ]
     # Stable, readable order (registry dicts are insertion-ordered already).
     return names
@@ -575,7 +577,7 @@ class SetupAltView(AltView):
             # Activate through the state service first. In attach mode this is
             # the RPC bridge to the daemon's ProfileManager; using only the
             # client-side LLM coordinator leaves the daemon with the previous
-            # profile until restart, so /profile and the status widget lag.
+            # profile until restart, so /loadout and the status widget lag.
             activated = False
             state_service = None
             if self._event_bus and hasattr(self._event_bus, "get_service"):

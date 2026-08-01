@@ -26,7 +26,10 @@ Monorepo with extracted packages:
 - `conversation_logger.py` - Conversation persistence (KollaborConversationLogger)
 - `conversation_manager.py` - Conversation state and history
 - `model_router.py` - Model selection and routing
-- `profile_manager.py` - LLM profile management
+- `model_registry.py` - Reads `bundles/data/models.json`: context windows, `supports_sampling`, per-provider model lists. Lookup is **longest-prefix match** on the model string, so every point release whose specs differ from its family needs its own entry (`grok-4.5` vs `grok-4`). `supports_sampling: false` means the model 400s on temperature/top_p/top_k and every provider omits them. Freshness gated by `scripts/validate_models.py`.
+- `model_catalog.py` - Live "what models does this provider offer?" for the `/model` picker (codex backend, OpenRouter, Anthropic, any OpenAI-compatible `{base_url}/models`). Never raises; empty list on failure.
+- `pricing_registry.py` - Cost rates. Seeded from `models.json` (authoritative) on top of `default_pricing.json`, then `~/.kollab/pricing.json`. Falls back across providers for the same model id, since rates belong to the model not the transport.
+- `profile_manager.py` - LLM profile management (`EFFORT_LEVELS`, per-field env resolution)
 - `response_processor.py` - Response processing
 - `response_parser.py` - Response parsing (includes Question Gate detection)
 - `prompt_renderer.py` - Dynamic system prompt rendering
@@ -526,9 +529,19 @@ python -m twine upload --repository testpypi dist/*
 }
 ```
 
-2. **Available actions:** `start_app`, `slash_command`, `type`, `send_keys`, `capture`, `assert_contains`, `assert_not_contains`, `sleep`, `section`
+2. **Available actions:** `start_app`, `slash_command`, `type`, `send_keys`, `capture`, `assert_contains`, `assert_not_contains`, `wait_for`, `shell`, `escape`, `enter`, `arrow`, `control`, `sleep`, `section`
+   - `send_keys` types **literal text** — use `escape` / `enter` / `arrow` for special keys
+   - `slash_command` sends `/`, waits for the palette, types the command — prefer it over `type` + `enter`
+   - prefer `wait_for` over `sleep` before an assertion, and pass `--no-daemon` in `config.command` so the spec can't attach to a developer's live daemon
 
 3. **Run:** `tests/tmux/lib/test_runner.sh tests/tmux/specs/your-test.json`
+
+**Never let a test touch the OS keyring.** On macOS every read/store of a
+missing Keychain entry pops a system dialog, so a spec that boots the app with
+an `api_key` in its config prompts on every run. The harness exports
+`KOLLAB_NO_KEYRING=1` for the app and every `shell` step, and
+`keyring_enabled()` (`kollabor_ai.providers.security`) is off automatically
+under pytest. Any new harness must do the same.
 
 4. **Report:**
 ```
@@ -919,9 +932,10 @@ set_color_support(ColorSupport.EXTENDED)
 
 **Built-in:**
 - `/help` - Show available commands
-- `/setup` (aliases: `/onboard`, `/wizard`) - Guided fullscreen wizard to configure a new LLM provider (pick provider → API key → endpoint → model → optional live test → save + activate). New-user entry point; ChatGPT OAuth delegates to `/login`, Azure/advanced routes to `/profile`.
+- `/setup` (aliases: `/onboard`, `/wizard`) - Guided fullscreen wizard to configure a new LLM provider (pick provider → API key → endpoint → model → optional live test → save + activate). New-user entry point; ChatGPT OAuth delegates to `/login`, Azure/advanced is configured manually in `config.json` (see `docs/providers.md`).
 - `/save` - Save conversation (transcript|markdown|jsonl|clipboard|both|local)
-- `/profile` (aliases: `/prof`, `/llm`) - Manage LLM profiles (list|set|create)
+- `/model` (aliases: `/mod`, `/m`) - Fullscreen model picker for the active provider (list|search|set|effort). The list is seeded from `bundles/data/models.json` (retired entries filtered) and merged with the provider's live catalog when one exists. `/model effort [level]` shows or sets reasoning effort — see `docs/features/reasoning-effort.md`.
+- `/llm` (aliases: `/loadout`, `/ld`) - Fullscreen loadout picker: provider + model + param presets. Every `models.json` model for a configured provider is an implicit loadout; `/llm <name>` activates one directly, `/llm new` opens a pre-filled create form, and `kollab --profile <loadout>` resolves loadouts at launch — see `docs/features/loadouts.md`.
 - `/permissions` (aliases: `/perms`, `/security`) - Manage permissions (show|default|strict|trust|stats|clear)
 - `/terminal` (aliases: `/tmux`, `/term`, `/t`) - Manage tmux sessions (new|view|list|kill)
 - `/hub` (aliases: `/mesh`) - Agent hub (status|msg|broadcast|feed|console|org|vault|whoami)

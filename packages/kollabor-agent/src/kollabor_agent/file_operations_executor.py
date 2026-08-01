@@ -21,15 +21,38 @@ import ast
 import logging
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kollabor_config.config_utils import get_config_directory_candidates
+from kollabor_config.config_utils import (
+    get_config_directory_candidates,
+    get_project_data_dir,
+)
 
 logger = logging.getLogger(__name__)
 
 # Global kollab config directories - allowed for read operations
 KOLLAB_CONFIG_DIRS = get_config_directory_candidates()
+
+# Suffixes an agent must not hand-write into the project: backups are automatic
+# and stored outside the tree (see create_backup).
+MANUAL_BACKUP_SUFFIXES = (".bak", ".backup", ".orig", ".deleted", ".old", ".save")
+
+# Operations that create or modify a file on disk.
+WRITE_OPERATION_TYPES = frozenset(
+    {
+        "file_edit",
+        "file_create",
+        "file_create_overwrite",
+        "file_move",
+        "file_copy",
+        "file_copy_overwrite",
+        "file_append",
+        "file_insert_after",
+        "file_insert_before",
+    }
+)
 
 
 class PathAccessMode:
@@ -64,7 +87,9 @@ class FileOperationsExecutor:
         self.event_bus = None  # Set by tool_executor
         self.path_access_mode = PathAccessMode.PROJECT_ONLY
         self.project_root = (
-            Path(workspace).expanduser().resolve() if workspace else Path.cwd().resolve()
+            Path(workspace).expanduser().resolve()
+            if workspace
+            else Path.cwd().resolve()
         )
 
         # Default configuration values
@@ -314,8 +339,24 @@ class FileOperationsExecutor:
         except FileNotFoundError:
             return True, ""  # File doesn't exist yet, allow operation
 
+    def _backup_root(self) -> Path:
+        """Directory backups live in: the project's data dir, never the repo.
+
+        Writing `foo.py.bak` next to the source pollutes the working tree --
+        the copies get committed, break test collection and linters, and
+        accumulate forever because nothing deletes them. Backups are runtime
+        state, so they belong with the rest of it under
+        ~/.kollab/projects/<encoded-path>/backups/.
+        """
+        return get_project_data_dir(self.project_root) / "backups"
+
     def create_backup(self, filepath: str, suffix: str = ".bak") -> Optional[str]:
         """Create backup of file before modification.
+
+        The backup is written outside the project tree and is transient:
+        callers must hand it to discard_backup() once the guarded operation
+        succeeds. It is retained only when an operation fails and the file
+        had to be rolled back.
 
         Args:
             filepath: File to backup
@@ -330,15 +371,84 @@ class FileOperationsExecutor:
         if not os.path.exists(filepath):
             return None
 
-        backup_path = f"{filepath}{suffix}"
+        source = Path(filepath).resolve()
+        try:
+            relative = source.relative_to(self.project_root)
+        except ValueError:
+            # Outside the project root (allowed for some paths) -- flatten to
+            # the bare filename rather than escaping the backup directory.
+            relative = Path(source.name)
+
+        # Flatten nested paths so two files with the same name can't collide,
+        # and stamp so repeated edits to one file don't clobber each other.
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        flat_name = str(relative).replace(os.sep, "_")
+        backup_path = self._backup_root() / f"{flat_name}.{stamp}{suffix}"
 
         try:
-            shutil.copy2(filepath, backup_path)
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, backup_path)
             logger.debug(f"Created backup: {backup_path}")
-            return backup_path
+            return str(backup_path)
         except Exception as e:
             logger.error(f"Failed to create backup: {e}")
             return None
+
+    def discard_backup(self, backup_path: Optional[str]) -> None:
+        """Delete a backup whose guarded operation succeeded.
+
+        A backup exists to roll back a failed write. Once the write lands it
+        is garbage -- keeping it is what left 90+ stale .bak files in the tree.
+
+        Args:
+            backup_path: Path returned by create_backup(), or None
+        """
+        if not backup_path:
+            return
+
+        try:
+            os.remove(backup_path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.debug(f"Could not remove backup {backup_path}: {e}")
+
+    def rollback_from_backup(
+        self, backup_path: Optional[str], filepath: str, reason: str
+    ) -> Dict[str, Any]:
+        """Restore a file from its backup and build a stop-and-fix error.
+
+        Single path for every failed write so the agent always gets the same
+        signal: what broke, whether the file is intact, where the retained
+        backup is, and an instruction to stop rather than retry blindly.
+
+        Args:
+            backup_path: Path returned by create_backup(), or None
+            filepath: File the operation was modifying
+            reason: Why the operation failed
+
+        Returns:
+            Failure result dict with an actionable error message
+        """
+        restored = False
+        if backup_path and os.path.exists(backup_path):
+            try:
+                shutil.copy2(backup_path, filepath)
+                restored = True
+            except Exception as e:
+                logger.error(f"Rollback failed for {filepath}: {e}")
+
+        message = reason
+        if restored:
+            message += f"\n{filepath} was restored from its backup (unchanged on disk)."
+        if backup_path:
+            message += f"\nBackup retained: {backup_path}"
+        message += (
+            "\nSTOP: do not retry this edit as-is. Read the file's current"
+            " contents, work out why the write failed, then issue a corrected"
+            " edit."
+        )
+        return {"success": False, "error": message}
 
     def validate_python_syntax_file(self, filepath: str) -> Tuple[bool, str]:
         """Validate Python file syntax.
@@ -401,6 +511,41 @@ class FileOperationsExecutor:
 
         return occurrences
 
+    def _reject_manual_backup(
+        self, op_type: str, operation: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Block writes that create a backup-suffixed file inside the project.
+
+        Agents reach for `cp foo.py foo.py.bak` out of habit. Those copies are
+        redundant (this executor already backs up and rolls back), and they
+        stay in the working tree forever. Refuse the write and say why, so the
+        agent stops and uses the real edit path.
+
+        Args:
+            op_type: Operation type from the parser
+            operation: Operation dictionary
+
+        Returns:
+            Failure result if the write should be blocked, else None
+        """
+        if op_type not in WRITE_OPERATION_TYPES:
+            return None
+
+        target = operation.get("file") or operation.get("to") or ""
+        if not target or not str(target).endswith(MANUAL_BACKUP_SUFFIXES):
+            return None
+
+        return {
+            "success": False,
+            "error": (
+                f"Refused to write backup-style file: {target}\n"
+                "Backups are automatic: the file is copied outside the project"
+                " before every edit, restored if the write fails, and deleted"
+                " when it succeeds.\n"
+                "STOP: drop the manual backup and edit the real file directly."
+            ),
+        }
+
     def execute_operation(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a file operation.
 
@@ -444,6 +589,14 @@ class FileOperationsExecutor:
                 )
 
             return {"success": False, "error": "\n".join(error_lines)}
+
+        # Single chokepoint for every write: refuse hand-rolled backup files.
+        # Backups are automatic, live outside the project, and are dropped on
+        # success. A `.bak` written into the tree gets committed, breaks test
+        # collection, and nothing ever cleans it up.
+        blocked = self._reject_manual_backup(op_type, operation)
+        if blocked:
+            return blocked
 
         # Route to specific operation handler
         handlers = {
@@ -556,22 +709,17 @@ class FileOperationsExecutor:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(new_content)
         except Exception as e:
-            # Restore from backup if write fails
-            if backup_path and os.path.exists(backup_path):
-                shutil.copy2(backup_path, filepath)
-            return {"success": False, "error": f"Failed to write file: {str(e)}"}
+            return self.rollback_from_backup(
+                backup_path, filepath, f"Failed to write file: {str(e)}"
+            )
 
         # Optional: Validate Python syntax
         if filepath.endswith(".py") and self.validate_python_syntax:
             is_valid, error = self.validate_python_syntax_file(filepath)
             if not is_valid and self.rollback_on_syntax_error:
-                # Rollback
-                if backup_path and os.path.exists(backup_path):
-                    shutil.copy2(backup_path, filepath)
-                return {
-                    "success": False,
-                    "error": f"Syntax validation failed: {error}. Edit rolled back.",
-                }
+                return self.rollback_from_backup(
+                    backup_path, filepath, f"Syntax validation failed: {error}"
+                )
 
         # Build success message with diff info
         if count == 1:
@@ -582,8 +730,7 @@ class FileOperationsExecutor:
                 lines_str += f" (+{len(line_numbers) - 10} more)"
             output = f"✓ Replaced {count} occurrences in {filepath}\nLocations: lines {lines_str}"
 
-        if backup_path:
-            output += f"\nBackup: {backup_path}"
+        self.discard_backup(backup_path)
 
         return {
             "success": True,
@@ -728,15 +875,13 @@ class FileOperationsExecutor:
 
             size_bytes = len(content.encode("utf-8"))
             output = f"✓ Created/overwrote {filepath} ({size_bytes} bytes)"
-            if backup_path:
-                output += f"\nBackup: {backup_path}"
 
+            self.discard_backup(backup_path)
             return {"success": True, "output": output}
         except Exception as e:
-            # Restore from backup if failed
-            if backup_path and os.path.exists(backup_path):
-                shutil.copy2(backup_path, filepath)
-            return {"success": False, "error": f"Failed to write file: {str(e)}"}
+            return self.rollback_from_backup(
+                backup_path, filepath, f"Failed to write file: {str(e)}"
+            )
 
     def _execute_delete(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute file delete operation.
@@ -778,7 +923,8 @@ class FileOperationsExecutor:
 
             output = f"✓ Deleted {filepath}"
             if backup_path:
-                output += f"\nBackup: {backup_path}"
+                # Kept deliberately: this is the only remaining copy.
+                output += f"\nRecovery copy: {backup_path}"
 
             return {"success": True, "output": output}
         except Exception as e:
@@ -945,15 +1091,13 @@ class FileOperationsExecutor:
             shutil.copy2(from_path, to_path)
 
             output = f"✓ Copied {from_path} → {to_path}"
-            if backup_path:
-                output += f"\nBackup: {backup_path}"
 
+            self.discard_backup(backup_path)
             return {"success": True, "output": output}
         except Exception as e:
-            # Restore backup if failed
-            if backup_path and os.path.exists(backup_path):
-                shutil.copy2(backup_path, to_path)
-            return {"success": False, "error": f"Failed to copy file: {str(e)}"}
+            return self.rollback_from_backup(
+                backup_path, to_path, f"Failed to copy file: {str(e)}"
+            )
 
     def _execute_append(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute file append operation.
@@ -1000,15 +1144,13 @@ class FileOperationsExecutor:
                 f.write(content)
 
             output = f"✓ Appended content to {filepath}"
-            if backup_path:
-                output += f"\nBackup: {backup_path}"
 
+            self.discard_backup(backup_path)
             return {"success": True, "output": output}
         except Exception as e:
-            # Restore backup if failed
-            if backup_path and os.path.exists(backup_path):
-                shutil.copy2(backup_path, filepath)
-            return {"success": False, "error": f"Failed to append to file: {str(e)}"}
+            return self.rollback_from_backup(
+                backup_path, filepath, f"Failed to append to file: {str(e)}"
+            )
 
     def _execute_insert_after(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute insert after pattern operation.
@@ -1080,15 +1222,13 @@ class FileOperationsExecutor:
                 f.write(new_content)
 
             output = f"✓ Inserted content after pattern in {filepath} (line {line_numbers[0]})"
-            if backup_path:
-                output += f"\nBackup: {backup_path}"
 
+            self.discard_backup(backup_path)
             return {"success": True, "output": output}
         except Exception as e:
-            # Restore backup if failed
-            if backup_path and os.path.exists(backup_path):
-                shutil.copy2(backup_path, filepath)
-            return {"success": False, "error": f"Failed to write file: {str(e)}"}
+            return self.rollback_from_backup(
+                backup_path, filepath, f"Failed to write file: {str(e)}"
+            )
 
     def _execute_insert_before(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute insert before pattern operation.
@@ -1160,15 +1300,13 @@ class FileOperationsExecutor:
                 f.write(new_content)
 
             output = f"✓ Inserted content before pattern in {filepath} (line {line_numbers[0]})"
-            if backup_path:
-                output += f"\nBackup: {backup_path}"
 
+            self.discard_backup(backup_path)
             return {"success": True, "output": output}
         except Exception as e:
-            # Restore backup if failed
-            if backup_path and os.path.exists(backup_path):
-                shutil.copy2(backup_path, filepath)
-            return {"success": False, "error": f"Failed to write file: {str(e)}"}
+            return self.rollback_from_backup(
+                backup_path, filepath, f"Failed to write file: {str(e)}"
+            )
 
     def _execute_mkdir(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute create directory operation.

@@ -49,6 +49,33 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class KeyringDisabledError(RuntimeError):
+    """Raised when a store is attempted while the OS keyring is disabled.
+
+    Storing has to fail *loudly*: callers treat "no exception" as "the key is
+    safely in the keyring" and then drop their plaintext copy (see
+    kollabor_config.migration._try_os_keyring and
+    APIKeyLoader._migrate_plaintext_key). Returning quietly would delete the
+    only copy of a user's API key. Both callers catch this and fall through to
+    the next storage tier.
+    """
+
+
+def keyring_enabled() -> bool:
+    """Whether the OS keyring may be touched at all.
+
+    Off when ``KOLLAB_NO_KEYRING`` is set, and automatically off under pytest
+    or the tmux harness: on macOS every read/write of a missing entry pops a
+    Keychain dialog, so a test run that boots the app with a plaintext key
+    would otherwise spam the developer with prompts to click through.
+    """
+    if not KEYRING_AVAILABLE:
+        return False
+    if os.environ.get("KOLLAB_NO_KEYRING", "").strip().lower() not in ("", "0", "false"):
+        return False
+    return "PYTEST_CURRENT_TEST" not in os.environ
+
+
 # =============================================================================
 # TIER 1: OS Native Keyring (Secure - Recommended)
 # =============================================================================
@@ -102,8 +129,17 @@ class APIKeyManager:
             api_key: API key to store
 
         Raises:
+            KeyringDisabledError: If the keyring is disabled -- nothing stored,
+                so the caller must keep its own copy or try the next tier.
             RuntimeError: If storage fails
         """
+        if not keyring_enabled():
+            # Must raise, not return: a silent no-op would let the caller drop
+            # its plaintext copy of a key that was never stored.
+            raise KeyringDisabledError(
+                f"OS keyring is disabled (KOLLAB_NO_KEYRING or test run); "
+                f"did not store key for profile: {profile_name}"
+            )
         async with self._lock:
             try:
                 keyring.set_password(self.SERVICE_NAME, profile_name, api_key)
@@ -124,6 +160,8 @@ class APIKeyManager:
         Returns:
             API key or None if not found
         """
+        if not keyring_enabled():
+            return None
         async with self._lock:
             try:
                 return keyring.get_password(self.SERVICE_NAME, profile_name)
@@ -141,6 +179,8 @@ class APIKeyManager:
         Returns:
             True if deleted, False if not found
         """
+        if not keyring_enabled():
+            return False
         async with self._lock:
             try:
                 keyring.delete_password(self.SERVICE_NAME, profile_name)

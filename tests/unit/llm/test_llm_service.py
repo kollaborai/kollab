@@ -131,6 +131,83 @@ class TestLLMServiceIntegration(unittest.TestCase):
             # Check queue size (background task mocked to prevent consumption)
             self.assertEqual(self.service.processing_queue.qsize(), 1)
 
+    def test_process_user_input_displays_before_lazy_alias_rebuild(self):
+        """First submit must echo immediately before alias/prompt rebuild work."""
+        message = "Test user input"
+        prompt_builder = MagicMock()
+        prompt_builder.ensure_shell_aliases_loaded = MagicMock(return_value=True)
+        self.service._prompt_builder = prompt_builder
+        self.service.rebuild_system_prompt = MagicMock(return_value=True)
+        order = []
+
+        self.service.message_display_service.display_user_message = MagicMock(
+            side_effect=lambda msg: order.append(("display", msg))
+        )
+        prompt_builder.ensure_shell_aliases_loaded.side_effect = (
+            lambda: order.append(("aliases", None)) or True
+        )
+        self.service.rebuild_system_prompt.side_effect = (
+            lambda: order.append(("rebuild", None)) or True
+        )
+
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+
+            result = asyncio.run(self.service.process_user_input(message))
+
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(
+            order[:3], [("display", message), ("aliases", None), ("rebuild", None)]
+        )
+        self.assertEqual(self.service.processing_queue.qsize(), 1)
+
+    def test_process_user_input_skips_duplicate_display_when_pre_displayed(self):
+        """Pre-displayed startup-held input must not echo twice."""
+        message = "Test user input"
+        prompt_builder = MagicMock()
+        prompt_builder.ensure_shell_aliases_loaded = MagicMock(return_value=False)
+        self.service._prompt_builder = prompt_builder
+        self.service.message_display_service.display_user_message = MagicMock()
+
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+
+            result = asyncio.run(
+                self.service.process_user_input(message, pre_displayed=True)
+            )
+
+        self.assertEqual(result["status"], "queued")
+        self.service.message_display_service.display_user_message.assert_not_called()
+        prompt_builder.ensure_shell_aliases_loaded.assert_called_once_with()
+        self.assertEqual(self.service.processing_queue.qsize(), 1)
+
+
+    def test_process_user_input_does_not_rebuild_when_alias_load_returns_empty(self):
+        """First turn should not pay repeated rebuild cost when alias detection times out."""
+        message = "Test user input"
+        prompt_builder = MagicMock()
+        prompt_builder.ensure_shell_aliases_loaded = MagicMock(return_value=False)
+        self.service._prompt_builder = prompt_builder
+        self.service.rebuild_system_prompt = MagicMock(return_value=True)
+
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+
+            result = asyncio.run(self.service.process_user_input(message))
+
+        self.assertEqual(result["status"], "queued")
+        prompt_builder.ensure_shell_aliases_loaded.assert_called_once_with()
+        self.service.rebuild_system_prompt.assert_not_called()
+
     def test_cancel_request_handling(self):
         """Test cancel request functionality."""
         # Set processing state
@@ -459,7 +536,9 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
 
         result = asyncio.run(self.service._handle_user_input(event_data, event))
 
-        mock_process.assert_called_once_with("Test user message")
+        mock_process.assert_called_once_with(
+            "Test user message", pre_displayed=False
+        )
         self.assertEqual(result["status"], "processed")
 
     def test_cancel_request_hook_handling(self):

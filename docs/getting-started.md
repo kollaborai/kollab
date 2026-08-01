@@ -201,6 +201,6 @@ Run `kollab --help` for the complete list including plugin-registered flags.
 
 - [Configuration Guide](configuration.md) - Profiles, config files, directories
 - [Providers Guide](providers.md) - All supported providers and their setup
-- `/profile` command - List, create, and switch profiles interactively
+- `/llm` command - Browse and switch model loadouts (provider + model + params)
 - `/permissions` command - Configure tool approval modes
 - `/save` command - Export conversations

@@ -1,32 +1,37 @@
-"""EngineSession - owns all AI services for one conversation context."""
+"""EngineSession - a thin proxy over one headless kollab daemon.
+
+This used to be a second, smaller implementation of a conversation: its own
+services, its own history list, and ``turn_runner.py`` running its own turn
+loop. It drifted from the terminal client and shipped without plugins, the XML
+tag pipeline, the vault, compaction, or a conversation log.
+
+Now a session owns a ``kollab --detached`` daemon - the same process the
+terminal client forks - and this class is the adapter between the engine's HTTP
+surface and that daemon:
+
+  * reads and writes go out as ``state.*`` RPC calls
+  * ``send_message`` submits a turn and returns immediately
+  * the daemon's structured display events are relayed as SSE
+
+Everything the terminal client can do, a web session can now do, because it is
+the same process doing it.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from kollabor_agent.mcp_integration import MCPIntegration
-from kollabor_agent.permissions.manager import PermissionManager
-from kollabor_agent.permissions.risk_assessor import RiskAssessor
-from kollabor_agent.tool_executor import ToolExecutor
-from kollabor_ai import (
-    APICommunicationService,
-    LLMProfile,
-)
-from kollabor_config.config_utils import get_config_directory
-from kollabor_events.bus import EventBus
-from kollabor_events.permissions_models import (
-    ApprovalMode,
-    PermissionDecision,
-    RiskAssessmentRules,
-    ToolRiskLevel,
-)
+from kollabor_events.permissions_models import ApprovalMode
 
-from . import sse
+from .daemon_pool import DaemonHandle, get_daemon_pool
 
 logger = logging.getLogger(__name__)
+
+PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
 
 _APPROVAL_MODE_MAP = {
     "confirm_all": ApprovalMode.CONFIRM_ALL,
@@ -35,8 +40,25 @@ _APPROVAL_MODE_MAP = {
     "trust_all": ApprovalMode.TRUST_ALL,
 }
 
-_DATA_DIR = get_config_directory()
-_PERMISSION_CONFIRMATION_HOOK_TIMEOUT_SECONDS = 300
+
+# HTTP decision+scope -> the ConfirmationResponse name the daemon expects.
+_APPROVE_SCOPE_RESPONSES = {
+    "once": "APPROVE_ONCE",
+    "session": "APPROVE_SESSION",
+    "project": "APPROVE_PROJECT",
+    "always_edits": "APPROVE_ALWAYS",
+    "trust_tool": "APPROVE_TOOL_ALWAYS",
+}
+
+
+def _confirmation_response_name(decision: str, scope: str) -> str:
+    """Map an API decision+scope onto a ConfirmationResponse member name.
+
+    Anything unrecognized denies: an unknown scope must never widen access.
+    """
+    if decision != "approve":
+        return "DENY"
+    return _APPROVE_SCOPE_RESPONSES.get(scope, "APPROVE_ONCE")
 
 
 def _permission_input_payload(tool_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -68,385 +90,221 @@ def _permission_input_payload(tool_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class EngineSession:
-    """
-    One conversation session. Owns all AI services.
-    No terminal renderer dependency - emits SSE events instead.
-    """
+    """One conversation, backed by a headless kollab daemon."""
 
     def __init__(
         self,
         session_id: str,
-        profile: LLMProfile,
+        profile: Any,
         approval_mode: str = "confirm_all",
         workspace: Optional[str] = None,
         system_prompt: Optional[str] = None,
         mcp_server_names: Optional[List[str]] = None,
         user_token: Optional[str] = None,
+        agent: Optional[str] = None,
     ):
         self.session_id = session_id
         self.user_token = user_token
-        self.workspace_path = self._resolve_workspace(workspace)
-        self.workspace = str(self.workspace_path) if workspace else None
+        self.workspace = str(Path(workspace).expanduser()) if workspace else None
         self.system_prompt = system_prompt or ""
         self.created_at = datetime.utcnow()
         self.profile = profile
-
-        # MCP servers to auto-connect on initialization
+        self.agent = agent
+        self.approval_mode = approval_mode
         self.mcp_server_names = mcp_server_names or []
 
-        # Conversation history (list of dicts: {role, content})
+        self.daemon: Optional[DaemonHandle] = None
+
+        # Mirror of the daemon's conversation. The daemon is the source of
+        # truth; this is refreshed on demand so synchronous readers (to_dict,
+        # the history route) don't have to await mid-render.
         self.history: List[Dict[str, Any]] = []
 
-        # System prompt injected into history as first message if set
-        if self.system_prompt:
-            self.history.append({"role": "system", "content": self.system_prompt})
-
-        # Engine config dict (lightweight - no ConfigService needed)
-        raw_dir = _DATA_DIR / "raw"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        self._config = {
-            "kollabor.llm.enable_streaming": True,
-            "kollabor.llm.use_explicit_tool_accumulation": True,
-            "kollabor.permissions.approval_mode": approval_mode,
-            "terminal.interactive_shell": False,
-        }
-
-        # Event bus (per-session, no shared state)
-        self.event_bus = EventBus(config=self._config)
-
-        # API communication service
-        self.api_service = APICommunicationService(
-            config=self._SimpleConfig(self._config),
-            raw_conversations_dir=str(raw_dir),
-            profile=profile,
-        )
-
-        # MCP integration
-        self.mcp_integration = MCPIntegration(
-            event_bus=self.event_bus,
-            workspace=self.workspace_path,
-            user_token=self.user_token,
-            session_id=session_id,
-        )
-
-        # Tool executor (no renderer - headless)
-        self.tool_executor = ToolExecutor(
-            mcp_integration=self.mcp_integration,
-            event_bus=self.event_bus,
-            config=self._SimpleConfig(self._config),
-            renderer=None,
-            workspace=self.workspace_path,
-        )
-
-        # Risk assessor + permission manager
-        risk_rules = RiskAssessmentRules()
-        risk_assessor = RiskAssessor(rules=risk_rules, config=self._config)
-        self.permission_manager = PermissionManager(
-            config=self._config,
-            risk_assessor=risk_assessor,
-            event_bus=self.event_bus,
-        )
-        self.permission_manager.set_confirmation_callback(self._permission_callback)
-
-        # Permission hook registered in initialize() (requires await)
-
-        # Approval mode
-        mode = _APPROVAL_MODE_MAP.get(approval_mode, ApprovalMode.CONFIRM_ALL)
-        self.permission_manager.set_approval_mode(mode, persist=False)
-
-        # SSE queue for active turn (set by TurnRunner)
-        self._sse_queue: Optional[asyncio.Queue] = None
-
-        # Pending permission events: tool_id -> asyncio.Event
-        self._pending_permissions: Dict[str, asyncio.Event] = {}
-        # Permission results: tool_id -> PermissionDecision
-        self._permission_results: Dict[str, PermissionDecision] = {}
-        # Scope of approved permissions: tool_id -> str
-        self._permission_scopes: Dict[str, str] = {}
-        # Risk levels: tool_id -> ToolRiskLevel
-        self._permission_risk_levels: Dict[str, ToolRiskLevel] = {}
-
-        # Turn stats
         self.total_turns = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
-        # Active turn task (for cancellation)
+        self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
+        self._event_task: Optional[asyncio.Task] = None
 
-        logger.info(
-            f"Session {session_id} created "
-            f"(profile={profile.name}, approval={approval_mode})"
+    # === lifecycle ===
+
+    async def initialize(self) -> None:
+        """Spawn the daemon and start tracking its event stream."""
+        profile_name = getattr(self.profile, "name", None) or str(self.profile or "")
+        self.daemon = await get_daemon_pool().spawn(
+            self.session_id,
+            profile=profile_name or None,
+            agent=self.agent,
+            workspace=self.workspace,
+            system_prompt=self.system_prompt or None,
         )
 
-    def _resolve_workspace(self, workspace: Optional[str]) -> Path:
-        """Resolve and validate the workspace for this session."""
-        if not workspace:
-            return Path.cwd().resolve()
-
-        path = Path(workspace).expanduser().resolve()
-        if not path.exists():
-            raise ValueError(f"Workspace does not exist: {workspace}")
-        if not path.is_dir():
-            raise ValueError(f"Workspace is not a directory: {workspace}")
-        return path
-
-    async def _register_permission_hook(self) -> None:
-        """Register the permission manager as a TOOL_CALL_PRE hook."""
-        from kollabor_events.models import EventType, Hook, HookPriority
-
-        pm = self.permission_manager
-
-        async def _handle_tool_pre(data: Dict[str, Any], event: Any) -> Dict[str, Any]:
-            tool_data = data.get("tool_data", {})
-            if not tool_data:
-                return data
-            decision = await pm.check_permission(tool_data)
-            data["permission_decision"] = {
-                "allowed": decision.allowed,
-                "reason": decision.reason,
-            }
-            if not decision.allowed:
-                event.cancelled = True
-                event.cancel_reason = decision.reason
-            return data
-
-        hook = Hook(
-            plugin_name="engine_permission_system",
-            name="permission_check",
-            event_type=EventType.TOOL_CALL_PRE,
-            callback=_handle_tool_pre,
-            priority=HookPriority.SECURITY.value,
-            enabled=True,
-            timeout=_PERMISSION_CONFIRMATION_HOOK_TIMEOUT_SECONDS,
-            retry_attempts=0,
-            error_action="stop",
-        )
-        await self.event_bus.register_hook(hook)
-        logger.debug(f"Session {self.session_id}: permission hook registered")
-
-    async def initialize(self) -> bool:
-        """Initialize API service, permission hook, and MCP connections."""
-        await self._register_permission_hook()
-        ok = await self.api_service.initialize()
-        if not ok:
-            logger.warning(f"Session {self.session_id}: API service init failed")
-
-        # Auto-connect MCP servers if specified
-        if self.mcp_server_names:
-            await self._connect_mcp_servers()
-
-        return ok
-
-    async def _connect_mcp_servers(self) -> None:
-        """Auto-connect MCP servers specified in mcp_server_names."""
-        for server_name in self.mcp_server_names:
-            if server_name not in self.mcp_integration.mcp_servers:
-                logger.warning(
-                    f"Session {self.session_id}: MCP server '{server_name}' "
-                    f"not found in configuration"
-                )
-                continue
-
-            server_config = self.mcp_integration.mcp_servers[server_name]
-            if not server_config.get("enabled", True):
-                logger.info(
-                    f"Session {self.session_id}: skipping disabled MCP server '{server_name}'"
-                )
-                continue
-
-            logger.info(
-                f"Session {self.session_id}: connecting to MCP server '{server_name}'"
-            )
+        if self.approval_mode:
             try:
-                command = server_config.get("command")
-                if command:
-                    await self.mcp_integration._connect_and_list_tools(
-                        server_name, command
-                    )
-                    tool_count = sum(
-                        1
-                        for t in self.mcp_integration.tool_registry.values()
-                        if t.get("server") == server_name
-                    )
-                    logger.info(
-                        f"Session {self.session_id}: MCP server '{server_name}' "
-                        f"connected with {tool_count} tools"
-                    )
+                await self.state.set_approval_mode(self.approval_mode)
             except Exception as e:
-                logger.error(
-                    f"Session {self.session_id}: failed to connect MCP server '{server_name}': {e}"
+                logger.warning(
+                    "session %s: could not set approval mode %s: %s",
+                    self.session_id,
+                    self.approval_mode,
+                    e,
                 )
 
-    async def shutdown(self):
-        """Clean up session resources."""
-        if self._active_turn_task and not self._active_turn_task.done():
-            self._active_turn_task.cancel()
+        self._event_task = asyncio.create_task(
+            self._track_events(), name=f"session-track-{self.session_id}"
+        )
+        await self.refresh_history()
 
-        # Clear pending permissions to prevent memory leaks
-        self._pending_permissions.clear()
-        self._permission_results.clear()
-        self._permission_scopes.clear()
-        self._permission_risk_levels.clear()
+    async def shutdown(self) -> None:
+        if self._event_task is not None:
+            self._event_task.cancel()
+            try:
+                await self._event_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await get_daemon_pool().stop(self.session_id)
+        self.daemon = None
 
-        await self.api_service.shutdown()
-        await self.mcp_integration.shutdown()
-        logger.info(f"Session {self.session_id} shut down")
+    # === daemon access ===
 
-    def cancel_turn(self):
-        """Cancel the active turn."""
-        self.api_service.cancel_current_request()
-        if self._active_turn_task and not self._active_turn_task.done():
-            self._active_turn_task.cancel()
+    @property
+    def state(self) -> Any:
+        """The daemon's StateService (the 41 ``state.*`` RPC methods)."""
+        if self.daemon is None or self.daemon.state is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        return self.daemon.state
 
-    async def get_tools(self) -> Optional[List[Dict]]:
-        """Get combined tool list (native + MCP) formatted for API."""
-        return self.mcp_integration.get_tool_definitions_for_api()
+    @property
+    def alive(self) -> bool:
+        return self.daemon is not None and self.daemon.alive
 
-    def resolve_permission(
-        self,
-        tool_id: str,
-        decision: str,
-        scope: str = "once",
+    def subscribe(self) -> asyncio.Queue:
+        if self.daemon is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        return self.daemon.subscribe()
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        if self.daemon is not None:
+            self.daemon.unsubscribe(queue)
+
+    # === conversation ===
+
+    async def refresh_history(self) -> List[Dict[str, Any]]:
+        """Pull the daemon's conversation into the local mirror."""
+        try:
+            snapshot = await self.state.get_conversation()
+        except Exception as e:
+            logger.debug("session %s history refresh failed: %s", self.session_id, e)
+            return self.history
+
+        messages = getattr(snapshot, "messages", None)
+        if messages is None and isinstance(snapshot, dict):
+            messages = snapshot.get("messages", [])
+
+        self.history = [
+            m if isinstance(m, dict) else {"role": m.role, "content": m.content}
+            for m in (messages or [])
+        ]
+        return self.history
+
+    async def send_message(self, content: str) -> Dict[str, Any]:
+        """Submit a user turn. Returns once accepted, not once complete."""
+        return await self.state.send_message(content)
+
+    def cancel_turn(self) -> None:
+        """Ask the daemon to cancel the in-flight turn (fire and forget)."""
+        if self.daemon is None:
+            return
+        self._active_turn_task = asyncio.create_task(
+            self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
+        )
+
+    # === permissions ===
+
+    async def resolve_permission(
+        self, tool_id: str, decision: str, scope: str = "once"
     ) -> bool:
+        """Answer a permission prompt the daemon is blocked on.
+
+        The HTTP surface speaks decision+scope; the daemon speaks
+        ``ConfirmationResponse`` names, so translate at this boundary.
         """
-        Resolve a pending permission request from the HTTP endpoint.
-        Returns True if there was a pending request to resolve.
-        """
-        event = self._pending_permissions.get(tool_id)
-        if not event:
+        if self.daemon is None or self.daemon.rpc is None:
             return False
 
-        risk_level = self._permission_risk_levels.get(tool_id, ToolRiskLevel.MEDIUM)
-        result = (
-            PermissionDecision(
-                allowed=True, reason="User approved", risk_level=risk_level
-            )
-            if decision == "approve"
-            else PermissionDecision(
-                allowed=False, reason="User denied", risk_level=risk_level
-            )
-        )
-        self._permission_results[tool_id] = result
-        self._permission_scopes[tool_id] = scope
-        event.set()
-        return True
-
-    async def _permission_callback(
-        self, tool_data: Dict[str, Any]
-    ) -> PermissionDecision:
-        """
-        Called by PermissionManager when user confirmation is needed.
-        Emits permission_request to SSE stream and waits for HTTP response.
-        """
-        tool_id = tool_data.get("id", str(uuid.uuid4()))
-        tool_name = tool_data.get("name", tool_data.get("type", "unknown"))
-        tool_type = tool_data.get("type", "unknown")
-        risk_level = tool_data.get("risk_level", "medium")
-        risk_reason = tool_data.get("risk_reason", "")
-        # Store risk level for resolve_permission to use
-        risk_enum = (
-            ToolRiskLevel[risk_level.upper()]
-            if isinstance(risk_level, str)
-            else risk_level
-        )
-        self._permission_risk_levels[tool_id] = risk_enum
-
-        # Emit to SSE stream if active
-        if self._sse_queue:
-            await self._sse_queue.put(
-                sse.permission_request(
-                    session_id=self.session_id,
-                    tool_id=tool_id,
-                    tool_name=tool_name,
-                    tool_type=tool_type,
-                    input=_permission_input_payload(tool_data),
-                    risk_level=str(risk_level).lower(),
-                    risk_reason=risk_reason,
-                )
-            )
-
-        # Create event and wait for HTTP response (5 min timeout)
-        event = asyncio.Event()
-        self._pending_permissions[tool_id] = event
+        response = _confirmation_response_name(decision, scope)
         try:
-            await asyncio.wait_for(event.wait(), timeout=300)
-            result = self._permission_results.get(tool_id)
-            scope = self._permission_scopes.get(tool_id, "once")
-            if (
-                result
-                and result.allowed
-                and scope in ("session", "trust_tool")
-                and risk_enum not in (ToolRiskLevel.HIGH, ToolRiskLevel.UNKNOWN)
-            ):
-                self.permission_manager._record_approval(
-                    tool_type, tool_name, tool_data, "session"
-                )
-
-            # Emit result back to SSE stream
-            if self._sse_queue:
-                if result and result.allowed:
-                    await self._sse_queue.put(
-                        sse.permission_granted(
-                            session_id=self.session_id,
-                            tool_id=tool_id,
-                            scope=scope,
-                        )
-                    )
-                else:
-                    await self._sse_queue.put(
-                        sse.permission_denied(
-                            session_id=self.session_id,
-                            tool_id=tool_id,
-                        )
-                    )
-
-            return result or PermissionDecision(
-                allowed=False,
-                reason="No response",
-                risk_level=risk_enum,
+            result = await self.daemon.rpc.call(
+                PERMISSION_RESPONSE_RPC_METHOD,
+                {"tool_id": tool_id, "response": response, "scope": scope},
             )
-        except asyncio.TimeoutError:
-            if self._sse_queue:
-                await self._sse_queue.put(
-                    sse.permission_denied(
-                        session_id=self.session_id,
-                        tool_id=tool_id,
-                    )
-                )
-            return PermissionDecision(
-                allowed=False,
-                reason="Permission request timed out",
-                risk_level=risk_enum,
-            )
+        except Exception as e:
+            logger.warning("permission response failed for %s: %s", tool_id, e)
+            return False
+        self._pending_permissions.pop(tool_id, None)
+        return bool(isinstance(result, dict) and result.get("ok"))
+
+    # === event tracking ===
+
+    async def _track_events(self) -> None:
+        """Keep session-level counters and pending prompts in step with the daemon.
+
+        SSE consumers get their own subscription; this one exists so that a
+        session with no attached browser still reports accurate stats and knows
+        which permission prompts are outstanding.
+        """
+        queue = self.subscribe()
+        try:
+            while True:
+                event = await queue.get()
+                etype = event.get("type")
+
+                if etype == "turn_complete":
+                    self.total_turns += 1
+                    self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
+                    self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
+                    await self.refresh_history()
+
+                elif etype == "permission_request":
+                    # Store the whole normalized event, not just the raw
+                    # details: a client that reloads mid-prompt needs to
+                    # re-render it, and the daemon will not re-send it.
+                    tool_id = str(event.get("tool_id") or "")
+                    if tool_id:
+                        self._pending_permissions[tool_id] = event
+
+                elif etype in ("permission_granted", "permission_denied"):
+                    self._pending_permissions.pop(str(event.get("tool_id") or ""), None)
+
+                elif etype == "daemon_closed":
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("session %s event tracking stopped: %s", self.session_id, e)
         finally:
-            self._pending_permissions.pop(tool_id, None)
-            self._permission_results.pop(tool_id, None)
-            self._permission_scopes.pop(tool_id, None)
-            self._permission_risk_levels.pop(tool_id, None)
+            self.unsubscribe(queue)
 
-    def to_dict(self) -> Dict:
+    # === serialization ===
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "session_id": self.session_id,
-            "profile": self.profile.name,
+            "profile": getattr(self.profile, "name", str(self.profile or "")),
             "workspace": self.workspace,
-            "approval_mode": self.permission_manager.approval_mode.value,
+            "approval_mode": _APPROVAL_MODE_MAP.get(
+                self.approval_mode, ApprovalMode.CONFIRM_ALL
+            ).value,
             "created_at": self.created_at.isoformat(),
             "total_turns": self.total_turns,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "history_length": len(self.history),
-            "active": self._active_turn_task is not None
-            and not self._active_turn_task.done(),
+            "active": self.alive,
+            "identity": self.daemon.identity if self.daemon else "",
+            "daemon_pid": self.daemon.pid if self.daemon else 0,
             "mcp_servers": self.mcp_server_names,
-            "mcp_connected": list(self.mcp_integration.server_connections.keys()),
+            "mcp_connected": [],
         }
-
-    class _SimpleConfig:
-        """Adapter so APICommunicationService can call config.get()."""
-
-        def __init__(self, data: Dict):
-            self._data = data
-
-        def get(self, key: str, default=None):
-            return self._data.get(key, default)

@@ -127,16 +127,25 @@ class HubBridge:
         self._cache_ts = now
         return agents
 
-    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def get_agent(
+        self, agent_id: str, use_cache: bool = True
+    ) -> Optional[Dict[str, Any]]:
         """Return a single agent's presence data."""
-        for agent in self.get_agents():
+        for agent in self.get_agents(use_cache=use_cache):
             if agent.get("agent_id") == agent_id:
                 return agent
         return None
 
-    def get_agent_by_identity(self, identity: str) -> Optional[Dict[str, Any]]:
-        """Return a single agent's presence data by identity (e.g. 'koordinator')."""
-        for agent in self.get_agents():
+    def get_agent_by_identity(
+        self, identity: str, use_cache: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Return a single agent's presence data by identity (e.g. 'koordinator').
+
+        Pass use_cache=False when polling for an agent that is expected to
+        appear: the cached list is a snapshot from up to CACHE_TTL_SECONDS ago
+        and will never contain an agent that started after it was taken.
+        """
+        for agent in self.get_agents(use_cache=use_cache):
             if agent.get("identity") == identity:
                 return agent
         return None

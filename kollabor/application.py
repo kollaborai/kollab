@@ -263,7 +263,43 @@ class TerminalLLMChat:
         if profile_name:
             # CLI --profile is a one-time override, don't persist active selection
             if not self.profile_manager.set_active_profile(profile_name, persist=False):
-                logger.warning(f"Profile '{profile_name}' not found, using default")
+                # Not an existing profile -- try resolving it as a loadout (a
+                # named preset of provider profile + model + params that
+                # layers on top of profiles; see loadout_manager.py). Applied
+                # in memory only: a launch flag must not rewrite the user's
+                # saved config fields.
+                from kollabor_ai.loadout_manager import LoadoutManager
+
+                loadout_manager = LoadoutManager(self.profile_manager)
+                loadout, suggestions = loadout_manager.resolve(profile_name)
+                activated_via_loadout = False
+                if loadout is not None:
+                    update_kwargs = {"model": loadout.model, "save_to_config": False}
+                    if loadout.temperature is not None:
+                        update_kwargs["temperature"] = loadout.temperature
+                    if loadout.effort:
+                        update_kwargs["effort"] = loadout.effort
+                    if loadout.max_tokens is not None:
+                        update_kwargs["max_tokens"] = loadout.max_tokens
+
+                    if self.profile_manager.update_profile(
+                        loadout.provider_profile, **update_kwargs
+                    ) and self.profile_manager.set_active_profile(
+                        loadout.provider_profile, persist=False
+                    ):
+                        activated_via_loadout = True
+                        logger.info(
+                            f"Resolved '{profile_name}' as loadout -> "
+                            f"profile '{loadout.provider_profile}', "
+                            f"model '{loadout.model}'"
+                        )
+                        profile_name = loadout.provider_profile
+
+                if not activated_via_loadout:
+                    msg = f"Profile '{profile_name}' not found, using default"
+                    if suggestions:
+                        msg += f". Did you mean: {', '.join(suggestions)}?"
+                    logger.warning(msg)
             elif save_profile or make_default_profile:
                 # Save profile values to config if --save/--default was used
                 profile = self.profile_manager.get_profile(profile_name)
@@ -314,6 +350,33 @@ class TerminalLLMChat:
                         logger.warning(f"Skill '{skill_name}' not found")
             else:
                 logger.warning("Cannot load skills without an active agent")
+
+        # If the hub is active and this process has a fixed identity, reconcile
+        # the startup agent bundle before llm_service initializes the first
+        # conversation so we avoid building the prompt for a stale default
+        # agent and immediately rebuilding for the hub role bundle.
+        self._startup_agent_reconciled = False
+        try:
+            from plugins.hub.identity import resolve_identity_name
+            from plugins.hub.pool_registry import PoolRegistry
+
+            startup_identity = resolve_identity_name(self.args)
+            if startup_identity:
+                pool = PoolRegistry.from_env()
+                if pool:
+                    entry = pool.find(startup_identity)
+                    desired_bundle = (getattr(entry, "agent_type", "") or "").strip()
+                    active_name = getattr(self.agent_manager, "active_agent_name", "") or ""
+                    if desired_bundle and desired_bundle != active_name:
+                        if self.agent_manager.set_active_agent(desired_bundle):
+                            self._startup_agent_reconciled = True
+                            logger.info(
+                                "Pre-reconciled startup agent bundle to '%s' for identity=%s",
+                                desired_bundle,
+                                startup_identity,
+                            )
+        except Exception as e:
+            logger.debug(f"Startup agent pre-reconciliation skipped: {e}")
 
         # Reconfigure logging now that config system is available
         # Skip for help mode to avoid creating log files
@@ -1135,7 +1198,7 @@ class TerminalLLMChat:
                     )
                     print(f"{error_msg}")
                     print()
-                    print("Use /profile to fix the configuration.")
+                    print("Use /setup to fix the configuration.")
                     # Clean up before exiting
                     await self.cleanup()
                     return
@@ -2203,7 +2266,7 @@ class TerminalLLMChat:
                     f"\033[33m{'=' * 60}\033[0m\n"
                     f"\033[1;33m[!] LLM Provider Configuration Error\033[0m\n\n"
                     f"\033[33m{error_msg}\033[0m\n\n"
-                    f"\033[1;37mUse /profile to fix the configuration.\033[0m\n"
+                    f"\033[1;37mUse /setup to fix the configuration.\033[0m\n"
                     f"\033[33m{'=' * 60}\033[0m"
                 )
                 self.renderer.message_coordinator.display_raw_text(warning_text)
@@ -2349,14 +2412,25 @@ class TerminalLLMChat:
                     "TmuxPlugin not available - ToolExecutor will use fallback ShellExecutor"
                 )
 
-            # Check if any plugin wants to add to system prompt and rebuild if needed
+            # Check if any plugin wants to add to system prompt and rebuild if needed.
+            # Skip the eager rebuild when startup already pre-reconciled the
+            # final agent bundle before the initial conversation build; that
+            # path ensures the first build already includes the final startup
+            # agent and plugin additions.
             additions = (
                 self.llm_service._prompt_builder._get_plugin_system_prompt_additions()
             )
-            if additions:
+            should_skip_startup_rebuild = bool(
+                additions and getattr(self, "_startup_agent_reconciled", False)
+            )
+            if additions and not should_skip_startup_rebuild:
                 self.llm_service.rebuild_system_prompt()
                 logger.info(
                     f"System prompt rebuilt with {len(additions)} plugin additions"
+                )
+            elif should_skip_startup_rebuild:
+                logger.info(
+                    "Skipped startup system prompt rebuild; initial build already used reconciled agent bundle"
                 )
 
     async def _load_config_hooks(self) -> None:

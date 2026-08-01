@@ -67,7 +67,7 @@ class TestModelProfileHotReload(unittest.TestCase):
     def test_profile_slash_path_requests_daemon_reload(self):
         """Verify /profile set also passes reload_profile=True for in-place edits."""
         # This is a smoke test to verify the slash path is wired correctly.
-        # The actual behavior is in ProfileCommandHandler._switch_profile,
+        # The actual behavior lives in the state-service switch path,
         # which now passes reload_profile=True to state_service.set_active_profile.
         # We rely on unit tests in profile.py to verify the slash logic;
         # this test just confirms the code path exists.
@@ -81,7 +81,7 @@ class TestModelProfileHotReload(unittest.TestCase):
         state_service = event_bus.get_service("state_service")
         self.assertIsNotNone(state_service)
         # The actual slash handler would call state_service.set_active_profile(..., reload_profile=True)
-        # which is now in place in ProfileCommandHandler._switch_profile
+        # which is now in place in the state-service switch path
 
 
 if __name__ == "__main__":

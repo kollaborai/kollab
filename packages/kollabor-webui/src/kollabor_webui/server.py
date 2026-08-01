@@ -9,12 +9,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 def create_app(engine_url: str = "http://127.0.0.1:7433") -> FastAPI:
-    app = FastAPI(title="Kollab WebUI", docs_url=None, redir_url=None)
+    app = FastAPI(title="Kollab WebUI", docs_url=None, redoc_url=None)
 
-    # API proxy config endpoint
+    # API proxy config endpoint. Ships the engine's bearer token to the page so
+    # the user does not have to paste it by hand; both servers are bound to
+    # 127.0.0.1 and this endpoint sends no CORS headers, so only a same-origin
+    # page can read it.
     @app.get("/api/config")
     async def get_config():
-        return {"engine_url": engine_url}
+        from kollabor_engine.auth import read_token_from_disk
+
+        return {"engine_url": engine_url, "token": read_token_from_disk()}
 
     # Serve static files
     @app.get("/", response_class=HTMLResponse)

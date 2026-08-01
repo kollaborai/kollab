@@ -1,10 +1,83 @@
 {
   "_meta": {
     "description": "Frontier model registry for kollab",
-    "updated": "2026-06-25",
-    "notes": "User overrides: ~/.kollab/models.json (merged on top)"
+    "updated": "2026-07-29",
+    "notes": "User overrides: ~/.kollab/models.json (merged on top). Lookup is longest-prefix match on the model string, so keep an explicit entry for every point release whose window differs from its family (e.g. grok-4.5 vs grok-4). supports_sampling=false means the model rejects temperature/top_p/top_k with a 400 -- providers omit them; absent means allowed."
   },
   "models": {
+    "gpt-5.6": {
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 5.00,
+      "pricing_out": 30.00,
+      "pricing_cached_in": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-07-09",
+      "notes": "Alias for gpt-5.6-sol. Requests over 272K input tokens bill 2x input / 1.5x output for the whole request."
+    },
+    "gpt-5.6-sol": {
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 5.00,
+      "pricing_out": 30.00,
+      "pricing_cached_in": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-07-09",
+      "notes": "Frontier tier. Requests over 272K input tokens bill 2x input / 1.5x output."
+    },
+    "gpt-5.6-terra": {
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 2.50,
+      "pricing_out": 15.00,
+      "pricing_cached_in": 0.25,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-07-09",
+      "notes": "Balanced tier. Requests over 272K input tokens bill 2x input / 1.5x output."
+    },
+    "gpt-5.6-luna": {
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 1.00,
+      "pricing_out": 6.00,
+      "pricing_cached_in": 0.10,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-07-09",
+      "notes": "Cost tier. Requests over 272K input tokens bill 2x input / 1.5x output."
+    },
+    "gpt-5.5": {
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 5.00,
+      "pricing_out": 30.00,
+      "pricing_cached_in": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true
+    },
     "gpt-5.4": {
       "provider": "openai",
       "context_window": 1050000,
@@ -12,6 +85,7 @@
       "default_output": 128000,
       "pricing_in": 2.50,
       "pricing_out": 15.00,
+      "pricing_cached_in": 0.25,
       "supports_tools": true,
       "supports_thinking": true,
       "supports_streaming": true,
@@ -38,6 +112,7 @@
       "default_output": 128000,
       "pricing_in": 0.75,
       "pricing_out": 4.50,
+      "pricing_cached_in": 0.075,
       "supports_tools": true,
       "supports_thinking": true,
       "supports_streaming": true,
@@ -51,6 +126,7 @@
       "default_output": 128000,
       "pricing_in": 0.20,
       "pricing_out": 1.25,
+      "pricing_cached_in": 0.02,
       "supports_tools": true,
       "supports_thinking": true,
       "supports_streaming": true,
@@ -70,6 +146,51 @@
       "supports_vision": true,
       "retired": true
     },
+    "claude-fable-5": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 10.00,
+      "pricing_out": 50.00,
+      "pricing_cached_in": 1.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "supports_sampling": false,
+      "notes": "Most capable Anthropic model. Thinking is always on -- sending any thinking config (including disabled) is a 400. No assistant prefill. Requires 30-day data retention (unavailable under ZDR)."
+    },
+    "claude-mythos-5": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 10.00,
+      "pricing_out": 50.00,
+      "pricing_cached_in": 1.00,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "supports_sampling": false,
+      "notes": "Same specs and API behavior as claude-fable-5. Access limited to Project Glasswing."
+    },
+    "claude-opus-5": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 5.00,
+      "pricing_out": 25.00,
+      "pricing_cached_in": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "supports_sampling": false,
+      "notes": "Current Opus flagship. Thinking is on by default (omitting it runs adaptive); disabling thinking is only valid at effort high or below. Separate rate-limit bucket from Opus 4.x."
+    },
     "claude-opus-4-8": {
       "provider": "anthropic",
       "context_window": 1000000,
@@ -82,8 +203,23 @@
       "supports_thinking": true,
       "supports_streaming": true,
       "supports_vision": true,
-      "released": "2026-05-01",
-      "notes": "Current Opus flagship. Specs mirror 4.6 — verify output/pricing."
+      "supports_sampling": false,
+      "released": "2026-05-01"
+    },
+    "claude-opus-4-7": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 5.00,
+      "pricing_out": 25.00,
+      "pricing_cached_in": 0.50,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "supports_sampling": false,
+      "notes": "Adaptive thinking only; sampling params (temperature/top_p/top_k) and budget_tokens are rejected."
     },
     "claude-opus-4-6": {
       "provider": "anthropic",
@@ -98,6 +234,21 @@
       "supports_streaming": true,
       "supports_vision": true,
       "released": "2026-03-15"
+    },
+    "claude-sonnet-5": {
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "default_output": 128000,
+      "pricing_in": 3.00,
+      "pricing_out": 15.00,
+      "pricing_cached_in": 0.30,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "supports_sampling": false,
+      "notes": "Introductory pricing of 2.00/10.00 applies through 2026-08-31. Rejects non-default temperature/top_p/top_k, so they are omitted entirely. New tokenizer: same text is ~30% more tokens than Sonnet 4.6."
     },
     "claude-sonnet-4-6": {
       "provider": "anthropic",
@@ -127,6 +278,46 @@
       "supports_vision": true,
       "released": "2025-10-01"
     },
+    "gemini-3.6-flash": {
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 1.50,
+      "pricing_out": 7.50,
+      "pricing_cached_in": 0.15,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "released": "2026-07-21"
+    },
+    "gemini-3.5-flash": {
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 1.50,
+      "pricing_out": 9.00,
+      "pricing_cached_in": 0.15,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true
+    },
+    "gemini-3.5-flash-lite": {
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 0.30,
+      "pricing_out": 2.50,
+      "pricing_cached_in": 0.03,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true
+    },
     "gemini-3.1-pro": {
       "provider": "gemini",
       "context_window": 1000000,
@@ -134,12 +325,27 @@
       "default_output": 8192,
       "pricing_in": 2.00,
       "pricing_out": 12.00,
+      "pricing_cached_in": 0.20,
       "supports_tools": true,
       "supports_thinking": true,
       "supports_streaming": true,
       "supports_vision": true,
       "released": "2026-02-19",
-      "notes": "default maxOutputTokens is 8192, must set explicitly for 65K"
+      "notes": "Served as gemini-3.1-pro-preview. default maxOutputTokens is 8192, must set explicitly for 65K. Prompts over 200K bill at 4.00/18.00."
+    },
+    "gemini-3-flash": {
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output": 65536,
+      "default_output": 8192,
+      "pricing_in": 0.50,
+      "pricing_out": 3.00,
+      "pricing_cached_in": 0.05,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": true,
+      "notes": "Served as gemini-3-flash-preview. Audio input bills at 1.00."
     },
     "gemini-3.1-flash-lite": {
       "provider": "gemini",
@@ -148,6 +354,7 @@
       "default_output": 8192,
       "pricing_in": 0.25,
       "pricing_out": 1.50,
+      "pricing_cached_in": 0.025,
       "supports_tools": true,
       "supports_thinking": true,
       "supports_streaming": true,
@@ -164,19 +371,36 @@
       "supports_tools": true,
       "supports_thinking": true,
       "supports_streaming": true,
-      "supports_vision": true
+      "supports_vision": true,
+      "notes": "Retires 2026-10-16. Prompts over 200K bill at 2.50/15.00."
     },
     "gemini-2.5-flash": {
       "provider": "gemini",
       "context_window": 1048576,
       "max_output": 65536,
       "default_output": 8192,
-      "pricing_in": 0.15,
-      "pricing_out": 0.60,
+      "pricing_in": 0.30,
+      "pricing_out": 2.50,
       "supports_tools": true,
       "supports_thinking": true,
       "supports_streaming": true,
-      "supports_vision": true
+      "supports_vision": true,
+      "notes": "Retires 2026-10-16."
+    },
+    "glm-5.2": {
+      "provider": "custom",
+      "context_window": 1000000,
+      "max_output": 131072,
+      "default_output": 131072,
+      "pricing_in": 1.40,
+      "pricing_out": 4.40,
+      "pricing_cached_in": 0.26,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "released": "2026-06-13",
+      "notes": "1M context / 128K output. Coding Plan quota multiplies 3x during 14:00-18:00 UTC+8."
     },
     "glm-5.1": {
       "provider": "custom",
@@ -203,19 +427,6 @@
       "supports_streaming": true,
       "supports_vision": false
     },
-    "glm-5.2": {
-      "provider": "custom",
-      "context_window": 1000000,
-      "max_output": 131072,
-      "default_output": 131072,
-      "pricing_in": 1.00,
-      "pricing_out": 4.00,
-      "supports_tools": true,
-      "supports_thinking": true,
-      "supports_streaming": true,
-      "supports_vision": false,
-      "notes": "1M context window. Pricing inferred from GLM-5.1 — verify."
-    },
     "glm-4.7": {
       "provider": "custom",
       "context_window": 202752,
@@ -229,6 +440,49 @@
       "supports_vision": false,
       "notes": "z.ai GLM-4.7: 200K context / 128K output. Also served via anthropic-compatible endpoint (api.z.ai/api/anthropic). Pricing approximate."
     },
+    "grok-4.5": {
+      "provider": "custom",
+      "context_window": 500000,
+      "max_output": null,
+      "default_output": null,
+      "pricing_in": 2.00,
+      "pricing_out": 6.00,
+      "pricing_cached_in": 0.30,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "released": "2026-07-08",
+      "notes": "Frontier reasoning tier. Prompts over 200K bill at 4.00/12.00; output limit not documented."
+    },
+    "grok-4.3": {
+      "provider": "custom",
+      "context_window": 1000000,
+      "max_output": null,
+      "default_output": null,
+      "pricing_in": 1.25,
+      "pricing_out": 2.50,
+      "pricing_cached_in": 0.20,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "Prompts over 200K bill at 2.50/5.00."
+    },
+    "grok-4.20": {
+      "provider": "custom",
+      "context_window": 1000000,
+      "max_output": null,
+      "default_output": null,
+      "pricing_in": 1.25,
+      "pricing_out": 2.50,
+      "pricing_cached_in": 0.20,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "Covers grok-4.20-0309-reasoning / -non-reasoning / -multi-agent-0309. Prompts over 200K bill at 2.50/5.00."
+    },
     "grok-4": {
       "provider": "custom",
       "context_window": 2000000,
@@ -241,7 +495,7 @@
       "supports_streaming": true,
       "supports_vision": false,
       "released": "2026-03-31",
-      "notes": "output limit not documented, bounded by context window"
+      "notes": "No longer listed on docs.x.ai as of 2026-07-29 -- superseded by grok-4.3 / grok-4.5. Kept so existing profiles keep resolving a real window."
     },
     "llama-4-scout": {
       "provider": "custom",
@@ -269,6 +523,35 @@
       "supports_vision": true,
       "notes": "open-weight, on-demand capped 4K output, dedicated uncapped"
     },
+    "deepseek-v4-pro": {
+      "provider": "custom",
+      "context_window": 1000000,
+      "max_output": 384000,
+      "default_output": 32000,
+      "pricing_in": 0.435,
+      "pricing_out": 0.87,
+      "pricing_cached_in": 0.003625,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "released": "2026-04-24",
+      "notes": "1M context is the floor for all V4 calls, not a premium tier. pricing_in is the cache-miss rate."
+    },
+    "deepseek-v4-flash": {
+      "provider": "custom",
+      "context_window": 1000000,
+      "max_output": 384000,
+      "default_output": 32000,
+      "pricing_in": 0.14,
+      "pricing_out": 0.28,
+      "pricing_cached_in": 0.0028,
+      "supports_tools": true,
+      "supports_thinking": true,
+      "supports_streaming": true,
+      "supports_vision": false,
+      "notes": "pricing_in is the cache-miss rate."
+    },
     "deepseek-chat": {
       "provider": "custom",
       "context_window": 128000,
@@ -280,7 +563,8 @@
       "supports_thinking": false,
       "supports_streaming": true,
       "supports_vision": false,
-      "notes": "DeepSeek V3.2 non-reasoning"
+      "retired": true,
+      "notes": "Retired 2026-07-24 -- migrate to deepseek-v4-flash / deepseek-v4-pro."
     },
     "deepseek-reasoner": {
       "provider": "custom",
@@ -293,11 +577,12 @@
       "supports_thinking": true,
       "supports_streaming": true,
       "supports_vision": false,
-      "notes": "DeepSeek V3.2 reasoning mode"
+      "retired": true,
+      "notes": "Retired 2026-07-24 -- migrate to deepseek-v4-pro."
     },
     "mistral-large-3": {
       "provider": "custom",
-      "context_window": 262000,
+      "context_window": 262144,
       "max_output": null,
       "default_output": null,
       "pricing_in": 2.00,
@@ -310,15 +595,17 @@
     },
     "mistral-small-4": {
       "provider": "custom",
-      "context_window": 128000,
+      "context_window": 262144,
       "max_output": null,
       "default_output": null,
-      "pricing_in": 0.10,
-      "pricing_out": 0.30,
+      "pricing_in": 0.15,
+      "pricing_out": 0.60,
       "supports_tools": true,
-      "supports_thinking": false,
+      "supports_thinking": true,
       "supports_streaming": true,
-      "supports_vision": false
+      "supports_vision": true,
+      "released": "2026-03-16",
+      "notes": "119B MoE, 6.5B active. Hybrid reasoning + image understanding."
     }
   },
   "provider_defaults": {

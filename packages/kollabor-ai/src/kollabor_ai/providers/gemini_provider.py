@@ -25,6 +25,7 @@ from .models import (
 )
 from .registry import register_provider
 from .transformers import ToolSchemaTransformer
+from .tuning import sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -307,12 +308,16 @@ class GeminiProvider(LLMProvider):
                 contents.append({"role": gemini_role, "parts": parts})
 
         # Build request payload
+        generation_config: Dict[str, Any] = {
+            "maxOutputTokens": self.config.max_tokens,
+        }
+        # Reasoning models reject sampling params; omitted for those. Gemini
+        # has no reasoning-effort parameter, so effort is not sent here.
+        generation_config.update(sampling_params(self.config, self.model))
+
         request_payload: Dict[str, Any] = {
             "contents": contents,
-            "generationConfig": {
-                "temperature": self.config.temperature,
-                "maxOutputTokens": self.config.max_tokens,
-            },
+            "generationConfig": generation_config,
         }
 
         # Add system instruction if present

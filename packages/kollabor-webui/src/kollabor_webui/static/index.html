@@ -5,7 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>kollabor // terminal</title>
   <style>
+    /* Default: slate. Neutral dark with readable off-white text and one
+       restrained accent. Every colour in the app is one of these variables, so
+       a theme is just an override block - see [data-theme] below. */
     :root {
+      --bg-primary: #101215;
+      --bg-secondary: #16191d;
+      --bg-tertiary: #1c2026;
+      --bg-elevated: #232830;
+      --text-primary: #dfe4ec;
+      --text-secondary: #aab3c0;
+      --text-dim: #6b7686;
+      --accent: #5aa9ff;
+      --accent-alt: #7ee0c4;
+      --error: #ff6b81;
+      --warning: #f0b45e;
+      --border: #262c34;
+      --border-active: #39414c;
+      --glow: rgba(90, 169, 255, 0.25);
+      --glow-alt: rgba(126, 224, 196, 0.25);
+    }
+
+    [data-theme="hacker"] {
       --bg-primary: #0a0a0a;
       --bg-secondary: #0d0d0d;
       --bg-tertiary: #111111;
@@ -21,6 +42,60 @@
       --border-active: #2a2a2a;
       --glow: rgba(0, 255, 65, 0.3);
       --glow-alt: rgba(0, 204, 255, 0.3);
+    }
+
+    [data-theme="amber"] {
+      --bg-primary: #0f0d0a;
+      --bg-secondary: #14110c;
+      --bg-tertiary: #1a1611;
+      --bg-elevated: #221d16;
+      --text-primary: #ffc46b;
+      --text-secondary: #d9a257;
+      --text-dim: #8a6a3a;
+      --accent: #ffb03a;
+      --accent-alt: #ffd9a0;
+      --error: #ff6b52;
+      --warning: #ffd166;
+      --border: #241e16;
+      --border-active: #3a2f22;
+      --glow: rgba(255, 176, 58, 0.25);
+      --glow-alt: rgba(255, 217, 160, 0.25);
+    }
+
+    [data-theme="dracula"] {
+      --bg-primary: #282a36;
+      --bg-secondary: #2f313f;
+      --bg-tertiary: #383a4a;
+      --bg-elevated: #424459;
+      --text-primary: #f8f8f2;
+      --text-secondary: #c6c8d1;
+      --text-dim: #6272a4;
+      --accent: #bd93f9;
+      --accent-alt: #8be9fd;
+      --error: #ff5555;
+      --warning: #f1fa8c;
+      --border: #3d4055;
+      --border-active: #55597a;
+      --glow: rgba(189, 147, 249, 0.25);
+      --glow-alt: rgba(139, 233, 253, 0.25);
+    }
+
+    [data-theme="nord"] {
+      --bg-primary: #2e3440;
+      --bg-secondary: #333b4a;
+      --bg-tertiary: #3b4252;
+      --bg-elevated: #434c5e;
+      --text-primary: #eceff4;
+      --text-secondary: #d8dee9;
+      --text-dim: #7b88a1;
+      --accent: #88c0d0;
+      --accent-alt: #a3be8c;
+      --error: #bf616a;
+      --warning: #ebcb8b;
+      --border: #3f4757;
+      --border-active: #4c566a;
+      --glow: rgba(136, 192, 208, 0.25);
+      --glow-alt: rgba(163, 190, 140, 0.25);
     }
 
     * {
@@ -337,6 +412,22 @@
       padding: 1px;
     }
 
+    /* Boot/error log shown while no session panels exist. One grid child that
+       flows internally, so lines stay together at the top instead of being
+       spread down the container as separate grid rows. */
+    .boot-log {
+      padding: 12px;
+      background: var(--bg-primary);
+      align-self: start;
+    }
+
+    .boot-log-line {
+      padding: 1px 0;
+      font-size: 12px;
+      color: var(--text-dim);
+      white-space: pre-wrap;
+    }
+
     .panel-container.single,
     .sessions-container.layout-1 {
       grid-template-columns: 1fr;
@@ -392,6 +483,7 @@
       justify-content: space-between;
       align-items: center;
       color: var(--text-dim);
+      flex-shrink: 0;
     }
 
     .panel-header .session-id {
@@ -480,6 +572,10 @@
       border-left: 2px solid var(--warning);
       padding: 8px 12px;
       margin: 8px 0;
+      /* .output-line is pre-wrap for terminal output, but this block is built
+         from a template literal of nested divs - pre-wrap turned its source
+         indentation and newlines into blank lines and phantom padding. */
+      white-space: normal;
     }
 
     .output-line.timestamp {
@@ -524,8 +620,11 @@
       margin-top: 8px;
     }
 
+    /* Fixed width, not flex:1 - stretched across a wide panel these read as
+       two giant bars rather than a choice. */
     .permission-buttons .btn {
-      flex: 1;
+      flex: 0 0 auto;
+      min-width: 110px;
     }
 
     .btn {
@@ -595,6 +694,33 @@
     }
 
     /* Input Area */
+    /* The scroll container for a session's output. It had no rules at all, so
+       it grew to fit its content inside an overflow:hidden panel - everything
+       past the fold was clipped and unreachable, and the input bar floated
+       under the last line instead of sitting at the bottom.
+       min-height:0 is required: without it a flex child refuses to shrink
+       below its content height and still will not scroll. */
+    .terminal-output {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 8px 12px;
+    }
+
+    .terminal-output::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .terminal-output::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    .terminal-output::-webkit-scrollbar-thumb:hover {
+      background: var(--text-dim);
+    }
+
     .input-area {
       background: var(--bg-secondary);
       border-top: 1px solid var(--border);
@@ -869,6 +995,12 @@
       color: var(--error);
     }
 
+    .mcp-server-command {
+      font-size: 11px;
+      color: var(--text-dim);
+      word-break: break-all;
+    }
+
     .mcp-server-actions {
       display: flex;
       gap: 4px;
@@ -879,6 +1011,29 @@
       flex: 1;
       font-size: 9px;
       padding: 4px 6px;
+    }
+
+    .btn-small {
+      font-size: 11px;
+      padding: 4px 10px;
+    }
+
+    /* The .mcp-server-* sizes above are tuned for the cramped status widget.
+       In a 500px modal that 9px text is unreadable and flex:1 stretches each
+       button across the whole row, so the modal gets its own scale. */
+    .mcp-list .mcp-server-name { font-size: 13px; }
+    .mcp-list .mcp-server-status { font-size: 10px; }
+
+    .mcp-list .mcp-server-item {
+      padding: 10px;
+      margin-bottom: 8px;
+      border-radius: 3px;
+    }
+
+    .mcp-list .mcp-server-actions .btn {
+      flex: 0 0 auto;
+      font-size: 11px;
+      padding: 4px 10px;
     }
 
     /* Modal */
@@ -952,6 +1107,70 @@
       display: flex;
       justify-content: flex-end;
       gap: 8px;
+    }
+
+    /* Hidden when the modal body supplies its own .form-actions, so a form
+       never shows two sets of buttons. */
+    .modal-footer.hidden {
+      display: none;
+    }
+
+    /* Modal forms. Used by every modal (new session, profiles, MCP, settings) --
+       without this the labels and fields fall into raw inline flow. */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 14px;
+    }
+
+    .form-group label {
+      color: var(--text-secondary);
+      font-size: 12px;
+      letter-spacing: 0.02em;
+    }
+
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 7px 9px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+
+    .form-group textarea {
+      resize: vertical;
+      min-height: 60px;
+    }
+
+    .form-group input:focus,
+    .form-group select:focus,
+    .form-group textarea:focus {
+      outline: none;
+      border-color: var(--text-primary);
+    }
+
+    .form-group input::placeholder,
+    .form-group textarea::placeholder {
+      color: var(--text-dim);
+    }
+
+    .form-hint {
+      color: var(--text-dim);
+      font-size: 11px;
+    }
+
+    .form-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 18px;
     }
 
     /* Hub Agent List */
@@ -1032,7 +1251,6 @@
         <button class="btn-icon" id="btn-layout" title="Toggle Layout">LAYOUT</button>
         <button class="btn-icon" id="btn-sidebar" title="Toggle Sidebar">SIDEBAR</button>
         <button class="btn-icon" id="btn-panel" title="Toggle Panel">PANEL</button>
-        <button class="btn-icon" id="config-toggle" title="Toggle Config">CONFIG</button>
         <button class="btn-icon" id="hub-btn" title="Hub Agents">HUB</button>
         <button class="btn-icon" id="profiles-btn" title="Profiles">PROFILES</button>
         <button class="btn-icon" id="mcp-btn" title="MCP">MCP</button>
@@ -1065,17 +1283,10 @@
         <!-- Sessions panels populated by JS -->
       </div>
 
-      <!-- Right Panel - Config/Profiles/MCP -->
-      <div class="right-panel" id="right-panel">
-        <div class="right-panel-tabs">
-          <div class="right-panel-tab active" data-tab="config">Config</div>
-          <div class="right-panel-tab" data-tab="profiles">Profiles</div>
-          <div class="right-panel-tab" data-tab="mcp">MCP</div>
-        </div>
-        <div class="right-panel-content" id="right-panel-content">
-          <!-- Tab content populated by JS -->
-        </div>
-      </div>
+      <!-- The Config/Profiles/MCP right panel was removed: its tabs had no
+           click handler, #right-panel-content was never populated, and it
+           duplicated the PROFILES and MCP buttons in the top bar. It rendered
+           as an empty column taking a sixth of the screen. -->
     </div>
 
     <!-- Global Status Bar -->
@@ -1107,12 +1318,11 @@
         <div class="modal-title" id="modal-title">Modal</div>
         <button class="modal-close" id="modal-close">&times;</button>
       </div>
+      <!-- No generic footer: every modal renders its own .form-actions, and
+           the old Cancel/Confirm pair had no handlers - it was dead UI shown
+           on top of each form's real buttons. -->
       <div class="modal-body" id="modal-body">
         <!-- Modal content -->
-      </div>
-      <div class="modal-footer" id="modal-footer">
-        <button class="btn" id="modal-cancel">Cancel</button>
-        <button class="btn btn-primary" id="modal-confirm">Confirm</button>
       </div>
     </div>
   </div>

@@ -56,6 +56,15 @@ DEVICE_CODE_REDIRECT_URI = f"{AUTH_ISSUER_URL}/deviceauth/callback"
 # (NOT api.openai.com which requires scoped API keys)
 CODEX_API_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
+# /models requires a client_version query param (400 without it) and gates the
+# catalog on it: versions below 1.0.0 get an empty list, not an error.
+CODEX_CLIENT_VERSION = "1.0.0"
+
+# Slugs the backend lists that are not user-selectable chat models.
+CODEX_NON_CHAT_SLUGS = ("auto-review",)
+# Lighter tiers -- never auto-picked over a flagship of the same version.
+CODEX_LIGHT_TIERS = ("mini", "spark", "lite", "nano")
+
 # Timeouts
 DEVICE_CODE_TIMEOUT = 900  # 15 minutes (matches Codex CLI)
 HTTP_TIMEOUT = 30
@@ -485,20 +494,24 @@ class OpenAIOAuthClient:
             await self.close()
 
 
-async def query_codex_models(
+async def query_codex_model_details(
     access_token: str,
     account_id: Optional[str] = None,
-) -> List[str]:
-    """Query available models from the ChatGPT codex backend.
+) -> List[dict[str, Any]]:
+    """Query the ChatGPT codex backend's model catalog with full metadata.
 
-    GET {CODEX_API_BASE_URL}/models with Bearer token.
+    ``GET {CODEX_API_BASE_URL}/models?client_version=...``. Each entry carries
+    ``slug``, ``display_name``, ``context_window``, ``default_reasoning_level``
+    and ``supported_reasoning_levels`` -- the source of truth for which effort
+    levels a model accepts.
 
     Args:
         access_token: Valid OAuth access token.
         account_id: Optional ChatGPT account ID for header.
 
     Returns:
-        List of model ID strings, or empty on failure.
+        List of model dicts in backend order (frontier first), or empty on
+        failure. Never raises.
     """
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -509,38 +522,69 @@ async def query_codex_models(
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
 
+    url = f"{CODEX_API_BASE_URL}/models?client_version={CODEX_CLIENT_VERSION}"
+
     try:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(f"{CODEX_API_BASE_URL}/models") as resp:
+            async with session.get(url) as resp:
                 if resp.status != 200:
                     logger.warning(f"Models query failed (HTTP {resp.status})")
                     return []
-
                 body = await resp.json()
-
-                # OpenAI /models returns {"data": [{"id": "...", ...}]}
-                # or could be a flat list of strings
-                models = []
-                data = body if isinstance(body, list) else body.get("data", [])
-                for item in data:
-                    if isinstance(item, str):
-                        models.append(item)
-                    elif isinstance(item, dict) and "id" in item:
-                        models.append(item["id"])
-
-                logger.info(f"Codex models available: {models}")
-                return models
-
     except Exception as e:
         logger.warning(f"Failed to query codex models: {e}")
         return []
 
+    # Codex backend: {"models": [{"slug": ...}]}. Tolerate the plain OpenAI
+    # shape ({"data": [{"id": ...}]}) and a flat list of ids.
+    if isinstance(body, list):
+        entries = body
+    elif isinstance(body, dict):
+        entries = body.get("models") or body.get("data") or []
+    else:
+        entries = []
+
+    models: List[dict[str, Any]] = []
+    for item in entries:
+        if isinstance(item, str):
+            models.append({"slug": item})
+        elif isinstance(item, dict):
+            slug = item.get("slug") or item.get("id")
+            if slug:
+                models.append({**item, "slug": slug})
+
+    logger.info(f"Codex models available: {[m['slug'] for m in models]}")
+    return models
+
+
+async def query_codex_models(
+    access_token: str,
+    account_id: Optional[str] = None,
+) -> List[str]:
+    """Model ids available to the ChatGPT codex backend.
+
+    Thin wrapper over :func:`query_codex_model_details` for callers that only
+    need the ids.
+
+    Args:
+        access_token: Valid OAuth access token.
+        account_id: Optional ChatGPT account ID for header.
+
+    Returns:
+        List of model ID strings, or empty on failure.
+    """
+    details = await query_codex_model_details(access_token, account_id)
+    return [str(m.get("slug")) for m in details if m.get("slug")]
+
 
 def pick_best_model(models: List[str], fallback: str = "codex") -> str:
-    """Pick the best codex model from a list.
+    """Pick the best chat model from a codex catalog listing.
 
-    Prefers codex-suffixed models, then highest version number.
+    Highest version wins; a flagship beats a lighter tier of the same version
+    (``gpt-5.4`` over ``gpt-5.4-mini``); helper slugs like
+    ``codex-auto-review`` are never selected. Ties keep backend order, which
+    lists the frontier tier first.
 
     Args:
         models: List of model ID strings.
@@ -554,13 +598,20 @@ def pick_best_model(models: List[str], fallback: str = "codex") -> str:
 
     import re
 
-    # Prefer codex models
-    codex_models = [m for m in models if "codex" in m.lower()]
-    pool = codex_models if codex_models else models
+    pool = [
+        m for m in models if not any(bad in m.lower() for bad in CODEX_NON_CHAT_SLUGS)
+    ] or list(models)
 
-    def version_key(model_id: str):
-        nums = re.findall(r"[\d]+(?:\.[\d]+)?", model_id)
-        return [float(n) for n in nums] if nums else [0.0]
+    def rank(model_id: str):
+        low = model_id.lower()
+        # Only the FIRST numeric token is the version. Matching every number
+        # would sweep up a dated snapshot (gpt-5.6-mini-2026-07-09 -> 5.6, 2026,
+        # 7, 9) and that longer vector then outranks the bare flagship, handing
+        # the pick to a mini tier.
+        match = re.search(r"\d+(?:\.\d+)?", low)
+        version = float(match.group()) if match else 0.0
+        is_flagship = not any(tier in low for tier in CODEX_LIGHT_TIERS)
+        return (version, is_flagship)
 
-    pool.sort(key=version_key, reverse=True)
-    return pool[0]
+    # sorted() is stable, so same-rank models keep backend order.
+    return sorted(pool, key=rank, reverse=True)[0]

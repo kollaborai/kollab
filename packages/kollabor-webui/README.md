@@ -22,7 +22,6 @@ prompts, profiles, MCP, and hub controls.
 | `server.py` | FastAPI app serving config and static assets |
 | `static/index.html` | web UI shell |
 | `static/app.js` | engine API client, SSE parser, session UI, controls |
-| `static/style.css` | visual styling for the web terminal |
 
 ## Usage
 
