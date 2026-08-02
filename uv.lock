@@ -174,6 +174,18 @@ wheels = [
 ]
 
 [[package]]
+name = "assistant-stream"
+version = "0.0.34"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "starlette" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/07/23/462e7711676c60cbf044525a8f262c08c7c017aeabae9a41e8a74d87d294/assistant_stream-0.0.34.tar.gz", hash = "sha256:82501cc41af7b9aa5454894fadce47f144fcdfa78dca7ba4bfa3a162a5737682", size = 108247, upload-time = "2026-06-17T18:11:34.7Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/fe/d8eaddc7365d606b888eb38cbfd311ae8eb0d6d0a1e6c64105698f47ad52/assistant_stream-0.0.34-py3-none-any.whl", hash = "sha256:4b847a37eedee3f8defaa4d69ac33b03381fe2edc812db9068a06161123c3c51", size = 22652, upload-time = "2026-06-17T18:11:33.441Z" },
+]
+
+[[package]]
 name = "ast-serialize"
 version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -853,6 +865,7 @@ name = "kollabor-engine"
 version = "0.5.22"
 source = { editable = "packages/kollabor-engine" }
 dependencies = [
+    { name = "assistant-stream" },
     { name = "fastapi" },
     { name = "kollabor-agent" },
     { name = "kollabor-ai" },
@@ -871,6 +884,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "assistant-stream", specifier = ">=0.0.34" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "kollabor-agent", editable = "packages/kollabor-agent" },
