@@ -44,6 +44,7 @@ class TaskCard:
     cron_interval: float = 300  # remind every 5 min by default
     cron_active: bool = True  # auto-enabled on assignment
     cron_ttl_seconds: float = 7200  # auto-silence cron after 2h of no updates
+    snoozed_until: float = 0  # agent asked for quiet until this timestamp
 
     # Progress
     checkpoints: List[Dict] = field(default_factory=list)
@@ -79,6 +80,15 @@ class TaskCard:
             return f"{int(s / 60)}m"
         return f"{int(s / 3600)}h{int((s % 3600) / 60)}m"
 
+    def is_snoozed(self) -> bool:
+        return self.snoozed_until > time.time()
+
+    def snooze_remaining_str(self) -> str:
+        left = self.snoozed_until - time.time()
+        if left <= 0:
+            return ""
+        return f"{int(left / 60)}m" if left >= 60 else f"{int(left)}s"
+
     def is_timed_out(self) -> bool:
         return (
             self.timeout_seconds > 0 and self.elapsed_seconds() > self.timeout_seconds
@@ -105,6 +115,7 @@ class TaskCard:
             "cron_interval": self.cron_interval,
             "cron_active": self.cron_active,
             "cron_ttl_seconds": self.cron_ttl_seconds,
+            "snoozed_until": self.snoozed_until,
             "checkpoints": self.checkpoints,
             "result": self.result,
             "error": self.error,
@@ -338,6 +349,26 @@ class TaskLedger:
         self._save(card)
         return True
 
+    # Longest a single snooze may run. Prevents an agent from silencing a
+    # task for the rest of the session with one tag.
+    MAX_SNOOZE_SECONDS = 3600
+
+    def snooze(self, task_id: str, minutes: float) -> Optional[TaskCard]:
+        """Quiet reminders for this task without changing its status.
+
+        The card stays active and stays in the system prompt -- only the
+        cron and the checkpoint nudge go quiet. Saved with _save_preserve
+        so a snooze does not reset the cron TTL clock.
+        """
+        card = self._load(task_id)
+        if not card:
+            return None
+        seconds = max(0.0, min(minutes * 60.0, self.MAX_SNOOZE_SECONDS))
+        card.snoozed_until = time.time() + seconds
+        self._save_preserve(card)
+        logger.info(f"Task {card.id} snoozed for {int(seconds / 60)}m")
+        return card
+
     def complete(self, task_id: str, result: str) -> Optional[TaskCard]:
         card = self._load(task_id)
         if not card:
@@ -411,6 +442,7 @@ class TaskLedger:
         Excludes:
         - Tasks with status != "active" (standby, qa_review, closed, etc.)
         - Tasks with cron_active=False
+        - Tasks the assignee snoozed (see snooze())
         - Tasks that have exceeded their cron_ttl_seconds with no updates
           (auto-silences stale tasks to prevent infinite reactivation)
         """
@@ -418,6 +450,8 @@ class TaskLedger:
         due = []
         for card in self.get_all(status="active"):
             if not card.cron_active:
+                continue
+            if card.snoozed_until > now:
                 continue
 
             # TTL auto-expire: if no update in cron_ttl_seconds, silence cron

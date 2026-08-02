@@ -39,6 +39,7 @@ class AgentTracker:
     unclaimed_files: List[str] = field(default_factory=list)
     has_file_watches: bool = False
     has_active_task: bool = False
+    active_task_ids: List[str] = field(default_factory=list)
     turns_hub_only: int = 0  # consecutive turns with hub_msg but no real work
     last_nudge_at: Dict[str, float] = field(default_factory=dict)
     last_nudge_type: str = ""
@@ -155,10 +156,20 @@ class NudgeEngine:
         if tracker:
             tracker.has_file_watches = has_watches
 
-    def observe_task_assignment(self, identity: str, has_task: bool) -> None:
-        """Update whether agent has an active task."""
+    def observe_task_assignment(
+        self,
+        identity: str,
+        has_task: bool,
+        task_ids: Optional[List[str]] = None,
+    ) -> None:
+        """Update whether agent has an active task.
+
+        task_ids lets the checkpoint nudge quote real ids instead of a
+        "TASK_ID" placeholder -- an agent cannot act on a placeholder.
+        """
         tracker = self._get_tracker(identity)
         tracker.has_active_task = has_task
+        tracker.active_task_ids = list(task_ids or [])
 
     def evaluate(
         self,
@@ -212,9 +223,17 @@ class NudgeEngine:
         ):
             if self._can_nudge(tracker, "checkpoint"):
                 self._record_nudge(tracker, "checkpoint")
+                tid = tracker.active_task_ids[0] if tracker.active_task_ids else "TASK_ID"
                 return (
-                    "[nudge] you have an active task but no recent checkpoint. "
-                    'use <task_checkpoint id="TASK_ID">progress note</task_checkpoint> to save your progress.'
+                    f"[nudge] task {tid} is still open with no recent checkpoint.\n"
+                    "pick one:\n"
+                    f'  <task_checkpoint id="{tid}">progress note</task_checkpoint>'
+                    "   still working\n"
+                    f'  <task_complete id="{tid}">result</task_complete>'
+                    "                finished\n"
+                    f'  <task_snooze id="{tid}" minutes="30"/>'
+                    "                      quiet for a while\n"
+                    "doing nothing keeps this reminder coming back."
                 )
 
         # 3. Scratchpad neglect

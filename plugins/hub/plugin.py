@@ -985,6 +985,27 @@ class HubPlugin(BasePlugin):
             "task_checkpoint", self._handle_task_checkpoint_tool
         )
 
+        # --- task_snooze ---
+        # Self-closing: <task_snooze id="abc" minutes="30"/>. Lets an agent
+        # silence reminders for a while without lying about progress.
+        tsnz_pat = _re.compile(
+            r'<task_snooze\s+id="([^"]+)"(?:\s+minutes="([0-9.]+)")?\s*/?>',
+            _re.IGNORECASE,
+        )
+
+        def _extract_task_snooze(m):
+            return {
+                "task_id": m.group(1).strip(),
+                "minutes": m.group(2) or "30",
+            }
+
+        response_parser.register_plugin_tag(
+            "task_snooze", tsnz_pat, "task_snooze", _extract_task_snooze
+        )
+        tool_executor.register_plugin_handler(
+            "task_snooze", self._handle_task_snooze_tool
+        )
+
         # --- task_complete ---
         # Mixed form: id attribute + body (matches system prompt format)
         tcomp_pat = _re.compile(
@@ -2903,6 +2924,42 @@ class HubPlugin(BasePlugin):
             tool_type="task_checkpoint",
             success=True,
             output=f"task {task_id} checkpoint saved",
+        )
+
+    async def _handle_task_snooze_tool(self, tool_data: dict):
+        """Execute a task_snooze tool."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        if not self._task_ledger or not self._identity:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="task_snooze",
+                success=False,
+                error="task ledger not initialized",
+            )
+
+        task_id = _safe_semantic_id(tool_data, ["task_id"])
+        try:
+            minutes = float(tool_data.get("minutes", 30) or 30)
+        except (TypeError, ValueError):
+            minutes = 30.0
+
+        card = self._task_ledger.snooze(task_id, minutes)
+        if not card:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="task_snooze",
+                success=False,
+                error=f"task {task_id} not found",
+            )
+        return ToolExecutionResult(
+            tool_id=tool_data.get("id", "unknown"),
+            tool_type="task_snooze",
+            success=True,
+            output=(
+                f"task {task_id} quiet for {card.snooze_remaining_str()}"
+                " (still active, still in your prompt)"
+            ),
         )
 
     async def _handle_task_complete_tool(self, tool_data: dict):
@@ -6494,6 +6551,11 @@ class HubPlugin(BasePlugin):
                         task_lines.append("  WARNING: exceeded timeout, complete NOW")
                     if task.status == "qa_review":
                         task_lines.append("  STATUS: awaiting QA review")
+                    if task.is_snoozed():
+                        task_lines.append(
+                            f"  STATUS: reminders snoozed"
+                            f" ({task.snooze_remaining_str()} left)"
+                        )
                     task_lines.append("")
                 task_lines.append(
                     "when done, use:"
@@ -6508,6 +6570,10 @@ class HubPlugin(BasePlugin):
                     "to request QA:"
                     ' <task_qa id="TASK_ID">'
                     "result for review</task_qa>"
+                )
+                task_lines.append(
+                    "to quiet reminders without closing:"
+                    ' <task_snooze id="TASK_ID" minutes="30"/>'
                 )
                 task_lines.append("--- end tasks ---")
                 roster_block += "\n" + "\n".join(task_lines)
@@ -6895,6 +6961,25 @@ class HubPlugin(BasePlugin):
                     )
                 ],
             )
+
+            # Tell the nudge engine which tasks are open. Without this,
+            # has_active_task stays False forever and the checkpoint nudge
+            # can never fire. Snoozed tasks are excluded so a snooze
+            # actually silences the nudge, not just the cron.
+            if self._task_ledger:
+                try:
+                    open_tasks = [
+                        t
+                        for t in self._task_ledger.get_active_for(identity)
+                        if t.status == "active" and not t.is_snoozed()
+                    ]
+                    self._nudge_engine.observe_task_assignment(
+                        identity,
+                        has_task=bool(open_tasks),
+                        task_ids=[t.id for t in open_tasks],
+                    )
+                except Exception as e:
+                    logger.debug(f"task observation failed: {e}")
 
             # Check if we should nudge. Nudges are passive: inject a system
             # message that rides along with the agent's NEXT natural turn.
