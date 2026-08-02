@@ -954,10 +954,11 @@ class APICommunicationService:
         After dropping old turns the window must still start on a real user
         turn: a leading assistant/tool message, or a tool result whose
         originating tool call was trimmed away, would be rejected (a
-        tool_result must follow its tool_use). Drop such leading messages,
-        never emptying the list.
+        tool_result must follow its tool_use). Drop such leading messages.
+        If the entire bounded window is orphaned tool state, return an empty
+        list rather than send an invalid function_call_output-only request.
         """
-        while len(messages) > 1:
+        while messages:
             head = messages[0]
             content = head.get("content")
             is_tool_result = head.get("tool_call_id") is not None or (
@@ -967,6 +968,10 @@ class APICommunicationService:
                     for b in content
                 )
             )
+            if len(messages) == 1 and not is_tool_result:
+                # Preserve a sole non-tool turn (the current user/assistant
+                # request); there is no orphaned function output to remove.
+                break
             if head.get("role") in ("assistant", "tool") or is_tool_result:
                 messages.pop(0)
             else:
@@ -1010,7 +1015,10 @@ class APICommunicationService:
         costs = [self._message_tokens(m) for m in messages]
         total = sum(costs)
         if total <= budget:
-            return messages
+            # Even an in-budget window can begin with a stale tool result
+            # after a prior history trim/reset. Never send that orphan to the
+            # provider just because no further budget trimming is needed.
+            return self._strip_leading_orphans(list(messages))
 
         kept = list(messages)
         kept_costs = list(costs)
