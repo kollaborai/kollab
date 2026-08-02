@@ -125,6 +125,27 @@ class HubCronJob:
     created_at: float = field(default_factory=time.time)
 
 
+def _compile_marker_pattern(markers: Tuple[str, ...]) -> "re.Pattern[str]":
+    """Compile markers into a word-boundary-anchored alternation.
+
+    Plain substring matching made every marker fire inside longer words --
+    "fix" matched "prefix"/"fixes", "get " matched "budget ", "run " matched
+    "rerun " -- so ordinary status reports were classified as task
+    assignments and auto-minted TaskCards on the receiver. Boundaries are
+    added only on ends that start/finish with a word character, so markers
+    like "?" and "[work assignment" keep matching as before.
+    """
+    parts = []
+    for marker in markers:
+        pattern = re.escape(marker)
+        if marker[:1].isalnum():
+            pattern = r"\b" + pattern
+        if marker[-1:].isalnum():
+            pattern = pattern + r"\b"
+        parts.append(pattern)
+    return re.compile("|".join(parts))
+
+
 def _parse_interval(s: str) -> float:
     """Parse interval string like '5m', '1h', '30s', '2h30m' to seconds.
 
@@ -5565,6 +5586,8 @@ class HubPlugin(BasePlugin):
         "all docs/gate items resolved",
     )
 
+    _request_marker_re = _compile_marker_pattern(_REQUEST_MARKERS)
+
     def _normalize_hub_wake_content(self, content: str) -> str:
         text = (content or "").strip().lower()
         text = re.sub(r"\s+", " ", text)
@@ -5581,7 +5604,7 @@ class HubPlugin(BasePlugin):
             content, sender_has_active_task=sender_has_active_task
         ):
             return False
-        if any(marker in text for marker in self._REQUEST_MARKERS):
+        if self._request_marker_re.search(text):
             return False
         return any(marker in text for marker in self._ACK_MARKERS)
 
@@ -5653,7 +5676,7 @@ class HubPlugin(BasePlugin):
         if metadata.get("task_assignment") or metadata.get("manual_wake"):
             return True
         text = self._normalize_hub_wake_content(content)
-        return any(marker in text for marker in self._REQUEST_MARKERS)
+        return bool(self._request_marker_re.search(text))
 
     def _prune_hub_wake_cache(self, now: float) -> None:
         cutoff = now - self._HUB_WAKE_DEDUPE_TTL
