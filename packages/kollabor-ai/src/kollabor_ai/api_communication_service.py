@@ -94,6 +94,11 @@ class APICommunicationService:
         # Request cancellation support
         self.current_request_task: Optional[asyncio.Task[str]] = None
         self.cancel_requested = False
+        # Signalled by cancel_current_request(). Task.cancel() cannot reach the
+        # retry backoff -- between attempts the previous task is already
+        # .done(), so there is nothing to cancel and ESC was a silent no-op
+        # that waited out the sleep and then fired another request.
+        self._cancel_event: Optional[asyncio.Event] = None
 
         # Token usage tracking
         self.last_token_usage: Dict[str, int] = {}
@@ -189,8 +194,13 @@ class APICommunicationService:
         return self._profile.provider if self._profile else ""
 
     def cancel_current_request(self):
-        """Cancel the current API request."""
+        """Cancel the current API request, including any retry backoff."""
         self.cancel_requested = True
+        # Wake a sleeping retry backoff. Must fire regardless of task state --
+        # during backoff the previous attempt's task is already .done(), which
+        # is exactly the window where cancellation used to be dropped.
+        if self._cancel_event is not None:
+            self._cancel_event.set()
         if self.current_request_task and not self.current_request_task.done():
             logger.info("Cancelling current API request")
             self.current_request_task.cancel()
@@ -389,8 +399,10 @@ class APICommunicationService:
             asyncio.CancelledError: If request was cancelled
             Exception: For API communication errors
         """
-        # Reset cancellation flag
+        # Reset cancellation flag. Created here, not in __init__, so the Event
+        # binds to the running loop rather than whichever loop constructed us.
         self.cancel_requested = False
+        self._cancel_event = asyncio.Event()
 
         # Store streaming callback for use in handlers
         self.streaming_callback = streaming_callback
@@ -507,7 +519,7 @@ class APICommunicationService:
                         error=f"{error_type}, retry {attempt + 1} in {delay:.0f}s",
                         duration=time.time() - request_start,
                     )
-                    await asyncio.sleep(delay)
+                    await self._sleep_or_cancel(delay)
                     continue
 
                 logger.error(f"Provider call failed: {type(e).__name__}: {e}")
@@ -523,6 +535,24 @@ class APICommunicationService:
                 self.current_request_task = None
         # Should never reach here — all paths return or raise
         raise RuntimeError("call_llm: exhausted retries without result")
+
+    async def _sleep_or_cancel(self, delay: float) -> None:
+        """Sleep for `delay`, or raise CancelledError as soon as ESC arrives.
+
+        A plain asyncio.sleep() here made cancellation during retry backoff a
+        no-op: the user pressed ESC, watched "retrying in 60s" run to
+        completion, and then another request went out anyway.
+        """
+        if self.cancel_requested:
+            raise asyncio.CancelledError("API request cancelled by user")
+        if self._cancel_event is None:
+            await asyncio.sleep(delay)
+            return
+        try:
+            await asyncio.wait_for(self._cancel_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            return  # backoff elapsed untouched, retry as normal
+        raise asyncio.CancelledError("API request cancelled during retry backoff")
 
     async def _call_provider_nonstream(
         self,
