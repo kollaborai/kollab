@@ -18,6 +18,19 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/kollabor_webui"]
 
+[tool.hatch.build.targets.sdist]
+# Source distributions need the frontend source and lockfile for reproducible
+# rebuilds, but never vendor the local dependency tree or generated Vite output.
+exclude = [
+    "/frontend/node_modules",
+    "/frontend/dist",
+]
+
+# hatch_build.py generates the Vite output when npm is available and copies it
+# into kollabor_webui/static/assistant. If a build environment has no Node
+# toolchain, the legacy static UI remains the usable fallback.
+[tool.hatch.build.hooks.custom]
+
 [tool.uv.sources]
 kollabor-engine = { workspace = true }
 
