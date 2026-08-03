@@ -9,6 +9,7 @@ network or a running daemon.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 from collections.abc import Iterable
@@ -131,7 +132,6 @@ def _install_fake_assistant_stream(monkeypatch: pytest.MonkeyPatch):
         async for _chunk in stream:
             pass
 
-
     class AssistantTransportResponse:
         def __init__(self, stream):
             self.stream = stream
@@ -149,7 +149,9 @@ def _install_fake_assistant_stream(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.asyncio
 async def test_assistant_transport_submits_add_message(monkeypatch):
     session = _FakeSession([{"type": "turn_complete", "input_tokens": 2}])
-    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
     captured, response_type, _ = _install_fake_assistant_stream(monkeypatch)
 
     response = await messages.assistant_transport(
@@ -176,7 +178,9 @@ async def test_assistant_transport_submits_add_message(monkeypatch):
 @pytest.mark.asyncio
 async def test_assistant_transport_maps_permission_result(monkeypatch):
     session = _FakeSession([{"type": "turn_complete"}])
-    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
     _install_fake_assistant_stream(monkeypatch)
 
     response = await messages.assistant_transport(
@@ -194,15 +198,15 @@ async def test_assistant_transport_maps_permission_result(monkeypatch):
     async for _chunk in response.stream:
         pass
 
-    session.resolve_permission.assert_awaited_once_with(
-        "shell-1", "approve", "session"
-    )
+    session.resolve_permission.assert_awaited_once_with("shell-1", "approve", "session")
 
 
 @pytest.mark.asyncio
 async def test_assistant_transport_sets_usage_when_client_omits_state(monkeypatch):
     session = _FakeSession([{"type": "turn_complete", "output_tokens": 3}])
-    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
     captured, _, _ = _install_fake_assistant_stream(monkeypatch)
 
     response = await messages.assistant_transport(
@@ -225,9 +229,117 @@ async def test_assistant_transport_sets_usage_when_client_omits_state(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_assistant_transport_preserves_state_through_real_state_proxy(
+    monkeypatch,
+):
+    """Usage patches must not replace the assistant-ui client's state root."""
+    import assistant_stream
+
+    session = _FakeSession(
+        [
+            {"type": "thinking", "text": "thinking"},
+            {"type": "token", "text": "hello"},
+            {
+                "type": "turn_complete",
+                "input_tokens": 2,
+                "output_tokens": 3,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured: dict[str, Any] = {}
+    real_create_run = assistant_stream.create_run
+
+    async def create_run(callback, *, state=None):
+        async def capture_controller(controller):
+            captured["controller"] = controller
+            await callback(controller)
+
+        async for chunk in real_create_run(capture_controller, state=state):
+            yield chunk
+
+    monkeypatch.setattr(assistant_stream, "create_run", create_run)
+
+    initial_state = {
+        "sessionId": session.session_id,
+        "messages": [{"id": "prior", "role": "user", "content": "previous"}],
+        "sessions": [{"session_id": session.session_id}],
+        "client": "test",
+    }
+    prior_messages = json.loads(json.dumps(initial_state["messages"]))
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state=initial_state,
+        ),
+    )
+
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert chunks
+    controller = captured["controller"]
+    assert type(controller.state).__name__ == "StateProxy"
+    state = controller._state_manager.state_data
+    payload = "".join(
+        chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks
+    )
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in payload.splitlines()
+        if line.startswith("data: {")
+    ]
+    assert [frame["type"] for frame in frames] == [
+        "part-start",
+        "text-delta",
+        "part-finish",
+        "part-start",
+        "text-delta",
+        "update-state",
+        "part-finish",
+        "message-finish",
+    ]
+    assert frames[1]["path"] == [0]
+    assert frames[1]["textDelta"] == "thinking"
+    assert frames[4]["path"] == [1]
+    assert frames[4]["textDelta"] == "hello"
+    assert frames[5]["operations"] == [
+        {"type": "set", "path": ["messages"], "value": state["messages"]},
+        {"type": "set", "path": ["usage"], "value": state["usage"]},
+    ]
+    assert frames[7]["finishReason"] == "stop"
+    assert state["sessionId"] == initial_state["sessionId"]
+    assert state["messages"] == [
+        *prior_messages,
+        {"id": "user-session-test-1", "role": "user", "content": "hello"},
+        {
+            "id": "assistant-session-test-2",
+            "role": "assistant",
+            "content": [
+                {"type": "reasoning", "text": "thinking"},
+                {"type": "text", "text": "hello"},
+            ],
+            "status": {"type": "complete", "reason": "stop"},
+        },
+    ]
+    assert state["sessions"] == initial_state["sessions"]
+    assert state["client"] == initial_state["client"]
+    assert state["usage"] == {
+        "inputTokens": 2,
+        "outputTokens": 3,
+        "toolCalls": 0,
+        "stopReason": "end_turn",
+    }
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_cancellation_cancels_daemon(monkeypatch):
     session = _FakeSession([])
-    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
     captured, _, drain_stream = _install_fake_assistant_stream(monkeypatch)
 
     response = await messages.assistant_transport(
@@ -265,14 +377,14 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     )
 
     async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
-        session._events.put_nowait(
-            {"type": "permission_denied", "tool_id": tool_id}
-        )
+        session._events.put_nowait({"type": "permission_denied", "tool_id": tool_id})
         session._events.put_nowait({"type": "turn_complete"})
         return True
 
     session.resolve_permission = AsyncMock(side_effect=resolve_permission)
-    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
     captured, _, _ = _install_fake_assistant_stream(monkeypatch)
 
     first = await messages.assistant_transport(
@@ -334,7 +446,9 @@ async def test_assistant_transport_maps_daemon_events_to_stream(monkeypatch):
             },
         ]
     )
-    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
     captured, _, _ = _install_fake_assistant_stream(monkeypatch)
 
     response = await messages.assistant_transport(

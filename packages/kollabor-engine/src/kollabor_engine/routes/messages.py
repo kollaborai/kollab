@@ -9,6 +9,7 @@ clients need no modification.
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
@@ -210,7 +211,9 @@ async def _cancel_assistant_turn(session, controller) -> None:
     try:
         await session.state.cancel_current_request()
     except Exception as exc:
-        logger.debug("assistant turn cancellation failed for %s: %s", session.session_id, exc)
+        logger.debug(
+            "assistant turn cancellation failed for %s: %s", session.session_id, exc
+        )
 
 
 async def _assistant_next_event(session, queue, controller):
@@ -261,6 +264,298 @@ def _assistant_set_usage(controller: Any, usage: Dict[str, Any]) -> None:
         controller.state = {"usage": usage}
 
 
+def _assistant_copy_messages(state: Any) -> List[Dict[str, Any]]:
+    """Copy the JSON message state before the StateProxy starts patching it."""
+    if not isinstance(state, dict) or not isinstance(state.get("messages"), list):
+        return []
+    try:
+        return json.loads(json.dumps(state["messages"]))
+    except (TypeError, ValueError):
+        return []
+
+
+def _assistant_state_content(
+    text: str,
+    reasoning: str,
+    tool_parts: List[Dict[str, Any]],
+) -> Any:
+    """Build a ThreadMessageLike-compatible content value."""
+    parts: List[Dict[str, Any]] = []
+    if reasoning:
+        parts.append({"type": "reasoning", "text": reasoning})
+    if text:
+        parts.append({"type": "text", "text": text})
+    parts.extend(tool_parts)
+    return parts if parts else ""
+
+
+def _assistant_update_message_state(
+    messages: List[Dict[str, Any]],
+    session_id: str,
+    submitted_texts: List[str],
+    text: str,
+    reasoning: str,
+    tool_parts: List[Dict[str, Any]],
+    status: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Persist the completed or interrupted turn in assistant-ui state."""
+    if not submitted_texts:
+        for message in reversed(messages):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            existing_parts = (
+                list(content)
+                if isinstance(content, list)
+                else ([{"type": "text", "text": content}] if content else [])
+            )
+            existing_tool_ids = {
+                part.get("toolCallId")
+                for part in existing_parts
+                if isinstance(part, dict) and part.get("type") == "tool-call"
+            }
+            if reasoning:
+                existing_parts.append({"type": "reasoning", "text": reasoning})
+            if text:
+                existing_parts.append({"type": "text", "text": text})
+            existing_parts.extend(
+                part
+                for part in tool_parts
+                if part.get("toolCallId") not in existing_tool_ids
+            )
+            message["content"] = existing_parts
+            message["status"] = status
+            return messages
+
+    for index, submitted_text in enumerate(submitted_texts):
+        messages.append(
+            {
+                "id": f"user-{session_id}-{len(messages) + index}",
+                "role": "user",
+                "content": submitted_text,
+            }
+        )
+
+    messages.append(
+        {
+            "id": f"assistant-{session_id}-{len(messages)}",
+            "role": "assistant",
+            "content": _assistant_state_content(text, reasoning, tool_parts),
+            "status": status,
+        }
+    )
+    return messages
+
+
+def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> None:
+    """Publish message state while retaining the rest of the client state."""
+    state = controller.state
+    if state is None:
+        controller.state = {"messages": messages}
+    else:
+        state["messages"] = messages
+
+
+def _assistant_protocol_chunk(
+    chunk_type: str, *, path: Optional[List[int]] = None, **fields: Any
+) -> SimpleNamespace:
+    """Build a current assistant-stream chunk for the transport encoder."""
+    return SimpleNamespace(
+        type=chunk_type,
+        path=[] if path is None else path,
+        **fields,
+    )
+
+
+def _assistant_finish_reason(value: Any) -> str:
+    """Map daemon completion names to assistant-stream finish reasons."""
+    normalized = str(value or "end_turn").lower()
+    return {
+        "end_turn": "stop",
+        "stop": "stop",
+        "tool_use": "tool-calls",
+        "tool_calls": "tool-calls",
+        "length": "length",
+        "content_filter": "content-filter",
+        "error": "error",
+    }.get(normalized, "other")
+
+
+async def _assistant_protocol_stream(stream, completion: Dict[str, Any]):
+    """Adapt assistant-stream 0.0.x chunks to the current wire protocol.
+
+    The Python dependency still emits the original flat chunk vocabulary while
+    the React client consumes path-addressed parts. Keep the compatibility
+    adapter here so the daemon/event contract stays unchanged.
+    """
+    next_part_index = 0
+    append_part: Optional[tuple[str, Optional[str], List[int]]] = None
+    tool_paths: Dict[str, List[int]] = {}
+
+    def close_append_part() -> Optional[SimpleNamespace]:
+        nonlocal append_part
+        if append_part is None:
+            return None
+        path = append_part[2]
+        append_part = None
+        return _assistant_protocol_chunk("part-finish", path=path)
+
+    def allocate_part_path() -> List[int]:
+        nonlocal next_part_index
+        path = [next_part_index]
+        next_part_index += 1
+        return path
+
+    async for chunk in stream:
+        chunk_type = getattr(chunk, "type", "")
+
+        if chunk_type in ("text-delta", "reasoning-delta"):
+            text_delta = str(
+                getattr(chunk, "text_delta", "")
+                or getattr(chunk, "reasoning_delta", "")
+                or ""
+            )
+            if not text_delta:
+                continue
+            kind = "reasoning" if chunk_type == "reasoning-delta" else "text"
+            parent_id = getattr(chunk, "parent_id", None)
+            if append_part is None or append_part[:2] != (kind, parent_id):
+                closing_chunk = close_append_part()
+                if closing_chunk is not None:
+                    yield closing_chunk
+                path = allocate_part_path()
+                part: Dict[str, Any] = {"type": kind}
+                if parent_id is not None:
+                    part["parentId"] = parent_id
+                yield _assistant_protocol_chunk("part-start", part=part)
+                append_part = (kind, parent_id, path)
+            yield _assistant_protocol_chunk(
+                "text-delta",
+                path=append_part[2],
+                textDelta=text_delta,
+            )
+            continue
+
+        if chunk_type == "tool-call-begin":
+            closing_chunk = close_append_part()
+            if closing_chunk is not None:
+                yield closing_chunk
+            tool_call_id = str(getattr(chunk, "tool_call_id", "") or "")
+            if not tool_call_id:
+                continue
+            path = allocate_part_path()
+            tool_paths[tool_call_id] = path
+            part = {
+                "type": "tool-call",
+                "toolCallId": tool_call_id,
+                "toolName": str(getattr(chunk, "tool_name", "tool") or "tool"),
+            }
+            parent_id = getattr(chunk, "parent_id", None)
+            if parent_id is not None:
+                part["parentId"] = parent_id
+            yield _assistant_protocol_chunk("part-start", part=part)
+            continue
+
+        if chunk_type == "tool-call-delta":
+            tool_call_id = str(getattr(chunk, "tool_call_id", "") or "")
+            path = tool_paths.get(tool_call_id)
+            if path is None:
+                logger.warning(
+                    "assistant stream args for unknown tool %s", tool_call_id
+                )
+                continue
+            yield _assistant_protocol_chunk(
+                "text-delta",
+                path=path,
+                textDelta=str(getattr(chunk, "args_text_delta", "") or ""),
+            )
+            continue
+
+        if chunk_type == "tool-result":
+            tool_call_id = str(getattr(chunk, "tool_call_id", "") or "")
+            path = tool_paths.pop(tool_call_id, None)
+            if path is None:
+                logger.warning(
+                    "assistant stream result for unknown tool %s", tool_call_id
+                )
+                continue
+            yield _assistant_protocol_chunk("tool-call-args-text-finish", path=path)
+            result_fields: Dict[str, Any] = {
+                "result": getattr(chunk, "result", None),
+                "isError": bool(getattr(chunk, "is_error", False)),
+            }
+            artifact = getattr(chunk, "artifact", None)
+            if artifact is not None:
+                result_fields["artifact"] = artifact
+            yield _assistant_protocol_chunk("result", path=path, **result_fields)
+            yield _assistant_protocol_chunk("part-finish", path=path)
+            continue
+
+        if chunk_type == "update-state":
+            yield _assistant_protocol_chunk(
+                "update-state",
+                operations=getattr(chunk, "operations", []),
+            )
+            continue
+
+        if chunk_type == "data":
+            data = getattr(chunk, "data", None)
+            yield _assistant_protocol_chunk(
+                "data",
+                data=data if isinstance(data, list) else [data],
+            )
+            continue
+
+        if chunk_type == "error":
+            yield _assistant_protocol_chunk(
+                "error",
+                error=str(getattr(chunk, "error", "assistant stream error")),
+            )
+            continue
+
+        if chunk_type == "source":
+            closing_chunk = close_append_part()
+            if closing_chunk is not None:
+                yield closing_chunk
+            path = allocate_part_path()
+            part = {
+                "type": "source",
+                "sourceType": str(getattr(chunk, "source_type", "url") or "url"),
+                "id": str(getattr(chunk, "id", "") or ""),
+                "url": str(getattr(chunk, "url", "") or ""),
+            }
+            title = getattr(chunk, "title", None)
+            if title is not None:
+                part["title"] = title
+            parent_id = getattr(chunk, "parent_id", None)
+            if parent_id is not None:
+                part["parentId"] = parent_id
+            yield _assistant_protocol_chunk("part-start", part=part)
+            yield _assistant_protocol_chunk("part-finish", path=path)
+            continue
+
+        if chunk_type:
+            logger.warning("dropping unsupported assistant-stream chunk %s", chunk_type)
+
+    closing_chunk = close_append_part()
+    if closing_chunk is not None:
+        yield closing_chunk
+    for path in tool_paths.values():
+        yield _assistant_protocol_chunk("tool-call-args-text-finish", path=path)
+        yield _assistant_protocol_chunk("part-finish", path=path)
+
+    if completion.get("completed"):
+        usage = completion.get("usage") or {}
+        yield _assistant_protocol_chunk(
+            "message-finish",
+            finishReason=_assistant_finish_reason(usage.get("stopReason")),
+            usage={
+                "inputTokens": int(usage.get("inputTokens", 0) or 0),
+                "outputTokens": int(usage.get("outputTokens", 0) or 0),
+            },
+        )
+
+
 @router.post("/{session_id}/assistant")
 async def assistant_transport(session_id: str, body: AssistantRequest):
     """Serve one assistant-ui assistant-transport run for a session.
@@ -285,11 +580,22 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             detail="assistant-stream is required for the assistant transport endpoint",
         ) from exc
 
+    completion: Dict[str, Any] = {"completed": False}
+
     async def run_callback(controller: RunController):
         queue = session.subscribe()
         tool_controllers: Dict[str, Any] = {}
         permission_controllers: Dict[str, Any] = {}
         permission_tool_ids: Dict[str, str] = {}
+        state_messages = _assistant_copy_messages(body.state)
+        persist_message_state = isinstance(body.state, dict) and isinstance(
+            body.state.get("messages"), list
+        )
+        submitted_texts: List[str] = []
+        assistant_text = ""
+        assistant_reasoning = ""
+        assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
+        assistant_parts: List[Dict[str, Any]] = []
         saw_action = False
 
         try:
@@ -301,14 +607,19 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         controller.add_error("add-message command has no text")
                         return
                     accepted = await session.send_message(text)
+                    submitted_texts.append(text)
                     saw_action = True
                     if not accepted.get("accepted"):
-                        controller.add_error(str(accepted.get("reason", "message rejected")))
+                        controller.add_error(
+                            str(accepted.get("reason", "message rejected"))
+                        )
                         return
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
-                        controller.add_error("add-tool-result command has no toolCallId")
+                        controller.add_error(
+                            "add-tool-result command has no toolCallId"
+                        )
                         return
                     source_tool_id = permission_tool_ids.get(call_id, call_id)
                     # Permission tool-call IDs are stable across requests so the
@@ -320,7 +631,9 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if not decision:
                         decision = "approve" if result is True else "deny"
                     if decision not in ("approve", "deny"):
-                        controller.add_error("permission decision must be approve or deny")
+                        controller.add_error(
+                            "permission decision must be approve or deny"
+                        )
                         return
                     resolved = await session.resolve_permission(
                         source_tool_id, decision, scope
@@ -332,7 +645,9 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         )
                         return
                 else:
-                    controller.add_error(f"Unsupported assistant command: {command_type or 'unknown'}")
+                    controller.add_error(
+                        f"Unsupported assistant command: {command_type or 'unknown'}"
+                    )
                     return
 
             if not saw_action:
@@ -346,9 +661,13 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 event_type = str(event.get("type") or "")
 
                 if event_type == "token":
-                    controller.append_text(str(event.get("text") or ""))
+                    token = str(event.get("text") or "")
+                    assistant_text += token
+                    controller.append_text(token)
                 elif event_type == "thinking":
-                    controller.append_reasoning(str(event.get("text") or ""))
+                    thinking = str(event.get("text") or "")
+                    assistant_reasoning += thinking
+                    controller.append_reasoning(thinking)
                 elif event_type == "tool_start":
                     tool_id = str(event.get("tool_id") or "")
                     if not tool_id:
@@ -357,9 +676,17 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         str(event.get("tool_name") or "tool"), tool_id
                     )
                     tool_controllers[tool_id] = tool_controller
-                    tool_controller.append_args_text(
-                        json.dumps(event.get("input") or {}, ensure_ascii=False)
-                    )
+                    tool_input = event.get("input") or {}
+                    tool_part = {
+                        "type": "tool-call",
+                        "toolCallId": tool_id,
+                        "toolName": str(event.get("tool_name") or "tool"),
+                        "args": tool_input,
+                        "argsText": json.dumps(tool_input, ensure_ascii=False),
+                    }
+                    assistant_tool_parts[tool_id] = tool_part
+                    assistant_parts.append(tool_part)
+                    tool_controller.append_args_text(tool_part["argsText"])
                 elif event_type == "permission_request":
                     source_tool_id = str(event.get("tool_id") or "")
                     if not source_tool_id:
@@ -370,18 +697,35 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         "request_permission", permission_call_id
                     )
                     permission_controllers[source_tool_id] = permission_controller
-                    permission_controller.append_args_text(
-                        json.dumps(
-                            {
-                                "tool_id": source_tool_id,
-                                "tool_name": event.get("tool_name"),
-                                "risk_level": event.get("risk_level"),
-                                "risk_reason": event.get("risk_reason"),
-                                "input": event.get("input") or {},
-                            },
-                            ensure_ascii=False,
-                        )
+                    permission_part = {
+                        "type": "tool-call",
+                        "toolCallId": permission_call_id,
+                        "toolName": "request_permission",
+                        "args": {
+                            "tool_id": source_tool_id,
+                            "tool_name": event.get("tool_name"),
+                            "risk_level": event.get("risk_level"),
+                            "risk_reason": event.get("risk_reason"),
+                            "input": event.get("input") or {},
+                        },
+                    }
+                    permission_part["argsText"] = json.dumps(
+                        permission_part["args"], ensure_ascii=False
                     )
+                    assistant_tool_parts[permission_call_id] = permission_part
+                    assistant_parts.append(permission_part)
+                    permission_controller.append_args_text(permission_part["argsText"])
+                    _assistant_update_message_state(
+                        state_messages,
+                        session_id,
+                        submitted_texts,
+                        assistant_text,
+                        assistant_reasoning,
+                        assistant_parts,
+                        {"type": "requires-action", "reason": "tool-calls"},
+                    )
+                    if persist_message_state:
+                        _assistant_set_messages(controller, state_messages)
                     # Return this run after exposing the prompt.  The daemon is
                     # blocked until a later add-tool-result request answers it;
                     # keeping this stream open would deadlock that follow-up.
@@ -395,21 +739,59 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         "error": event.get("error", ""),
                         "metadata": event.get("metadata") or {},
                     }
+                    tool_part = assistant_tool_parts.get(tool_id)
+                    if tool_part is not None:
+                        tool_part.update(
+                            {
+                                "result": result,
+                                "isError": not result["success"],
+                            }
+                        )
                     if tool_controller is not None:
                         _assistant_set_tool_result(tool_controller, result)
                     else:
                         controller.add_tool_result(tool_id, result)
                 elif event_type == "permission_granted":
                     source_tool_id = str(event.get("tool_id") or "")
-                    permission_controller = permission_controllers.pop(source_tool_id, None)
+                    permission_part = assistant_tool_parts.get(
+                        f"permission_{source_tool_id}"
+                    )
+                    if permission_part is not None:
+                        permission_part.update(
+                            {
+                                "result": {
+                                    "decision": "approve",
+                                    "scope": event.get("scope", "once"),
+                                },
+                                "isError": False,
+                            }
+                        )
+                    permission_controller = permission_controllers.pop(
+                        source_tool_id, None
+                    )
                     if permission_controller is not None:
                         _assistant_set_tool_result(
                             permission_controller,
-                            {"decision": "approve", "scope": event.get("scope", "once")},
+                            {
+                                "decision": "approve",
+                                "scope": event.get("scope", "once"),
+                            },
                         )
                 elif event_type == "permission_denied":
                     source_tool_id = str(event.get("tool_id") or "")
-                    permission_controller = permission_controllers.pop(source_tool_id, None)
+                    permission_part = assistant_tool_parts.get(
+                        f"permission_{source_tool_id}"
+                    )
+                    if permission_part is not None:
+                        permission_part.update(
+                            {
+                                "result": {"decision": "deny"},
+                                "isError": True,
+                            }
+                        )
+                    permission_controller = permission_controllers.pop(
+                        source_tool_id, None
+                    )
                     if permission_controller is not None:
                         _assistant_set_tool_result(
                             permission_controller,
@@ -418,15 +800,25 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 elif event_type == "error":
                     controller.add_error(str(event.get("message") or "engine error"))
                 elif event_type == "turn_complete":
-                    _assistant_set_usage(
-                        controller,
-                        {
-                            "inputTokens": int(event.get("input_tokens", 0) or 0),
-                            "outputTokens": int(event.get("output_tokens", 0) or 0),
-                            "toolCalls": int(event.get("tool_calls", 0) or 0),
-                            "stopReason": event.get("stop_reason", "end_turn"),
-                        },
+                    completion["usage"] = {
+                        "inputTokens": int(event.get("input_tokens", 0) or 0),
+                        "outputTokens": int(event.get("output_tokens", 0) or 0),
+                        "toolCalls": int(event.get("tool_calls", 0) or 0),
+                        "stopReason": event.get("stop_reason", "end_turn"),
+                    }
+                    completion["completed"] = True
+                    _assistant_update_message_state(
+                        state_messages,
+                        session_id,
+                        submitted_texts,
+                        assistant_text,
+                        assistant_reasoning,
+                        assistant_parts,
+                        {"type": "complete", "reason": "stop"},
                     )
+                    if persist_message_state:
+                        _assistant_set_messages(controller, state_messages)
+                    _assistant_set_usage(controller, completion["usage"])
                     return
                 elif event_type == "daemon_closed":
                     controller.add_error("session daemon exited")
@@ -441,7 +833,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             session.unsubscribe(queue)
 
     stream = create_run(run_callback, state=body.state)
-    return AssistantTransportResponse(stream)
+    return AssistantTransportResponse(_assistant_protocol_stream(stream, completion))
 
 
 @router.post("/{session_id}/cancel")
