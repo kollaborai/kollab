@@ -26,6 +26,16 @@ if Node/npm is unavailable.
 
 ## Usage
 
+Quickest path — `kollab --web-ui` spawns the engine and this package together
+(reusing an already-running engine on 7433 if one is healthy) and cleans both
+up on Ctrl+C or SIGTERM:
+
+```bash
+kollab --web-ui
+```
+
+To run the two pieces separately (useful when iterating on one of them):
+
 Start the engine:
 
 ```bash
