@@ -105,7 +105,7 @@ class EngineSession:
     ):
         self.session_id = session_id
         self.user_token = user_token
-        self.workspace = str(Path(workspace).expanduser()) if workspace else None
+        self.workspace = self._resolve_workspace(workspace)
         self.system_prompt = system_prompt or ""
         self.created_at = datetime.utcnow()
         self.profile = profile
@@ -127,6 +127,19 @@ class EngineSession:
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
         self._event_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _resolve_workspace(workspace: Optional[str]) -> Optional[str]:
+        """Normalize and validate a caller-provided daemon working directory."""
+        if not workspace:
+            return None
+
+        path = Path(workspace).expanduser().resolve()
+        if not path.exists():
+            raise ValueError(f"Workspace does not exist: {workspace}")
+        if not path.is_dir():
+            raise ValueError(f"Workspace is not a directory: {workspace}")
+        return str(path)
 
     # === lifecycle ===
 

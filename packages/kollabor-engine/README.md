@@ -50,7 +50,10 @@ Main engine modules:
 
 ## Usage
 
-Start the local service:
+To run this alongside `kollabor-webui` in one step, use `kollab --web-ui`
+from the repo root instead (see `packages/kollabor-webui/README.md`).
+
+Start the local service on its own:
 
 ```bash
 python -m kollabor_engine serve --host 127.0.0.1 --port 7433

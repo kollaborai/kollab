@@ -97,7 +97,9 @@ class LLMProfile:
         model: Model name/identifier
         temperature: Sampling temperature (0.0-1.0)
         max_tokens: Maximum tokens to generate (None = no limit)
-        timeout: Request timeout in milliseconds (0 = no timeout)
+        timeout: Request timeout in SECONDS (0 = use the provider default).
+            Seconds, not milliseconds -- the value is passed straight to
+            ProviderConfig.timeout and on to the HTTP client.
         description: Human-readable description
         extra_headers: Additional HTTP headers to include
         api_key: API key for provider
@@ -237,9 +239,14 @@ class LLMProfile:
         return self.temperature if self.temperature is not None else 0.7
 
     def get_timeout(self) -> int:
-        """Get timeout in seconds, checking env var first. OPTIONAL field (default: 120s).
+        """Get timeout in SECONDS, checking env var first.
 
-        Note: 0 means no timeout (infinity), not a fallback value.
+        0 means "use the provider default" (ProviderConfig.timeout, 120s) --
+        create_config_from_profile drops falsy values rather than sending 0.
+
+        Seconds, not milliseconds. The docstrings used to claim ms while every
+        consumer read seconds, so an env-var profile silently got a 30000
+        second (8.3 hour) timeout and a hung connection never died.
         """
         env_key = self._get_env_key("TIMEOUT")
         env_val = self._get_env_value("TIMEOUT")
@@ -260,10 +267,27 @@ class LLMProfile:
                     f"KOLLAB_TIMEOUT='{global_val}' is not a valid integer, "
                     f"using config value"
                 )
-        # 0 is valid (no timeout), only use default if truly None
+        # 0 is valid (inherit provider default), only fall back if truly None
         if self.timeout is not None:
-            return self.timeout
-        return 30000
+            return self._sane_timeout(self.timeout)
+        return 0
+
+    @staticmethod
+    def _sane_timeout(value: int) -> int:
+        """Warn on values that look like milliseconds fed into a seconds field.
+
+        Nothing legitimately waits an hour on a single HTTP request. A value
+        this large is almost always someone following the old (wrong) ms
+        documentation, and the symptom -- a request that hangs for hours
+        instead of failing -- is nearly impossible to diagnose from the UI.
+        """
+        if value > 3600:
+            logger.warning(
+                f"Timeout of {value}s (~{value / 3600:.1f}h) is suspiciously "
+                f"large. Timeouts are in SECONDS, not milliseconds -- did you "
+                f"mean {value // 1000}s?"
+            )
+        return value
 
     def get_endpoint(self) -> str:
         """Get endpoint URL, checking env var first. OPTIONAL field."""
@@ -1225,7 +1249,7 @@ class ProfileManager:
             KOLLAB_{NAME}_API_KEY        - API key/token
             KOLLAB_{NAME}_MAX_TOKENS     - Max tokens (integer)
             KOLLAB_{NAME}_TEMPERATURE    - Temperature (float, 0.0-2.0)
-            KOLLAB_{NAME}_TIMEOUT        - Timeout in ms (integer)
+            KOLLAB_{NAME}_TIMEOUT        - Timeout in seconds (integer)
             KOLLAB_{NAME}_TOP_P          - Nucleus sampling (float, 0.0-1.0)
             KOLLAB_{NAME}_EFFORT         - Reasoning effort (low..max, ultra)
             KOLLAB_{NAME}_STREAMING      - Enable streaming (true/false)
@@ -1274,7 +1298,9 @@ class ProfileManager:
             except ValueError:
                 logger.warning(f"Invalid TEMPERATURE value: {temp_str}")
 
-        timeout = 30000
+        # 0 = inherit the provider default (120s). Hardcoding 30000 here gave
+        # every env-var profile an 8.3 hour HTTP timeout.
+        timeout = 0
         timeout_str = os.environ.get(f"{prefix}TIMEOUT", "").strip()
         if timeout_str:
             try:
@@ -1591,7 +1617,7 @@ class ProfileManager:
             provider: Provider type (default "custom")
             supports_tools: Enable tool calling (default True)
             description: Profile description
-            timeout: Request timeout in milliseconds (0 = no timeout)
+            timeout: Request timeout in seconds (0 = provider default)
             streaming: Enable streaming responses (default True)
             save_to_config: Whether to save to config file
 
@@ -1923,7 +1949,7 @@ class ProfileManager:
             f"  Token: {hints['token'].name} {token_status}",
             f"  Temperature: {profile.get_temperature()}",
             f"  Max Tokens: {profile.get_max_tokens() or '(API default)'}",
-            f"  Timeout: {profile.get_timeout()}ms",
+            f"  Timeout: {profile.get_timeout()}s",
             f"  Tool Calling: {tool_mode}",
         ]
         if profile.description:

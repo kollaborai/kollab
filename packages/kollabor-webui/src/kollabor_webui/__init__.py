@@ -1,17 +1,15 @@
-"""kollabor-webui: Hacker-style terminal web UI for Kollab Engine."""
+"""kollabor-webui: browser UI shell for Kollab Engine."""
 
-import asyncio
+from __future__ import annotations
+
 import os
+import threading
+import time
 import webbrowser
-from pathlib import Path
-
-STATIC_DIR = Path(__file__).parent / "static"
 
 
-def main():
+def main() -> None:
     """Launch the Kollab UI web server."""
-    import threading
-    import time
 
     import uvicorn  # type: ignore[import-not-found]
 
@@ -24,13 +22,13 @@ def main():
     print(f"  engine: {engine_url}")
     print(f"  ui:     http://127.0.0.1:{port}\n")
 
-    # Open browser after short delay
-    def open_browser_delayed():
+    # Open browser after short delay.  Keep this daemonized so shutdown is not
+    # delayed if uvicorn exits before the browser callback runs.
+    def open_browser_delayed() -> None:
         time.sleep(1.5)
         webbrowser.open(f"http://127.0.0.1:{port}")
 
-    browser_thread = threading.Thread(target=open_browser_delayed, daemon=True)
-    browser_thread.start()
+    threading.Thread(target=open_browser_delayed, daemon=True).start()
 
     uvicorn.run(
         create_app(engine_url),

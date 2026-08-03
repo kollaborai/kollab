@@ -76,6 +76,31 @@ class TestContextBudgetGuard(unittest.TestCase):
         self.assertNotEqual(kept[0].get("role"), "tool")
         self.assertNotIn("tool_call_id", kept[0])
 
+    def test_sole_orphan_tool_result_is_dropped(self):
+        """Never send a Responses function output without its function call."""
+        svc = _service()
+        # This is the exact failure shape after trimming the call owner.
+        history = [{"role": "tool", "content": "x" * 400_000, "tool_call_id": "t1"}]
+
+        kept = svc._enforce_token_budget(list(history))
+
+        self.assertEqual(kept, [])
+
+    def test_orphan_tool_result_is_dropped_when_it_is_last_message(self):
+        """A current tool result is invalid if its owner was trimmed away."""
+        svc = _service()
+        history = [
+            _msg("user", "x" * 400_000),
+            {"role": "tool", "content": "result", "tool_call_id": "t1"},
+        ]
+
+        # Force the budget guard to enter the trim path while retaining the
+        # final orphan result as the only candidate.
+        svc._provider.config.context_window = 200000
+        kept = svc._enforce_token_budget(list(history))
+
+        self.assertEqual(kept, [])
+
     def test_overhead_is_configurable(self):
         # A huge configured overhead shrinks the budget and forces more trimming.
         class Cfg:

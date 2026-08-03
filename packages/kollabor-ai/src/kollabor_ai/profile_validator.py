@@ -319,7 +319,7 @@ def validate_timeout(value: str) -> CommandResult:
     """Validate timeout value.
 
     Args:
-        value: Timeout to validate (milliseconds, 0 = no timeout)
+        value: Timeout to validate (seconds, 0 = provider default)
 
     Returns:
         Command result with validation status
@@ -340,7 +340,7 @@ def validate_timeout(value: str) -> CommandResult:
     except ValueError:
         return CommandResult(
             success=False,
-            message=f"\n[err] Timeout must be an integer (milliseconds), got '{value}'",
+            message=f"\n[err] Timeout must be an integer (seconds), got '{value}'",
             display_type="error",
         )
 

@@ -5,7 +5,6 @@ from .context_injection import AGENT_ORCHESTRATION_CONTEXT
 from .context_service import ContextService
 from .conversation_logger import KollaborConversationLogger
 from .conversation_manager import ConversationManager
-from .model_router import ModelRouter
 from .oauth import OAuthTokens, OAuthTokenStorage, OpenAIOAuthClient
 from .profile_manager import EnvVarHint, LLMProfile, ProfileManager
 from .profile_validator import (
@@ -39,7 +38,6 @@ __all__ = [
     "AGENT_ORCHESTRATION_CONTEXT",
     "ConversationManager",
     "KollaborConversationLogger",
-    "ModelRouter",
     "EnvVarHint",
     "LLMProfile",
     "ProfileManager",

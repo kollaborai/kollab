@@ -342,6 +342,7 @@ Examples:
   kollab --agent coder --as lapis --detached  # Same, detached (backgrounded agent)
   kollab -d                                # Short form for --detached
   kollab --attach lapis                     # Attach to agent 'lapis' and see its output
+  kollab --web-ui                           # Launch the engine + browser UI
   kollab --reset-config                    # Reset configs to defaults with updated profiles
   kollab --update                          # Update this source checkout from Git
   kollab --sub list                         # Execute /sub list and exit
@@ -489,6 +490,13 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="ORG",
         help="Launch an organization (e.g., --org engineering, --org startup)",
+    )
+
+    parser.add_argument(
+        "--web-ui",
+        action="store_true",
+        default=False,
+        help="Launch the local engine + browser UI (http://127.0.0.1:8080)",
     )
 
     parser.add_argument(
@@ -903,6 +911,11 @@ async def async_main() -> None:
             sys.exit(1)
 
         await _handle_cli_login(args.login)
+        return
+
+    # Handle --web-ui: spawn engine + browser UI and block until Ctrl+C.
+    if args.web_ui:
+        await _handle_cli_web_ui()
         return
 
     # Handle --hub.
@@ -1717,6 +1730,93 @@ async def _handle_cli_login(provider: str) -> None:
         sys.exit(1)
 
 
+def _terminate_child(proc, timeout: float = 5.0) -> None:
+    """SIGTERM a child Popen, escalating to SIGKILL if it won't die."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except Exception:
+        proc.kill()
+        try:
+            proc.wait(timeout=timeout)
+        except Exception:
+            pass
+
+
+async def _handle_cli_web_ui() -> None:
+    """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
+
+    Both pieces already exist as installable console entry points
+    (`kollabor_engine`, `kollabor_webui`); this just wires them together the
+    way the two READMEs describe running them by hand.
+    """
+    import subprocess
+    import time
+    import urllib.error
+    import urllib.request
+
+    engine_port = 7433
+    webui_port = int(os.environ.get("KOLLAB_WEBUI_PORT", "8080"))
+    engine_url = f"http://127.0.0.1:{engine_port}"
+
+    def engine_healthy() -> bool:
+        try:
+            with urllib.request.urlopen(f"{engine_url}/health", timeout=1) as resp:
+                return resp.status == 200
+        except (urllib.error.URLError, OSError):
+            return False
+
+    print("\n  starting kollab web ui...")
+    print(f"  engine: {engine_url}")
+    print(f"  ui:     http://127.0.0.1:{webui_port}\n")
+
+    engine_proc = None
+    if engine_healthy():
+        print(f"  (reusing engine already running on {engine_port})")
+    else:
+        engine_proc = subprocess.Popen(
+            [sys.executable, "-m", "kollabor_engine", "serve", "--port", str(engine_port)]
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not engine_healthy():
+            if engine_proc.poll() is not None:
+                break
+            time.sleep(0.2)
+
+        if not engine_healthy():
+            print("Error: engine failed to start, see ~/.kollab logs", file=sys.stderr)
+            _terminate_child(engine_proc)
+            sys.exit(1)
+
+    env = dict(os.environ)
+    env["KOLLAB_ENGINE_URL"] = engine_url
+    env["KOLLAB_WEBUI_PORT"] = str(webui_port)
+    webui_proc = subprocess.Popen(
+        [sys.executable, "-c", "from kollabor_webui import main; main()"], env=env
+    )
+
+    import signal as signal_module
+
+    def _on_sigterm(signum, frame):
+        raise KeyboardInterrupt()
+
+    # SIGINT (Ctrl+C) already raises KeyboardInterrupt via Python's default
+    # handler. `kill <pid>` sends SIGTERM instead, whose default disposition
+    # kills the process without running `finally` -- orphaning both children.
+    # Route it through the same path so cleanup always runs.
+    previous_sigterm = signal_module.signal(signal_module.SIGTERM, _on_sigterm)
+    try:
+        webui_proc.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal_module.signal(signal_module.SIGTERM, previous_sigterm)
+        _terminate_child(webui_proc)
+        _terminate_child(engine_proc)
+
+
 def _kill_owned_daemon() -> None:
     """Kill the daemon process we forked, if we own it.
 
@@ -1766,7 +1866,7 @@ def _should_use_daemon() -> bool:
     """Determine if this invocation should auto-fork a daemon.
 
     Daemon mode only for normal interactive sessions. Skip for:
-    - explicit flags (--detached, --attach, --no-daemon, --hub)
+    - explicit flags (--detached, --attach, --no-daemon, --hub, --web-ui)
     - pipe mode (stdin not a tty, or -p flag)
     - info flags (-h, --help, --version, --reset-config, --update, --font-dir, --login)
     """
@@ -1778,6 +1878,7 @@ def _should_use_daemon() -> bool:
         "--no-daemon",
         "--hub",
         "--org",
+        "--web-ui",
         "-h",
         "--help",
         "-v",

@@ -185,7 +185,7 @@ def test_workspace_resolved_paths_still_honor_protected_files(tmp_path):
     assert executor.is_protected_path("main.py")
 
 
-def test_engine_session_applies_workspace_to_tools_and_mcp(tmp_path):
+def test_engine_session_normalizes_workspace_for_daemon(tmp_path):
     from kollabor_engine.session import EngineSession
 
     profile = LLMProfile(
@@ -203,13 +203,6 @@ def test_engine_session_applies_workspace_to_tools_and_mcp(tmp_path):
     )
 
     assert session.workspace == str(tmp_path.resolve())
-    assert session.workspace_path == tmp_path.resolve()
-    assert session.mcp_integration.workspace == tmp_path.resolve()
-    assert session.mcp_integration.local_mcp_dirs == [
-        tmp_path.resolve() / ".kollab" / "mcp"
-    ]
-    assert session.tool_executor.workspace == tmp_path.resolve()
-    assert session.tool_executor.file_ops_executor.project_root == tmp_path.resolve()
 
 
 def test_engine_session_rejects_invalid_workspace(tmp_path):
@@ -275,26 +268,32 @@ async def test_tool_executor_uses_workspace_for_terminal_and_files(tmp_path):
 async def test_session_mcp_connect_endpoint_connects(app):
     from kollabor_engine.server import get_session_registry
 
-    async def connect(server_name: str, command: str):
-        mock_mcp.server_connections[server_name] = SimpleNamespace(initialized=True)
-        mock_mcp.tool_registry["memory_query"] = {
-            "server": server_name,
-            "definition": {"description": "Query memory"},
-        }
-        return [{"name": "memory_query", "description": "Query memory"}]
+    from kollabor.state.snapshots import McpServerInfo, McpSnapshot
 
-    mock_mcp = SimpleNamespace(
-        mcp_servers={
-            "memory": {
-                "enabled": True,
-                "command": "npx -y @modelcontextprotocol/server-memory",
-            }
-        },
-        server_connections={},
-        tool_registry={},
-        _connect_and_list_tools=AsyncMock(side_effect=connect),
+    initial = McpSnapshot(
+        total_servers=1,
+        servers=[McpServerInfo(name="memory", enabled=True)],
     )
-    mock_session = SimpleNamespace(session_id="sess_connect", mcp_integration=mock_mcp)
+    connected = McpSnapshot(
+        total_servers=1,
+        total_tools=1,
+        connected_servers=1,
+        servers=[
+            McpServerInfo(
+                name="memory",
+                enabled=True,
+                connected=True,
+                tool_count=1,
+                tools=["memory_query"],
+            )
+        ],
+    )
+    mock_state = SimpleNamespace(
+        get_mcp_state=AsyncMock(side_effect=[initial, connected]),
+        enable_mcp_server=AsyncMock(return_value=initial),
+        reload_mcp_servers=AsyncMock(return_value={"snapshot": connected.to_dict()}),
+    )
+    mock_session = SimpleNamespace(session_id="sess_connect", state=mock_state)
 
     registry = get_session_registry()
     registry["sess_connect"] = mock_session
@@ -310,8 +309,7 @@ async def test_session_mcp_connect_endpoint_connects(app):
         assert data["status"] == "connected"
         assert data["tool_count"] == 1
         assert data["tools"] == ["memory_query"]
-        mock_mcp._connect_and_list_tools.assert_awaited_once_with(
-            "memory", "npx -y @modelcontextprotocol/server-memory"
-        )
+        mock_state.enable_mcp_server.assert_awaited_once_with("memory")
+        mock_state.reload_mcp_servers.assert_awaited_once_with()
     finally:
         registry.pop("sess_connect", None)

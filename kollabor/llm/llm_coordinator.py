@@ -1234,12 +1234,6 @@ class LLMService:
         """Load MCP tools for native API function calling."""
         await self._native_tools.load_tools()
 
-    async def _execute_native_tool_calls(self) -> List[Any]:
-        """Execute tool calls from native API response."""
-        return cast(
-            List[Any], await self._native_tools.execute_tool_calls(self.tool_executor)
-        )
-
     async def process_user_input(
         self, message: str, pre_displayed: bool = False
     ) -> Dict[str, Any]:
