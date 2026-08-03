@@ -1,0 +1,109 @@
+{
+  "name": "cli-web-ui-flag",
+  "description": "Verify --web-ui is registered, launches the engine + webui, serves both over HTTP, and cleans up both child processes on real Ctrl+C and SIGTERM with no orphans. Signals are delivered inside the tmux pane's own shell (a real PTY/foreground process group for Ctrl+C, pattern-based pkill for SIGTERM) rather than by PID from outside, since that is how these signals actually reach a running kollab process.",
+  "config": {
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "section",
+      "title": "--web-ui is registered"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" kollab -h 2>&1 | sed -n '1,140p'",
+      "description": "Show help"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--web-ui",
+      "description": "--web-ui appears in help"
+    },
+
+    {
+      "action": "section",
+      "title": "--web-ui serves engine + webui and shuts down cleanly on real Ctrl+C"
+    },
+    {
+      "action": "shell",
+      "command": "pkill -f 'main.py --web-ui' 2>/dev/null; pkill -f 'kollabor_engine serve' 2>/dev/null; pkill -f 'from kollabor_webui import main' 2>/dev/null; sleep 1; echo READY_FOR_TEST",
+      "description": "Ensure no leftover engine/webui from a prior run"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "READY_FOR_TEST",
+      "description": "baseline is clean"
+    },
+    {
+      "action": "start_app",
+      "command": "env KOLLAB_NO_AUTO_DETECT=1 KOLLAB_WEBUI_PORT=18092 python main.py --web-ui",
+      "sleep": 1
+    },
+    {
+      "action": "shell",
+      "command": "for i in $(seq 1 40); do curl -fs http://127.0.0.1:7433/health >/dev/null 2>&1 && curl -fs http://127.0.0.1:18092/ >/dev/null 2>&1 && { echo WEBUI_SIGINT_HEALTH_OK; exit 0; }; sleep 0.5; done; echo WEBUI_SIGINT_HEALTH_FAIL",
+      "description": "Poll engine /health and webui / until both respond"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "WEBUI_SIGINT_HEALTH_OK",
+      "description": "engine /health and webui / both respond 200 while running"
+    },
+    {
+      "action": "control",
+      "key": "c"
+    },
+    {
+      "action": "shell",
+      "command": "for i in $(seq 1 20); do pgrep -f 'main.py --web-ui' >/dev/null 2>&1 || break; sleep 0.3; done; sleep 1; if lsof -iTCP:7433 -sTCP:LISTEN -n -P >/dev/null 2>&1 || lsof -iTCP:18092 -sTCP:LISTEN -n -P >/dev/null 2>&1; then echo WEBUI_SIGINT_CLEANUP_FAIL; else echo WEBUI_SIGINT_CLEANUP_OK; fi; if pgrep -f 'kollabor_engine serve|from kollabor_webui import main' >/dev/null 2>&1; then echo WEBUI_SIGINT_ORPHAN_FAIL; else echo WEBUI_SIGINT_ORPHAN_OK; fi",
+      "description": "After Ctrl+C: verify both ports released and no orphaned children"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "WEBUI_SIGINT_CLEANUP_OK",
+      "description": "both ports are released after Ctrl+C"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "WEBUI_SIGINT_ORPHAN_OK",
+      "description": "no orphaned engine/webui processes remain after Ctrl+C"
+    },
+
+    {
+      "action": "section",
+      "title": "--web-ui shuts down cleanly on SIGTERM (e.g. a process manager stopping it)"
+    },
+    {
+      "action": "type",
+      "text": "env KOLLAB_NO_AUTO_DETECT=1 KOLLAB_WEBUI_PORT=18093 python main.py --web-ui"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "shell",
+      "command": "for i in $(seq 1 40); do curl -fs http://127.0.0.1:7433/health >/dev/null 2>&1 && curl -fs http://127.0.0.1:18093/ >/dev/null 2>&1 && { echo WEBUI_SIGTERM_HEALTH_OK; exit 0; }; sleep 0.5; done; echo WEBUI_SIGTERM_HEALTH_FAIL",
+      "description": "Poll engine /health and webui / until both respond"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "WEBUI_SIGTERM_HEALTH_OK",
+      "description": "engine /health and webui / both respond 200 while running (second instance)"
+    },
+    {
+      "action": "shell",
+      "command": "pkill -TERM -f 'main.py --web-ui'; for i in $(seq 1 20); do pgrep -f 'main.py --web-ui' >/dev/null 2>&1 || break; sleep 0.3; done; sleep 1; if lsof -iTCP:7433 -sTCP:LISTEN -n -P >/dev/null 2>&1 || lsof -iTCP:18093 -sTCP:LISTEN -n -P >/dev/null 2>&1; then echo WEBUI_SIGTERM_CLEANUP_FAIL; else echo WEBUI_SIGTERM_CLEANUP_OK; fi; if pgrep -f 'kollabor_engine serve|from kollabor_webui import main' >/dev/null 2>&1; then echo WEBUI_SIGTERM_ORPHAN_FAIL; else echo WEBUI_SIGTERM_ORPHAN_OK; fi",
+      "description": "pkill -TERM the launcher (pattern-based, not a bare PID), verify cleanup"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "WEBUI_SIGTERM_CLEANUP_OK",
+      "description": "both ports are released after SIGTERM"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "WEBUI_SIGTERM_ORPHAN_OK",
+      "description": "no orphaned engine/webui processes remain after SIGTERM"
+    }
+  ]
+}
