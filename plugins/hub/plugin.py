@@ -5735,6 +5735,22 @@ class HubPlugin(BasePlugin):
         text = self._normalize_hub_wake_content(content)
         return bool(self._request_marker_re.search(text))
 
+    @staticmethod
+    def _touch_wake_cache(
+        cache: "collections.OrderedDict[str, float]", key: str, ts: float
+    ) -> None:
+        """Insert or refresh a key, keeping insertion order aligned with time.
+
+        Re-assigning an existing OrderedDict key keeps its ORIGINAL position
+        but updates its value. _prune_hub_wake_cache evicts from the front and
+        breaks at the first non-expired entry, so a refreshed entry sitting at
+        the front makes pruning stop on its first check: the cache then grows
+        without bound AND the stale entries behind it outlive the 120s TTL,
+        silently rejecting real messages as duplicate fingerprints.
+        """
+        cache.pop(key, None)
+        cache[key] = ts
+
     def _prune_hub_wake_cache(self, now: float) -> None:
         cutoff = now - self._HUB_WAKE_DEDUPE_TTL
         for cache in (
@@ -5796,8 +5812,8 @@ class HubPlugin(BasePlugin):
             return "duplicate report fingerprint"
 
         if msg_id:
-            self._hub_wake_seen_ids[msg_id] = now
-        self._hub_wake_seen_fingerprints[fingerprint] = now
+            self._touch_wake_cache(self._hub_wake_seen_ids, msg_id, now)
+        self._touch_wake_cache(self._hub_wake_seen_fingerprints, fingerprint, now)
         return None
 
     def _decide_hub_wake(
@@ -5854,7 +5870,7 @@ class HubPlugin(BasePlugin):
             self._pending_hub_wake_ids.clear()
             return HubWakeDecision("wake", True, wake_reason)
 
-        self._pending_hub_wake_ids[message.id] = time.time()
+        self._touch_wake_cache(self._pending_hub_wake_ids, message.id, time.time())
         if self._hub_buffer_retry_queued:
             return HubWakeDecision("buffer", False, "retry already queued")
         self._hub_buffer_retry_queued = True

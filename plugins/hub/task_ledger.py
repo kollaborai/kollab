@@ -417,16 +417,6 @@ class TaskLedger:
         self._save(card)
         return card
 
-    def fail(self, task_id: str, error: str) -> Optional[TaskCard]:
-        card = self._load(task_id)
-        if not card:
-            return None
-        card.status = "failed"
-        card.error = error
-        card.cron_active = False
-        self._save(card)
-        return card
-
     def cancel(self, task_id: str) -> bool:
         card = self._load(task_id)
         if not card:
