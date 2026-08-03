@@ -573,7 +573,8 @@ async def connect_server(session_id: str, server_name: str):
         )
 
     await session.state.enable_mcp_server(server_name)
-    updated = await session.state.reload_mcp_servers()
+    await session.state.reload_mcp_servers()
+    updated = await _mcp_snapshot(session)
     server = _find_server(updated, server_name)
 
     return {

@@ -3,11 +3,14 @@
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+
+from kollabor.state.snapshots import McpServerInfo, McpSnapshot
 
 
 @pytest.fixture
@@ -328,15 +331,23 @@ class TestSessionMCPStatus:
         """Test getting MCP status for a session."""
         from kollabor_engine.server import get_session_registry
 
-        # Create a mock session
-        mock_session = MagicMock()
-        mock_session.session_id = "sess_test123"
-        mock_session.mcp_integration.mcp_servers = {
-            "memory": {"enabled": True},
-            "filesystem": {"enabled": False},
-        }
-        mock_session.mcp_integration.server_connections = {}
-        mock_session.mcp_integration.tool_registry = {}
+        snapshot = McpSnapshot(
+            total_servers=2,
+            total_tools=1,
+            connected_servers=1,
+            servers=[
+                McpServerInfo(
+                    name="memory",
+                    enabled=True,
+                    connected=True,
+                    tool_count=1,
+                    tools=["query_memory"],
+                ),
+                McpServerInfo(name="filesystem", enabled=False),
+            ],
+        )
+        state = SimpleNamespace(get_mcp_state=AsyncMock(return_value=snapshot))
+        mock_session = SimpleNamespace(session_id="sess_test123", state=state)
 
         registry = get_session_registry()
         registry["sess_test123"] = mock_session
@@ -351,6 +362,8 @@ class TestSessionMCPStatus:
             assert data["session_id"] == "sess_test123"
             assert "servers" in data
             assert "total_tools" in data
+            assert data["servers"]["memory"]["tools"] == ["query_memory"]
+            state.get_mcp_state.assert_awaited_once_with()
 
         # Cleanup
         registry.pop("sess_test123", None)
@@ -373,29 +386,27 @@ class TestServerTools:
         """Test listing tools from a connected server."""
         from kollabor_engine.server import get_session_registry
 
-        # Create mock session with tools
-        mock_session = MagicMock()
-        mock_session.session_id = "sess_tools"
-
-        # Mock MCP integration with tools
-        mock_mcp = MagicMock()
-        mock_mcp.tool_registry = {
-            "query_memory": {
-                "server": "memory",
-                "definition": {
-                    "description": "Query memories",
-                    "parameters": {"type": "object"},
-                },
-            },
-            "create_file": {
-                "server": "filesystem",
-                "definition": {
-                    "description": "Create file",
-                    "parameters": {"type": "object"},
-                },
-            },
-        }
-        mock_session.mcp_integration = mock_mcp
+        state = SimpleNamespace(
+            get_mcp_tools=AsyncMock(
+                return_value={
+                    "memory": [
+                        {
+                            "name": "query_memory",
+                            "description": "Query memories",
+                            "parameters": {"type": "object"},
+                        }
+                    ],
+                    "filesystem": [
+                        {
+                            "name": "create_file",
+                            "description": "Create file",
+                            "parameters": {"type": "object"},
+                        }
+                    ],
+                }
+            )
+        )
+        mock_session = SimpleNamespace(session_id="sess_tools", state=state)
 
         registry = get_session_registry()
         registry["sess_tools"] = mock_session
@@ -410,5 +421,6 @@ class TestServerTools:
             assert data["server_name"] == "memory"
             assert len(data["tools"]) == 1
             assert data["tools"][0]["name"] == "query_memory"
+            state.get_mcp_tools.assert_awaited_once_with(server_filter="memory")
 
         registry.pop("sess_tools", None)
