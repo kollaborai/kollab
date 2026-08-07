@@ -52,6 +52,7 @@ Bundled agents in `bundles/agents/` provide defaults.
 fields:
   - description: human-readable description (optional)
   - profile: default llm profile to use (optional, overrides via --profile)
+  - tools: registry tool names allowed for the agent; `["*"]` allows all tools
   - skills: names of Agent Skills from the library (optional); use `["*"]` to attach every discovered skill
   - default_skills: subset of skills to load into context automatically (optional)
 

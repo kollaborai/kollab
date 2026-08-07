@@ -1,25 +1,6 @@
 {
   "description": "Creative writing agent - short stories, novels, and prose",
-  "tools": [
-    "terminal",
-    "file-read",
-    "file-edit",
-    "file-create",
-    "file-create-overwrite",
-    "file-append",
-    "file-grep",
-    "hub-msg",
-    "hub-status",
-    "scratchpad",
-    "scratchpad-append",
-    "scratchpad-get",
-    "web-fetch",
-    "web-search",
-    "mcp-reload",
-    "workspace-set",
-    "tool-search",
-    "tool-load"
-  ],
+  "tools": ["*"],
   "skills": [
     "character-development",
     "dialogue-craft",

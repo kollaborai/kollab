@@ -21,7 +21,7 @@ Profiles define how you connect to LLM providers. Each profile specifies the pro
 | `api_key` | string | API authentication key |
 | `base_url` | string | Custom endpoint URL (for custom providers) |
 | `temperature` | float | Sampling randomness (0.0-2.0, default: 0.7) |
-| `max_tokens` | int | Maximum tokens to generate (default: 4096) |
+| `max_tokens` | int | Maximum output tokens to generate (default: 16384; standard Responses providers send this as `max_output_tokens`, while ChatGPT OAuth/Codex uses its backend default) |
 | `timeout` | float | Request timeout in seconds (default: 60.0) |
 
 ### Environment Variable Pattern

@@ -4,15 +4,14 @@ Verifies the full pipeline from registry through generators to
 system prompt and native tool schemas, in both coexistence modes.
 """
 
-import json
 from unittest.mock import MagicMock
 
 import pytest
 
-from kollabor_agent.tool_registry import ToolRegistry, get_registry
+from kollabor_agent.tool_generators.markdown import render_for_bundle
 from kollabor_agent.tool_generators.native_json import generate_openai_tools
 from kollabor_agent.tool_generators.xml_regex import generate_all_regexes
-from kollabor_agent.tool_generators.markdown import render_for_bundle
+from kollabor_agent.tool_registry import ToolRegistry, get_registry
 
 
 @pytest.fixture(autouse=True)
@@ -40,9 +39,11 @@ class TestRegistryIntegration:
             assert params["type"] == "object"
             assert isinstance(params["properties"], dict)
 
+        assert "git" not in {t["function"]["name"] for t in tools}
+        assert "terminal" in {t["function"]["name"] for t in tools}
+
     def test_full_pipeline_regex(self):
         """Registry -> XML regex -> matches sample XML."""
-        r = get_registry()
         regexes = generate_all_regexes()
 
         # Test a representative sample

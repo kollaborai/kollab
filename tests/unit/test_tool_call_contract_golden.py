@@ -54,6 +54,17 @@ def test_xml_native_and_mcp_normalize_to_executor_shape():
         "arguments": {"tab": "active"},
     }
 
+    native_git = normalize_native_tool_call(
+        SimpleNamespace(
+            id="call_git",
+            name="git",
+            input={"command": "git status --short"},
+        )
+    )
+    assert native_git["type"] == "terminal"
+    assert native_git["name"] == "git"
+    assert native_git["command"] == "git status --short"
+
 
 def test_doctor_contract_probe_reports_stable_proof_labels():
     assert collect_tool_contract_proofs() == [

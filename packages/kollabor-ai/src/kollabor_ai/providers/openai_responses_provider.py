@@ -575,20 +575,20 @@ class OpenAIResponsesProvider(LLMProvider):
         # TODO: Optimize to use string format for simple single-turn prompts
         params["input"] = input_messages
 
-        # ChatGPT codex backend rejects temperature and max_tokens
         if not self._requires_streaming:
-            # ...and so does any reasoning model the registry marks, on the
-            # plain Responses API too (see providers/tuning.py).
+            # The public Responses API calls the provider-neutral output
+            # budget `max_output_tokens`. ChatGPT's OAuth/Codex transport has
+            # a different contract and rejects both output-token parameter
+            # names, so leave that backend on its server-side default.
+            requested_max_tokens = kwargs.get("max_tokens", self.config.max_tokens)
+            if requested_max_tokens is not None:
+                params["max_output_tokens"] = requested_max_tokens
+
             sampling = sampling_params(self.config, self.model)
             if "temperature" in kwargs:
                 params["temperature"] = kwargs["temperature"]
             elif "temperature" in sampling:
                 params["temperature"] = sampling["temperature"]
-
-            if "max_tokens" in kwargs:
-                params["max_tokens"] = kwargs["max_tokens"]
-            else:
-                params["max_tokens"] = self.config.max_tokens
 
         # Reasoning effort (opt-in). The Responses API nests it under
         # reasoning; the codex backend reports the levels each model accepts

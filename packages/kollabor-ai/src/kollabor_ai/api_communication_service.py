@@ -955,9 +955,11 @@ class APICommunicationService:
         turn: a leading assistant/tool message, or a tool result whose
         originating tool call was trimmed away, would be rejected (a
         tool_result must follow its tool_use). Drop such leading messages.
-        If the entire bounded window is orphaned tool state, return an empty
-        list rather than send an invalid function_call_output-only request.
+        If the entire bounded window is orphaned tool state, replace it with a
+        recoverable user message rather than send an invalid
+        function_call_output-only request.
         """
+        original = list(messages)
         while messages:
             head = messages[0]
             content = head.get("content")
@@ -976,7 +978,28 @@ class APICommunicationService:
                 messages.pop(0)
             else:
                 break
-        return messages
+        if messages:
+            return messages
+        if not original:
+            return [
+                {
+                    "role": "user",
+                    "content": (
+                        "[context recovery] No valid conversation input remained "
+                        "after context preparation. Continue from the current turn."
+                    ),
+                }
+            ]
+        return [
+            {
+                "role": "user",
+                "content": (
+                    "[context recovery] Earlier tool state was trimmed before its "
+                    "call owner. The previous tool result is unavailable in this "
+                    "request; continue from the current turn."
+                ),
+            }
+        ]
 
     def _enforce_token_budget(
         self, messages: List[Dict[str, Any]]
@@ -994,8 +1017,8 @@ class APICommunicationService:
         """
         cfg = getattr(getattr(self, "_provider", None), "config", None)
         window = int(getattr(cfg, "context_window", 0) or 0)
-        if window <= 0 or not messages:
-            return messages
+        if window <= 0:
+            return self._strip_leading_orphans(list(messages))
 
         reserve_output = int(getattr(cfg, "max_tokens", 0) or 16384)
         # The system prompt and tool schemas are added by the provider and are

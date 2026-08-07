@@ -18,7 +18,38 @@ from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
 
+from .tool_output_budget import (
+    build_tool_output_store,
+    pack_tool_history_messages,
+    pack_tool_results,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _config_int(config: Any, key: str, default: int) -> int:
+    """Read an integer setting without letting test doubles leak into policy."""
+    if config is None:
+        return default
+    if hasattr(config, "get"):
+        try:
+            value = config.get(key, default)
+        except Exception:
+            return default
+    else:
+        value = getattr(config, key, default)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
 
 # Hard ceiling on continuation turns in one LOOP 2 pass. Runaway backstop,
 # NOT a work limit — sits far above any healthy investigation depth. Stops a
@@ -148,6 +179,36 @@ class QueueProcessor:
         self._add_message_fn = add_message_fn
         self._max_history = max_history
         self.question_gate_enabled = question_gate_enabled
+
+        # Tool output has a producer-level spill boundary and a batch-level
+        # packing boundary. The artifact root is session/project scoped so the
+        # model can reopen the exact output after this turn.
+        self._tool_output_store = build_tool_output_store(
+            config,
+            conversation_logger,
+        )
+        self._tool_output_max_chars = _config_int(
+            config,
+            "kollabor.llm.max_tool_output_chars",
+            80000,
+        )
+        self._tool_output_preview_chars = _config_int(
+            config,
+            "kollabor.llm.tool_output_preview_chars",
+            12000,
+        )
+        self._tool_output_batch_override = _config_int(
+            config,
+            "kollabor.llm.max_tool_batch_output_chars",
+            0,
+        )
+        configure_output = getattr(tool_executor, "configure_tool_output_store", None)
+        if callable(configure_output):
+            configure_output(
+                self._tool_output_store,
+                max_result_chars=self._tool_output_max_chars,
+                preview_chars=self._tool_output_preview_chars,
+            )
 
         # Queue state (owned by QueueProcessor, accessed via properties)
         self.processing_queue: asyncio.Queue[Any] = asyncio.Queue(
@@ -1053,18 +1114,40 @@ class QueueProcessor:
             # Step 8: Bridge relay
             await self._bridge_relay(clean_response)
 
-            # Cap each tool result before it enters history so one oversized
-            # result (shell output, grep, find, MCP, ...) can't blow the context
-            # window. file_read is already capped at the source; this is the
-            # universal net. Display above already showed the full output.
-            _output_cap = int(
-                self.config.get("kollabor.llm.max_tool_output_chars", 80000)
+            # First apply the per-result spill boundary, then pack the whole
+            # native/XML batch against the remaining request budget. This is
+            # deliberately before history append: once oversized content has
+            # entered history, the provider guard can only trim whole messages
+            # and may lose the native call owner.
+            all_tool_results = [*native_results, *xml_tool_results]
+            history_limit = self._tool_history_limit_chars(
+                response=response,
+                raw_tool_calls=raw_tool_calls,
+                xml_tool_calls=all_tools,
             )
-            for _result in (*native_results, *xml_tool_results):
-                if getattr(_result, "success", False) and getattr(
-                    _result, "output", ""
-                ):
-                    _result.output = _cap_tool_output(_result.output, _output_cap)
+            history_stats = pack_tool_history_messages(
+                self.conversation_history,
+                self._tool_output_store,
+                max_chars=history_limit,
+                preview_chars=self._tool_output_preview_chars,
+            )
+            batch_limit = self._tool_batch_limit_chars(
+                history_limit=history_limit,
+                existing_tool_chars=history_stats.model_chars,
+            )
+            output_stats = pack_tool_results(
+                all_tool_results,
+                self._tool_output_store,
+                max_result_chars=self._tool_output_max_chars,
+                preview_chars=self._tool_output_preview_chars,
+                batch_limit_chars=batch_limit,
+            )
+            if output_stats.result_count or history_stats.result_count:
+                logger.info(
+                    "Tool output budget: history=%s batch=%s",
+                    history_stats.as_dict(),
+                    output_stats.as_dict(),
+                )
 
             # Step 9: Conversation logging + history
             # Build tool call entries for JSONL logging
@@ -1156,7 +1239,14 @@ class QueueProcessor:
                                 ConversationMessage(
                                     role=msg.get("role", "tool"),
                                     content=str(msg.get("content", result.output)),
-                                    metadata={"tool_call_id": tc.id},
+                                    metadata={
+                                        "tool_call_id": tc.id,
+                                        **{
+                                            key: value
+                                            for key, value in (result.metadata or {}).items()
+                                            if key.startswith("tool_output_")
+                                        },
+                                    },
                                 )
                             )
                             break
@@ -1185,6 +1275,7 @@ class QueueProcessor:
                         tool_msg = ConversationMessage(
                             role="user",
                             content="\n".join(batched),
+                            metadata={"tool_output_batch": True},
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(
@@ -1220,6 +1311,7 @@ class QueueProcessor:
                         tool_msg = ConversationMessage(
                             role="user",
                             content="\n".join(batched_tool_results),
+                            metadata={"tool_output_batch": True},
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(
@@ -1288,6 +1380,87 @@ class QueueProcessor:
     # ------------------------------------------------------------------
     # Shared helpers (used by both native and XML tool paths)
     # ------------------------------------------------------------------
+
+    def _tool_history_limit_chars(
+        self,
+        *,
+        response: str,
+        raw_tool_calls: list[Any],
+        xml_tool_calls: list[Any],
+    ) -> Optional[int]:
+        """Calculate one shared budget for retained and current tool output."""
+        explicit = self._tool_output_batch_override
+        provider_config = getattr(
+            getattr(self.api_service, "_provider", None),
+            "config",
+            None,
+        )
+        context_window = _config_int(
+            provider_config,
+            "context_window",
+            0,
+        ) if provider_config is not None else 0
+
+        derived: Optional[int] = None
+        if context_window > 0:
+            reserve_output = _config_int(provider_config, "max_tokens", 16384)
+            overhead = _config_int(
+                self.config,
+                "kollabor.llm.context_overhead_tokens",
+                60000,
+            )
+            margin = 4000
+            effective_budget = context_window - reserve_output - overhead - margin
+            non_tool_tokens = 0
+            for message in self.conversation_history:
+                role = getattr(message, "role", "")
+                metadata = getattr(message, "metadata", {}) or {}
+                is_tool_history = bool(
+                    (role == "tool" and metadata.get("tool_call_id"))
+                    or metadata.get("tool_output_batch")
+                )
+                if not is_tool_history:
+                    non_tool_tokens += (
+                        len(str(getattr(message, "content", "") or "")) // 3 + 1
+                    )
+            current_response_tokens = len(str(response or "")) // 3 + 1
+            call_tokens = len(
+                str(raw_tool_calls or xml_tool_calls or "")
+            ) // 3 + 1
+            remaining_tokens = (
+                effective_budget
+                - non_tool_tokens
+                - current_response_tokens
+                - call_tokens
+                - 512
+            )
+            derived = max(0, remaining_tokens * 3)
+
+        if explicit > 0:
+            return min(explicit, derived) if derived is not None else explicit
+        if derived is not None:
+            # Keep the recent tool-history aggregate bounded by the existing
+            # per-result ceiling by default. This catches a chain of five
+            # individually-valid reads before the provider has to trim owners.
+            return (
+                min(derived, self._tool_output_max_chars)
+                if self._tool_output_max_chars > 0
+                else derived
+            )
+        # Unknown provider window: still protect the aggregate batch. A zero
+        # per-result setting explicitly disables this fallback.
+        return self._tool_output_max_chars or None
+
+    @staticmethod
+    def _tool_batch_limit_chars(
+        *,
+        history_limit: Optional[int],
+        existing_tool_chars: int,
+    ) -> Optional[int]:
+        """Return the portion of the shared budget left for this response."""
+        if history_limit is None:
+            return None
+        return max(0, history_limit - existing_tool_chars)
 
     def _track_file_interaction(self, result: ToolExecutionResult) -> None:
         """Record a successful file operation in the conversation logger.

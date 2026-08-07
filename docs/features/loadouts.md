@@ -60,10 +60,12 @@ Picker keys:
   can't be deleted; they come from the catalog.
 
 The create/edit form arrives fully pre-filled: name suggested, provider and
-model locked from the row you picked, temperature/effort defaults, max tokens
-seeded from the model's `default_output`. `Ctrl+S` saves and activates. Max
-tokens is validated against the model's `max_output` — a value the model would
-400 on is rejected in the form instead.
+model locked from the row you picked, temperature/effort defaults, and a
+16,384-token interactive output reserve. `Ctrl+S` saves and activates. The
+value is validated against the model's `max_output` ceiling — a value the
+model would 400 on is rejected in the form instead. Clear the field to leave
+the provider default untouched. ChatGPT OAuth/Codex shows `backend default`
+instead because that endpoint rejects output-token overrides.
 
 Direct activation, no UI:
 

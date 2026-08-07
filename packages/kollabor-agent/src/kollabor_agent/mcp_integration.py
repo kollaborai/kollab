@@ -1315,6 +1315,8 @@ class MCPIntegration:
 
             result = []
             for tool in tools:
+                if not tool.expose_native:
+                    continue
                 schema = tool.to_json_schema()
                 result.append({
                     "name": schema["name"],

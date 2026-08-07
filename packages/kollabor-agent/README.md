@@ -244,7 +244,8 @@ To add a new tool:
 
 The three generators (markdown, XML regex, native JSON) automatically pick up
 new tools. Agent system prompts include only tools listed in the agent's
-`agent.json` `tools` array.
+`agent.json` `tools` array. Use `"tools": ["*"]` to allow every registered
+tool across prompt documentation, native schemas, and execution.
 
 ## Known Gaps
 

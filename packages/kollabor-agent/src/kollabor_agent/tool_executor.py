@@ -15,6 +15,7 @@ from kollabor_events.models import EventType
 from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
 from .shell_executor import ShellExecutor
+from .tool_output_budget import ToolOutputArtifactStore
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,9 @@ class ToolExecutor:
             workspace=self.workspace,
         )
         self.file_ops_executor.event_bus = event_bus
+        self._tool_output_store: Optional[ToolOutputArtifactStore] = None
+        self._tool_output_max_chars = 80000
+        self._tool_output_preview_chars = 12000
 
         # Plugin-registered tool handlers (populated via register_plugin_handler)
         self._plugin_handlers: Dict[
@@ -175,6 +179,27 @@ class ToolExecutor:
             callback: Callable that returns True if cancellation is requested
         """
         self._cancel_callback = callback
+
+    def configure_tool_output_store(
+        self,
+        store: ToolOutputArtifactStore,
+        *,
+        max_result_chars: int = 80000,
+        preview_chars: int = 12000,
+    ) -> None:
+        """Install the shared lossless tool-output boundary.
+
+        QueueProcessor owns the session/batch budget, while ToolExecutor is the
+        earliest common producer boundary. Applying the per-result pass here
+        keeps oversized output out of the renderer, hooks, and history.
+        """
+        self._tool_output_store = store
+        self._tool_output_max_chars = max_result_chars
+        self._tool_output_preview_chars = preview_chars
+        self.file_ops_executor.configure_tool_output_store(
+            store,
+            preview_chars=preview_chars,
+        )
 
     def set_bundle_scope(self, allowed_tools: Optional[List[str]]) -> None:
         """Set the bundle scope for tool access control.
@@ -364,6 +389,13 @@ class ToolExecutor:
         result = await self._execute_tool_inner(tool_data)
         self._executed_count += 1
 
+        if self._tool_output_store is not None:
+            self._tool_output_store.prepare_result(
+                result,
+                max_chars=self._tool_output_max_chars,
+                preview_chars=self._tool_output_preview_chars,
+            )
+
         publish_semantic(
             self.event_bus,
             "tool_result",
@@ -390,6 +422,14 @@ class ToolExecutor:
         """
         tool_type = tool_data.get("type", "unknown")
         tool_id = tool_data.get("id", "unknown")
+
+        # Native callers are normalized before reaching this method, but keep
+        # the legacy alias safe for direct/older callers too. The registered
+        # ``git`` definition is documentation for terminal execution, not a
+        # separate executor type.
+        if tool_type == "git":
+            tool_data = {**tool_data, "type": "terminal"}
+            tool_type = "terminal"
 
         # Check for cancellation before starting
         if self.is_cancelled():
@@ -1088,6 +1128,8 @@ class ToolExecutor:
             metadata = {}
             if "diff_info" in result_dict:
                 metadata["diff_info"] = result_dict["diff_info"]
+            if "tool_output_path" in result_dict:
+                metadata["tool_output_path"] = result_dict["tool_output_path"]
             # Propagate file path for context-service ledger ingestion
             file_path = (
                 tool_data.get("file")

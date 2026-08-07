@@ -72,6 +72,32 @@ class TestToolExecutor(unittest.TestCase):
             self.assertIsNone(result.error)
             self.assertGreater(result.execution_time, 0)
 
+    async def test_legacy_git_alias_routes_to_terminal(self):
+        """The legacy native git alias must not reach unknown-type dispatch."""
+        tool_data = {
+            "type": "git",
+            "id": "git_0",
+            "command": "git status --short",
+        }
+        self.event_bus.emit_with_hooks = AsyncMock(return_value=None)
+
+        with patch.object(
+            self.executor,
+            "_execute_terminal_command",
+            new=AsyncMock(
+                return_value=MockToolResult(
+                    "terminal", "git_0", True, " M README.md"
+                )
+            ),
+        ) as mock_terminal:
+            result = await self.executor._execute_tool_inner(tool_data)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.tool_type, "terminal")
+        mock_terminal.assert_awaited_once_with(
+            {"type": "terminal", "id": "git_0", "command": "git status --short"}
+        )
+
     async def test_execute_terminal_command_failure(self):
         """Test failed terminal command execution."""
         tool_data = {

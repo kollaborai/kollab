@@ -620,7 +620,32 @@ class TestOpenAIResponsesProviderPrepareRequest:
             messages=sample_messages, tools=None, stream=False, max_tokens=1000
         )
 
-        assert request["max_tokens"] == 1000
+        assert request["max_output_tokens"] == 1000
+        assert "max_tokens" not in request
+
+    def test_prepare_request_oauth_omits_unsupported_output_budget(
+        self, sample_messages
+    ):
+        """ChatGPT OAuth rejects both output-token parameter names."""
+        config = OpenAIResponsesConfig(
+            provider=ProviderType.OPENAI_RESPONSES,
+            api_key="oauth-test-token",
+            model="gpt-5.6-luna",
+            base_url="https://chatgpt.com/backend-api/codex",
+            max_tokens=16384,
+            effort="max",
+        )
+        provider = OpenAIResponsesProvider(config)
+
+        request = provider._prepare_request(
+            messages=sample_messages, tools=None, stream=True
+        )
+
+        assert request["stream"] is True
+        assert "max_output_tokens" not in request
+        assert "max_tokens" not in request
+        assert "temperature" not in request
+        assert request["reasoning"] == {"effort": "max"}
 
     def test_prepare_request_string_input(self, provider_config):
         """Test request with simple string input (not messages array)."""
