@@ -11,11 +11,14 @@ Lifecycle:
   assign -> obsolete/cancelled (audited terminal state, no cron)
 """
 
+import fcntl
 import json
 import logging
 import os
+import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -166,30 +169,73 @@ class TaskLedger:
     def _pending_replies_path(self) -> Path:
         return self._tasks_dir / "_pending_replies.json"
 
-    def _load_pending_replies(self) -> List[Dict[str, Any]]:
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Hold an advisory lock beside a shared JSON file."""
+        lock_path = path.with_suffix(".lock")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    @staticmethod
+    def _load_json_object(path: Path) -> Any:
+        """Load one JSON value, recovering a valid prefix after old corruption."""
+        raw = path.read_text()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            value, end = decoder.raw_decode(raw.lstrip())
+            if not isinstance(value, dict):
+                raise
+            logger.warning("Recovered valid JSON prefix from corrupted ledger file %s", path)
+            return value
+
+    @staticmethod
+    def _write_json_atomic(path: Path, data: Any) -> None:
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.stem}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+
+    def _read_pending_replies_unlocked(self) -> List[Dict[str, Any]]:
         path = self._pending_replies_path()
         if not path.exists():
             return []
         try:
-            with open(path) as f:
-                data = json.load(f)
+            data = self._load_json_object(path)
             replies = data.get("expected_replies", [])
             return replies if isinstance(replies, list) else []
         except Exception as e:
             logger.debug(f"Failed to load pending replies: {e}")
             return []
 
+    def _write_pending_replies_unlocked(self, replies: List[Dict[str, Any]]) -> None:
+        self._write_json_atomic(
+            self._pending_replies_path(), {"expected_replies": replies}
+        )
+
+    def _load_pending_replies(self) -> List[Dict[str, Any]]:
+        with self._file_lock(self._pending_replies_path()):
+            return self._read_pending_replies_unlocked()
+
     def _save_pending_replies(self, replies: List[Dict[str, Any]]) -> None:
-        path = self._pending_replies_path()
-        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            with open(tmp, "w") as f:
-                json.dump({"expected_replies": replies}, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        with self._file_lock(self._pending_replies_path()):
+            self._write_pending_replies_unlocked(replies)
 
     def _save(self, card: TaskCard) -> None:
         card.updated_at = time.time()
@@ -205,23 +251,15 @@ class TaskLedger:
 
     def _write_card(self, card: TaskCard) -> None:
         path = self._task_path(card.id)
-        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            with open(tmp, "w") as f:
-                json.dump(card.to_dict(), f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        with self._file_lock(path):
+            self._write_json_atomic(path, card.to_dict())
 
     def _load(self, task_id: str) -> Optional[TaskCard]:
         path = self._task_path(task_id)
         if not path.exists():
             return None
         try:
-            with open(path) as f:
-                return TaskCard.from_dict(json.load(f))
+            return TaskCard.from_dict(self._load_json_object(path))
         except Exception as e:
             logger.debug(f"Failed to load task {task_id}: {e}")
             return None
@@ -268,19 +306,20 @@ class TaskLedger:
         message_id: str,
         deadline_seconds: int,
     ) -> None:
-        replies = self._load_pending_replies()
-        replies.append(
-            {
-                "task_id": task_id,
-                "assignee": assignee,
-                "requested_by": requested_by,
-                "message_id": message_id,
-                "created_at": time.time(),
-                "deadline_seconds": deadline_seconds,
-                "status": "pending",
-            }
-        )
-        self._save_pending_replies(replies)
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            replies.append(
+                {
+                    "task_id": task_id,
+                    "assignee": assignee,
+                    "requested_by": requested_by,
+                    "message_id": message_id,
+                    "created_at": time.time(),
+                    "deadline_seconds": deadline_seconds,
+                    "status": "pending",
+                }
+            )
+            self._write_pending_replies_unlocked(replies)
 
     # Replies older than this are auto-expired on read.
     PENDING_REPLY_TTL = 86400  # 24 hours
@@ -292,26 +331,24 @@ class TaskLedger:
         pruned from the file. This prevents the pending list from
         growing unbounded when agents go offline without resolving.
         """
-        replies = self._load_pending_replies()
-        now = time.time()
-        changed = False
-        kept = []
-        for item in replies:
-            if item.get("status") == "pending":
-                age = now - item.get("created_at", 0)
-                if age > self.PENDING_REPLY_TTL:
-                    item["status"] = "expired"
-                    item["expired_at"] = now
-                    changed = True
-            kept.append(item)
-        if changed:
-            # Prune: keep only non-expired entries to prevent unbounded growth
-            pruned = [r for r in kept if r.get("status") != "expired"]
-            self._save_pending_replies(pruned)
-            kept = pruned
-        return [
-            item for item in kept if item.get("status") == "pending"
-        ]
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            now = time.time()
+            changed = False
+            kept = []
+            for item in replies:
+                if item.get("status") == "pending":
+                    age = now - item.get("created_at", 0)
+                    if age > self.PENDING_REPLY_TTL:
+                        item["status"] = "expired"
+                        item["expired_at"] = now
+                        changed = True
+                kept.append(item)
+            if changed:
+                # Prune: keep only non-expired entries to prevent unbounded growth
+                kept = [r for r in kept if r.get("status") != "expired"]
+                self._write_pending_replies_unlocked(kept)
+            return [item for item in kept if item.get("status") == "pending"]
 
     def resolve_reply(
         self,
@@ -332,15 +369,16 @@ class TaskLedger:
         if not any(marker in evidence.lower() for marker in strong_markers):
             return False
 
-        replies = self._load_pending_replies()
-        for item in replies:
-            if item.get("assignee") == assignee and item.get("status") == "pending":
-                item["status"] = "resolved"
-                item["resolved_by_message_id"] = message_id
-                item["resolved_at"] = time.time()
-                self._save_pending_replies(replies)
-                return True
-        return False
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            for item in replies:
+                if item.get("assignee") == assignee and item.get("status") == "pending":
+                    item["status"] = "resolved"
+                    item["resolved_by_message_id"] = message_id
+                    item["resolved_at"] = time.time()
+                    self._write_pending_replies_unlocked(replies)
+                    return True
+            return False
 
     def get_active_for(self, identity: str) -> List[TaskCard]:
         """Get all active tasks assigned to this agent."""
@@ -458,22 +496,23 @@ class TaskLedger:
         reason: str,
         message_id: str = "",
     ) -> int:
-        replies = self._load_pending_replies()
-        now = time.time()
-        resolved = 0
-        for item in replies:
-            if item.get("task_id") != task_id or item.get("status") != "pending":
-                continue
-            item["status"] = "resolved"
-            item["resolution"] = "task_terminalized"
-            item["terminal_status"] = terminal_status
-            item["resolved_reason"] = reason
-            item["resolved_by_message_id"] = message_id
-            item["resolved_at"] = now
-            resolved += 1
-        if resolved:
-            self._save_pending_replies(replies)
-        return resolved
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            now = time.time()
+            resolved = 0
+            for item in replies:
+                if item.get("task_id") != task_id or item.get("status") != "pending":
+                    continue
+                item["status"] = "resolved"
+                item["resolution"] = "task_terminalized"
+                item["terminal_status"] = terminal_status
+                item["resolved_reason"] = reason
+                item["resolved_by_message_id"] = message_id
+                item["resolved_at"] = now
+                resolved += 1
+            if resolved:
+                self._write_pending_replies_unlocked(replies)
+            return resolved
 
     def terminalize(
         self,

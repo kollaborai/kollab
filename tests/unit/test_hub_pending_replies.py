@@ -20,6 +20,48 @@ def test_task_assignment_creates_expected_reply(tmp_path):
     assert pending[0]["assignee"] == "lapis"
 
 
+def test_task_loader_recovers_valid_prefix_after_old_corruption(tmp_path):
+    ledger = TaskLedger(str(tmp_path))
+    card = ledger.create(
+        assigner="koordinator",
+        assignee="lapis",
+        directive="recover this card",
+    )
+    path = tmp_path / f"{card.id}.json"
+    path.write_text(path.read_text() + "\\nextra writer suffix")
+
+    recovered = ledger.get(card.id)
+
+    assert recovered is not None
+    assert recovered.id == card.id
+    assert recovered.directive == "recover this card"
+
+
+def test_concurrent_pending_reply_writers_keep_both_entries(tmp_path):
+    first = TaskLedger(str(tmp_path))
+    second = TaskLedger(str(tmp_path))
+
+    first.expect_reply(
+        task_id="task-1",
+        assignee="lapis",
+        requested_by="koordinator",
+        message_id="msg-1",
+        deadline_seconds=120,
+    )
+    second.expect_reply(
+        task_id="task-2",
+        assignee="sapphire",
+        requested_by="koordinator",
+        message_id="msg-2",
+        deadline_seconds=120,
+    )
+
+    assert {item["task_id"] for item in first.pending_replies()} == {
+        "task-1",
+        "task-2",
+    }
+
+
 def test_completion_report_resolves_expected_reply(tmp_path):
     ledger = TaskLedger(str(tmp_path))
     ledger.expect_reply(
