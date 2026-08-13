@@ -8792,15 +8792,18 @@ class HubPlugin(BasePlugin):
             return self._tasks_assign(rest)
         elif action == "cancel":
             return self._tasks_cancel(rest.strip())
+        elif action in ("obsolete", "stale"):
+            return self._tasks_terminalize(rest.strip(), status="obsolete")
         elif action == "status":
             return self._tasks_status(rest.strip())
         else:
             return (
-                "usage: /hub tasks list|mine|assign|cancel|status\n"
+                "usage: /hub tasks list|mine|assign|cancel|obsolete|status\n"
                 "  list                        all tasks\n"
                 "  mine                        my active tasks\n"
                 "  assign <agent> <directive>  assign task\n"
-                "  cancel <id>                 cancel a task\n"
+                "  cancel <id> [reason]        cancel a task\n"
+                "  obsolete <id> <reason>      mark stale task obsolete\n"
                 "  status <id>                 task details"
             )
 
@@ -8821,6 +8824,8 @@ class HubPlugin(BasePlugin):
                 "failed": "!!",
                 "qa_review": "QA",
                 "closed": "--",
+                "cancelled": "--",
+                "obsolete": "xx",
             }.get(card.status, "??")
             lines.append(
                 f"  [{status_icon}] {card.id}"
@@ -8881,15 +8886,38 @@ class HubPlugin(BasePlugin):
         return f"task {card.id} assigned to {assignee}:" f" {directive[:60]}"
 
     def _tasks_cancel(self, task_id: str) -> str:
-        """Cancel a task by id."""
-        if not task_id:
-            return "usage: /hub tasks cancel <id>"
+        """Cancel a task by id with a durable reason."""
+        return self._tasks_terminalize(task_id, status="cancelled")
 
+    def _tasks_terminalize(self, args: str, *, status: str) -> str:
+        if not args:
+            if status == "obsolete":
+                return "usage: /hub tasks obsolete <id> <reason>"
+            return "usage: /hub tasks cancel <id> [reason]"
+
+        parts = args.split(maxsplit=1)
+        task_id = parts[0]
+        reason = (
+            parts[1].strip()
+            if len(parts) > 1 and parts[1].strip()
+            else f"{status} via /hub tasks {status}"
+        )
+        if status == "obsolete" and len(parts) < 2:
+            return "usage: /hub tasks obsolete <id> <reason>"
         if self._task_ledger is None:
             return "task system not available"
-        if self._task_ledger.cancel(task_id):
-            return f"task {task_id} cancelled"
-        return f"task {task_id} not found"
+        try:
+            card = self._task_ledger.terminalize(
+                task_id,
+                status=status,
+                reason=reason,
+                actor=self._identity.identity if self._identity else "",
+            )
+        except ValueError as exc:
+            return str(exc)
+        if not card:
+            return f"task {task_id} not found"
+        return f"task {task_id} {status}: {card.terminal_reason}"
 
     def _tasks_status(self, task_id: str) -> str:
         """Show detailed task status."""
@@ -8928,6 +8956,8 @@ class HubPlugin(BasePlugin):
             lines.append(f"  result:      {card.result[:100]}")
         if card.error:
             lines.append(f"  error:       {card.error[:100]}")
+        if card.terminal_reason:
+            lines.append(f"  terminal:    {card.terminal_reason[:100]}")
         if card.qa_reviewer:
             passed = "PASSED" if card.qa_passed else "REJECTED"
             lines.append(f"  qa:          {passed} by {card.qa_reviewer}")
