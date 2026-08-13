@@ -658,3 +658,44 @@ class TestOpenAIResponsesProviderPrepareRequest:
         # For Responses API, single user message can be a string
         # This is an optimization for simple prompts
         assert "input" in request
+
+    def test_prepare_request_omits_empty_input_for_continuation(self, provider_config):
+        """A continuation may rely on the server-side response state."""
+        provider = OpenAIResponsesProvider(provider_config)
+
+        request = provider._prepare_request(
+            [{"role": "system", "content": "Continue the prior task."}],
+            tools=None,
+            stream=False,
+            previous_response_id="resp_previous",
+        )
+
+        assert "input" not in request
+        assert request["previous_response_id"] == "resp_previous"
+        assert request["instructions"] == "Continue the prior task."
+
+    def test_prepare_request_rejects_empty_initial_request(self, provider_config):
+        """Do not send the Responses API's invalid empty-input request."""
+        provider = OpenAIResponsesProvider(provider_config)
+
+        with pytest.raises(ProviderError, match="requires input"):
+            provider._prepare_request(
+                [{"role": "system", "content": "Only instructions"}],
+                tools=None,
+                stream=False,
+            )
+
+    def test_prepare_request_preserves_cache_controls(self, provider_config):
+        """Responses cache controls survive request preparation."""
+        provider = OpenAIResponsesProvider(provider_config)
+
+        request = provider._prepare_request(
+            [{"role": "user", "content": "Use the cached context."}],
+            tools=None,
+            stream=False,
+            prompt_cache_key="harness-context-v1",
+            prompt_cache_retention="24h",
+        )
+
+        assert request["prompt_cache_key"] == "harness-context-v1"
+        assert request["prompt_cache_retention"] == "24h"

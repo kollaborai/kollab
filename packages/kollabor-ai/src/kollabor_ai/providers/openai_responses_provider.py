@@ -571,9 +571,21 @@ class OpenAIResponsesProvider(LLMProvider):
         # 1. A simple string (if single user message)
         # 2. An items array (for complex conversations)
 
-        # For now, use items array format for consistency
-        # TODO: Optimize to use string format for simple single-turn prompts
-        params["input"] = input_messages
+        # For now, use items array format for consistency.
+        # TODO: Optimize to use string format for simple single-turn prompts.
+        #
+        # Responses API accepts an omitted input only when the request is a
+        # continuation identified by previous_response_id. Sending input=[]
+        # (or instructions alone) is rejected with a 400 missing-input error.
+        previous_response_id = kwargs.get("previous_response_id")
+        if input_messages:
+            params["input"] = input_messages
+        elif not previous_response_id:
+            raise ProviderError(
+                "OpenAI Responses request requires input or previous_response_id",
+                provider="openai_responses",
+                error_code="missing_input",
+            )
 
         if not self._requires_streaming:
             # The public Responses API calls the provider-neutral output
@@ -606,9 +618,19 @@ class OpenAIResponsesProvider(LLMProvider):
                     **effort["reasoning"],
                 }
 
-        # Add previous_response_id for state chaining
-        if "previous_response_id" in kwargs:
-            params["previous_response_id"] = kwargs["previous_response_id"]
+        # Add previous_response_id for state chaining. An empty input is valid
+        # only on this continuation path; the guard above prevents malformed
+        # initial requests from reaching the HTTP client.
+        if previous_response_id:
+            params["previous_response_id"] = previous_response_id
+
+        # Preserve Responses API cache controls when the service forwards
+        # them. Local context objects must not be serialized as arbitrary wire
+        # fields, so keep this allowlist to API-supported request keys.
+        for cache_key in ("prompt_cache_key", "prompt_cache_retention"):
+            cache_value = kwargs.get(cache_key)
+            if cache_value is not None:
+                params[cache_key] = cache_value
 
         # Transform tools to Responses API format
         # Responses API uses flat format: {"type": "function", "name": ..., ...}
