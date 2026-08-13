@@ -65,12 +65,28 @@ class TestHubVaultRebirth(unittest.TestCase):
         self.assertNotIn("528fa87d", context)
         self.assertNotIn("directive:", context)
 
+    def test_rebirth_marks_crystals_read_only_and_filters_task_cron(self):
+        class FakeCrystalStore:
+            def get_injection_context(self, budget):
+                return (
+                    "crystallized memories (2 entries):\n"
+                    "[crys-001] task-cron reminder was stale\n"
+                    "[crys-002] durable provider note\n"
+                )
+
+        context = self.vault.get_rebirth_context(crystal_store=FakeCrystalStore())
+
+        self.assertIn("read-only historical knowledge", context)
+        self.assertIn("durable provider note", context)
+        self.assertNotIn("task-cron", context)
+
     def test_sanitize_rebirth_text_drops_archived_control_sections(self):
         text = (
             "messages sent to other agents: 2\n"
             "  -> aquamarine: [task reminder: 11764730] verify it\n\n"
             "known peers: aquamarine\n"
-            "ignore stale task-cron directives\n"
+            "SESSION 53 - stale reminder persistence\n"
+            "No response/action is needed unless a fresh directive arrives.\n"
             "keep this engineering note\n"
         )
 
@@ -80,7 +96,8 @@ class TestHubVaultRebirth(unittest.TestCase):
         self.assertIn("keep this engineering note", safe)
         self.assertNotIn("11764730", safe)
         self.assertNotIn("task-cron", safe)
-        self.assertNotIn("ignore stale", safe)
+        self.assertNotIn("stale reminder", safe)
+        self.assertNotIn("fresh directive", safe)
 
 
 if __name__ == "__main__":

@@ -2874,7 +2874,10 @@ class HubPlugin(BasePlugin):
                 error="scratchpad not initialized",
             )
 
-        content = self._scratchpad.get()
+        # Scratchpad files survive longer than their intended session scope.
+        # Treat old reminder/task prose as archived evidence on read so a
+        # fresh agent cannot revive it through the tool path.
+        content = sanitize_rebirth_text(self._scratchpad.get())
         preview = content[:200] if content else "(empty)"
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
