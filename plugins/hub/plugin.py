@@ -7205,11 +7205,13 @@ class HubPlugin(BasePlugin):
             logger.debug("hub delivery trace failed: %s", e)
 
     async def _route_message(self, message: HubMessage) -> List[Tuple[str, str]]:
-        """Route a message to all agents (open channel).
+        """Route a message according to its explicit scope.
 
-        Every agent sees every message - like a Slack channel.
-        The intended recipient is marked so others know they don't
-        have to respond unless the topic is relevant to them.
+        Direct messages go only to ``message.to``. Project/team/broadcast
+        messages retain the open-channel behavior. The old implementation
+        broadcast every message, even though ``HubMessage`` defaults to the
+        direct scope, which made coordinator follow-ups fan out to the whole
+        swarm and created duplicate task directives.
 
         Returns:
             A list of (recipient_identity, rejection_reason) tuples.
@@ -7228,9 +7230,9 @@ class HubPlugin(BasePlugin):
                 to_agent=message.to,
             )
 
-        # Broadcast to ALL agents except self (open channel model)
-        # Self already sees the message via _display_outgoing_message
         agents = await self._presence.discover_agents_async()
+        if message.scope == MessageScope.DIRECT.value:
+            agents = [agent for agent in agents if agent.identity == message.to]
         my_id = self._identity.agent_id if self._identity else ""
         delivered_identities: set[str] = set()
 

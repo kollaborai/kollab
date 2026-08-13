@@ -65,6 +65,45 @@ class TestHubMeshForce(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejections, [])
         plugin._deliver_to_agent.assert_awaited_once()
 
+    async def test_direct_message_routes_only_to_named_identity(self) -> None:
+        plugin = HubPlugin(event_bus=MagicMock())
+        plugin._dns_registry = FakeDnsRegistry()
+        plugin._identity = AgentRuntime(
+            name="coordinator",
+            identity="koordinator",
+            agent_id="koordinator-id",
+            is_coordinator=True,
+        )
+        target = AgentRuntime(
+            name="coder",
+            identity="lapis",
+            agent_id="lapis-id",
+        )
+        bystander = AgentRuntime(
+            name="coder",
+            identity="sapphire",
+            agent_id="sapphire-id",
+        )
+        plugin._presence = MagicMock()
+        plugin._presence.discover_agents_async = AsyncMock(
+            return_value=[target, bystander]
+        )
+        plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+        rejections = await plugin._route_message(
+            HubMessage(
+                action="message",
+                from_agent="koordinator-id",
+                from_identity="koordinator",
+                to="lapis",
+                content="targeted check",
+                force=True,
+            )
+        )
+
+        self.assertEqual(rejections, [])
+        plugin._deliver_to_agent.assert_awaited_once_with(target, unittest.mock.ANY)
+
     async def test_hub_msg_tool_reports_rejection_as_failure(self) -> None:
         plugin = HubPlugin(event_bus=MagicMock())
         plugin._identity = AgentRuntime(
