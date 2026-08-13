@@ -373,6 +373,7 @@ class APICommunicationService:
         on_rate_limit=None,
         turn_id: Optional[str] = None,
         parent_turn_id: Optional[str] = None,
+        **provider_kwargs: Any,
     ) -> str:
         """Make API call to LLM with conversation history and robust error handling.
 
@@ -390,6 +391,8 @@ class APICommunicationService:
                 call records ``continuation_of=<parent_turn_id>`` so a
                 truncated-and-resumed response can be stitched back to the
                 turn that started it.
+            **provider_kwargs: Provider-native request options such as
+                ``previous_response_id`` and Responses API cache controls.
 
         Returns:
             LLM response content
@@ -418,6 +421,7 @@ class APICommunicationService:
 
         # Prepare messages for API
         messages = self._prepare_messages(conversation_history, max_history)
+        self._provider_kwargs = dict(provider_kwargs)
 
         # Use provider system (always enabled)
         if not self._provider:
@@ -577,6 +581,7 @@ class APICommunicationService:
         response: UnifiedResponse = await self._provider.call(
             messages=messages,
             tools=tools,
+            **getattr(self, "_provider_kwargs", {}),
         )
 
         # Extract token usage
@@ -653,6 +658,7 @@ class APICommunicationService:
             async for streaming_response in self._provider.stream(
                 messages=messages,
                 tools=tools,
+                **getattr(self, "_provider_kwargs", {}),
             ):
                 # Check for cancellation
                 if self.cancel_requested:
