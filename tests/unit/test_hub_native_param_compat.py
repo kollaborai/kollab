@@ -64,6 +64,74 @@ class TestHubNativeParamCompat(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.output, "claim:")
 
+    def test_hub_capture_reads_native_nested_name_and_lines(self):
+        plugin = _make_plugin()
+        calls = []
+
+        async def _fake_handle_capture_command(arg):
+            calls.append(arg)
+            return "captured"
+
+        plugin._handle_capture_command = _fake_handle_capture_command
+        result = _run(
+            plugin._handle_hub_capture_tool(
+                {
+                    "id": "capture-native",
+                    "type": "hub_capture",
+                    "name": "hub_capture",
+                    "input": {"name": "lapis", "lines": 80},
+                    "arguments": {"name": "lapis", "lines": 80},
+                }
+            )
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(calls, ["lapis 80"])
+
+    def test_hub_capture_retains_legacy_xml_extractor_keys(self):
+        plugin = _make_plugin()
+        calls = []
+
+        async def _fake_handle_capture_command(arg):
+            calls.append(arg)
+            return "captured"
+
+        plugin._handle_capture_command = _fake_handle_capture_command
+        result = _run(
+            plugin._handle_hub_capture_tool(
+                {"id": "capture-xml", "cap_name": "sapphire", "cap_lines": "25"}
+            )
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(calls, ["sapphire 25"])
+
+    def test_hub_vault_reads_native_nested_name(self):
+        plugin = _make_plugin()
+        plugin._format_vault = MagicMock(return_value="vault")
+        result = _run(
+            plugin._handle_hub_vault_tool(
+                {
+                    "id": "vault-native",
+                    "type": "hub_vault",
+                    "name": "hub_vault",
+                    "input": {"name": "lapis"},
+                    "arguments": {"name": "lapis"},
+                }
+            )
+        )
+        self.assertTrue(result.success)
+        plugin._format_vault.assert_called_once_with("lapis")
+
+    def test_hub_vault_retains_legacy_xml_extractor_key(self):
+        plugin = _make_plugin()
+        plugin._format_vault = MagicMock(return_value="vault")
+        result = _run(
+            plugin._handle_hub_vault_tool(
+                {"id": "vault-xml", "vault_name": "sapphire"}
+            )
+        )
+        self.assertTrue(result.success)
+        plugin._format_vault.assert_called_once_with("sapphire")
+
 
     def test_crystal_read_does_not_use_tool_call_id_as_entry_id(self):
         plugin = _make_plugin()

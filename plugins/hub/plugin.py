@@ -3511,7 +3511,13 @@ class HubPlugin(BasePlugin):
         """Execute a hub_vault tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        vault_name = tool_data.get("vault_name", "") or tool_data.get("name", "")
+        # Native normalization keeps the executor's canonical ``name`` as
+        # ``hub_vault``. Read the provider argument from the nested payload
+        # first, while retaining the legacy XML extractor key.
+        request = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(request, dict):
+            request = {}
+        vault_name = tool_data.get("vault_name", "") or request.get("name", "")
         result = self._format_vault(vault_name.strip())
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -3601,9 +3607,18 @@ class HubPlugin(BasePlugin):
         """Execute a hub_capture tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        cap_name = tool_data.get("cap_name", "") or tool_data.get("name", "")
-        cap_lines = tool_data.get("cap_lines", "50") or str(
-            tool_data.get("lines", "50")
+        # Native normalization keeps the executor's canonical ``name`` as
+        # ``hub_capture``. Read provider arguments from the nested payload
+        # first, while retaining the legacy XML extractor keys.
+        request = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(request, dict):
+            request = {}
+        cap_name = tool_data.get("cap_name", "") or request.get("name", "")
+        cap_lines = (
+            tool_data.get("cap_lines", "")
+            or request.get("lines", "")
+            or tool_data.get("lines", "")
+            or "50"
         )
         args = cap_name.strip()
         if cap_lines:
