@@ -67,3 +67,32 @@ class TestHubSpawnResolution(IsolatedAsyncioTestCase):
         self.assertEqual(call["identity"], "lapis")
         self.assertEqual(call["agent_type"], "research")
         self.assertEqual(call["task"], "review this project")
+
+    async def test_native_spawn_reads_identity_and_type_from_input(self):
+        event_bus = _FakeEventBus()
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._identity = SimpleNamespace(
+            identity="koordinator",
+            profile="deepseek",
+            is_coordinator=True,
+        )
+        plugin._presence = _FakePresence()
+
+        result = await plugin._handle_hub_spawn_tool(
+            {
+                "id": "call_spawn",
+                "type": "hub_spawn",
+                "name": "hub_spawn",
+                "input": {
+                    "name": "lapis",
+                    "type": "research",
+                    "task": "audit",
+                },
+            }
+        )
+
+        call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+        self.assertTrue(result.success)
+        self.assertEqual(call["name"], "lapis")
+        self.assertEqual(call["agent_type"], "research")
+        self.assertEqual(call["task"], "audit")

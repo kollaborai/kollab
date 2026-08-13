@@ -101,7 +101,18 @@ def normalize_native_tool_call(
         "arguments": input_value,
     }
     if resolved_type != "mcp_tool":
-        normalized.update(input_value)
+        # ``type`` and ``name`` are the executor's canonical dispatch fields.
+        # Some provider envelopes use those same keys inside the arguments
+        # (hub_spawn uses ``name`` for the requested identity and ``type`` for
+        # the agent bundle), so merging them over the canonical fields routes
+        # the call to the wrong executor and loses the plugin name.
+        normalized.update(
+            {
+                key: value
+                for key, value in input_value.items()
+                if key not in {"type", "name"}
+            }
+        )
     if isinstance(tool_call, Mapping):
         return {**dict(tool_call), **normalized}
     return normalized

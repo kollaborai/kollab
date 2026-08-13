@@ -3392,12 +3392,28 @@ class HubPlugin(BasePlugin):
             )
 
         my_ident = self._identity.identity or ""
-        raw_name = tool_data.get("name", "")
-        requested_identity = (tool_data.get("identity", "") or "").strip()
-        agent_type_override = (
-            tool_data.get("agent_type_override", "") or tool_data.get("type", "")
+        # Native normalization keeps the executor's canonical ``name`` and
+        # ``type`` as ``hub_spawn``. Read provider arguments from the nested
+        # input/arguments payload first, while retaining compatibility with
+        # legacy flat tool data.
+        request = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(request, dict):
+            request = {}
+        raw_name = request.get("name", tool_data.get("name", ""))
+        requested_identity = (
+            request.get("identity", tool_data.get("identity", "")) or ""
         ).strip()
-        task = tool_data.get("task", "")
+        agent_type_override = (
+            request.get("agent_type_override")
+            or request.get("type")
+            or tool_data.get("agent_type_override", "")
+            or (
+                tool_data.get("type", "")
+                if tool_data.get("type") != "hub_spawn"
+                else ""
+            )
+        ).strip()
+        task = request.get("task", tool_data.get("task", ""))
 
         if raw_name == my_ident or requested_identity == my_ident:
             return ToolExecutionResult(
