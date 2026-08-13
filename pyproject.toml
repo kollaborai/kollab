@@ -5,6 +5,18 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-p no:warnings"
+pythonpath = [
+    ".",
+    "packages/kollabor-ai/src",
+    "packages/kollabor-tui/src",
+    "packages/kollabor-events/src",
+    "packages/kollabor-config/src",
+    "packages/kollabor-agent/src",
+    "packages/kollabor-plugins/src",
+    "packages/kollabor-engine/src",
+    "packages/kollabor-rpc/src",
+    "packages/kollabor-webui/src",
+]
 
 [project]
 name = "kollab"
