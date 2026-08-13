@@ -59,6 +59,7 @@ class TaskCard:
     qa_reviewer: Optional[str] = None
     qa_passed: Optional[bool] = None
     qa_notes: Optional[str] = None
+    qa_requested_at: Optional[float] = None
 
     # Terminalization audit
     terminal_reason: Optional[str] = None
@@ -104,6 +105,13 @@ class TaskCard:
             self.timeout_seconds > 0 and self.elapsed_seconds() > self.timeout_seconds
         )
 
+    def qa_review_expired(self) -> bool:
+        """Return whether this QA card has waited past its review TTL."""
+        if self.status != "qa_review" or self.cron_ttl_seconds <= 0:
+            return False
+        requested_at = self.qa_requested_at or self.updated_at
+        return time.time() - requested_at > self.cron_ttl_seconds
+
     def last_checkpoint_note(self) -> str:
         if self.checkpoints:
             return str(self.checkpoints[-1].get("note", ""))
@@ -132,6 +140,7 @@ class TaskCard:
             "qa_reviewer": self.qa_reviewer,
             "qa_passed": self.qa_passed,
             "qa_notes": self.qa_notes,
+            "qa_requested_at": self.qa_requested_at,
             "terminal_reason": self.terminal_reason,
             "terminal_actor": self.terminal_actor,
             "terminal_message_id": self.terminal_message_id,
@@ -437,6 +446,19 @@ class TaskLedger:
             if (
                 card
                 and card.assignee == identity
+                and card.status == "qa_review"
+                and card.qa_review_expired()
+            ):
+                self.terminalize(
+                    card.id,
+                    status="obsolete",
+                    reason="QA review expired without reviewer action",
+                    actor="task-ledger",
+                )
+                continue
+            if (
+                card
+                and card.assignee == identity
                 and card.status in ("active", "standby", "qa_review")
             ):
                 result.append(card)
@@ -497,6 +519,7 @@ class TaskLedger:
         card.status = "qa_review"
         card.result = result
         card.cron_active = False
+        card.qa_requested_at = time.time()
         self._save(card)
         return card
 
@@ -510,6 +533,7 @@ class TaskLedger:
         card.qa_reviewer = reviewer
         card.qa_passed = True
         card.qa_notes = notes
+        card.qa_requested_at = None
         card.cron_active = False
         self._save(card)
         return card
@@ -522,6 +546,7 @@ class TaskLedger:
         card.qa_reviewer = reviewer
         card.qa_passed = False
         card.qa_notes = notes
+        card.qa_requested_at = None
         card.cron_active = True  # re-enable cron
         self._save(card)
         return card

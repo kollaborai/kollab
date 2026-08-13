@@ -69,6 +69,30 @@ def test_snooze_does_not_reset_cron_ttl(ledger):
     assert ledger.get(card.id).updated_at == pytest.approx(original)
 
 
+def test_qa_review_stays_visible_until_review_ttl(ledger):
+    card = _card(ledger)
+    qa_card = ledger.request_qa(card.id, "ready for review")
+
+    assert qa_card.qa_requested_at is not None
+    assert card.id in [item.id for item in ledger.get_active_for("lapis")]
+
+
+def test_expired_qa_review_is_terminalized_before_prompt_injection(ledger):
+    card = _card(ledger)
+    qa_card = ledger.request_qa(card.id, "old QA result")
+    qa_card.qa_requested_at = time.time() - 10
+    qa_card.updated_at = qa_card.qa_requested_at
+    qa_card.cron_ttl_seconds = 1
+    ledger._save_preserve(qa_card)
+
+    assert ledger.get_active_for("lapis") == []
+    stale = ledger.get(card.id)
+    assert stale.status == "obsolete"
+    assert stale.cron_active is False
+    assert stale.terminal_actor == "task-ledger"
+    assert stale.terminal_reason == "QA review expired without reviewer action"
+
+
 def test_snooze_survives_roundtrip(ledger):
     card = _card(ledger)
     ledger.snooze(card.id, minutes=30)
