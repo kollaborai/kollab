@@ -380,6 +380,35 @@ class TaskLedger:
                     return True
             return False
 
+    def resolve_pending_reply(
+        self,
+        message_id: str,
+        *,
+        reason: str,
+        resolution: str = "task_terminalized",
+        terminal_status: str = "obsolete",
+        resolved_by_message_id: str = "",
+    ) -> bool:
+        """Resolve one legacy expected reply keyed by outbound message ID."""
+        if not message_id or not reason:
+            return False
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            for item in replies:
+                if (
+                    item.get("message_id") == message_id
+                    and item.get("status") == "pending"
+                ):
+                    item["status"] = "resolved"
+                    item["resolution"] = resolution
+                    item["terminal_status"] = terminal_status
+                    item["resolved_reason"] = reason
+                    item["resolved_by_message_id"] = resolved_by_message_id
+                    item["resolved_at"] = time.time()
+                    self._write_pending_replies_unlocked(replies)
+                    return True
+            return False
+
     def get_active_for(self, identity: str) -> List[TaskCard]:
         """Get all active tasks assigned to this agent."""
         result = []

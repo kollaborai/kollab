@@ -120,11 +120,13 @@ class TestHubMeshForce(unittest.IsolatedAsyncioTestCase):
                 "id": "hub_msg_2",
                 "to": "lapis",
                 "content": "review Agent HUD and report back",
+                "task_id": "task-42",
             }
         )
 
         routed = plugin._route_message.await_args.args[0]
         self.assertTrue(routed.metadata["task_assignment"])
+        self.assertEqual(routed.metadata["task_id"], "task-42")
 
     async def test_route_message_queues_direct_target_identity_when_offline(self) -> None:
         plugin = HubPlugin(event_bus=MagicMock())

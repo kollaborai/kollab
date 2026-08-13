@@ -2519,6 +2519,9 @@ class HubPlugin(BasePlugin):
                 sender_has_task = False
 
         metadata = {"wait": any_wait}
+        task_id = str(tool_data.get("task_id", "") or "").strip()
+        if task_id:
+            metadata["task_id"] = task_id
         if self._is_ack_only_content(content, sender_has_active_task=sender_has_task):
             metadata["ack"] = True
         elif self._has_report_evidence(content, sender_has_active_task=sender_has_task):

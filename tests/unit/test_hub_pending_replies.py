@@ -82,6 +82,25 @@ def test_completion_report_resolves_expected_reply(tmp_path):
     assert ledger.pending_replies() == []
 
 
+def test_legacy_message_id_resolution_closes_one_expected_reply(tmp_path):
+    ledger = TaskLedger(str(tmp_path))
+    ledger.expect_reply(
+        task_id="legacy-message-id",
+        assignee="sapphire",
+        requested_by="koordinator",
+        message_id="legacy-message-id",
+        deadline_seconds=120,
+    )
+
+    resolved = ledger.resolve_pending_reply(
+        "legacy-message-id",
+        reason="retired with the stopped harness swarm",
+    )
+
+    assert resolved is True
+    assert ledger.pending_replies() == []
+
+
 def test_ack_does_not_resolve_expected_reply(tmp_path):
     ledger = TaskLedger(str(tmp_path))
     ledger.expect_reply(
