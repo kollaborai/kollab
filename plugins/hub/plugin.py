@@ -315,8 +315,6 @@ class HubPlugin(BasePlugin):
         self._last_activity_at: float = time.time()
         self._last_dream_at: float = 0.0
         self._last_autosave_at: float = 0.0
-        self._last_scratchpad_inject_at: float = 0.0
-        self._cached_scratchpad: str = ""  # cached scratchpad content (refreshed on timer)
 
         # Loop prevention metrics (phase 3 observability)
         self._loop_metrics: Dict[str, int] = {
@@ -4221,36 +4219,16 @@ class HubPlugin(BasePlugin):
             if self._vault:
                 self._scratchpad = Scratchpad(self._vault._vault_dir)
 
-            # Build rebirth context (vault + session state + scratchpad)
+            # Build rebirth context from the vault audit/memory layers. Do not
+            # append scratchpad or session-state text here: both are mutable
+            # operational notes and can carry stale ownership or task prose.
+            # They remain available through explicit tools; the TaskLedger is
+            # the only automatic source of actionable work after a restart.
             if self._vault and self._vault.exists():
                 rebirth_context = self._vault.get_rebirth_context(
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
                 )
-
-                # Append scratchpad to rebirth context
-                if self._scratchpad:
-                    pad = self._scratchpad.get()
-                    safe_pad = sanitize_rebirth_text(pad)
-                    if safe_pad:
-                        rebirth_context += (
-                            "\n\n--- archived scratchpad (reference only) ---\n"
-                            f"{safe_pad}\n"
-                            "--- end archived scratchpad ---"
-                        )
-
-                # Append session state to rebirth context
-                if self._vault:
-                    state_prompt = self._session_state_mgr.get_injection_prompt(
-                        self._vault._vault_dir
-                    )
-                    safe_state_prompt = sanitize_rebirth_text(state_prompt)
-                    if safe_state_prompt:
-                        rebirth_context += (
-                            "\n\n--- archived session state (reference only) ---\n"
-                            f"{safe_state_prompt}\n"
-                            "--- end archived session state ---"
-                        )
 
                 # Release stale lane claims from previous session
                 if self._change_feed and self._identity:
@@ -6686,38 +6664,10 @@ class HubPlugin(BasePlugin):
                 task_lines.append("--- end tasks ---")
                 roster_block += "\n" + "\n".join(task_lines)
 
-        # Inject scratchpad (timer-gated: read from disk every 3 min,
-        # but always include the cached content so it persists between
-        # refreshes — the roster block is stripped and rebuilt each call).
-        SCRATCHPAD_INJECT_INTERVAL = 180  # 3 minutes
-        if self._scratchpad:
-            now_sp = time.time()
-            if now_sp - self._last_scratchpad_inject_at >= SCRATCHPAD_INJECT_INTERVAL:
-                self._last_scratchpad_inject_at = now_sp
-                self._cached_scratchpad = self._scratchpad.get()
-            if self._cached_scratchpad:
-                safe_scratchpad = sanitize_rebirth_text(self._cached_scratchpad)
-            else:
-                safe_scratchpad = ""
-            if safe_scratchpad:
-                roster_block += (
-                    "\n\n--- archived scratchpad (reference only) ---\n"
-                    f"{safe_scratchpad}\n"
-                    "--- end archived scratchpad ---"
-                )
-
-        # Inject session state (working context from previous session)
-        if self._vault:
-            state_prompt = self._session_state_mgr.get_injection_prompt(
-                self._vault._vault_dir
-            )
-            safe_state_prompt = sanitize_rebirth_text(state_prompt)
-            if safe_state_prompt:
-                roster_block += (
-                    "\n\n--- archived session state (reference only) ---\n"
-                    f"{safe_state_prompt}\n"
-                    "--- end archived session state ---"
-                )
+        # Scratchpad and session state are intentionally not injected here.
+        # They are mutable operational notes that can outlive their task and
+        # reintroduce stale ownership/reminder prose. Agents can request them
+        # explicitly; active TaskLedger cards remain injected above.
 
         # Inject active lane claims for this agent
         if self._change_feed and self._identity:
