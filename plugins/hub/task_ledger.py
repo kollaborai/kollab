@@ -169,6 +169,15 @@ class TaskLedger:
     def _pending_replies_path(self) -> Path:
         return self._tasks_dir / "_pending_replies.json"
 
+    def _task_files(self):
+        """Yield task card files without the pending-reply envelope."""
+        pending_name = self._pending_replies_path().name
+        return (
+            path
+            for path in self._tasks_dir.glob("*.json")
+            if path.name != pending_name
+        )
+
     @contextmanager
     def _file_lock(self, path: Path):
         """Hold an advisory lock beside a shared JSON file."""
@@ -423,7 +432,7 @@ class TaskLedger:
     def get_active_for(self, identity: str) -> List[TaskCard]:
         """Get all active tasks assigned to this agent."""
         result = []
-        for f in self._tasks_dir.glob("*.json"):
+        for f in self._task_files():
             card = self._load(f.stem)
             if (
                 card
@@ -435,7 +444,7 @@ class TaskLedger:
 
     def get_all(self, status: Optional[str] = None) -> List[TaskCard]:
         result = []
-        for f in self._tasks_dir.glob("*.json"):
+        for f in self._task_files():
             card = self._load(f.stem)
             if card and (status is None or card.status == status):
                 result.append(card)

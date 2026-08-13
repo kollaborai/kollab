@@ -81,6 +81,13 @@ def test_create_rejects_blank_assignment_fields(tmp_path):
     with pytest.raises(ValueError, match="non-empty assignee"):
         ledger.create(assigner="koordinator", assignee="", directive="inspect")
 
+    ledger.expect_reply(
+        task_id="task-1",
+        assignee="lapis",
+        requested_by="koordinator",
+        message_id="message-1",
+        deadline_seconds=120,
+    )
     assert ledger.get_all() == []
 
 
