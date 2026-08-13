@@ -5,8 +5,9 @@ Three-tier memory architecture:
   working_memory    rolling context for system prompt injection
   crystallized      distilled long-term knowledge (from dreaming)
 
-When an agent is reborn with the same identity, they get their
-vault hydrated into their system prompt. They remember everything.
+When an agent is reborn with the same identity, durable knowledge is
+available in its system prompt. Historical hub traffic is archived rather
+than replayed as executable instructions.
 
 Vault scoping (project-aware):
   stream.jsonl and working_memory are scoped per-project via get_hub_dir()
@@ -33,12 +34,81 @@ Vault scoping (project-aware):
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+_REBIRTH_CONTROL_MARKER_RE = re.compile(
+    r"(?ix)"
+    r"<\s*(?:task|hub_msg|hub_reply|hub_broadcast)"
+    r"|\[\s*task\b"
+    r"|\btask[-_ ]?(?:cron|directive|assignment|reminder|checkpoint|complete|approve|reject|card)\b"
+    r"|\btask[_ -]?id\b"
+    r"|\b(?:checkpoint|fresh\s+card)\s+(?:saved|sent|is|remains|report)\b"
+    r"|\b(?:review\s+and\s+approve|or\s+reject)\b"
+    r"|\b(?:hub_msg|hub_reply|hub_broadcast)\b"
+    r"|\blast\s+session\s+activity\s*\(?(?:verbatim|raw)\)?\b"
+)
+_REBIRTH_TASK_REFERENCE_RE = re.compile(
+    r"(?i)\b(?:task|card|directive|assignment|checkpoint|fresh\s+card)\b"
+    r"[^\n]{0,100}\b[0-9a-f]{8}\b"
+)
+_REBIRTH_ARCHIVED_SECTIONS = (
+    "messages sent to other agents:",
+    "messages received from agents:",
+    "recent user interactions:",
+    "pending promises:",
+)
+
+
+def sanitize_rebirth_text(text: str) -> str:
+    """Remove executable hub/task traffic from persisted memory excerpts.
+
+    Vault files are durable evidence, not a queue. A prior session can leave
+    behind assignments, reminders, and reports that are no longer valid after
+    the task ledger has been reconciled. Keep ordinary notes useful, but never
+    replay those operational lines into a fresh agent prompt.
+    """
+    if not text:
+        return ""
+
+    safe_lines: List[str] = []
+    skip_section = False
+    for raw_line in str(text).splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        lowered = stripped.lower()
+
+        if not stripped:
+            skip_section = False
+            if safe_lines and safe_lines[-1] != "":
+                safe_lines.append("")
+            continue
+
+        if any(lowered.startswith(header) for header in _REBIRTH_ARCHIVED_SECTIONS):
+            skip_section = True
+            continue
+        if skip_section:
+            continue
+
+        if (
+            _REBIRTH_CONTROL_MARKER_RE.search(line)
+            or _REBIRTH_TASK_REFERENCE_RE.search(line)
+            or lowered.startswith(("directive:", "result:", "review:", "or reject:"))
+            or lowered.startswith("current task:")
+        ):
+            continue
+
+        safe_lines.append(line)
+
+    while safe_lines and safe_lines[-1] == "":
+        safe_lines.pop()
+    return "\n".join(safe_lines)
 
 
 def get_vaults_dir() -> Path:
@@ -490,31 +560,36 @@ class AgentVault:
         lines.append(f"sessions: {session_count + 1} (previous: {session_count})")
         lines.append(f"last active: {last_active}")
 
-        # Recent stream entries (verbatim -- what actually happened)
+        # The raw stream remains the audit trail, but message traffic is not
+        # executable rebirth context. The current task ledger is authoritative
+        # after a restart; replaying old directives here resurrects stale work.
         recent = self.get_recent_stream(15)
         if recent:
             lines.append("")
-            lines.append("last session activity (verbatim):")
-            for entry in recent:
-                etype = entry.get("type", "?")
-                content = str(entry.get("content", ""))[:300]
-                from_agent = entry.get("from", "")
-                to_agent = entry.get("to", "")
-                routing = ""
-                if from_agent and to_agent:
-                    routing = f" ({from_agent} -> {to_agent})"
-                elif from_agent:
-                    routing = f" (from {from_agent})"
-                lines.append(f"  [{etype}]{routing} {content}")
+            lines.append("archived hub activity:")
+            lines.append(
+                f"  {len(recent)} prior stream event(s) are acknowledged as "
+                "historical evidence, not current instructions."
+            )
+            lines.append(
+                "  reconcile work against the current TaskLedger: active cards "
+                "need current checkpoints; stale, expired, or terminal cards "
+                "remain terminal and must not be resumed."
+            )
 
         # Working memory (rolling summary)
         working = self.get_working_memory()
-        if working:
-            if len(working) > max_tokens * 2:
-                working = working[: max_tokens * 2] + "\n...(truncated)"
+        safe_working = sanitize_rebirth_text(working)
+        if safe_working:
+            if len(safe_working) > max_tokens * 2:
+                safe_working = safe_working[: max_tokens * 2] + "\n...(truncated)"
             lines.append("")
-            lines.append("working memory summary:")
-            lines.append(working)
+            lines.append("archived working memory (reference only):")
+            lines.append(safe_working)
+            lines.append(
+                "current assignments come only from the TaskLedger, not this "
+                "archived note."
+            )
 
         # Dual-tier crystal injection.
         # Split the budget evenly when both tiers are present so neither

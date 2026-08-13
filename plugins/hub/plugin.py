@@ -58,7 +58,7 @@ from .presence import PresenceManager, get_messages_dir
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .task_ledger import TaskLedger
-from .vault import AgentVault
+from .vault import AgentVault, sanitize_rebirth_text
 
 # Agent DNS (discovery, identity, trust) — guarded: PyNaCl is optional
 try:
@@ -4228,11 +4228,12 @@ class HubPlugin(BasePlugin):
                 # Append scratchpad to rebirth context
                 if self._scratchpad:
                     pad = self._scratchpad.get()
-                    if pad:
+                    safe_pad = sanitize_rebirth_text(pad)
+                    if safe_pad:
                         rebirth_context += (
-                            "\n\n--- scratchpad ---\n"
-                            f"{pad}\n"
-                            "--- end scratchpad ---"
+                            "\n\n--- archived scratchpad (reference only) ---\n"
+                            f"{safe_pad}\n"
+                            "--- end archived scratchpad ---"
                         )
 
                 # Append session state to rebirth context
@@ -4240,8 +4241,13 @@ class HubPlugin(BasePlugin):
                     state_prompt = self._session_state_mgr.get_injection_prompt(
                         self._vault._vault_dir
                     )
-                    if state_prompt:
-                        rebirth_context += f"\n\n{state_prompt}"
+                    safe_state_prompt = sanitize_rebirth_text(state_prompt)
+                    if safe_state_prompt:
+                        rebirth_context += (
+                            "\n\n--- archived session state (reference only) ---\n"
+                            f"{safe_state_prompt}\n"
+                            "--- end archived session state ---"
+                        )
 
                 # Release stale lane claims from previous session
                 if self._change_feed and self._identity:
@@ -6687,10 +6693,14 @@ class HubPlugin(BasePlugin):
                 self._last_scratchpad_inject_at = now_sp
                 self._cached_scratchpad = self._scratchpad.get()
             if self._cached_scratchpad:
+                safe_scratchpad = sanitize_rebirth_text(self._cached_scratchpad)
+            else:
+                safe_scratchpad = ""
+            if safe_scratchpad:
                 roster_block += (
-                    "\n\n--- scratchpad ---\n"
-                    f"{self._cached_scratchpad}\n"
-                    "--- end scratchpad ---"
+                    "\n\n--- archived scratchpad (reference only) ---\n"
+                    f"{safe_scratchpad}\n"
+                    "--- end archived scratchpad ---"
                 )
 
         # Inject session state (working context from previous session)
@@ -6698,8 +6708,13 @@ class HubPlugin(BasePlugin):
             state_prompt = self._session_state_mgr.get_injection_prompt(
                 self._vault._vault_dir
             )
-            if state_prompt:
-                roster_block += f"\n\n{state_prompt}"
+            safe_state_prompt = sanitize_rebirth_text(state_prompt)
+            if safe_state_prompt:
+                roster_block += (
+                    "\n\n--- archived session state (reference only) ---\n"
+                    f"{safe_state_prompt}\n"
+                    "--- end archived session state ---"
+                )
 
         # Inject active lane claims for this agent
         if self._change_feed and self._identity:
