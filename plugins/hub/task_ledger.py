@@ -611,20 +611,23 @@ class TaskLedger:
         now = time.time()
         due = []
         for card in self.get_all(status="active"):
-            if not card.cron_active:
-                continue
-            if card.snoozed_until > now:
-                continue
-
             # TTL auto-expire: if no update in cron_ttl_seconds, silence cron
             ttl = card.cron_ttl_seconds if card.cron_ttl_seconds > 0 else 0
             if ttl > 0 and (now - card.updated_at) > ttl:
-                logger.info(
-                    f"Task {card.id} cron auto-expired "
-                    f"(no update in {int(ttl / 3600)}h)"
+                self.terminalize(
+                    card.id,
+                    status="obsolete",
+                    reason=(
+                        f"task-cron expired after {int(ttl / 3600)}h "
+                        "without a checkpoint"
+                    ),
+                    actor="task-cron",
                 )
-                card.cron_active = False
-                self._save_preserve(card)
+                continue
+
+            if not card.cron_active:
+                continue
+            if card.snoozed_until > now:
                 continue
 
             last_update = card.updated_at

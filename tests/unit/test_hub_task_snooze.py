@@ -75,6 +75,20 @@ def test_snooze_survives_roundtrip(ledger):
     assert ledger.get(card.id).snoozed_until > time.time()
 
 
+def test_cron_ttl_terminalizes_stale_active_task(ledger):
+    card = _card(ledger)
+    card.updated_at = time.time() - 10
+    card.cron_ttl_seconds = 1
+    card.cron_active = False
+    ledger._save_preserve(card)
+
+    assert ledger.get_cron_due() == []
+    stale = ledger.get(card.id)
+    assert stale.status == "obsolete"
+    assert stale.cron_active is False
+    assert "task-cron expired" in stale.terminal_reason
+
+
 def test_nudge_quotes_real_task_id_and_offers_snooze():
     engine = NudgeEngine()
     engine.observe_task_assignment("lapis", has_task=True, task_ids=["abc12345"])
