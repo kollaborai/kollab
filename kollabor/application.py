@@ -2342,6 +2342,7 @@ class TerminalLLMChat:
                     "input_handler": self.input_handler,
                     "renderer": self.renderer,
                     "llm_service": self.llm_service,
+                    "profile_manager": self.profile_manager,
                     # Use llm_service's conversation_logger (the one actively logging)
                     "conversation_logger": getattr(
                         self.llm_service,

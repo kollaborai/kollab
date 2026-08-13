@@ -36,12 +36,15 @@ class _FakeEventBus:
     def __init__(self):
         self.orchestrator_plugin = _FakeOrchestratorPlugin()
         self.agent_manager = _FakeAgentManager()
+        self.profile_manager = SimpleNamespace(active_profile_name="openai-oauth")
 
     def get_service(self, name):
         if name == "agent_orchestrator":
             return self.orchestrator_plugin
         if name == "agent_manager":
             return self.agent_manager
+        if name == "profile_manager":
+            return self.profile_manager
         return None
 
 
@@ -96,3 +99,26 @@ class TestHubSpawnResolution(IsolatedAsyncioTestCase):
         self.assertEqual(call["name"], "lapis")
         self.assertEqual(call["agent_type"], "research")
         self.assertEqual(call["task"], "audit")
+
+    async def test_native_spawn_inherits_profile_from_profile_manager_service(self):
+        event_bus = _FakeEventBus()
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._identity = SimpleNamespace(
+            identity="koordinator",
+            profile=None,
+            is_coordinator=True,
+        )
+        plugin._presence = _FakePresence()
+
+        result = await plugin._handle_hub_spawn_tool(
+            {
+                "id": "call_spawn_profile",
+                "type": "hub_spawn",
+                "name": "hub_spawn",
+                "input": {"name": "lapis", "task": "smoke"},
+            }
+        )
+
+        call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+        self.assertTrue(result.success)
+        self.assertEqual(call["profile"], "openai-oauth")

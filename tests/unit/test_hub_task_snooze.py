@@ -75,6 +75,15 @@ def test_snooze_survives_roundtrip(ledger):
     assert ledger.get(card.id).snoozed_until > time.time()
 
 
+def test_create_rejects_blank_assignment_fields(tmp_path):
+    ledger = TaskLedger(tasks_dir=str(tmp_path))
+
+    with pytest.raises(ValueError, match="non-empty assignee"):
+        ledger.create(assigner="koordinator", assignee="", directive="inspect")
+
+    assert ledger.get_all() == []
+
+
 def test_cron_ttl_terminalizes_stale_active_task(ledger):
     card = _card(ledger)
     card.updated_at = time.time() - 10

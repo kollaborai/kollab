@@ -2524,9 +2524,20 @@ class HubPlugin(BasePlugin):
             metadata["task_id"] = task_id
         if self._is_ack_only_content(content, sender_has_active_task=sender_has_task):
             metadata["ack"] = True
-        elif self._has_report_evidence(content, sender_has_active_task=sender_has_task):
+        elif self._has_report_evidence(
+            content,
+            sender_has_active_task=sender_has_task,
+            # A task id identifies the thread, but does not by itself prove
+            # that this outbound message is a report.  Otherwise every
+            # coordinator assignment carrying a task id is misclassified as
+            # a report and never records the expected reply.
+            metadata={"wait": any_wait},
+        ):
             metadata["task_report"] = True
-        elif self._has_request_evidence(content):
+        elif self._is_explicit_task_assignment(
+            content,
+            task_id=task_id,
+        ):
             metadata["task_assignment"] = True
 
         # Route the message
@@ -5648,6 +5659,20 @@ class HubPlugin(BasePlugin):
         "qa needed",
         "manual wake",
     )
+    # Only these markers are strong enough to mint a durable TaskCard from a
+    # free-form hub message.  Ordinary requests ("please check...", "report
+    # back", etc.) still wake the recipient, but they are not assignments and
+    # must not create pending-reply debt or duplicate cards.
+    _TASK_ASSIGNMENT_MARKERS = (
+        "[work assignment",
+        "task:",
+        "directive:",
+        "assigned task",
+        "you are assigned",
+        "take ownership",
+        "new assignment",
+        "qa needed",
+    )
     _REPORT_MARKERS = (
         "task complete",
         "task completed",
@@ -5663,6 +5688,7 @@ class HubPlugin(BasePlugin):
     )
 
     _request_marker_re = _compile_marker_pattern(_REQUEST_MARKERS)
+    _task_assignment_marker_re = _compile_marker_pattern(_TASK_ASSIGNMENT_MARKERS)
 
     def _normalize_hub_wake_content(self, content: str) -> str:
         text = (content or "").strip().lower()
@@ -5753,6 +5779,25 @@ class HubPlugin(BasePlugin):
             return True
         text = self._normalize_hub_wake_content(content)
         return bool(self._request_marker_re.search(text))
+
+    def _is_explicit_task_assignment(
+        self,
+        content: str,
+        *,
+        task_id: str = "",
+    ) -> bool:
+        """Return whether a hub message is an assignment, not a request.
+
+        Free-form requests are actionable wake signals, but they are not
+        durable task assignments.  A task id makes a request an assignment;
+        otherwise require an explicit assignment marker.  Reports are checked
+        before this helper by the caller, so a worker can report against a
+        task id without creating a new card.
+        """
+        text = self._normalize_hub_wake_content(content)
+        if self._task_assignment_marker_re.search(text):
+            return True
+        return bool(task_id and self._has_request_evidence(text))
 
     @staticmethod
     def _touch_wake_cache(
@@ -6014,16 +6059,35 @@ class HubPlugin(BasePlugin):
             )
             if is_task:
                 # Extract directive from the message content
-                directive = message.content[:500]
-                card = self._task_ledger.create(
-                    assigner=message.from_identity,
-                    assignee=self._identity.identity,
-                    directive=directive,
-                    report_to=message.from_identity,
-                )
-                logger.info(
-                    f"Auto-created task {card.id} from" f" {message.from_identity}"
-                )
+                assigner = str(message.from_identity or "").strip()
+                assignee = str(self._identity.identity or "").strip()
+                directive = str(message.content or "").strip()
+                if not assigner or not assignee or not directive:
+                    logger.warning(
+                        "Skipping malformed task assignment: "
+                        "assigner=%r assignee=%r directive_empty=%s",
+                        assigner,
+                        assignee,
+                        not bool(directive),
+                    )
+                else:
+                    task_id = str(message.metadata.get("task_id", "") or "").strip()
+                    existing = self._task_ledger.get(task_id) if task_id else None
+                    if existing:
+                        logger.info(
+                            "Task assignment %s already exists; not minting duplicate card",
+                            task_id,
+                        )
+                    else:
+                        card = self._task_ledger.create(
+                            assigner=assigner,
+                            assignee=assignee,
+                            directive=directive[:500],
+                            report_to=assigner,
+                        )
+                        logger.info(
+                            f"Auto-created task {card.id} from" f" {assigner}"
+                        )
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the
@@ -8230,6 +8294,25 @@ class HubPlugin(BasePlugin):
 
         if not resolved_profile and self._identity and self._identity.profile:
             resolved_profile = self._identity.profile
+
+        # HubPlugin is initialized through the generic plugin loader, which
+        # historically did not pass profile_manager in its kwargs.  Recover
+        # the live profile from the service registry so children spawned from
+        # an agent launched with --profile inherit the same provider instead
+        # of falling back to auto-detection.
+        if not resolved_profile and self.event_bus:
+            try:
+                profile_mgr = self.event_bus.get_service("profile_manager")
+                active_name = getattr(profile_mgr, "active_profile_name", "")
+                if isinstance(active_name, str):
+                    resolved_profile = active_name.strip()
+                if not resolved_profile and profile_mgr:
+                    active_profile = profile_mgr.get_active_profile()
+                    active_name = getattr(active_profile, "name", "")
+                    if isinstance(active_name, str):
+                        resolved_profile = active_name.strip()
+            except Exception:
+                resolved_profile = ""
 
         # --- Spawn ---
         result = await orch.orchestrator.spawn(

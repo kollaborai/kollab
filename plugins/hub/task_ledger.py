@@ -276,6 +276,17 @@ class TaskLedger:
         cron_interval: float = 300,
         status: str = "active",
     ) -> TaskCard:
+        required = {
+            "assigner": assigner,
+            "assignee": assignee,
+            "directive": directive,
+        }
+        missing = [name for name, value in required.items() if not str(value).strip()]
+        if missing:
+            raise ValueError(
+                "task assignment requires non-empty " + ", ".join(missing)
+            )
+
         card = TaskCard(
             assigner=assigner,
             assignee=assignee,
