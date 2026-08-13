@@ -151,6 +151,20 @@ class TestHubNativeParamCompat(unittest.TestCase):
         plugin._task_ledger.checkpoint.assert_called_once_with("", "still working")
         self.assertEqual(result.output, "task  checkpoint saved")
 
+    def test_task_checkpoint_reports_terminal_task_without_claiming_success(self):
+        plugin = _make_plugin()
+        plugin._task_ledger = MagicMock()
+        plugin._task_ledger.checkpoint.return_value = False
+
+        result = _run(
+            plugin._handle_task_checkpoint_tool(
+                {"id": "late-checkpoint", "task_id": "obsolete-1", "note": "late"}
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "task obsolete-1 not found or terminal")
+
     def test_crystal_read_accepts_canonical_id_param(self):
         plugin = _make_plugin()
         plugin._crystal_store.add_entry("summary text\n\nbody text", manual_keywords=["alpha"])

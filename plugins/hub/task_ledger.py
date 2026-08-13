@@ -282,6 +282,26 @@ class TaskLedger:
             logger.debug(f"Failed to load task {task_id}: {e}")
             return None
 
+    def _load_mutable(self, task_id: str, operation: str) -> Optional[TaskCard]:
+        """Load a task only when a late operation may still mutate it.
+
+        Terminal cards are durable acknowledgements for stale or superseded
+        work. Once a card is terminal, progress, completion, QA, and snooze
+        directives must not reopen it or change its audit record.
+        """
+        card = self._load(task_id)
+        if card is None:
+            return None
+        if card.status in self.TERMINAL_STATUSES:
+            logger.info(
+                "Ignoring %s for terminal task %s (%s)",
+                operation,
+                card.id,
+                card.status,
+            )
+            return None
+        return card
+
     def create(
         self,
         assigner: str,
@@ -473,7 +493,7 @@ class TaskLedger:
         return result
 
     def checkpoint(self, task_id: str, note: str, data: Optional[Dict] = None) -> bool:
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "checkpoint")
         if not card:
             return False
         card.add_checkpoint(note, data)
@@ -491,7 +511,7 @@ class TaskLedger:
         cron and the checkpoint nudge go quiet. Saved with _save_preserve
         so a snooze does not reset the cron TTL clock.
         """
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "snooze")
         if not card:
             return None
         seconds = max(0.0, min(minutes * 60.0, self.MAX_SNOOZE_SECONDS))
@@ -501,7 +521,7 @@ class TaskLedger:
         return card
 
     def complete(self, task_id: str, result: str) -> Optional[TaskCard]:
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "complete")
         if not card:
             return None
         card.status = "done"
@@ -513,7 +533,7 @@ class TaskLedger:
 
     def request_qa(self, task_id: str, result: str) -> Optional[TaskCard]:
         """Mark task as done and request QA review."""
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "request_qa")
         if not card:
             return None
         card.status = "qa_review"
@@ -526,7 +546,7 @@ class TaskLedger:
     def qa_approve(
         self, task_id: str, reviewer: str, notes: str = ""
     ) -> Optional[TaskCard]:
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "qa_approve")
         if not card:
             return None
         card.status = "closed"
@@ -539,7 +559,7 @@ class TaskLedger:
         return card
 
     def qa_reject(self, task_id: str, reviewer: str, notes: str) -> Optional[TaskCard]:
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "qa_reject")
         if not card:
             return None
         card.status = "active"  # re-activate for rework

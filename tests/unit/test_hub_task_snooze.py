@@ -93,6 +93,27 @@ def test_expired_qa_review_is_terminalized_before_prompt_injection(ledger):
     assert stale.terminal_reason == "QA review expired without reviewer action"
 
 
+@pytest.mark.parametrize("status", ["cancelled", "obsolete"])
+def test_terminal_task_rejects_late_lifecycle_mutations(ledger, status):
+    card = _card(ledger)
+    terminal = ledger.terminalize(
+        card.id,
+        status=status,
+        reason="stale directive superseded by the current harness task",
+        actor="koordinator",
+    )
+    before = terminal.to_dict()
+
+    assert ledger.checkpoint(card.id, "late progress") is False
+    assert ledger.snooze(card.id, minutes=30) is None
+    assert ledger.complete(card.id, "late result") is None
+    assert ledger.request_qa(card.id, "late QA result") is None
+    assert ledger.qa_approve(card.id, "late reviewer", "late notes") is None
+    assert ledger.qa_reject(card.id, "late reviewer", "late rejection") is None
+
+    assert ledger.get(card.id).to_dict() == before
+
+
 def test_snooze_survives_roundtrip(ledger):
     card = _card(ledger)
     ledger.snooze(card.id, minutes=30)

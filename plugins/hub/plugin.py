@@ -2932,7 +2932,13 @@ class HubPlugin(BasePlugin):
 
         task_id = _safe_semantic_id(tool_data, ["task_id"])
         note = tool_data.get("progress", tool_data.get("note", ""))
-        self._task_ledger.checkpoint(task_id, note)
+        if not self._task_ledger.checkpoint(task_id, note):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="task_checkpoint",
+                success=False,
+                error=f"task {task_id} not found or terminal",
+            )
         logger.info(f"Task {task_id} checkpoint: {note[:60]}")
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
