@@ -2971,7 +2971,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="task_snooze",
                 success=False,
-                error=f"task {task_id} not found",
+                error=f"task {task_id} not found or terminal",
             )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),

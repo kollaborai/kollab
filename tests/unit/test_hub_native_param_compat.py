@@ -165,6 +165,20 @@ class TestHubNativeParamCompat(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error, "task obsolete-1 not found or terminal")
 
+    def test_task_snooze_reports_terminal_task_without_claiming_success(self):
+        plugin = _make_plugin()
+        plugin._task_ledger = MagicMock()
+        plugin._task_ledger.snooze.return_value = None
+
+        result = _run(
+            plugin._handle_task_snooze_tool(
+                {"id": "late-snooze", "task_id": "obsolete-1", "minutes": 30}
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "task obsolete-1 not found or terminal")
+
     def test_crystal_read_accepts_canonical_id_param(self):
         plugin = _make_plugin()
         plugin._crystal_store.add_entry("summary text\n\nbody text", manual_keywords=["alpha"])
