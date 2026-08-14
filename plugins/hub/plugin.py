@@ -5978,7 +5978,9 @@ class HubPlugin(BasePlugin):
         metadata = message.metadata or {}
         candidates = [
             metadata.get("source_identity"),
+            metadata.get("source_agent"),
             getattr(card, "report_to", "") if card else "",
+            getattr(card, "assigner", "") if card else "",
         ]
         report_match = _TASK_CRON_REPORT_TO_RE.search(message.content or "")
         if report_match:
@@ -6046,22 +6048,16 @@ class HubPlugin(BasePlugin):
         ack_target = self._task_cron_ack_target(message, card)
         ack_metadata = {
             "task_cron_ack": True,
+            "acknowledged": True,
             "task_id": task_id,
             "task_status": task_status,
             "disposition": "stale",
             "reason": reason,
             "reminder_id": message.id,
         }
-        if self._vault:
-            self._vault.append_stream(
-                "received",
-                message.content,
-                from_agent=message.from_identity,
-                to_agent=self._identity.identity if self._identity else "",
-                metadata=ack_metadata,
-            )
 
         if ack_target and ack_target != (self._identity.identity if self._identity else ""):
+            ack_metadata["ack_target"] = ack_target
             ack = HubMessage(
                 action="message",
                 from_agent=self._identity.agent_id if self._identity else "",
@@ -6079,7 +6075,9 @@ class HubPlugin(BasePlugin):
             )
             try:
                 await self._route_message(ack)
+                ack_metadata["ack_transport"] = "direct"
             except Exception as e:
+                ack_metadata["ack_transport"] = "direct_failed"
                 logger.warning(
                     "Failed to send stale task-cron acknowledgement for %s to %s: %s",
                     task_id or "unknown",
@@ -6087,9 +6085,20 @@ class HubPlugin(BasePlugin):
                     e,
                 )
         else:
+            ack_metadata["ack_target"] = ack_target
+            ack_metadata["ack_transport"] = "local_receipt"
             logger.warning(
-                "Stale task-cron reminder %s has no routable acknowledgement target",
+                "Stale task-cron reminder %s acknowledged locally; no routable acknowledgement target",
                 task_id or "unknown",
+            )
+
+        if self._vault:
+            self._vault.append_stream(
+                "received",
+                message.content,
+                from_agent=message.from_identity,
+                to_agent=self._identity.identity if self._identity else "",
+                metadata=ack_metadata,
             )
 
         logger.info(
