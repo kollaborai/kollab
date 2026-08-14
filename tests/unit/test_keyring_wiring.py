@@ -352,6 +352,12 @@ class TestSaveProfileEnvKeyPersists(unittest.TestCase):
                     "kollabor_ai.profile_manager.get_existing_global_config_path",
                     return_value=cfg_path,
                 ), patch(
+                    "kollabor_ai.profile_manager.get_local_config_path",
+                    return_value=Path(tmp) / "local-config.json",
+                ), patch(
+                    "kollabor_ai.profile_manager.get_local_config_path_candidates",
+                    return_value=[Path(tmp) / "local-config.json"],
+                ), patch(
                     "kollabor_ai.profile_manager._keyring_set",
                     mock_set,
                 ):
