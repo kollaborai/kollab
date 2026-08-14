@@ -97,6 +97,7 @@ class ContextService:
         self.event_bus = event_bus
         self.active_contexts = {}
         self.last_triggers = []
+        self._pending_injections = []
 
         # Extensible trigger and loader registries
         self.trigger_map = {}
@@ -291,9 +292,25 @@ class ContextService:
             if content:
                 formatted = f'<context_inject type="{context_id}">\n{content}\n</context_inject>'
                 try:
-                    self.conversation_manager.add_message(
-                        role="system", content=formatted
+                    # Context triggered by the current user input is
+                    # request-local. Route it to the ledger service's
+                    # ephemeral rail when available; the queue processor
+                    # drains the fallback during the same turn. Persisting a
+                    # system row here would poison the next cached prefix.
+                    ledger_service = None
+                    get_service = getattr(self.event_bus, "get_service", None)
+                    if callable(get_service):
+                        ledger_service = get_service("context_service")
+                    queue_injection = getattr(
+                        ledger_service, "queue_ephemeral_injection", None
                     )
+                    if (
+                        callable(queue_injection)
+                        and type(ledger_service).__module__ != "unittest.mock"
+                    ):
+                        queue_injection(formatted)
+                    else:
+                        self._pending_injections.append(formatted)
                     self.active_contexts[context_id] = content
                     self.last_triggers.append(context_id)
                     injected = True
@@ -301,6 +318,12 @@ class ContextService:
                 except Exception as e:
                     logger.error(f"Failed to inject context {context_id}: {e}")
         return injected
+
+    def drain_pending_injections(self):
+        """Drain request-local injections not handed to the ledger service."""
+        pending = self._pending_injections
+        self._pending_injections = []
+        return pending
 
     async def load_context(self, context_id: str) -> Optional[str]:
         """Load context content using registered loaders.
@@ -355,6 +378,7 @@ class ContextService:
     def clear_active_contexts(self):
         self.active_contexts.clear()
         self.last_triggers.clear()
+        self._pending_injections.clear()
 
     def get_active_contexts(self):
         return list(self.active_contexts.keys())

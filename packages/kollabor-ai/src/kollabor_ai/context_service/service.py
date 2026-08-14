@@ -62,6 +62,9 @@ class ContextService:
         # Divergent-hash warnings pending inline injection (fallback
         # path until the agent notification system lands)
         self._divergence_warnings_pending: List[Dict[str, Any]] = []
+        # Compatibility rail for legacy keyword-trigger context. These
+        # blocks are request-local and must never enter the ledger/history.
+        self._ephemeral_injections: List[str] = []
 
     def set_event_bus(self, event_bus: Any) -> None:
         """Set the event bus reference.
@@ -125,6 +128,17 @@ class ContextService:
     def get_hub_bridge(self) -> Any:
         """Return the attached HubBridge, or None if disabled."""
         return self._hub_bridge
+
+    def queue_ephemeral_injection(self, content: str) -> None:
+        """Queue request-local context without persisting it in history."""
+        if content:
+            self._ephemeral_injections.append(content)
+
+    def drain_ephemeral_injections(self) -> List[str]:
+        """Drain legacy request-local context blocks for the next API call."""
+        injections = self._ephemeral_injections
+        self._ephemeral_injections = []
+        return injections
 
     def queue_divergence_warning(self, warning: Dict[str, Any]) -> None:
         """Queue a divergent-file warning for inline injection.

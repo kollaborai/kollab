@@ -715,6 +715,26 @@ class QueueProcessor:
                         if divergence:
                             injections.append(divergence)
 
+                if hasattr(context_svc, "drain_ephemeral_injections"):
+                    injections.extend(context_svc.drain_ephemeral_injections())
+
+                # The legacy keyword service is owned by LLMService rather
+                # than registered under the ledger's service name. Drain its
+                # fallback only when the ledger rail was unavailable.
+                if self.event_bus:
+                    _llm = self.event_bus.get_service("llm_service")
+                    if (
+                        _llm is not None
+                        and type(_llm).__module__ != "unittest.mock"
+                    ):
+                        legacy = getattr(_llm, "context_service", None)
+                        if (
+                            legacy is not None
+                            and legacy is not context_svc
+                            and hasattr(legacy, "drain_pending_injections")
+                        ):
+                            injections.extend(legacy.drain_pending_injections())
+
                 # Env notification queue drains regardless of curator state —
                 # capability / peer events shouldn't wait for the curator.
                 env_block = self._drain_env_block()

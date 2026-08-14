@@ -256,6 +256,9 @@ class TestQueueProcessor(unittest.TestCase):
             def build_divergence_warnings(self):
                 return None
 
+            def drain_ephemeral_injections(self):
+                return ["[legacy context]"]
+
         wire_contents = []
 
         async def capture_request(**kwargs):
@@ -303,7 +306,12 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.assertEqual(
             wire_contents,
-            [["[ephemeral context]\n\n---\n\noriginal prompt"]],
+            [
+                [
+                    "[ephemeral context]\n\n---\n\n"
+                    "[legacy context]\n\n---\n\noriginal prompt"
+                ]
+            ],
         )
         self.assertEqual(self.conversation_history[-1].content, "original prompt")
 
