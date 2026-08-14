@@ -184,6 +184,7 @@ class ContextService:
         file_path: Optional[str] = None,
         file_lines: Optional[tuple] = None,
         file_version: Optional[int] = None,
+        content_hash: Optional[str] = None,
     ) -> Optional[LedgerEntry]:
         """Add a heavy item to the ledger.
 
@@ -199,6 +200,7 @@ class ContextService:
             file_path: For file reads, the on-disk path.
             file_lines: For partial file reads, (start, end).
             file_version: For file reads, the monotonic version.
+            content_hash: Optional producer-supplied hash of the raw content.
 
         Returns:
             The new LedgerEntry, or None if the item is under the
@@ -209,14 +211,14 @@ class ContextService:
 
         now = datetime.now()
         ctx_id = self._ledger.next_ctx_id()
-        content_hash = compute_hash(content)
+        stored_content_hash = content_hash or compute_hash(content)
 
         entry = LedgerEntry(
             ctx_id=ctx_id,
             kind=kind,
             tool=tool,
             label=label,
-            content_hash=content_hash,
+            content_hash=stored_content_hash,
             size_bytes=len(content),
             message_uuid=message_uuid,
             added_at=now,

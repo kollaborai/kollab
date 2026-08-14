@@ -1546,6 +1546,7 @@ class QueueProcessor:
             content_bytes = output.encode("utf-8", errors="replace")
 
             tool_type = result.tool_type or "unknown"
+            file_content_hash = None
             if tool_type in ("read", "file_read"):
                 kind = "file_read"
                 label = "file read"
@@ -1553,12 +1554,16 @@ class QueueProcessor:
                 if hasattr(result, "metadata") and result.metadata:
                     label = result.metadata.get("file_path", label)
                     file_path = result.metadata.get("file_path")
+                    file_content_hash = result.metadata.get("file_content_hash")
             else:
                 kind = "tool_result"
                 label = tool_type
                 file_path = None
 
             try:
+                ingest_kwargs = {}
+                if file_content_hash:
+                    ingest_kwargs["content_hash"] = file_content_hash
                 entry = context_svc.ingest_heavy_item(
                     kind=kind,
                     tool=tool_type,
@@ -1566,6 +1571,7 @@ class QueueProcessor:
                     content=content_bytes,
                     message_uuid=message_uuid,
                     file_path=file_path,
+                    **ingest_kwargs,
                 )
                 if entry and message is not None:
                     ctx_ids = message.metadata.setdefault("ctx_ids", [])

@@ -1131,6 +1131,8 @@ class ToolExecutor:
                 metadata["diff_info"] = result_dict["diff_info"]
             if "tool_output_path" in result_dict:
                 metadata["tool_output_path"] = result_dict["tool_output_path"]
+            if "file_content_hash" in result_dict:
+                metadata["file_content_hash"] = result_dict["file_content_hash"]
             # Propagate file path for context-service ledger ingestion
             file_path = (
                 tool_data.get("file")

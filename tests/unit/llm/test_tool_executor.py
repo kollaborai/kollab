@@ -72,6 +72,25 @@ class TestToolExecutor(unittest.TestCase):
             self.assertIsNone(result.error)
             self.assertGreater(result.execution_time, 0)
 
+    async def test_file_read_context_hash_metadata_is_preserved(self):
+        self.executor.file_ops_executor.execute_operation = MagicMock(
+            return_value={
+                "success": True,
+                "output": "rendered file output",
+                "file_content_hash": "raw-hash",
+            }
+        )
+
+        result = await self.executor._execute_file_operation(
+            {
+                "type": "file_read",
+                "id": "read-1",
+                "file": "/workspace/large.py",
+            }
+        )
+
+        self.assertEqual(result.metadata["file_content_hash"], "raw-hash")
+
     async def test_legacy_git_alias_routes_to_terminal(self):
         """The legacy native git alias must not reach unknown-type dispatch."""
         tool_data = {

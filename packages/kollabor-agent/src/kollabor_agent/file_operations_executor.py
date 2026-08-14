@@ -18,6 +18,7 @@ comprehensive error handling. Implements 11 file operation types:
 """
 
 import ast
+import hashlib
 import logging
 import os
 import shutil
@@ -55,6 +56,11 @@ WRITE_OPERATION_TYPES = frozenset(
         "file_insert_before",
     }
 )
+
+
+def _context_content_hash(content: bytes) -> str:
+    """Match ContextService's compact content hash without a package cycle."""
+    return hashlib.blake2b(content, digest_size=8).hexdigest()
 
 
 class PathAccessMode:
@@ -1552,6 +1558,8 @@ class FileOperationsExecutor:
         except Exception as e:
             return {"success": False, "error": f"Failed to read file: {str(e)}"}
 
+        file_content_hash = _context_content_hash(disk_content_bytes)
+
         # Consult ContextService for dedup before returning content
         context_svc = self._get_context_service()
         force = operation.get("force", False)
@@ -1567,12 +1575,14 @@ class FileOperationsExecutor:
                 return {
                     "success": True,
                     "output": hook_result["content"].decode("utf-8"),
+                    "file_content_hash": file_content_hash,
                 }
 
             if hook_result["action"] == "diff":
                 return {
                     "success": True,
                     "output": hook_result["content"].decode("utf-8"),
+                    "file_content_hash": file_content_hash,
                 }
 
             # fresh or force_fresh: fall through to normal read path
@@ -1620,6 +1630,7 @@ class FileOperationsExecutor:
             }
             if self._last_tool_output_path:
                 result["tool_output_path"] = self._last_tool_output_path
+            result["file_content_hash"] = file_content_hash
             return result
 
         # Handle line range if specified (lines="10-20" style)
@@ -1650,6 +1661,7 @@ class FileOperationsExecutor:
                 }
                 if self._last_tool_output_path:
                     result["tool_output_path"] = self._last_tool_output_path
+                result["file_content_hash"] = file_content_hash
                 return result
             except Exception as e:
                 return {
@@ -1680,6 +1692,7 @@ class FileOperationsExecutor:
         }
         if self._last_tool_output_path:
             result["tool_output_path"] = self._last_tool_output_path
+        result["file_content_hash"] = file_content_hash
         return result
 
     def _execute_grep(self, operation: Dict[str, Any]) -> Dict[str, Any]:

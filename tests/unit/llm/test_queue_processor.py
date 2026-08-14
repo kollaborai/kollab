@@ -604,6 +604,33 @@ class TestQueueProcessor(unittest.TestCase):
         # Should not raise
         self.loop.run_until_complete(self.processor._bridge_relay("hello"))
 
+    def test_file_ingestion_uses_raw_hash_for_unchanged_read_detection(self):
+        """Rendered read headers must not replace the disk-content hash."""
+        from kollabor_ai.context_service.hash_utils import compute_hash
+        from kollabor_ai.context_service.service import ContextService
+
+        context_service = ContextService(heavy_threshold_kb=1)
+        self.event_bus.get_service.return_value = context_service
+        path = "/workspace/large.py"
+        raw = b"x" * 9000
+        result = ToolExecutionResult(
+            tool_id="file_read_1",
+            tool_type="file_read",
+            success=True,
+            output="rendered read header\n\n" + raw.decode("utf-8"),
+            metadata={
+                "file_path": path,
+                "file_content_hash": compute_hash(raw),
+            },
+        )
+
+        self.processor._ingest_tool_results([result], "message-1")
+
+        self.assertEqual(
+            context_service.file_read_hook(path, raw)["action"],
+            "stale",
+        )
+
 
 class TestQueueProcessorToolContinuation(unittest.TestCase):
     def test_state_update_requires_followup(self):
