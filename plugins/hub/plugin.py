@@ -299,6 +299,10 @@ class HubPlugin(BasePlugin):
         self._presence_sweep_task: Optional[asyncio.Task] = None
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
+        # Self-restart coordination: retain the timeout watchdog and ensure
+        # graceful and forced paths can execute the replacement only once.
+        self._self_restart_watchdog_task: Optional[asyncio.Task] = None
+        self._self_restart_exec_started: bool = False
         # True when this session owns the inbound poll; False on standby
         # (another session polls the shared token). See _messaging_bridge_loop.
         self._bridge_polling: bool = False
@@ -2756,22 +2760,9 @@ class HubPlugin(BasePlugin):
         self._self_stop_requested = True  # triggers existing shutdown path
         asyncio.ensure_future(self._perform_self_restart())
 
-        async def _self_restart_watchdog() -> None:
-            try:
-                await asyncio.sleep(8.0)
-            except asyncio.CancelledError:
-                return
-            logger.warning(
-                f"{identity.identity}: self-restart watchdog fired, "
-                f"forcing execvp after graceful shutdown timeout"
-            )
-            try:
-                os.execvp(exec_argv[0], exec_argv)
-            except Exception as e:
-                logger.error(f"execvp failed: {e}, falling back to exit")
-                os._exit(0)
-
-        asyncio.ensure_future(_self_restart_watchdog())
+        self._self_restart_watchdog_task = asyncio.create_task(
+            self._self_restart_watchdog(exec_argv, identity.identity)
+        )
 
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -2779,6 +2770,37 @@ class HubPlugin(BasePlugin):
             success=True,
             output=f"{self._identity.identity} restarting...",
         )
+
+    async def _self_restart_watchdog(self, exec_argv, identity: str) -> None:
+        try:
+            await asyncio.sleep(8.0)
+        except asyncio.CancelledError:
+            return
+        logger.warning(
+            f"{identity}: self-restart watchdog fired, "
+            f"forcing execvp after graceful shutdown timeout"
+        )
+        if not self._claim_self_restart_exec():
+            return
+        try:
+            os.execvp(exec_argv[0], exec_argv)
+        except Exception as e:
+            logger.error(f"execvp failed: {e}, falling back to exit")
+            os._exit(0)
+
+    def _claim_self_restart_exec(self) -> bool:
+        """Claim the one-shot self-restart replacement path."""
+        if getattr(self, "_self_restart_exec_started", False):
+            return False
+        self._self_restart_exec_started = True
+        return True
+
+    def _cancel_self_restart_watchdog(self) -> None:
+        """Cancel a pending forced restart after graceful shutdown wins."""
+        watchdog = getattr(self, "_self_restart_watchdog_task", None)
+        if watchdog is not None and not watchdog.done():
+            watchdog.cancel()
+
 
     async def _perform_self_restart(self) -> None:
         """Run graceful shutdown, then os.execvp to replace this process."""
@@ -2789,6 +2811,10 @@ class HubPlugin(BasePlugin):
             await self.shutdown(exit_process=False)
         except Exception as e:
             logger.error(f"Self-restart: shutdown error (continuing to exec): {e}")
+
+        self._cancel_self_restart_watchdog()
+        if not self._claim_self_restart_exec():
+            return
 
         exec_argv = getattr(self, "_self_restart_cmd", None)
         if not exec_argv:
