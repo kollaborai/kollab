@@ -17,7 +17,10 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "sse-starlette>=2.1.0",
-    "assistant-stream>=0.0.34",
+    # The assistant transport adapter targets the 0.0.34 chunk/serializer
+    # contract. Later releases canonicalize the stream a second time and
+    # reject the protocol-shaped chunks emitted by routes.messages.
+    "assistant-stream==0.0.34",
 ]
 
 [project.optional-dependencies]
