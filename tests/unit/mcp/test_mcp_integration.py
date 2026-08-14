@@ -376,6 +376,41 @@ class TestMCPIntegration(unittest.TestCase):
         self.assertIn("test_tool", mcp.tool_registry)
         self.assertEqual(mcp.tool_registry["test_tool"]["server"], "test-server")
 
+    @patch("kollabor_agent.mcp_integration.MCPServerConnection")
+    def test_connect_and_list_tools_passes_server_environment(self, mock_connection):
+        """Configured MCP env reaches the stdio child while auth is preserved."""
+        connection = mock_connection.return_value
+        connection.connect = AsyncMock(return_value=True)
+        connection.initialize = AsyncMock(return_value=True)
+        connection.list_tools = AsyncMock(return_value=[])
+
+        mcp = MCPIntegration(
+            event_bus=self.event_bus,
+            user_token="explicit-session-token",
+            session_id="engine-session",
+        )
+        mcp.mcp_servers["mentiko"] = {
+            "type": "stdio",
+            "command": "/path/to/mentiko-mcp",
+            "env": {
+                "MENTIKO_WEB_URL": "http://localhost:3200",
+                "KOLLABOR_ENGINE_URL": "http://127.0.0.1:7433",
+                "MENTIKO_INBOX_KEY": "test-inbox-key",
+                "MENTIKO_SESSION_TOKEN": "configured-token",
+            },
+        }
+
+        asyncio.run(mcp._connect_and_list_tools("mentiko", "/path/to/mentiko-mcp"))
+
+        extra_env = mock_connection.call_args.kwargs["extra_env"]
+        self.assertEqual(extra_env["MENTIKO_WEB_URL"], "http://localhost:3200")
+        self.assertEqual(
+            extra_env["KOLLABOR_ENGINE_URL"], "http://127.0.0.1:7433"
+        )
+        self.assertEqual(extra_env["MENTIKO_INBOX_KEY"], "test-inbox-key")
+        self.assertEqual(extra_env["MENTIKO_SESSION_TOKEN"], "explicit-session-token")
+        self.assertEqual(extra_env["MENTIKO_SESSION_ID"], "engine-session")
+
     def test_get_tool_definitions_for_api(self):
         """Test getting tool definitions in API format."""
         mcp = MCPIntegration(event_bus=self.event_bus)

@@ -843,27 +843,43 @@ class MCPIntegration:
         if server_name in self.server_connections:
             await self.server_connections[server_name].close()
 
+        server_config = self.mcp_servers.get(server_name, {})
+        configured_env = server_config.get("env", {})
+        if not isinstance(configured_env, dict):
+            configured_env = {}
+
+        # Preserve per-server runtime configuration (for example the web URL
+        # and shared inbox key) while letting an explicit engine/session
+        # credential take precedence over ambient or config values.
+        extra_env = {
+            str(key): str(value)
+            for key, value in configured_env.items()
+            if value is not None
+        }
+
         # Create new connection, injecting session auth into subprocess env
         connection = MCPServerConnection(
             server_name,
             command,
             cwd=self.workspace,
-            extra_env={
-                # Fall back to the ambient env when the caller didn't pass an
-                # explicit token/id. A mentiko chain-run agent is launched via
-                # application.py, which constructs MCPIntegration WITHOUT
-                # user_token/session_id — but the mentiko engine exports
-                # MENTIKO_SESSION_TOKEN / MENTIKO_SESSION_ID into the agent's
-                # environment. Without this fallback the MCP subprocess gets an
-                # empty token and every ops call fails "session auth required".
-                # The engine-session path still passes user_token explicitly, so
-                # it takes precedence and is unaffected.
-                "MENTIKO_SESSION_TOKEN": self.user_token
-                or os.environ.get("MENTIKO_SESSION_TOKEN", ""),
-                "MENTIKO_SESSION_ID": self.session_id
-                or os.environ.get("MENTIKO_SESSION_ID", ""),
-            },
+            extra_env=extra_env,
         )
+
+        # Fall back to the ambient env when the caller didn't pass an explicit
+        # token/id. A mentiko chain-run agent is launched via application.py,
+        # which constructs MCPIntegration WITHOUT user_token/session_id — but
+        # the mentiko engine exports these into the agent's environment.
+        # Without this fallback the MCP subprocess gets an empty token and
+        # every ops call fails "session auth required". Explicit integration
+        # values take precedence over both sources.
+        if self.user_token or os.environ.get("MENTIKO_SESSION_TOKEN"):
+            extra_env["MENTIKO_SESSION_TOKEN"] = self.user_token or os.environ[
+                "MENTIKO_SESSION_TOKEN"
+            ]
+        if self.session_id or os.environ.get("MENTIKO_SESSION_ID"):
+            extra_env["MENTIKO_SESSION_ID"] = self.session_id or os.environ[
+                "MENTIKO_SESSION_ID"
+            ]
 
         if not await connection.connect():
             logger.warning(f"Failed to connect to MCP server: {server_name}")
