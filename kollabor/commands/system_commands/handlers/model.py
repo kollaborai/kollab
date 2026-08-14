@@ -875,11 +875,13 @@ class ModelCommandHandler(BaseCommandHandler):
                     llm_service = self.llm_service
                     if llm_service and hasattr(llm_service, "api_service"):
                         llm_service.create_background_task(
-                            llm_service.api_service.reinitialize_provider(profile),
+                            lambda: llm_service.api_service.reinitialize_provider(
+                                profile
+                            ),
                             name="reinitialize_provider",
                         )
                         llm_service.create_background_task(
-                            llm_service._load_native_tools(),
+                            lambda: llm_service._load_native_tools(),
                             name="reload_native_tools",
                         )
                     data["display_messages"] = [
@@ -901,11 +903,13 @@ class ModelCommandHandler(BaseCommandHandler):
                     llm_service = self.llm_service
                     if llm_service and hasattr(llm_service, "api_service"):
                         llm_service.create_background_task(
-                            llm_service.api_service.reinitialize_provider(profile),
+                            lambda: llm_service.api_service.reinitialize_provider(
+                                profile
+                            ),
                             name="reinitialize_provider",
                         )
                         llm_service.create_background_task(
-                            llm_service._load_native_tools(),
+                            lambda: llm_service._load_native_tools(),
                             name="reload_native_tools",
                         )
                     tools_mode = (

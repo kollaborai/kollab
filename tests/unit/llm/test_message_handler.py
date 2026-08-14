@@ -296,7 +296,7 @@ class TestMessageHandler(unittest.TestCase):
             await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
             self.assertTrue(self.coordinator.create_background_task.called)
 
-            hub_coro = self.coordinator.create_background_task.call_args[0][0]
+            hub_factory = self.coordinator.create_background_task.call_args[0][0]
             self.coordinator.create_background_task.reset_mock()
 
             # Step 2 — a user message lands in the queue (simulates the user
@@ -304,7 +304,7 @@ class TestMessageHandler(unittest.TestCase):
             real_queue.put_nowait("reply from user during hub continue")
 
             # Step 3 — actually run _hub_continue() to completion.
-            await hub_coro
+            await hub_factory()
 
             # Step 4 — the fix must have called create_background_task once
             # more, this time to drain the processing_queue.
@@ -342,10 +342,10 @@ class TestMessageHandler(unittest.TestCase):
             self.coordinator._continue_conversation = complete_turn
 
             await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
-            hub_coro = self.coordinator.create_background_task.call_args[0][0]
+            hub_factory = self.coordinator.create_background_task.call_args[0][0]
             self.coordinator.create_background_task.reset_mock()
 
-            await hub_coro
+            await hub_factory()
 
             self.assertFalse(
                 self.coordinator.create_background_task.called,
@@ -402,8 +402,8 @@ class TestMessageHandler(unittest.TestCase):
                 await self.handler.handle_llm_continue(
                     {"source": "hub-test"}, MagicMock()
                 )
-                hub_coro = self.coordinator.create_background_task.call_args[0][0]
-                await hub_coro
+                hub_factory = self.coordinator.create_background_task.call_args[0][0]
+                await hub_factory()
 
             self.assertEqual(
                 calls["n"],
@@ -441,9 +441,9 @@ class TestMessageHandler(unittest.TestCase):
             await self.handler.handle_llm_continue(
                 {"source": "hub-test"}, MagicMock()
             )
-            hub_coro = self.coordinator.create_background_task.call_args[0][0]
+            hub_factory = self.coordinator.create_background_task.call_args[0][0]
             self.coordinator.create_background_task.reset_mock()
-            await hub_coro
+            await hub_factory()
 
             self.assertEqual(
                 calls["n"], 1, "chain must yield before running another turn"
@@ -474,7 +474,7 @@ class TestMessageHandler(unittest.TestCase):
                 {"source": "peer"}, MagicMock()
             )
             self.assertEqual(result["status"], "queued_for_retry")
-            retry_coro = coord.create_background_task.call_args[0][0]
+            retry_factory = coord.create_background_task.call_args[0][0]
             coord.create_background_task.reset_mock()
 
             offset = {"v": 0.0}
@@ -493,7 +493,7 @@ class TestMessageHandler(unittest.TestCase):
             ), patch(
                 "kollabor.llm.message_handler.asyncio.sleep", fake_sleep
             ):
-                await retry_coro
+                await retry_factory()
 
             self.assertFalse(
                 coord.cancel_processing,
@@ -505,7 +505,7 @@ class TestMessageHandler(unittest.TestCase):
                 "retry must fire the continuation once the chain finishes",
             )
             # Close the unawaited _hub_continue coroutine handed to the mock.
-            coord.create_background_task.call_args[0][0].close()
+            coord.create_background_task.call_args[0][0]().close()
 
         self.loop.run_until_complete(run())
 
@@ -516,7 +516,7 @@ class TestMessageHandler(unittest.TestCase):
 
         async def run():
             await handler.handle_llm_continue({"source": "peer"}, MagicMock())
-            retry_coro = coord.create_background_task.call_args[0][0]
+            retry_factory = coord.create_background_task.call_args[0][0]
             coord.create_background_task.reset_mock()
 
             offset = {"v": 0.0}
@@ -531,7 +531,7 @@ class TestMessageHandler(unittest.TestCase):
             ), patch(
                 "kollabor.llm.message_handler.asyncio.sleep", fake_sleep
             ):
-                await retry_coro
+                await retry_factory()
 
             self.assertFalse(coord.cancel_processing)
             self.assertFalse(

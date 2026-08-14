@@ -1375,6 +1375,7 @@ def _get_minimal_default_config() -> dict:
         "kollabor": {
             "llm": {
                 "max_history": 999,
+                "max_retries": 5,
                 "save_conversations": True,
                 "conversation_format": "jsonl",
                 "show_status": True,
