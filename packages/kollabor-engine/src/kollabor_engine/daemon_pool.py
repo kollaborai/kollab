@@ -343,8 +343,23 @@ class DaemonPool:
         """
         async with self._spawn_lock:
             existing = self._daemons.get(session_id)
-            if existing is not None and existing.alive:
-                return existing
+            if existing is not None:
+                if existing.alive:
+                    return existing
+
+                # A daemon can die outside this pool (for example after a
+                # Hub stop or a crashed detached process). Do not overwrite a
+                # dead handle while its reader/socket resources are still
+                # attached; close it before claiming the session again.
+                self._daemons.pop(session_id, None)
+                try:
+                    await existing.close()
+                except Exception as e:
+                    logger.debug(
+                        "stale daemon handle cleanup failed for %s: %s",
+                        session_id,
+                        e,
+                    )
 
             identity = f"web-{session_id.replace('sess_', '')[:12]}"
             argv = _kollab_command() + ["--detached", "--as", identity]
