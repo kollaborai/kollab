@@ -12,6 +12,7 @@ from kollabor_agent.queue_processor import (
     _tool_results_requiring_followup,
 )
 from kollabor_agent.tool_executor import ToolExecutionResult
+from kollabor_events.data_models import ConversationMessage
 
 
 @dataclass
@@ -235,6 +236,76 @@ class TestQueueProcessor(unittest.TestCase):
 
         process_batch_fn.assert_called_once_with(["msg1", "msg2"])
         self.assertFalse(self.processor.is_processing)
+
+    def test_context_injection_is_ephemeral_for_wire_request(self):
+        """Context blocks reach the request but do not persist in history."""
+
+        class ContextService:
+            def increment_turn(self):
+                pass
+
+            def build_curator_injection(self):
+                return "[ephemeral context]"
+
+            def build_context_snapshot(self):
+                return None
+
+            def build_confirmation_injection(self):
+                return None
+
+            def build_divergence_warnings(self):
+                return None
+
+        wire_contents = []
+
+        async def capture_request(**kwargs):
+            wire_contents.append(
+                [message.content for message in kwargs["conversation_history"]]
+            )
+            return "test response"
+
+        self.event_bus.get_service.return_value = ContextService()
+        self.conversation_history.append(
+            ConversationMessage(role="user", content="original prompt")
+        )
+        self.streaming_handler.call_llm.side_effect = capture_request
+        self.api_service.last_stop_reason = ""
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_tool_calls.return_value = []
+        self.api_service.last_thinking_content = None
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.response_parser.parse_response.return_value = {
+            "content": "test response",
+            "components": {},
+            "turn_completed": True,
+            "question_gate_active": False,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("test response", False, False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.assertEqual(
+            wire_contents,
+            [["[ephemeral context]\n\n---\n\noriginal prompt"]],
+        )
+        self.assertEqual(self.conversation_history[-1].content, "original prompt")
 
     # ------------------------------------------------------------------
     # Tests for _emit_llm_response_and_handle

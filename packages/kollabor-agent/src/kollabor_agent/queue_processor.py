@@ -679,6 +679,8 @@ class QueueProcessor:
 
         response = None
         parent_uuid = current_parent_uuid
+        ephemeral_user_message = None
+        ephemeral_user_content = None
 
         try:
             # Context service: inject ephemeral prompts (curator,
@@ -725,6 +727,8 @@ class QueueProcessor:
                     for i in range(len(self.conversation_history) - 1, -1, -1):
                         msg = self.conversation_history[i]
                         if getattr(msg, "role", "") == "user":
+                            ephemeral_user_message = msg
+                            ephemeral_user_content = msg.content
                             msg.content = combined + "\n\n---\n\n" + msg.content
                             break
 
@@ -1360,6 +1364,13 @@ class QueueProcessor:
                 )
             self.message_display_service.display_error_message(error_msg)
             self.turn_completed = True
+
+        finally:
+            # Context-service blocks are request-local. Restore the persisted
+            # history object after the initial call and any continuations so
+            # ephemeral context cannot become part of the next cached prefix.
+            if ephemeral_user_message is not None:
+                ephemeral_user_message.content = ephemeral_user_content
 
         # A turn is only done once no tool results need to go back to the model.
         # Publishing earlier would tell remote clients the turn ended while its
