@@ -55,9 +55,7 @@ if WATCHDOG_AVAILABLE:
                     try:
                         loop = asyncio.get_running_loop()
                         loop.call_soon_threadsafe(
-                            lambda: asyncio.create_task(
-                                self.config_service._handle_file_change()
-                            )
+                            self.config_service._schedule_file_change_reload
                         )
                     except RuntimeError:
                         # No event loop running, fall back to sync reload
@@ -110,6 +108,7 @@ class ConfigService:
         # File watching setup
         self._file_watcher: Any = None
         self._observer: Any = None
+        self._pending_reload_tasks: set[asyncio.Task] = set()
 
         # Load initial configuration
         self._initialize_config()
@@ -570,6 +569,30 @@ class ConfigService:
         if not success:
             logger.warning("Configuration reload failed, using cached fallback")
 
+    def _schedule_file_change_reload(self) -> None:
+        """Schedule and retain a hot-reload task until it completes."""
+        task = asyncio.create_task(self._handle_file_change())
+        self._pending_reload_tasks.add(task)
+        task.add_done_callback(self._on_reload_task_done)
+
+    def _on_reload_task_done(self, task: asyncio.Task) -> None:
+        """Remove a reload task and consume any exception it raised."""
+        self._pending_reload_tasks.discard(task)
+        if task.cancelled():
+            return
+
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Configuration hot-reload task failed")
+
+    def _cancel_pending_reload_tasks(self) -> None:
+        """Cancel tracked hot-reload tasks during synchronous shutdown."""
+        for task in tuple(self._pending_reload_tasks):
+            if not task.done():
+                task.cancel()
+        self._pending_reload_tasks.clear()
+
     def register_reload_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback to be notified when configuration reloads.
 
@@ -605,4 +628,5 @@ class ConfigService:
     def shutdown(self) -> None:
         """Shutdown the configuration service and file watcher."""
         self._stop_file_watching()
+        self._cancel_pending_reload_tasks()
         logger.info("Configuration service shutdown")
