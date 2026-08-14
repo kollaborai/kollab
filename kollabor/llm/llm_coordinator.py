@@ -559,7 +559,9 @@ class LLMService:
         returns None so the watchdog's heal step does not block on the whole
         drain completing.
         """
-        self.create_background_task(self._process_queue(), name="watchdog_requeue")
+        self.create_background_task(
+            lambda: self._process_queue(), name="watchdog_requeue"
+        )
 
     def _init_hooks(self):
         """Create hooks for LLM service (delegated to MessageHandler)."""
@@ -728,7 +730,7 @@ class LLMService:
         # This allows the UI to start immediately while MCP servers connect
         try:
             self.create_background_task(
-                self._background_mcp_discovery(), name="mcp_discovery"
+                lambda: self._background_mcp_discovery(), name="mcp_discovery"
             )
         except Exception as e:
             # Log but don't fail startup - MCP discovery is non-critical
@@ -751,7 +753,7 @@ class LLMService:
         if self._turn_watchdog is not None:
             try:
                 self.create_background_task(
-                    self._turn_watchdog.run(), name="turn_watchdog"
+                    lambda: self._turn_watchdog.run(), name="turn_watchdog"
                 )
             except Exception as e:
                 logger.warning(f"Failed to start turn watchdog: {e}")
@@ -1152,9 +1154,14 @@ class LLMService:
 
     # -- Forwarding methods to BackgroundTaskManager --
 
-    def create_background_task(self, coro, name: str | None = None) -> asyncio.Task:
+    def create_background_task(
+        self, coro_or_factory, name: str | None = None
+    ) -> asyncio.Task:
         """Create and track a background task. Delegates to BackgroundTaskManager."""
-        return cast(asyncio.Task, self._task_manager.create_background_task(coro, name))
+        return cast(
+            asyncio.Task,
+            self._task_manager.create_background_task(coro_or_factory, name),
+        )
 
     async def start_task_monitor(self):
         """Start background task monitoring. Delegates to BackgroundTaskManager."""
@@ -1350,7 +1357,9 @@ class LLMService:
 
         # Start processing if not already running
         if not self.is_processing:
-            self.create_background_task(self._process_queue(), name="process_queue")
+            self.create_background_task(
+                lambda: self._process_queue(), name="process_queue"
+            )
 
         return {
             "status": "queued",
@@ -1428,7 +1437,7 @@ class LLMService:
                 coord = self  # alias for clarity in the closure
                 if coord.tool_executor is not None:
                     coord.create_background_task(
-                        coord.tool_executor.cancel_running_tool(),
+                        lambda: coord.tool_executor.cancel_running_tool(),
                         name="esc_cancel_tool",
                     )
             except Exception as e:

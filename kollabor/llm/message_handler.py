@@ -155,7 +155,7 @@ class MessageHandler:
                 state_svc = event_bus.get_service("state_service")
                 if state_svc and hasattr(state_svc, "cancel_current_request"):
                     self._coordinator.create_background_task(
-                        state_svc.cancel_current_request(),
+                        lambda: state_svc.cancel_current_request(),
                         name="esc_cancel_daemon",
                     )
                     logger.info("ESC cancel forwarded to daemon via state_service RPC")
@@ -174,7 +174,7 @@ class MessageHandler:
                 if hub and hasattr(hub, "_identity") and hub._identity:
                     if hub._identity.state == "waiting":
                         self._coordinator.create_background_task(
-                            hub._exit_waiting_state(),
+                            lambda: hub._exit_waiting_state(),
                             name="esc_clear_hub_waiting",
                         )
                         logger.info("ESC cleared hub waiting state (agent was parked)")
@@ -297,7 +297,7 @@ class MessageHandler:
                     if not coord.is_processing:
                         # Trigger queue processing via background task
                         coord.create_background_task(
-                            coord._process_queue(), name="process_queue"
+                            lambda: coord._process_queue(), name="process_queue"
                         )
 
             logger.info(
@@ -451,7 +451,7 @@ class MessageHandler:
                             qp.processing_queue.qsize(),
                         )
                         coord.create_background_task(
-                            coord._process_queue(),
+                            lambda: coord._process_queue(),
                             name="process_queue_drain_after_hub_continue",
                         )
 
@@ -519,19 +519,20 @@ class MessageHandler:
                         )
                         if not coord.is_processing:
                             coord.create_background_task(
-                                _hub_continue(), name="continue_conversation_retry"
+                                lambda: _hub_continue(),
+                                name="continue_conversation_retry",
                             )
                     finally:
                         self._retry_pending = False
 
                 coord.create_background_task(
-                    _retry_continue(), name="trigger_continue_retry"
+                    lambda: _retry_continue(), name="trigger_continue_retry"
                 )
                 return {"status": "queued_for_retry"}
 
             if not coord.is_processing:
                 coord.create_background_task(
-                    _hub_continue(), name="continue_conversation_hub"
+                    lambda: _hub_continue(), name="continue_conversation_hub"
                 )
 
             logger.info("TRIGGER_LLM_CONTINUE: Triggered LLM processing")

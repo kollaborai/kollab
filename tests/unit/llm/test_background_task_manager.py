@@ -60,8 +60,17 @@ class TestBackgroundTaskManager(unittest.TestCase):
         )
 
     def tearDown(self):
-        for task in list(self.manager._background_tasks):
+        tasks = [
+            task
+            for task in self.manager._background_tasks
+            if isinstance(task, asyncio.Future)
+        ]
+        for task in tasks:
             task.cancel()
+        if tasks:
+            self.loop.run_until_complete(
+                asyncio.gather(*tasks, return_exceptions=True)
+            )
         self.loop.close()
 
     def test_init(self):
@@ -159,6 +168,7 @@ class TestBackgroundTaskManager(unittest.TestCase):
         async def run():
             task = self.manager.create_background_task(asyncio.sleep(0.01), "new_task")
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
         self.loop.run_until_complete(run())
 
@@ -277,6 +287,37 @@ class TestBackgroundTaskManager(unittest.TestCase):
                 self.manager._safe_task_wrapper(fail(), "test")
             )
         self.assertEqual(self.manager._task_error_count, 1)
+
+    def test_retry_factory_creates_fresh_coroutines_with_bounded_attempts(self):
+        """Retries must invoke a factory and stop at the configured count."""
+        self.task_config.background_tasks.task_retry_attempts = 2
+        self.task_config.background_tasks.task_retry_delay = 0
+        attempts = 0
+
+        async def failing_task():
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("transient background failure")
+
+        async def run():
+            task = self.manager.create_background_task(
+                failing_task,
+                name="factory_retry",
+            )
+            with self.assertRaises(RuntimeError):
+                await task
+
+            # Each failed retry creates another task asynchronously from the
+            # same factory. Wait until the final retry's done callback removes
+            # it from the manager.
+            for _ in range(100):
+                if attempts == 3 and not self.manager._background_tasks:
+                    break
+                await asyncio.sleep(0.01)
+
+        self.loop.run_until_complete(run())
+        self.assertEqual(attempts, 3)
+        self.assertEqual(len(self.manager._background_tasks), 0)
 
 
 if __name__ == "__main__":
