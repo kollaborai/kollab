@@ -241,9 +241,25 @@ class BackgroundTaskManager:
             self._circuit_breaker_test_task_running = True
             logger.info(f"Circuit breaker HALF_OPEN - allowing test task '{task_name}'")
 
-        task = asyncio.create_task(
-            self._safe_task_wrapper(wrapped_coro, task_name), name=task_name
-        )
+        # Track whether the wrapper started. If cancellation happens before
+        # the event loop schedules it, close both coroutine objects explicitly;
+        # otherwise Python reports them as never awaited during GC.
+        wrapper_started = False
+
+        async def tracked_wrapper():
+            nonlocal wrapper_started
+            wrapper_started = True
+            return await self._safe_task_wrapper(wrapped_coro, task_name)
+
+        task = asyncio.create_task(tracked_wrapper(), name=task_name)
+
+        def _close_unstarted_coroutines(completed_task):
+            if completed_task.cancelled() and not wrapper_started:
+                for awaitable in (wrapped_coro, coro):
+                    if inspect.iscoroutine(awaitable):
+                        awaitable.close()
+
+        task.add_done_callback(_close_unstarted_coroutines)
 
         # Add to set and register callback before any await so the done_callback
         # always sees the task in _background_tasks even if the task finishes
