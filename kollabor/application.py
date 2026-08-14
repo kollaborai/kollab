@@ -58,6 +58,23 @@ def merge_widget_state_snapshot(
     return result
 
 
+def _should_apply_agent_preferred_profile(
+    agent_profile: str | None, active_profile: str | None
+) -> bool:
+    """Decide whether an agent profile should override the current profile.
+
+    ``default`` in bundled agent metadata means "use the normal profile
+    resolution", not "discard a project/global profile selected by the
+    user". Explicit non-default agent profiles still override the persisted
+    default when no CLI profile was supplied.
+    """
+    if not agent_profile:
+        return False
+    if agent_profile == "default" and active_profile not in (None, "", "default"):
+        return False
+    return True
+
+
 class TerminalLLMChat:
     """Main Kollab application.
 
@@ -342,11 +359,19 @@ class TerminalLLMChat:
         # Don't persist agent's profile - it's automatic based on agent selection
         if not profile_name:
             agent_profile = self.agent_manager.get_preferred_profile()
-            if agent_profile:
+            if _should_apply_agent_preferred_profile(
+                agent_profile, self.profile_manager.active_profile_name
+            ):
                 if self.profile_manager.set_active_profile(
                     agent_profile, persist=False
                 ):
                     logger.info(f"Using agent's preferred profile: {agent_profile}")
+            elif agent_profile == "default":
+                logger.debug(
+                    "Keeping configured profile '%s'; agent profile is the "
+                    "default placeholder",
+                    self.profile_manager.active_profile_name,
+                )
 
         # Load skills if specified (requires an active agent)
         # Store for later injection into conversation after llm_service is initialized
