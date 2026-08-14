@@ -81,7 +81,7 @@ class TempFileTest(unittest.TestCase):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManager(unittest.TestCase):
+class TestAPIKeyManager(unittest.IsolatedAsyncioTestCase):
     """Test OS native keyring storage."""
 
     def setUp(self):
@@ -110,7 +110,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_store_key_success(self, mock_get_keyring, mock_set_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_store_key_success(
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
+    ):
         """Test successful key storage."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -123,7 +126,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_store_key_failure(self, mock_get_keyring, mock_set_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_store_key_failure(
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
+    ):
         """Test key storage failure handling."""
         from keyring.errors import KeyringError
 
@@ -139,7 +145,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_get_key_success(self, mock_get_keyring, mock_get_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_get_key_success(
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
+    ):
         """Test successful key retrieval."""
         mock_get_keyring.return_value = self.mock_backend
         mock_get_password.return_value = "sk-example-header-key-0000"
@@ -152,7 +161,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_get_key_not_found(self, mock_get_keyring, mock_get_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_get_key_not_found(
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
+    ):
         """Test key retrieval when not found."""
         from keyring.errors import KeyringError
 
@@ -166,7 +178,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_success(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_success(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test successful key deletion."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -178,7 +193,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_not_found(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_not_found(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test key deletion when not found."""
         from keyring.errors import PasswordDeleteError
 
@@ -198,6 +216,7 @@ class TestAPIKeyManager(unittest.TestCase):
             ) as mock_get_keyring,
             patch("kollabor_ai.providers.security.keyring.set_password"),
             patch("kollabor_ai.providers.security.keyring.get_password"),
+            patch("kollabor_ai.providers.security.keyring_enabled", return_value=True),
         ):
 
             mock_get_keyring.return_value = self.mock_backend
@@ -2140,9 +2159,7 @@ class TestLoggingRedactorAllPatterns(unittest.TestCase):
 
     def test_redact_multiple_keys_in_string(self):
         """Test multiple keys in same string are redacted."""
-        text = (
-            "OpenAI: sk-example-openai-redaction-0000, Anthropic: sk-ant-example-anthropic-key-0000"
-        )
+        text = "OpenAI: sk-example-openai-redaction-0000, Anthropic: sk-ant-example-anthropic-key-0000"
         redacted = LoggingRedactor.redact(text)
 
         self.assertNotIn("sk-example-openai-redaction-0000", redacted)
