@@ -1,3 +1,10 @@
+import asyncio
+from collections import OrderedDict
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.task_ledger import TaskLedger
 
@@ -211,24 +218,8 @@ def test_resolve_reply_can_target_specific_task(tmp_path):
     assert [item["task_id"] for item in pending] == ["task-a"]
 
 
-def test_production_reply_resolver_passes_inbound_task_id():
-    """The live hub message path must disambiguate same-assignee replies."""
-    from pathlib import Path
-
-    source = Path("plugins/hub/plugin.py").read_text()
-    call = source[
-        source.index("resolve_reply(") : source.index(
-            "):", source.index("resolve_reply(")
-        )
-    ]
-    assert 'task_id=str((message.metadata or {}).get("task_id") or "").strip()' in call
-
-
 @pytest.mark.asyncio
 async def test_inbound_message_resolves_matching_task_only(tmp_path):
-    from collections import OrderedDict
-    from unittest.mock import AsyncMock, MagicMock
-
     from plugins.hub.models import HubMessage, MessageScope
     from plugins.hub.plugin import HubPlugin, HubWakeDecision
 
@@ -253,20 +244,24 @@ async def test_inbound_message_resolves_matching_task_only(tmp_path):
     plugin._identity = MagicMock(identity="lead", agent_id="lead-id")
     plugin._vault = None
 
-    class FakeLLM:
-        conversation_history = []
-        is_processing = False
+    llm = SimpleNamespace(
+        conversation_history=[],
+        is_processing=False,
+        conversation_logger=None,
+        current_parent_uuid=None,
+    )
 
     class FakeEventBus:
         def get_service(self, name):
-            return FakeLLM() if name == "llm_service" else None
+            return llm if name == "llm_service" else None
+
+        async def emit_with_hooks(self, *args, **kwargs):
+            return None
 
     plugin.event_bus = FakeEventBus()
-    plugin._event_bus = plugin.event_bus
-    plugin._llm_service = FakeLLM()
-    plugin._history_lock = None
-    plugin._seen_content_hashes = set()
-    plugin._pending_hub_wake_ids = set()
+    plugin._history_lock = asyncio.Lock()
+    plugin._seen_content_hashes = {}
+    plugin._pending_hub_wake_ids = OrderedDict()
     plugin._display_hub_message = MagicMock()
     plugin._bridge = None
     plugin._change_feed = None
