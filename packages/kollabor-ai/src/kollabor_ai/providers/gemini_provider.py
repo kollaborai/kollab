@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import httpx
 
 from .base import LLMProvider
+from .errors import map_httpx_error
 from .gemini_transformer import GeminiResponseTransformer
 from .models import (
     GeminiConfig,
@@ -175,11 +176,14 @@ class GeminiProvider(LLMProvider):
 
             return unified_response
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                f"Gemini HTTP error: {e.response.status_code} {e.response.text}"
-            )
-            raise
+        except (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            httpx.HTTPStatusError,
+        ) as e:
+            mapped_error = map_httpx_error(e, "gemini")
+            logger.error(f"Gemini request failed: {mapped_error}")
+            raise mapped_error from e
         except Exception as e:
             logger.error(f"Gemini call failed: {e}")
             raise
@@ -256,11 +260,14 @@ class GeminiProvider(LLMProvider):
                             logger.warning(f"Failed to parse SSE chunk: {e}")
                             continue
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                f"Gemini HTTP error: {e.response.status_code} {e.response.text}"
-            )
-            raise
+        except (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            httpx.HTTPStatusError,
+        ) as e:
+            mapped_error = map_httpx_error(e, "gemini")
+            logger.error(f"Gemini stream failed: {mapped_error}")
+            raise mapped_error from e
         except Exception as e:
             logger.error(f"Gemini stream failed: {e}")
             raise

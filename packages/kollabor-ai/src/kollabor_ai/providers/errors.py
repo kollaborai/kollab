@@ -6,7 +6,10 @@ Maps provider-specific exceptions to unified error types with safe user messages
 """
 
 import re
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from math import isfinite
+from typing import Any, Dict, Mapping, Optional
 
 
 class ProviderError(Exception):
@@ -169,7 +172,7 @@ class RateLimitError(ProviderError):
         self.retry_after = retry_after
 
         if safe_message is None:
-            if retry_after:
+            if retry_after is not None:
                 safe_message = f"Rate limit exceeded. Retry after {retry_after}s."
             else:
                 safe_message = "Rate limit exceeded. Please try again later."
@@ -271,6 +274,7 @@ class APITimeoutError(ProviderError):
         error_code: Optional[str] = None,
         original_error: Optional[Exception] = None,
         safe_message: Optional[str] = None,
+        retry_after: Optional[float] = None,
     ):
         """
         Initialize timeout error.
@@ -282,9 +286,16 @@ class APITimeoutError(ProviderError):
             original_error: Original exception
             safe_message: Optional custom safe message
         """
+        self.retry_after = retry_after
         if safe_message is None:
             safe_message = "Request timed out. Please try again."
         super().__init__(message, provider, error_code, original_error, safe_message)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = super().to_dict()
+        if self.retry_after is not None:
+            data["retry_after"] = self.retry_after
+        return data
 
 
 class APIConnectionError(ProviderError):
@@ -333,6 +344,7 @@ class ServerError(ProviderError):
         error_code: Optional[str] = None,
         original_error: Optional[Exception] = None,
         safe_message: Optional[str] = None,
+        retry_after: Optional[float] = None,
     ):
         """
         Initialize server error.
@@ -346,6 +358,7 @@ class ServerError(ProviderError):
             safe_message: Optional custom safe message
         """
         self.status_code = status_code
+        self.retry_after = retry_after
         if safe_message is None:
             safe_message = f"{provider.capitalize()} server error ({status_code}). Please try again later."
         super().__init__(message, provider, error_code, original_error, safe_message)
@@ -359,6 +372,38 @@ class ServerError(ProviderError):
         """
         data = super().to_dict()
         data["status_code"] = self.status_code
+        if self.retry_after is not None:
+            data["retry_after"] = self.retry_after
+        return data
+
+
+class TransientHTTPError(ProviderError):
+    """A retryable HTTP status outside the timeout and 5xx error classes."""
+
+    def __init__(
+        self,
+        message: str,
+        provider: str,
+        status_code: int,
+        error_code: Optional[str] = None,
+        original_error: Optional[Exception] = None,
+        safe_message: Optional[str] = None,
+        retry_after: Optional[float] = None,
+    ):
+        self.status_code = status_code
+        self.retry_after = retry_after
+        if safe_message is None:
+            safe_message = (
+                f"{provider.capitalize()} temporarily unavailable ({status_code}). "
+                "Please try again later."
+            )
+        super().__init__(message, provider, error_code, original_error, safe_message)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = super().to_dict()
+        data["status_code"] = self.status_code
+        if self.retry_after is not None:
+            data["retry_after"] = self.retry_after
         return data
 
 
@@ -379,6 +424,206 @@ class EmptyResponseError(ProviderError):
                 "Please try again."
             )
         super().__init__(message, provider, error_code, original_error, safe_message)
+
+
+def parse_retry_after(
+    value: Any,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[float]:
+    """Parse Retry-After delta-seconds or HTTP-date without raising."""
+    if value is None:
+        return None
+
+    raw_value = str(value).strip()
+    if not raw_value:
+        return None
+
+    try:
+        seconds = float(raw_value)
+        if isfinite(seconds) and seconds >= 0:
+            return seconds
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(raw_value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        current_time = now or datetime.now(timezone.utc)
+        return max(0.0, (retry_at - current_time).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def parse_retry_after_headers(
+    headers: Optional[Mapping[str, Any]] = None,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[float]:
+    """Parse provider retry headers, preferring millisecond precision."""
+    if not headers:
+        return None
+
+    def get_header(name: str) -> Any:
+        value = headers.get(name)
+        if value is not None:
+            return value
+        for key, candidate in headers.items():
+            if str(key).lower() == name:
+                return candidate
+        return None
+
+    raw_milliseconds = get_header("retry-after-ms")
+    if raw_milliseconds is not None:
+        try:
+            milliseconds = float(str(raw_milliseconds).strip())
+            if isfinite(milliseconds) and milliseconds >= 0:
+                return milliseconds / 1000.0
+        except (TypeError, ValueError):
+            pass
+
+    return parse_retry_after(get_header("retry-after"), now=now)
+
+
+def map_http_status_error(
+    error: Exception,
+    provider: str,
+    status_code: int,
+    headers: Optional[Mapping[str, Any]] = None,
+    *,
+    authentication_safe_message: Optional[str] = None,
+    not_found_safe_message: Optional[str] = None,
+) -> ProviderError:
+    """Map an HTTP status while preserving response headers for retry policy."""
+    error_message = str(error)
+    response_headers = headers or {}
+    retry_after = parse_retry_after_headers(response_headers)
+
+    if status_code == 401:
+        return AuthenticationError(
+            error_message,
+            provider,
+            error_code="authentication_error",
+            original_error=error,
+            safe_message=authentication_safe_message,
+        )
+
+    if status_code == 429:
+        return RateLimitError(
+            error_message,
+            provider,
+            retry_after=retry_after,
+            error_code="rate_limit_error",
+            original_error=error,
+        )
+
+    if status_code == 408:
+        return APITimeoutError(
+            error_message,
+            provider,
+            error_code="timeout",
+            original_error=error,
+            retry_after=retry_after,
+        )
+
+    if status_code == 409:
+        return TransientHTTPError(
+            error_message,
+            provider,
+            status_code=status_code,
+            error_code="transient_http_409",
+            original_error=error,
+            retry_after=retry_after,
+        )
+
+    if status_code == 400:
+        if (
+            "context_length" in error_message.lower()
+            or "max_tokens" in error_message.lower()
+        ):
+            return ContextLengthExceededError(
+                error_message,
+                provider,
+                error_code="context_length_exceeded",
+                original_error=error,
+            )
+        return InvalidRequestError(
+            error_message,
+            provider,
+            error_code="invalid_request",
+            original_error=error,
+        )
+
+    if status_code == 404:
+        return InvalidRequestError(
+            error_message,
+            provider,
+            error_code="not_found",
+            original_error=error,
+            safe_message=not_found_safe_message,
+        )
+
+    if 500 <= status_code < 600:
+        return ServerError(
+            error_message,
+            provider,
+            status_code=status_code,
+            error_code=f"server_error_{status_code}",
+            original_error=error,
+            retry_after=retry_after,
+        )
+
+    return ProviderError(
+        error_message,
+        provider,
+        error_code=f"http_error_{status_code}",
+        original_error=error,
+    )
+
+
+def map_httpx_error(
+    error: Exception,
+    provider: str,
+    *,
+    authentication_safe_message: Optional[str] = None,
+    not_found_safe_message: Optional[str] = None,
+) -> ProviderError:
+    """Map httpx transport/status failures to the shared provider hierarchy."""
+    try:
+        import httpx
+    except ImportError:
+        return ProviderError(str(error), provider, original_error=error)
+
+    error_message = str(error)
+    if isinstance(error, httpx.TimeoutException):
+        return APITimeoutError(
+            error_message,
+            provider,
+            error_code="timeout",
+            original_error=error,
+        )
+
+    if isinstance(error, httpx.TransportError):
+        return APIConnectionError(
+            error_message,
+            provider,
+            error_code="connection_error",
+            original_error=error,
+        )
+
+    if isinstance(error, httpx.HTTPStatusError):
+        response = error.response
+        return map_http_status_error(
+            error,
+            provider,
+            response.status_code,
+            response.headers,
+            authentication_safe_message=authentication_safe_message,
+            not_found_safe_message=not_found_safe_message,
+        )
+
+    return ProviderError(error_message, provider, original_error=error)
 
 
 def map_openai_error(error: Exception, provider: str = "openai") -> ProviderError:
@@ -429,12 +674,7 @@ def map_openai_error(error: Exception, provider: str = "openai") -> ProviderErro
         retry_after = None
         if hasattr(error, "response") and error.response is not None:
             headers = getattr(error.response, "headers", {})
-            retry_after = headers.get("retry-after")
-            if retry_after:
-                try:
-                    retry_after = float(retry_after)
-                except (ValueError, TypeError):
-                    retry_after = None
+            retry_after = parse_retry_after_headers(headers)
 
         return RateLimitError(
             error_message,
@@ -474,14 +714,14 @@ def map_openai_error(error: Exception, provider: str = "openai") -> ProviderErro
 
     if APIStatusError is not None and isinstance(error, APIStatusError):
         status_code = getattr(error, "status_code", None)
-
-        if status_code and 500 <= status_code < 600:
-            return ServerError(
-                error_message,
+        if status_code is not None:
+            response = getattr(error, "response", None)
+            headers = getattr(response, "headers", {}) if response is not None else {}
+            return map_http_status_error(
+                error,
                 provider,
-                status_code=status_code,
-                error_code=f"server_error_{status_code}",
-                original_error=error,
+                status_code,
+                headers,
             )
 
     if OpenAITimeoutError is not None and isinstance(error, OpenAITimeoutError):
@@ -503,88 +743,14 @@ def map_openai_error(error: Exception, provider: str = "openai") -> ProviderErro
     # httpx errors (if SDK exceptions not available or not matched)
     try:
         import httpx
-
-        if isinstance(error, httpx.TimeoutException):
-            return APITimeoutError(
-                error_message,
-                provider,
-                error_code="timeout",
-                original_error=error,
-            )
-
-        if isinstance(error, httpx.ConnectError):
-            return APIConnectionError(
-                error_message,
-                provider,
-                error_code="connection_error",
-                original_error=error,
-            )
-
-        if isinstance(error, httpx.HTTPStatusError):
-            status_code = error.response.status_code
-
-            # 401 - Authentication
-            if status_code == 401:
-                return AuthenticationError(
-                    error_message,
-                    provider,
-                    error_code="authentication_error",
-                    original_error=error,
-                )
-
-            # 429 - Rate limit
-            if status_code == 429:
-                retry_after = error.response.headers.get("retry-after")
-                retry_seconds = float(retry_after) if retry_after else None
-
-                return RateLimitError(
-                    error_message,
-                    provider,
-                    retry_after=retry_seconds,
-                    error_code="rate_limit_error",
-                    original_error=error,
-                )
-
-            # 400 - Bad request
-            if status_code == 400:
-                if (
-                    "context_length" in error_message.lower()
-                    or "max_tokens" in error_message.lower()
-                ):
-                    return ContextLengthExceededError(
-                        error_message,
-                        provider,
-                        error_code="context_length_exceeded",
-                        original_error=error,
-                    )
-
-                return InvalidRequestError(
-                    error_message,
-                    provider,
-                    error_code="invalid_request",
-                    original_error=error,
-                )
-
-            # 404 - Not found
-            if status_code == 404:
-                return InvalidRequestError(
-                    error_message,
-                    provider,
-                    error_code="not_found",
-                    original_error=error,
-                )
-
-            # 500-599 - Server errors
-            if 500 <= status_code < 600:
-                return ServerError(
-                    error_message,
-                    provider,
-                    status_code=status_code,
-                    error_code=f"server_error_{status_code}",
-                    original_error=error,
-                )
     except ImportError:
         pass
+    else:
+        if isinstance(
+            error,
+            (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError),
+        ):
+            return map_httpx_error(error, provider)
 
     # Generic error
     return ProviderError(
@@ -607,122 +773,9 @@ def map_anthropic_error(error: Exception, provider: str = "anthropic") -> Provid
     Returns:
         Mapped ProviderError subclass
     """
-    error_message = str(error)
-
-    # Import httpx for error handling
-    try:
-        from httpx import ConnectError, HTTPStatusError, TimeoutException
-    except ImportError:
-        # httpx not available, return generic error
-        return ProviderError(
-            error_message,
-            provider,
-            original_error=error,
-        )
-
-    # HTTP status errors
-    if isinstance(error, HTTPStatusError):
-        status_code = error.response.status_code
-
-        # 401 - Authentication
-        if status_code == 401:
-            return AuthenticationError(
-                error_message,
-                provider,
-                error_code="authentication_error",
-                original_error=error,
-                safe_message="Invalid Anthropic API key. Please check your API key.",
-            )
-
-        # 429 - Rate limit
-        if status_code == 429:
-            # Extract retry-after from headers
-            retry_after = error.response.headers.get("retry-after")
-            retry_seconds = float(retry_after) if retry_after else None
-
-            if retry_seconds:
-                safe_message = f"Rate limit exceeded. Retry after {retry_seconds}s."
-            else:
-                safe_message = "Rate limit exceeded. Please try again later."
-
-            return RateLimitError(
-                error_message,
-                provider,
-                retry_after=retry_seconds,
-                error_code="rate_limit_error",
-                original_error=error,
-                safe_message=safe_message,
-            )
-
-        # 400 - Bad request
-        if status_code == 400:
-            # Check for specific error types
-            if "context_length" in error_message.lower():
-                return ContextLengthExceededError(
-                    error_message,
-                    provider,
-                    error_code="context_length_exceeded",
-                    original_error=error,
-                )
-
-            return InvalidRequestError(
-                error_message,
-                provider,
-                error_code="invalid_request",
-                original_error=error,
-            )
-
-        # 404 - Not found (model not found)
-        if status_code == 404:
-            return InvalidRequestError(
-                error_message,
-                provider,
-                error_code="not_found",
-                original_error=error,
-                safe_message="Model or endpoint not found. Check your configuration.",
-            )
-
-        # 500-599 - Server errors
-        if 500 <= status_code < 600:
-            return ServerError(
-                error_message,
-                provider,
-                status_code=status_code,
-                error_code=f"server_error_{status_code}",
-                original_error=error,
-            )
-
-        # Other HTTP errors
-        return ProviderError(
-            error_message,
-            provider,
-            error_code=f"http_error_{status_code}",
-            original_error=error,
-        )
-
-    # Timeout errors
-    if isinstance(error, TimeoutException):
-        return APITimeoutError(
-            error_message,
-            provider,
-            error_code="timeout",
-            original_error=error,
-            safe_message="Request timed out. Please try again.",
-        )
-
-    # Connection errors
-    if isinstance(error, ConnectError):
-        return APIConnectionError(
-            error_message,
-            provider,
-            error_code="connection_error",
-            original_error=error,
-            safe_message="Connection failed. Please check your network.",
-        )
-
-    # Generic error
-    return ProviderError(
-        error_message,
+    return map_httpx_error(
+        error,
         provider,
-        original_error=error,
+        authentication_safe_message="Invalid Anthropic API key. Please check your API key.",
+        not_found_safe_message="Model or endpoint not found. Check your configuration.",
     )

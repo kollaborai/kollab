@@ -90,6 +90,7 @@ class AzureOpenAIProvider(OpenAIProvider):
                 "base_url": base_url,
                 "timeout": self.config.timeout,
                 "default_headers": {"api-key": self.config.api_key},
+                "max_retries": 0,
             }
 
             self._client = AsyncOpenAI(**client_kwargs)  # type: ignore[arg-type]

@@ -3,6 +3,7 @@
 Supports any OpenAI-compatible API (vLLM, Ollama, LM Studio, etc.).
 """
 
+import asyncio
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
@@ -11,6 +12,7 @@ import aiohttp
 from pydantic import field_validator
 
 from .base import LLMProvider
+from .errors import APIConnectionError, APITimeoutError, map_http_status_error
 from .message_sanitizer import strip_local_message_metadata
 from .models import (
     ProviderConfig,
@@ -137,32 +139,43 @@ class CustomProvider(LLMProvider):
 
         self.last_request_payload = payload
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(
-                    total=self.config.timeout if self.config.timeout else None
-                ),
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    if response.status == 429:
-                        from kollabor_ai.providers.errors import RateLimitError
-
-                        retry_after = response.headers.get("retry-after")
-                        retry_seconds = float(retry_after) if retry_after else None
-                        raise RateLimitError(
-                            message=f"Rate limited: {error_text}",
-                            provider=self.provider_name,
-                            retry_after=retry_seconds,
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(
+                        total=self.config.timeout if self.config.timeout else None
+                    ),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        error = RuntimeError(
+                            f"Custom API error {response.status}: {error_text}"
                         )
-                    raise RuntimeError(
-                        f"Custom API error {response.status}: {error_text}"
-                    )
+                        raise map_http_status_error(
+                            error,
+                            self.provider_name,
+                            response.status,
+                            response.headers,
+                        ) from error
 
-                return dict(await response.json())
+                    return dict(await response.json())
+        except asyncio.TimeoutError as e:
+            raise APITimeoutError(
+                str(e),
+                self.provider_name,
+                error_code="timeout",
+                original_error=e,
+            ) from e
+        except aiohttp.ClientError as e:
+            raise APIConnectionError(
+                str(e),
+                self.provider_name,
+                error_code="connection_error",
+                original_error=e,
+            ) from e
 
     async def call(
         self,
@@ -238,6 +251,31 @@ class CustomProvider(LLMProvider):
         tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamingResponse]:
+        """Stream response from custom API with unified transport errors."""
+        try:
+            async for response in self._stream_impl(messages, tools, **kwargs):
+                yield response
+        except asyncio.TimeoutError as e:
+            raise APITimeoutError(
+                str(e),
+                self.provider_name,
+                error_code="timeout",
+                original_error=e,
+            ) from e
+        except aiohttp.ClientError as e:
+            raise APIConnectionError(
+                str(e),
+                self.provider_name,
+                error_code="connection_error",
+                original_error=e,
+            ) from e
+
+    async def _stream_impl(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamingResponse]:
         """Stream response from custom API."""
         logger.debug(f"CustomProvider.stream (model={self.model})")
 
@@ -305,19 +343,15 @@ class CustomProvider(LLMProvider):
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    if response.status == 429:
-                        from kollabor_ai.providers.errors import RateLimitError
-
-                        retry_after = response.headers.get("retry-after")
-                        retry_seconds = float(retry_after) if retry_after else None
-                        raise RateLimitError(
-                            message=f"Rate limited: {error_text}",
-                            provider=self.provider_name,
-                            retry_after=retry_seconds,
-                        )
-                    raise RuntimeError(
+                    error = RuntimeError(
                         f"Custom API error {response.status}: {error_text}"
                     )
+                    raise map_http_status_error(
+                        error,
+                        self.provider_name,
+                        response.status,
+                        response.headers,
+                    ) from error
 
                 # Parse SSE stream
                 usage_info = None

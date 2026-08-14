@@ -14,7 +14,7 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
-from .errors import map_anthropic_error
+from .errors import ProviderError, map_anthropic_error, map_http_status_error
 from .message_sanitizer import strip_local_message_metadata_from_message
 from .models import (
     AnthropicConfig,
@@ -49,7 +49,7 @@ class AnthropicProvider(LLMProvider):
         temperature: Sampling temperature (0.0-1.0)
         max_tokens: Maximum tokens to generate
         timeout: Request timeout in seconds
-        max_retries: Number of retries (0-5)
+        max_retries: Legacy profile field; shared API service owns retries
     """
 
     def __init__(self, config: AnthropicConfig):
@@ -168,7 +168,13 @@ class AnthropicProvider(LLMProvider):
                     )
                 except Exception:
                     error_msg = response.text or f"HTTP {response.status_code}"
-                raise Exception(f"{error_msg} (HTTP {response.status_code})")
+                error = RuntimeError(f"{error_msg} (HTTP {response.status_code})")
+                raise map_http_status_error(
+                    error,
+                    "anthropic",
+                    response.status_code,
+                    response.headers,
+                ) from error
 
             # Parse response
             response_dict = response.json()
@@ -189,6 +195,8 @@ class AnthropicProvider(LLMProvider):
 
         except Exception as e:
             logger.error(f"Anthropic call failed: {e}")
+            if isinstance(e, ProviderError):
+                raise
             raise map_anthropic_error(e, "anthropic") from e
         finally:
             await self._track_request_end()
@@ -244,7 +252,13 @@ class AnthropicProvider(LLMProvider):
                         )
                     except Exception:
                         error_msg = response.text or f"HTTP {response.status_code}"
-                    raise Exception(f"{error_msg} (HTTP {response.status_code})")
+                    error = RuntimeError(f"{error_msg} (HTTP {response.status_code})")
+                    raise map_http_status_error(
+                        error,
+                        "anthropic",
+                        response.status_code,
+                        response.headers,
+                    ) from error
 
                 # Parse SSE stream
                 async for chunk in self._parse_sse_stream(response):
@@ -260,6 +274,8 @@ class AnthropicProvider(LLMProvider):
 
         except Exception as e:
             logger.error(f"Anthropic stream failed: {e}")
+            if isinstance(e, ProviderError):
+                raise
             raise map_anthropic_error(e, "anthropic") from e
         finally:
             await self._track_request_end()

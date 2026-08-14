@@ -22,7 +22,7 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
-from .errors import AuthenticationError, ProviderError, map_openai_error
+from .errors import ProviderError, map_http_status_error, map_openai_error
 from .message_sanitizer import strip_local_message_metadata_from_message
 from .models import (
     OpenAIResponsesConfig,
@@ -251,19 +251,24 @@ class OpenAIResponsesProvider(LLMProvider):
                     else {}
                 )
 
-                # Detect specific error types by status code and error response
-                if response.status_code == 401:
-                    error_info = error_data.get("error", {})
-                    raise AuthenticationError(
-                        error_info.get("message", "Authentication failed"),
-                        provider="openai_responses",
-                        error_code=error_info.get("type", "authentication_error"),
-                    )
-
-                raise map_openai_error(
-                    Exception(f"API error {response.status_code}: {error_data}"),
-                    "openai_responses",
+                error_info = (
+                    error_data.get("error", {})
+                    if isinstance(error_data, dict)
+                    else {}
                 )
+                if not isinstance(error_info, dict):
+                    error_info = {}
+                error = RuntimeError(
+                    error_info.get(
+                        "message", f"API error {response.status_code}: {error_data}"
+                    )
+                )
+                raise map_http_status_error(
+                    error,
+                    "openai_responses",
+                    response.status_code,
+                    response.headers,
+                ) from error
 
             # Parse response
             response_dict = response.json()
@@ -326,18 +331,24 @@ class OpenAIResponsesProvider(LLMProvider):
                     except Exception:
                         pass
 
-                    if response.status_code == 401:
-                        error_info = error_data.get("error", {})
-                        raise AuthenticationError(
-                            error_info.get("message", "Authentication failed"),
-                            provider="openai_responses",
-                            error_code=error_info.get("type", "authentication_error"),
-                        )
-
-                    raise map_openai_error(
-                        Exception(f"API error {response.status_code}: {error_data}"),
-                        "openai_responses",
+                    error_info = (
+                        error_data.get("error", {})
+                        if isinstance(error_data, dict)
+                        else {}
                     )
+                    if not isinstance(error_info, dict):
+                        error_info = {}
+                    error = RuntimeError(
+                        error_info.get(
+                            "message", f"API error {response.status_code}: {error_data}"
+                        )
+                    )
+                    raise map_http_status_error(
+                        error,
+                        "openai_responses",
+                        response.status_code,
+                        response.headers,
+                    ) from error
 
                 # Consume SSE stream, capture the final response payload
                 # Also accumulate text deltas in case the final payload
@@ -461,10 +472,24 @@ class OpenAIResponsesProvider(LLMProvider):
                         error_data = json.loads(response.text)
                     except Exception:
                         pass
-                    raise map_openai_error(
-                        Exception(f"API error {response.status_code}: {error_data}"),
-                        "openai_responses",
+                    error_info = (
+                        error_data.get("error", {})
+                        if isinstance(error_data, dict)
+                        else {}
                     )
+                    if not isinstance(error_info, dict):
+                        error_info = {}
+                    error = RuntimeError(
+                        error_info.get(
+                            "message", f"API error {response.status_code}: {error_data}"
+                        )
+                    )
+                    raise map_http_status_error(
+                        error,
+                        "openai_responses",
+                        response.status_code,
+                        response.headers,
+                    ) from error
 
                 # Parse SSE stream
                 async for chunk in self._parse_sse_stream(response):
