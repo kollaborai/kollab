@@ -7,6 +7,7 @@ MCP tool calls, and file operations from LLM responses with clean architecture.
 import json
 import logging
 import re
+from html import unescape
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, overload
 
 logger = logging.getLogger(__name__)
@@ -826,13 +827,30 @@ class ResponseParser:
         # Extract plugin-registered tools
         plugin_tools = self._extract_plugin_tools(response_without_agent_files)
 
-        # Count total tools (including plugin tools)
-        total_tools = (
-            len(terminal_commands)
-            + len(tool_calls)
-            + len(file_operations)
-            + len(plugin_tools)
-        )
+        # Restore code-span placeholders in all extracted components so that
+        # file content, tool args, etc. contain the original text rather than
+        # \x00CODEn\x00 tokens.
+        if _code_restore:
+            file_operations = self._restore_in_structure(file_operations, _code_restore)
+            tool_calls = self._restore_in_structure(tool_calls, _code_restore)
+            terminal_commands = self._restore_in_structure(
+                terminal_commands, _code_restore
+            )
+            plugin_tools = self._restore_in_structure(plugin_tools, _code_restore)
+            raw_response = self._restore_code_spans(raw_response, _code_restore)
+
+        components = {
+            "thinking": thinking_blocks,
+            "terminal_commands": terminal_commands,
+            "tool_calls": tool_calls,
+            "file_operations": file_operations,
+            "plugin_tools": plugin_tools,
+            "question": question_content,
+        }
+
+        # Count semantic tools after deduplication so status and turn-control
+        # decisions match the calls that the queue will actually execute.
+        total_tools = len(self.get_all_tools({"components": components}))
 
         # Question gate: if question present, mark turn as completed but flag tools as pending
         # This causes the system to stop and wait for user input
@@ -846,29 +864,12 @@ class ResponseParser:
         # sees its tool results.
         turn_completed = (total_tools == 0) or has_question
 
-        # Restore code-span placeholders in all extracted components so that
-        # file content, tool args, etc. contain the original text rather than
-        # \x00CODEn\x00 tokens.
-        if _code_restore:
-            file_operations = self._restore_in_structure(file_operations, _code_restore)
-            tool_calls = self._restore_in_structure(tool_calls, _code_restore)
-            terminal_commands = self._restore_in_structure(terminal_commands, _code_restore)
-            plugin_tools = self._restore_in_structure(plugin_tools, _code_restore)
-            raw_response = self._restore_code_spans(raw_response, _code_restore)
-
         parsed = {
             "raw": raw_response,
             "content": clean_content,
             "turn_completed": turn_completed,
             "question_gate_active": has_question and total_tools > 0,  # Tools suspended
-            "components": {
-                "thinking": thinking_blocks,
-                "terminal_commands": terminal_commands,
-                "tool_calls": tool_calls,
-                "file_operations": file_operations,
-                "plugin_tools": plugin_tools,
-                "question": question_content,
-            },
+            "components": components,
             "metadata": {
                 "has_thinking": bool(thinking_blocks),
                 "has_terminal_commands": bool(terminal_commands),
@@ -1000,7 +1001,7 @@ class ResponseParser:
         # Extract <terminal> tags with attributes
         for i, match in enumerate(self.terminal_pattern.finditer(text_without_content)):
             attrs_str = match.group(1).strip()
-            command = match.group(2).strip()
+            command = unescape(match.group(2).strip())
 
             if command:
                 commands.append(
@@ -1206,7 +1207,7 @@ class ResponseParser:
         Returns:
             Parsed tool call dictionary
         """
-        content = content.strip()
+        content = unescape(content.strip())
 
         # Try JSON format first
         if content.startswith("{"):
@@ -1465,7 +1466,64 @@ class ResponseParser:
         # Sort by original position in response text to preserve
         # the order the LLM intended (create before read before edit, etc.)
         all_tools.sort(key=lambda t: t.get("_position", float("inf")))
-        return all_tools
+        return self._deduplicate_tools(all_tools)
+
+    @staticmethod
+    def _tool_execution_key(tool: Dict[str, Any]) -> Tuple[str, str]:
+        """Return the stable semantic identity of one parsed XML tool call.
+
+        Parser-generated ids and source positions change for every occurrence,
+        and the raw tag preserves formatting rather than execution semantics.
+        Exclude those fields so an accidentally repeated tag cannot execute
+        twice merely because it received a new parser id.
+        """
+        semantic = {
+            key: value
+            for key, value in tool.items()
+            if key not in {"id", "raw", "_position"}
+        }
+        try:
+            payload = json.dumps(
+                semantic,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except (TypeError, ValueError):
+            payload = repr(
+                sorted((str(key), repr(value)) for key, value in semantic.items())
+            )
+        return str(tool.get("type", "unknown")), payload
+
+    def _deduplicate_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Drop exact semantic duplicates from one model response.
+
+        A repeated XML tag is unsafe when it represents a side effect (for
+        example, running the same shell command or applying the same edit).
+        Keep the first occurrence so response order remains deterministic;
+        calls with different arguments or tool types remain independent.
+        """
+        seen: set[Tuple[str, str]] = set()
+        unique: List[Dict[str, Any]] = []
+        duplicate_types: set[str] = set()
+
+        for tool in tools:
+            key = self._tool_execution_key(tool)
+            if key in seen:
+                duplicate_types.add(key[0])
+                continue
+            seen.add(key)
+            unique.append(tool)
+
+        duplicate_count = len(tools) - len(unique)
+        if duplicate_count:
+            logger.warning(
+                "Dropped %d duplicate XML tool call(s) from one LLM response; "
+                "types=%s",
+                duplicate_count,
+                ",".join(sorted(duplicate_types)),
+            )
+        return unique
 
     def format_for_display(
         self, parsed_response: Dict[str, Any], show_thinking: bool = True
