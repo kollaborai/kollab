@@ -102,6 +102,7 @@ class TmuxPlugin:
         self.input_handler = None
         self._current_session: Optional[str] = None
         self._active_executor = None  # Track for ESC cancellation
+        self._timeout_tasks: Dict[str, asyncio.Task] = {}
 
         self.logger = logger
 
@@ -146,6 +147,14 @@ class TmuxPlugin:
 
     async def shutdown(self) -> None:
         try:
+            timeout_tasks = tuple(self._timeout_tasks.values())
+            for task in timeout_tasks:
+                if not task.done():
+                    task.cancel()
+            if timeout_tasks:
+                await asyncio.gather(*timeout_tasks, return_exceptions=True)
+            self._timeout_tasks.clear()
+
             # Kill all managed sessions
             for name in list(self.sessions.keys()):
                 session = self.sessions[name]
@@ -398,6 +407,7 @@ Aliases: /t, /term, /tmux"""
         # Clean up dead sessions
         dead = [n for n, s in self.sessions.items() if not s.is_alive()]
         for n in dead:
+            self._cancel_timeout_task(n)
             del self.sessions[n]
 
         if not self.sessions:
@@ -436,6 +446,7 @@ Aliases: /t, /term, /tmux"""
             )
 
         session = self.sessions[session_name]
+        self._cancel_timeout_task(session_name)
         self._kill_process(session)
         del self.sessions[session_name]
 
@@ -694,6 +705,12 @@ Aliases: /t, /term, /tmux"""
                 "message": f"Session '{name}' already exists",
             }
 
+        # A dead session may retain a timeout task. Remove both before reusing
+        # its name so an old timer cannot kill the replacement session.
+        if name in self.sessions:
+            self._cancel_timeout_task(name)
+            self.sessions.pop(name, None)
+
         try:
             effective_cwd = cwd if cwd and cwd.strip() else str(Path.cwd())
 
@@ -737,7 +754,16 @@ Aliases: /t, /term, /tmux"""
             if timeout:
                 timeout_seconds = self._parse_timeout(timeout)
                 if timeout_seconds > 0:
-                    asyncio.create_task(self._auto_kill_after(name, timeout_seconds))
+                    task = asyncio.create_task(
+                        self._auto_kill_after(name, timeout_seconds),
+                        name=f"terminal-timeout-{name}",
+                    )
+                    self._timeout_tasks[name] = task
+                    task.add_done_callback(
+                        lambda done, session_name=name: self._on_timeout_task_done(
+                            session_name, done
+                        )
+                    )
 
             return {
                 "success": True,
@@ -800,6 +826,7 @@ Aliases: /t, /term, /tmux"""
             failed = []
             for session_name in list(self.sessions.keys()):
                 session = self.sessions[session_name]
+                self._cancel_timeout_task(session_name)
                 if self._kill_process(session):
                     killed.append(session_name)
                     del self.sessions[session_name]
@@ -815,8 +842,10 @@ Aliases: /t, /term, /tmux"""
         else:
             found: Optional[TerminalSession] = self.sessions.get(name)
             if found is None:
+                self._cancel_timeout_task(name)
                 return {"success": False, "message": f"Session '{name}' not found"}
 
+            self._cancel_timeout_task(name)
             if self._kill_process(found):
                 del self.sessions[name]
                 return {"success": True, "message": f"Killed session '{name}'"}
@@ -888,6 +917,28 @@ Aliases: /t, /term, /tmux"""
             pass
         except Exception as e:
             self.logger.error(f"Error in auto-kill task for {session_name}: {e}")
+
+    def _cancel_timeout_task(self, session_name: str) -> None:
+        """Cancel and forget a session timeout unless it is the current task."""
+        task = self._timeout_tasks.pop(session_name, None)
+        if task is None or task is asyncio.current_task() or task.done():
+            return
+        task.cancel()
+
+    def _on_timeout_task_done(
+        self, session_name: str, task: asyncio.Task
+    ) -> None:
+        """Forget a timeout task and consume unexpected task failures."""
+        if self._timeout_tasks.get(session_name) is task:
+            self._timeout_tasks.pop(session_name, None)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            self.logger.exception(
+                "Terminal timeout task failed for session '%s'", session_name
+            )
 
     @staticmethod
     def get_config_widgets() -> Optional[Dict[str, Any]]:
