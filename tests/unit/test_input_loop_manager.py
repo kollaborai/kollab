@@ -246,6 +246,7 @@ class TestInputLoopManagerAsync(unittest.TestCase):
             ) as log_exception:
                 await self.manager._handle_paste_chunk("paste content")
                 await asyncio.sleep(0)
+                await asyncio.sleep(0)
 
             self.assertFalse(self.manager._paste_event_tasks)
             log_exception.assert_called_once_with("PASTE_DETECTED event task failed")
