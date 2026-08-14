@@ -353,6 +353,7 @@ async def test_config_altview_observes_profile_switch_failure(caplog):
     with caplog.at_level(logging.ERROR):
         view._do_save("local")
         await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
     assert "runtime profile switch failed" in caplog.text
     assert not view._save_tasks
