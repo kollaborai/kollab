@@ -248,6 +248,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._consecutive_failures: int = 0
         self._disabled_for_session: bool = False
         self._compaction_task: Optional[asyncio.Task] = None
+        self._compaction_tasks: set[asyncio.Task] = set()
 
         # References set during initialize()
         self._llm_service = None
@@ -321,12 +322,14 @@ class ContextCompactionPlugin(BasePlugin):
         logger.info("Context compaction hooks registered")
 
     async def shutdown(self) -> None:
-        if self._compaction_task and not self._compaction_task.done():
-            self._compaction_task.cancel()
-            try:
-                await self._compaction_task
-            except asyncio.CancelledError:
-                pass
+        tasks = tuple(self._compaction_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._compaction_tasks.clear()
+        self._compaction_task = None
         self._pending_compaction = None
         self._pending_session_id = None
         logger.info("Context compaction plugin shutdown")
@@ -738,6 +741,19 @@ class ContextCompactionPlugin(BasePlugin):
     async def _on_llm_turn_complete(
         self, data: Dict[str, Any], event
     ) -> Dict[str, Any]:
+    def _compaction_task_done(self, task: asyncio.Task) -> None:
+        """Observe and retire a background compaction task."""
+        self._compaction_tasks.discard(task)
+        if self._compaction_task is task:
+            self._compaction_task = None
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except Exception:
+            logger.exception("Failed to inspect completed compaction task")
+
+
         """LLM_REQUEST_POST: check if compaction threshold reached."""
         if self._disabled_for_session or self._compaction_in_progress:
             return data
@@ -751,7 +767,10 @@ class ContextCompactionPlugin(BasePlugin):
 
         if self._should_compact(history):
             self._compaction_in_progress = True
-            self._compaction_task = asyncio.ensure_future(self._run_compaction())
+            task = asyncio.create_task(self._run_compaction())
+            self._compaction_task = task
+            self._compaction_tasks.add(task)
+            task.add_done_callback(self._compaction_task_done)
 
         self._maybe_emit_budget_hud(history)
 
