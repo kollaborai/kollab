@@ -764,11 +764,17 @@ class ConfigAltView(AltView):
                         if completed.cancelled():
                             return
                         try:
-                            completed.exception()
+                            error = completed.exception()
                         except Exception:
                             logger.exception(
-                                "ConfigAltView: runtime profile switch failed"
+                                "ConfigAltView: could not inspect runtime profile switch"
                             )
+                        else:
+                            if error is not None:
+                                logger.error(
+                                    "ConfigAltView: runtime profile switch failed: %s",
+                                    error,
+                                )
 
                     task.add_done_callback(_observe_profile_switch)
                     logger.info(
