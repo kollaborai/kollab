@@ -89,6 +89,27 @@ class TestStreamingHandler(unittest.TestCase):
         self.assertEqual(result, "test response")
         self.api_service.call_llm.assert_called_once()
 
+    def test_call_llm_forwards_provider_options(self):
+        """Provider-native options survive the streaming-handler boundary."""
+        mcp_complete = asyncio.Event()
+        mcp_complete.set()
+
+        self.loop.run_until_complete(
+            self.handler.call_llm(
+                conversation_history=[],
+                max_history=90,
+                native_tools=None,
+                mcp_discovery_complete=mcp_complete,
+                is_cancelled_fn=lambda: False,
+                prompt_cache_key="stable-key",
+                previous_response_id="response-123",
+            )
+        )
+
+        call_kwargs = self.api_service.call_llm.call_args.kwargs
+        self.assertEqual(call_kwargs["prompt_cache_key"], "stable-key")
+        self.assertEqual(call_kwargs["previous_response_id"], "response-123")
+
     def test_call_llm_cancelled_before_start(self):
         """Test LLM call cancelled before starting."""
         conversation_history = []
