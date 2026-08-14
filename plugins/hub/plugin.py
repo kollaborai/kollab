@@ -2429,6 +2429,7 @@ class HubPlugin(BasePlugin):
         if not content and target:
             # Look for patterns like: identity">message  or  identity" >message
             import re as _re
+
             _salvage = _re.match(
                 r'^([a-zA-Z0-9_-]+)["\']\s*>\s*(.+)',
                 target.strip(),
@@ -2452,7 +2453,7 @@ class HubPlugin(BasePlugin):
                 output="",
                 error=(
                     f"hub_msg to {target!r} has empty message. "
-                    f"Use: <hub_msg to=\"{target}\">your message here</hub_msg>"
+                    f'Use: <hub_msg to="{target}">your message here</hub_msg>'
                 ),
             )
 
@@ -5000,9 +5001,7 @@ class HubPlugin(BasePlugin):
                 removed = 0
 
                 if projects_root.exists():
-                    for presence_dir in projects_root.glob(
-                        "*/hub/presence/*.json"
-                    ):
+                    for presence_dir in projects_root.glob("*/hub/presence/*.json"):
                         try:
                             with open(presence_dir) as f:
                                 data = json.load(f)
@@ -5072,9 +5071,7 @@ class HubPlugin(BasePlugin):
                 inboxes_removed = 0
 
                 if projects_root.exists():
-                    for messages_root in projects_root.glob(
-                        "*/hub/messages"
-                    ):
+                    for messages_root in projects_root.glob("*/hub/messages"):
                         if not messages_root.is_dir():
                             continue
                         for inbox_dir in messages_root.iterdir():
@@ -5093,12 +5090,8 @@ class HubPlugin(BasePlugin):
                                     try:
                                         with open(mf) as f:
                                             data = json.load(f)
-                                        ts = float(
-                                            data.get("timestamp", 0) or 0
-                                        )
-                                        if ts and (
-                                            now - ts
-                                        ) < INBOX_TTL_SECS:
+                                        ts = float(data.get("timestamp", 0) or 0)
+                                        if ts and (now - ts) < INBOX_TTL_SECS:
                                             all_stale = False
                                             break
                                     except Exception:
@@ -5108,9 +5101,7 @@ class HubPlugin(BasePlugin):
                                     shutil.rmtree(inbox_dir)
                                     inboxes_removed += 1
                             except Exception as e:
-                                logger.debug(
-                                    f"inbox sweep: error on {inbox_dir}: {e}"
-                                )
+                                logger.debug(f"inbox sweep: error on {inbox_dir}: {e}")
 
                 if inboxes_removed:
                     logger.info(
@@ -6282,9 +6273,7 @@ class HubPlugin(BasePlugin):
                             directive=directive[:500],
                             report_to=assigner,
                         )
-                        logger.info(
-                            f"Auto-created task {card.id} from" f" {assigner}"
-                        )
+                        logger.info(f"Auto-created task {card.id} from" f" {assigner}")
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the
@@ -6309,8 +6298,7 @@ class HubPlugin(BasePlugin):
                         notes="auto-approved on receipt",
                     )
                     logger.info(
-                        f"Auto-approved task {task_id} from "
-                        f"{message.from_identity}"
+                        f"Auto-approved task {task_id} from " f"{message.from_identity}"
                     )
 
         # Track active thread so <hub_reply> can auto-fill thread_id/reply_to
@@ -6436,7 +6424,9 @@ class HubPlugin(BasePlugin):
                         assignee=message.from_identity,
                         evidence=message.content,
                         message_id=message.id,
-                    task_id=str((message.metadata or {}).get("task_id") or "").strip(),
+                        task_id=str(
+                            (message.metadata or {}).get("task_id") or ""
+                        ).strip(),
                     )
                 except Exception as e:
                     logger.debug("failed to resolve expected hub reply: %s", e)
@@ -8108,7 +8098,11 @@ class HubPlugin(BasePlugin):
             if len(ep) < 2:
                 return "usage: /hub dns endorse <designation> <capability>"
             target, cap = ep[0], ep[1]
-            if not self._dns_reputation or not self._identity or not self._identity.identity:
+            if (
+                not self._dns_reputation
+                or not self._identity
+                or not self._identity.identity
+            ):
                 return "dns: not running as named agent"
             from .dns.models import Endorsement
 

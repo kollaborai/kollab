@@ -187,16 +187,25 @@ def test_hub_status_includes_cockpit_counts(tmp_path):
 def test_resolve_reply_can_target_specific_task(tmp_path):
     ledger = TaskLedger(str(tmp_path))
     ledger.expect_reply(
-        task_id="task-a", assignee="worker", requested_by="lead",
-        message_id="msg-a", deadline_seconds=60,
+        task_id="task-a",
+        assignee="worker",
+        requested_by="lead",
+        message_id="msg-a",
+        deadline_seconds=60,
     )
     ledger.expect_reply(
-        task_id="task-b", assignee="worker", requested_by="lead",
-        message_id="msg-b", deadline_seconds=60,
+        task_id="task-b",
+        assignee="worker",
+        requested_by="lead",
+        message_id="msg-b",
+        deadline_seconds=60,
     )
 
     assert ledger.resolve_reply(
-        assignee="worker", evidence="task complete", message_id="reply-b", task_id="task-b"
+        assignee="worker",
+        evidence="task complete",
+        message_id="reply-b",
+        task_id="task-b",
     )
     pending = ledger.pending_replies()
     assert [item["task_id"] for item in pending] == ["task-a"]
@@ -207,5 +216,9 @@ def test_production_reply_resolver_passes_inbound_task_id():
     from pathlib import Path
 
     source = Path("plugins/hub/plugin.py").read_text()
-    call = source[source.index("resolve_reply(") : source.index("):", source.index("resolve_reply("))]
+    call = source[
+        source.index("resolve_reply(") : source.index(
+            "):", source.index("resolve_reply(")
+        )
+    ]
     assert 'task_id=str((message.metadata or {}).get("task_id") or "").strip()' in call
