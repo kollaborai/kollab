@@ -210,6 +210,13 @@ class ActivityMonitor:
 
             logger.info(f"Agent {name} completed @ {duration}")
 
+            # Record the terminal activity transition before untracking and
+            # invoking the callback so status consumers observe completion.
+            # Keep stale/dead sessions unchanged; they are handled by the
+            # orchestrator's lifecycle cleanup instead.
+            if agent is not None and agent.is_alive:
+                agent.status = "idle"
+
             # Remove from tracking before callback to prevent re-detection
             self.untrack(name)
 
