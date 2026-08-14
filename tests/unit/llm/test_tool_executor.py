@@ -30,7 +30,7 @@ class MockToolResult:
     execution_time: float = 0.0
 
 
-class TestToolExecutor(unittest.TestCase):
+class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
     """Test tool execution functionality."""
 
     def setUp(self):
@@ -104,9 +104,7 @@ class TestToolExecutor(unittest.TestCase):
             self.executor,
             "_execute_terminal_command",
             new=AsyncMock(
-                return_value=MockToolResult(
-                    "terminal", "git_0", True, " M README.md"
-                )
+                return_value=MockToolResult("terminal", "git_0", True, " M README.md")
             ),
         ) as mock_terminal:
             result = await self.executor._execute_tool_inner(tool_data)
