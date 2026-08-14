@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """Test runner for Kollab test suite."""
 
+import os
 import sys
-import unittest
 from pathlib import Path
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
+
+# Run from the repository root so pytest loads the project configuration.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+os.chdir(PROJECT_ROOT)
 
 if __name__ == "__main__":
-    # Discover and run all tests
-    loader = unittest.TestLoader()
-    suite = loader.discover("tests", pattern="test_*.py")
-
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-
-    # Exit with error code if tests failed
-    sys.exit(0 if result.wasSuccessful() else 1)
+    os.environ.setdefault("KOLLAB_HUB_DISABLED", "1")
+    sys.exit(pytest.main(["tests"]))
