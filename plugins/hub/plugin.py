@@ -94,6 +94,15 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
+_TASK_CRON_ID_RE = re.compile(
+    r"\[\s*task\s+reminder\s*:\s*([^\]\s]+)\s*\]",
+    re.IGNORECASE,
+)
+_TASK_CRON_REPORT_TO_RE = re.compile(
+    r"^\s*report\s+to\s*:\s*([^\s]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 @dataclass
 class HubWakeDecision:
@@ -5394,6 +5403,11 @@ class HubPlugin(BasePlugin):
                                     " when done."
                                 ),
                                 scope=MessageScope.DIRECT.value,
+                                metadata={
+                                    "task_cron": True,
+                                    "task_id": task.id,
+                                    "source_identity": self._identity.identity,
+                                },
                             )
                             agents = await self._presence.discover_agents_async()
                             for a in agents:
@@ -5904,6 +5918,8 @@ class HubPlugin(BasePlugin):
             return HubWakeDecision("observe", False, "departure")
 
         metadata = message.metadata or {}
+        if metadata.get("task_cron_ack"):
+            return HubWakeDecision("observe", False, "task-cron acknowledgement")
         sender_has_task = self._sender_has_active_task(message)
         if metadata.get("ack") or self._is_ack_only_content(
             message.content, sender_has_active_task=sender_has_task
@@ -5947,6 +5963,141 @@ class HubPlugin(BasePlugin):
             return HubWakeDecision("buffer", False, "retry already queued")
         self._hub_buffer_retry_queued = True
         return HubWakeDecision("buffer", True, "busy, queue one retry")
+
+    @staticmethod
+    def _task_cron_id(message: HubMessage) -> str:
+        metadata = message.metadata or {}
+        task_id = str(metadata.get("task_id") or "").strip()
+        if task_id:
+            return task_id
+        match = _TASK_CRON_ID_RE.search(message.content or "")
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _task_cron_ack_target(message: HubMessage, card: Any = None) -> str:
+        metadata = message.metadata or {}
+        candidates = [
+            metadata.get("source_identity"),
+            getattr(card, "report_to", "") if card else "",
+        ]
+        report_match = _TASK_CRON_REPORT_TO_RE.search(message.content or "")
+        if report_match:
+            candidates.append(report_match.group(1))
+        for candidate in candidates:
+            target = str(candidate or "").strip()
+            if target and target not in {"task-cron", "hub-cron"}:
+                return target
+        return ""
+
+    async def _handle_stale_task_cron(self, message: HubMessage) -> bool:
+        """Acknowledge a task reminder that is no longer actionable.
+
+        Task-cron is a synthetic sender, so a stale reminder cannot be left
+        as an implicit "ignore" instruction. The receiver reports the exact
+        disposition to the cron source and returns before the reminder is
+        displayed or injected as fresh work.
+        """
+        if message.from_identity != "task-cron":
+            return False
+
+        task_id = self._task_cron_id(message)
+        card = self._task_ledger.get(task_id) if self._task_ledger and task_id else None
+        reason = ""
+        task_status = "missing"
+
+        if not task_id:
+            reason = "reminder has no task id"
+        elif card is None:
+            reason = "task card not found"
+        else:
+            task_status = str(getattr(card, "status", "unknown") or "unknown")
+            if task_status != "active":
+                reason = f"task status is {task_status}"
+            elif not getattr(card, "cron_active", False):
+                reason = "task cron is disabled"
+            elif getattr(card, "snoozed_until", 0) > time.time():
+                reason = "task reminder is snoozed"
+            else:
+                ttl = getattr(card, "cron_ttl_seconds", 0) or 0
+                updated_at = getattr(card, "updated_at", 0) or 0
+                try:
+                    expired = ttl > 0 and (time.time() - updated_at) > ttl
+                except TypeError:
+                    expired = False
+                if expired:
+                    terminal = self._task_ledger.terminalize(
+                        card.id,
+                        status="obsolete",
+                        reason=(
+                            f"task-cron expired after {int(ttl / 3600)}h "
+                            "without a checkpoint"
+                        ),
+                        actor="task-cron",
+                        message_id=message.id,
+                    )
+                    if terminal is not None:
+                        card = terminal
+                    task_status = "obsolete"
+                    reason = "task-cron reminder expired without a checkpoint"
+
+        if not reason:
+            return False
+
+        ack_target = self._task_cron_ack_target(message, card)
+        ack_metadata = {
+            "task_cron_ack": True,
+            "task_id": task_id,
+            "task_status": task_status,
+            "disposition": "stale",
+            "reason": reason,
+            "reminder_id": message.id,
+        }
+        if self._vault:
+            self._vault.append_stream(
+                "received",
+                message.content,
+                from_agent=message.from_identity,
+                to_agent=self._identity.identity if self._identity else "",
+                metadata=ack_metadata,
+            )
+
+        if ack_target and ack_target != (self._identity.identity if self._identity else ""):
+            ack = HubMessage(
+                action="message",
+                from_agent=self._identity.agent_id if self._identity else "",
+                from_identity=self._identity.identity if self._identity else "",
+                to=ack_target,
+                content=(
+                    f"[task-cron ack: {task_id or 'unknown'}] stale reminder "
+                    f"acknowledged; no work resumed ({reason})."
+                ),
+                scope=MessageScope.DIRECT.value,
+                force=True,
+                thread_id=message.thread_id,
+                reply_to=message.id,
+                metadata=ack_metadata,
+            )
+            try:
+                await self._route_message(ack)
+            except Exception as e:
+                logger.warning(
+                    "Failed to send stale task-cron acknowledgement for %s to %s: %s",
+                    task_id or "unknown",
+                    ack_target,
+                    e,
+                )
+        else:
+            logger.warning(
+                "Stale task-cron reminder %s has no routable acknowledgement target",
+                task_id or "unknown",
+            )
+
+        logger.info(
+            "Acknowledged stale task-cron reminder %s: %s",
+            task_id or "unknown",
+            reason,
+        )
+        return True
 
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
@@ -6028,6 +6179,9 @@ class HubPlugin(BasePlugin):
             )
             return
         self._seen_content_hashes[_content_hash] = _now
+
+        if await self._handle_stale_task_cron(message):
+            return
 
         # NOTE: _exit_waiting_state() is NOT called here anymore.
         # It moves to the TRIGGER_LLM_CONTINUE decision block below,
