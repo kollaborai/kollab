@@ -222,12 +222,13 @@ class ToolExecutor:
         self._bundle_tools = None
 
     # Internal dispatch types that bypass scope checks.
-    # These are infrastructure types, not agent-facing tools.
+    # These are infrastructure types, not agent-facing tools.  ``mcp_tool``
+    # is deliberately absent: external MCP calls are agent-facing and must
+    # be denied when a bounded bundle does not grant them.
     _INTERNAL_TYPES = frozenset({
         "terminal_status",
         "terminal_output",
         "terminal_kill",
-        "mcp_tool",
         "malformed_file_op",
         "malformed_tool",
         "unknown",

@@ -244,8 +244,15 @@ class TestInternalTypeBypass:
         executor = self._make_scoped_executor()
         assert executor._check_bundle_scope("terminal_kill") is None
 
-    def test_mcp_tool_bypasses_scope(self):
+    def test_mcp_tool_is_denied_without_mcp_grant(self):
         executor = self._make_scoped_executor()
+        error = executor._check_bundle_scope("mcp_tool")
+        assert error is not None
+        assert "mcp-tool" in error
+
+    def test_mcp_tool_is_allowed_with_explicit_mcp_grant(self):
+        executor = self._make_scoped_executor()
+        executor.set_bundle_scope(["terminal", "mcp-tool"])
         assert executor._check_bundle_scope("mcp_tool") is None
 
     def test_malformed_file_op_bypasses_scope(self):

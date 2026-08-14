@@ -93,17 +93,40 @@ def test_native_tool_schemas_use_runtime_bundle_tools():
     assert "hub_spawn" not in names
 
 
-def test_all_bundled_profiles_are_temporarily_wildcard_scoped():
+def test_explicit_bundle_scope_hides_external_mcp_tools():
+    runtime = _restricted_research_runtime()
+    mcp = MCPIntegration.__new__(MCPIntegration)
+    mcp.event_bus = MagicMock(config={})
+    mcp.tool_registry = {
+        "repo_search": {
+            "server": "github",
+            "enabled": True,
+            "definition": {"description": "Search a repository"},
+        }
+    }
+    mcp._agent_manager = _agent_manager_with(runtime)
+    mcp.config = _registry_enabled_config()
+
+    tools = mcp.get_tool_definitions_for_api()
+    names = {tool["name"] for tool in tools}
+
+    assert "repo_search" not in names
+
+
+def test_research_profile_is_explicitly_read_only_and_others_are_wildcard_scoped():
     profiles = sorted(Path("bundles/agents").glob("*/agent.json"))
 
     assert profiles
     for path in profiles:
         config = json.loads(path.read_text(encoding="utf-8"))
-        assert config["tools"] == ["*"], path
+        if path.parent.name == "research":
+            assert config["tools"] == _EXPLICIT_RESEARCH_TOOLS, path
+        else:
+            assert config["tools"] == ["*"], path
 
 
-def test_wildcard_runtime_reaches_prompt_and_native_schema():
-    agent = Agent.from_directory(Path("bundles/agents/research"))
+def test_wildcard_runtime_reaches_prompt_and_native_schema_for_coder():
+    agent = Agent.from_directory(Path("bundles/agents/coder"))
     assert agent is not None
     runtime = AgentRuntime.from_agent(agent)
 

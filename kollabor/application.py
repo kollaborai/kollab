@@ -204,6 +204,16 @@ class TerminalLLMChat:
             self.config_dir / "config.json", self.plugin_registry, fast_mode=True
         )
 
+        # Runtime-only safety override for bounded/headless agents.  Keep the
+        # saved config untouched: the flag is intentionally scoped to this
+        # process and is inherited by the event bus/MCP integration through
+        # the in-memory configuration dictionary.
+        if getattr(args, "no_mcp", False):
+            if self.config.set("plugins.mcp.enabled", False):
+                logger.info("MCP disabled for this process by --no-mcp")
+            else:
+                logger.warning("Could not apply process-local --no-mcp override")
+
         # Note: plugin configs are already merged in _initialize_config() via
         # load_complete_config(). No need to call update_from_plugins() again -
         # it would re-read all configs, re-discover plugins, and write to disk

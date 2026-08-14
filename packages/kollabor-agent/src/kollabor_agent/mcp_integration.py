@@ -476,6 +476,23 @@ class MCPIntegration:
 
         logger.info("MCP Integration initialized")
 
+    def _mcp_enabled(self) -> bool:
+        """Return whether MCP is enabled for this process.
+
+        The application applies launch-only overrides to the in-memory config
+        dictionary carried by the event bus.  Reading that shared dictionary
+        here keeps discovery, schema exposure, reloads, and execution behind
+        the same switch without persisting the override.
+        """
+        config = getattr(self.event_bus, "config", None)
+        if isinstance(config, dict):
+            plugins = config.get("plugins", {})
+            if isinstance(plugins, dict):
+                mcp = plugins.get("mcp", {})
+                if isinstance(mcp, dict) and "enabled" in mcp:
+                    return bool(mcp["enabled"])
+        return True
+
     def _load_mcp_config(self):
         """Load MCP configuration from Kollab config directories."""
         # Load from global config first (lower priority)
@@ -609,6 +626,10 @@ class MCPIntegration:
         Returns:
             Dictionary of discovered MCP servers and their capabilities
         """
+        if not self._mcp_enabled():
+            logger.info("MCP disabled for this process; skipping discovery")
+            return {}
+
         # Emit discovery start event
         if self.event_bus:
             await self.event_bus.emit_with_hooks(
@@ -695,6 +716,14 @@ class MCPIntegration:
             Summary counts for configured, discovered, and reconnected
             servers after the reload.
         """
+        if not self._mcp_enabled():
+            await self.shutdown()
+            return {
+                "configured": len(self.mcp_servers),
+                "discovered": 0,
+                "reconnected": 0,
+            }
+
         await self.shutdown()
         self.mcp_servers.clear()
         self._load_mcp_config()
@@ -1012,6 +1041,9 @@ class MCPIntegration:
         Returns:
             Tool execution result
         """
+        if not self._mcp_enabled():
+            return {"error": "MCP is disabled for this process"}
+
         if tool_name not in self.tool_registry:
             return {
                 "error": f"Tool '{tool_name}' not found",
@@ -1206,6 +1238,9 @@ class MCPIntegration:
         Returns:
             List of available tools with their information
         """
+        if not self._mcp_enabled():
+            return []
+
         tools = []
         for tool_name, tool_info in self.tool_registry.items():
             tools.append(
@@ -1228,12 +1263,28 @@ class MCPIntegration:
         Returns:
             List of tool definitions in generic API format
         """
+        if not self._mcp_enabled():
+            return []
+
         tools = []
+        allowed_mcp_tools = self._get_bundle_tool_list()
 
         # Add MCP tools from registry
         for tool_name, tool_info in self.tool_registry.items():
             if not tool_info.get("enabled", True):
                 continue
+
+            if allowed_mcp_tools is not None:
+                allowed = set(allowed_mcp_tools)
+                server_name = str(tool_info.get("server", ""))
+                permitted = (
+                    "mcp" in allowed
+                    or "mcp-tool" in allowed
+                    or tool_name in allowed
+                    or f"mcp:{server_name}:{tool_name}" in allowed
+                )
+                if not permitted:
+                    continue
 
             definition = tool_info.get("definition", {})
             tools.append(

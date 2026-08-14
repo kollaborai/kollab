@@ -181,6 +181,14 @@ class TestParseArgumentsWithPlugins(unittest.TestCase):
         self.assertEqual(args.agent, "test-agent")
         self.assertEqual(args.profile, "test-profile")
 
+    def test_parse_arguments_supports_process_local_no_mcp(self):
+        """The MCP safety switch is a core argument and defaults off."""
+        args = parse_arguments(plugin_classes=[], argv=[])
+        self.assertFalse(args.no_mcp)
+
+        args = parse_arguments(plugin_classes=[], argv=["--no-mcp"])
+        self.assertTrue(args.no_mcp)
+
 
 class TestHandleEarlyPluginArgs(unittest.TestCase):
     """Test cases for handle_early_plugin_args()."""

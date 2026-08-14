@@ -532,6 +532,16 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "--no-mcp",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable MCP discovery and external MCP tool calls for this "
+            "process (does not modify saved config)"
+        ),
+    )
+
+    parser.add_argument(
         "-d",
         "--detached",
         action="store_true",
@@ -1892,6 +1902,7 @@ def _should_use_daemon() -> bool:
         "--skill",
         "-s",
         "--timeout",
+        "--no-mcp",
     }
     daemon_launch_switches = {
         "--daemon",
