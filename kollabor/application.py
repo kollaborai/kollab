@@ -1165,10 +1165,22 @@ class TerminalLLMChat:
             logger.info("Deferred startup cancelled")
             raise
         except Exception as e:
-            logger.error(f"Error during deferred startup: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logger.exception("Error during deferred startup: %s", e)
+            self._startup_complete = False
+            self.running = False
+            input_handler = getattr(self, "input_handler", None)
+            if input_handler is not None:
+                input_handler.running = False
+            render_loop = getattr(self, "render_loop", None)
+            if render_loop is not None:
+                try:
+                    render_loop.stop()
+                except Exception:
+                    logger.debug(
+                        "Could not stop render loop after startup failure",
+                        exc_info=True,
+                    )
+            raise
         finally:
             # Always set startup_ready to prevent deadlocks on waiting input
             if not self._startup_ready.is_set():
@@ -1892,7 +1904,9 @@ class TerminalLLMChat:
                 )
                 self.running = False
                 try:
-                    asyncio.ensure_future(self.shutdown())
+                    self.create_background_task(
+                        self.shutdown(), "attach_client_shutdown"
+                    )
                 except Exception as e:
                     logger.debug(f"attach client shutdown schedule failed: {e}")
 
@@ -1922,7 +1936,9 @@ class TerminalLLMChat:
                     os._exit(0)
 
                 try:
-                    asyncio.ensure_future(_attach_exit_watchdog())
+                    self.create_background_task(
+                        _attach_exit_watchdog(), "attach_exit_watchdog"
+                    )
                 except Exception:
                     pass
 
