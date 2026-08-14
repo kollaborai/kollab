@@ -1,6 +1,5 @@
 """Tests for MCP Status Plugin."""
 
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -8,7 +7,7 @@ from kollabor_events.models import Event, EventType
 from plugins.mcp_status_plugin import MCPStatusPlugin
 
 
-class TestMCPStatusPlugin(unittest.TestCase):
+class TestMCPStatusPlugin(unittest.IsolatedAsyncioTestCase):
     """Test MCP Status Plugin functionality."""
 
     def setUp(self):
@@ -95,7 +94,7 @@ class TestMCPStatusPlugin(unittest.TestCase):
         self.assertIn("widgets", widgets)
         self.assertEqual(widgets["title"], "MCP Status Plugin")
 
-    def test_server_connect_event(self):
+    async def test_server_connect_event(self):
         """Test handling server connect event."""
         event = Event(
             type=EventType.MCP_SERVER_CONNECT,
@@ -103,13 +102,13 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = asyncio.run(self.plugin._on_server_connect(event.data, event))
+        result = await self.plugin._on_server_connect(event.data, event)
 
         self.assertEqual(self.plugin.connecting_count, 1)
         self.assertEqual(result["status"], "monitored")
         self.assertIn("test_server", self.plugin.mcp_servers)
 
-    def test_server_connected_event(self):
+    async def test_server_connected_event(self):
         """Test handling server connected event."""
         # First connect
         self.plugin.connecting_count = 1
@@ -120,14 +119,14 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = asyncio.run(self.plugin._on_server_connected(event.data, event))
+        result = await self.plugin._on_server_connected(event.data, event)
 
         self.assertEqual(self.plugin.connected_servers, 1)
         self.assertEqual(self.plugin.total_tools, 3)
         self.assertEqual(self.plugin.connecting_count, 0)
         self.assertEqual(result["status"], "monitored")
 
-    def test_server_error_event(self):
+    async def test_server_error_event(self):
         """Test handling server error event."""
         self.plugin.connecting_count = 1
 
@@ -137,13 +136,13 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = asyncio.run(self.plugin._on_server_error(event.data, event))
+        result = await self.plugin._on_server_error(event.data, event)
 
         self.assertEqual(self.plugin.error_count, 1)
         self.assertEqual(self.plugin.connecting_count, 0)
         self.assertEqual(result["status"], "monitored")
 
-    def test_tool_register_event(self):
+    async def test_tool_register_event(self):
         """Test handling tool register event."""
         # Setup: server already connected
         self.plugin.mcp_servers["test_server"] = {
@@ -158,15 +157,15 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = asyncio.run(self.plugin._on_tool_register(event.data, event))
+        result = await self.plugin._on_tool_register(event.data, event)
 
         self.assertEqual(self.plugin.total_tools, 1)
         self.assertIn("new_tool", self.plugin.mcp_servers["test_server"]["tools"])
         self.assertEqual(result["status"], "monitored")
 
-    def test_register_hooks(self):
+    async def test_register_hooks(self):
         """Test hook registration."""
-        asyncio.run(self.plugin.register_hooks())
+        await self.plugin.register_hooks()
 
         # Verify register_hook was called for all MCP events
         self.assertGreater(self.event_bus.register_hook.call_count, 0)
