@@ -2770,9 +2770,33 @@ class TerminalLLMChat:
         def remove_task(t):
             try:
                 self._background_tasks.remove(t)
-                logger.debug(f"Background task completed: {name}")
             except ValueError:
                 pass  # Task already removed
+
+            # Fire-and-forget startup tasks are not awaited by the main loop.
+            # Retrieve their terminal state here so asyncio does not emit the
+            # unhelpful "Task exception was never retrieved" warning, and so
+            # a failed startup task is not falsely reported as completed.
+            if t.cancelled():
+                logger.debug(f"Background task cancelled: {name}")
+                return
+
+            try:
+                error = t.exception()
+            except asyncio.CancelledError:
+                logger.debug(f"Background task cancelled: {name}")
+                return
+
+            if error is not None:
+                logger.error(
+                    "Background task failed: %s - %s: %s",
+                    name,
+                    type(error).__name__,
+                    error,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            else:
+                logger.debug(f"Background task completed: {name}")
 
         task.add_done_callback(remove_task)
         return task
