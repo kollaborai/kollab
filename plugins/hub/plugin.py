@@ -2750,7 +2750,10 @@ class HubPlugin(BasePlugin):
     async def _perform_self_restart(self) -> None:
         """Run graceful shutdown, then os.execvp to replace this process."""
         try:
-            await self.shutdown()
+            # The normal self-stop path exits from shutdown after cleanup.
+            # Restart must preserve that cleanup but return so execvp can
+            # replace the process image instead of terminating it.
+            await self.shutdown(exit_process=False)
         except Exception as e:
             logger.error(f"Self-restart: shutdown error (continuing to exec): {e}")
 
@@ -10306,7 +10309,7 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"Failed to trigger shutdown: {e}")
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, exit_process: bool = True) -> None:
         """Clean shutdown - save vault, remove presence, close socket, release lock."""
         # Guard against re-entry (SIGINT can fire multiple times during shutdown)
         if getattr(self, "_shutdown_in_progress", False):
@@ -10498,7 +10501,7 @@ class HubPlugin(BasePlugin):
         logger.info("Hub plugin shut down")
 
         # If this was a self-stop request, exit the process after clean teardown
-        if getattr(self, "_self_stop_requested", False):
+        if getattr(self, "_self_stop_requested", False) and exit_process:
             logger.info(
                 f"{self._identity.identity}: self-stop complete, exiting process"
             )
