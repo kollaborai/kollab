@@ -169,6 +169,39 @@ class TestHubMeshForce(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(routed.metadata["task_assignment"])
         self.assertEqual(routed.metadata["task_id"], "task-42")
 
+    async def test_hub_msg_tool_normalizes_embedded_xml_target_attributes(self) -> None:
+        plugin = HubPlugin(event_bus=MagicMock())
+        plugin._identity = AgentRuntime(
+            name="coordinator",
+            identity="koordinator",
+            agent_id="koordinator-id",
+            is_coordinator=True,
+        )
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._display_outgoing_message = MagicMock()
+        plugin._bridge_forward = AsyncMock()
+        plugin._resolve_scope = MagicMock(return_value="direct")
+        plugin._task_ledger = MagicMock()
+        plugin._task_ledger.get_active_for.return_value = []
+
+        for index, (target, expected_wait) in enumerate(
+            (('to="lapis"', False), ('to="lapis" wait="true"', True))
+        ):
+            with self.subTest(target=target):
+                result = await plugin._handle_hub_msg_tool(
+                    {
+                        "id": f"hub_msg_embedded_attrs_{index}",
+                        "to": target,
+                        "content": f"ACK stale directive {index}",
+                    }
+                )
+
+                self.assertTrue(result.success)
+                routed = plugin._route_message.await_args.args[0]
+                self.assertEqual(routed.to, "lapis")
+                self.assertEqual(routed.metadata["wait"], expected_wait)
+        plugin._task_ledger.expect_reply.assert_not_called()
+
     async def test_hub_msg_plain_request_does_not_create_task_debt(self) -> None:
         plugin = HubPlugin(event_bus=MagicMock())
         plugin._identity = AgentRuntime(

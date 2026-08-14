@@ -102,6 +102,13 @@ _TASK_CRON_REPORT_TO_RE = re.compile(
     r"^\s*report\s+to\s*:\s*([^\s]+)",
     re.IGNORECASE | re.MULTILINE,
 )
+_HUB_MSG_EMBEDDED_ATTRS_RE = re.compile(
+    r'^\s*(?:<hub_msg\s+)?to\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))'
+    r'(?:\s+wait\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
+    r'(?:\s+force\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
+    r"(?:\s*>\s*(.*?)(?:</hub_msg>)?)?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 @dataclass
@@ -2420,6 +2427,31 @@ class HubPlugin(BasePlugin):
         wait_attr = tool_data.get("wait", tool_data.get("wait_attr", ""))
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
         content = tool_data.get("message", tool_data.get("content", ""))
+
+        # Some native-tool calls incorrectly put the XML attribute text in the
+        # target value (for example ``to=\"sapphire\" wait=\"true\"``).
+        # Normalize that shape before routing so it cannot create literal
+        # identities such as ``to=\"sapphire\"`` or silently lose ``wait``.
+        target = str(target or "").strip()
+        content = str(content or "").strip()
+        embedded_attrs = _HUB_MSG_EMBEDDED_ATTRS_RE.match(target)
+        if embedded_attrs:
+            target = next(
+                value for value in embedded_attrs.groups()[0:3] if value is not None
+            ).strip()
+            embedded_wait = next(
+                (value for value in embedded_attrs.groups()[3:6] if value is not None),
+                "",
+            )
+            embedded_force = next(
+                (value for value in embedded_attrs.groups()[6:9] if value is not None),
+                "",
+            )
+            embedded_content = embedded_attrs.group(10)
+            wait_attr = str(wait_attr or embedded_wait or "").lower()
+            force_attr = str(force_attr or embedded_force or "").lower()
+            if not content and embedded_content:
+                content = embedded_content.strip()
 
         # Salvage: LLMs sometimes emit hub_msg as a native tool call with
         # the entire message body jammed inside the `to` param after an
