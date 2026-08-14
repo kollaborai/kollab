@@ -42,7 +42,7 @@ from .messaging_bridge import (
     IncomingMessage,
     MessagingBridge,
 )
-from .messenger import AgentMessenger, AgentSocketServer
+from .messenger import AgentMessenger, AgentSocketServer, _coerce_line_count
 from .models import (
     COORDINATOR_IDENTITY,
     POOL_BY_NAME,
@@ -10066,6 +10066,7 @@ class HubPlugin(BasePlugin):
         Each event's ``rendered`` payload is already multi-line, so
         callers join with "\\n" cleanly.
         """
+        limit = _coerce_line_count(limit, 50)
         if not self._display_tap:
             return ["(no display tap)"]
 

@@ -9,6 +9,7 @@ from kollabor_agent.tool_output_budget import (
     ToolOutputArtifactStore,
     pack_tool_history_messages,
     pack_tool_results,
+    preview_text,
 )
 
 
@@ -22,6 +23,23 @@ def _result(tool_id: str, output: str) -> ToolExecutionResult:
 
 
 class TestToolOutputBudget(unittest.TestCase):
+    def test_none_limits_fall_back_without_type_error(self):
+        with TemporaryDirectory() as directory:
+            store = ToolOutputArtifactStore(Path(directory))
+            result = _result("call-none", "small output")
+
+            stats = pack_tool_results(
+                [result],
+                store,
+                max_result_chars=None,
+                preview_chars=None,
+                batch_limit_chars=None,
+            )
+
+            self.assertEqual(result.output, "small output")
+            self.assertEqual(stats.remaining_chars, None)
+            self.assertEqual(preview_text("small output", None), "")
+
     def test_output_below_both_limits_stays_inline(self):
         with TemporaryDirectory() as directory:
             store = ToolOutputArtifactStore(Path(directory))

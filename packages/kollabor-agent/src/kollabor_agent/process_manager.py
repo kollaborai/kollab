@@ -124,6 +124,12 @@ class RingBuffer:
             self._total += 1
 
     def get_last(self, n: int) -> List[str]:
+        try:
+            n = max(0, int(n))
+        except (TypeError, ValueError, OverflowError):
+            n = 0
+        if n == 0:
+            return []
         with self._lock:
             if n >= len(self._buf):
                 return list(self._buf)

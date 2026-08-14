@@ -19,11 +19,10 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from plugins.agent_orchestrator.models import AgentTask
 
 
 def _make_plugin():
@@ -184,6 +183,15 @@ class TestHandleCaptureTool(unittest.TestCase):
         }))
         self.assertTrue(result.success)
         self.assertIn("worker-1", result.output)
+
+    def test_missing_capture_lines_use_default(self):
+        result = _run(self.plugin._handle_capture_tool({
+            "id": "t1", "target": "worker-1", "lines": None,
+        }))
+        self.assertTrue(result.success)
+        self.plugin.orchestrator.capture_output.assert_called_once_with(
+            "worker-1", 50
+        )
 
     def test_no_target(self):
         result = _run(self.plugin._handle_capture_tool({

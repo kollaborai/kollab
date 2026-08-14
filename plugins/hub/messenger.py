@@ -31,6 +31,15 @@ INBOX_MAX_REPLAY: int = 20
 # `attach` live-stream path, which exits the read loop before streaming.
 REMOTE_IDLE_TIMEOUT: float = 30.0
 
+
+def _coerce_line_count(value: Any, default: int) -> int:
+    """Normalize optional line counts received from native tools or sockets."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        count = default
+    return max(1, count)
+
 logger = logging.getLogger(__name__)
 
 
@@ -553,7 +562,7 @@ class AgentSocketServer:
 
                 elif action == "get_context":
                     # Return recent conversation context for social awareness
-                    lines_requested = msg_data.get("lines", 200)
+                    lines_requested = _coerce_line_count(msg_data.get("lines"), 200)
                     context = await self._get_context(lines_requested)
                     resp = (
                         json.dumps(
@@ -581,7 +590,7 @@ class AgentSocketServer:
                     await writer.drain()
 
                 elif action == "get_output":
-                    lines_requested = msg_data.get("lines", 100)
+                    lines_requested = _coerce_line_count(msg_data.get("lines"), 100)
                     output_lines: List[str] = []
                     if self._on_get_output:
                         try:
@@ -1206,6 +1215,7 @@ class AgentMessenger:
         ssl_ctx: Any = None,
     ) -> str:
         """Request recent context from an agent (unix socket or endpoint)."""
+        lines = _coerce_line_count(lines, 200)
         writer = None
         try:
             reader, writer = await AgentMessenger._open(
@@ -1243,6 +1253,7 @@ class AgentMessenger:
         ssl_ctx: Any = None,
     ) -> List[str]:
         """Request recent output lines from an agent (unix socket or endpoint)."""
+        lines = _coerce_line_count(lines, 100)
         writer = None
         try:
             reader, writer = await AgentMessenger._open(

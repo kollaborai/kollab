@@ -29,6 +29,7 @@ TOOL_OUTPUT_SPILL_REASON_KEY = "tool_output_spill_reason"
 
 def preview_text(text: str, max_chars: int) -> str:
     """Return a head preview, preferring a complete line at the boundary."""
+    max_chars = _as_positive_int(max_chars, 0)
     if max_chars <= 0:
         return ""
     if len(text) <= max_chars:
@@ -43,6 +44,7 @@ def preview_text(text: str, max_chars: int) -> str:
 
 def _bounded_omission(limit: int, subject: str) -> str:
     """Return an explicit omission notice that never exceeds ``limit``."""
+    limit = _as_positive_int(limit, 0)
     if limit <= 0:
         return ""
     notice = f"[{subject} omitted; complete output is in artifact metadata]"
@@ -69,17 +71,13 @@ def _result_metadata(result: Any) -> dict[str, Any]:
 
 def _as_positive_int(value: Any, default: int) -> int:
     if isinstance(value, bool):
-        return default
+        return max(0, default)
     if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return default
-    return default
+        return max(0, value)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return max(0, default)
 
 
 class ToolOutputArtifactStore:
@@ -148,6 +146,7 @@ class ToolOutputArtifactStore:
         Write failures are contained: the result becomes a bounded warning so a
         filesystem problem cannot turn into a failed LLM turn.
         """
+        preview_chars = _as_positive_int(preview_chars, 12000)
         attribute = _result_text_attribute(result)
         original = getattr(result, attribute, "") if text is None else text
         if original is None:
@@ -207,6 +206,8 @@ class ToolOutputArtifactStore:
         preview_chars: int,
     ) -> bool:
         """Apply the per-result threshold. Return whether it is spilled."""
+        max_chars = _as_positive_int(max_chars, 80000)
+        preview_chars = _as_positive_int(preview_chars, 12000)
         attribute = _result_text_attribute(result)
         text = getattr(result, attribute, "") or ""
         if not isinstance(text, str):
@@ -259,6 +260,10 @@ def pack_tool_results(
     batch_limit_chars: Optional[int],
 ) -> ToolOutputPackStats:
     """Make a complete result batch fit while preserving every result envelope."""
+    max_result_chars = _as_positive_int(max_result_chars, 80000)
+    preview_chars = _as_positive_int(preview_chars, 12000)
+    if batch_limit_chars is not None:
+        batch_limit_chars = _as_positive_int(batch_limit_chars, 0)
     result_list = list(results)
     stats = ToolOutputPackStats(
         result_count=len(result_list),
@@ -394,6 +399,9 @@ def pack_tool_history_messages(
     XML batches are marked as one history item by QueueProcessor and are treated
     as one lossless artifact when they need to be reduced.
     """
+    preview_chars = _as_positive_int(preview_chars, 12000)
+    if max_chars is not None:
+        max_chars = _as_positive_int(max_chars, 0)
     candidates = [message for message in messages if _is_tool_history_message(message)]
     visible_total = sum(len(_message_content(message)) for message in candidates)
     stats = ToolOutputPackStats(

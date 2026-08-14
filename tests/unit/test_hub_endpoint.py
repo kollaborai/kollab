@@ -8,6 +8,7 @@ same code path and is exercised separately via the context builders.
 """
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -502,6 +503,43 @@ def test_local_unix_delivery_unchanged_without_auth(tmp_path):
             assert ok is True
             assert len(received) == 1
             assert received[0].content == "local hello"
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def test_output_requests_coerce_missing_line_count(tmp_path):
+    """A null native/socket line count must use the capture default."""
+
+    async def run():
+        seen = []
+
+        def on_get_output(lines):
+            seen.append(lines)
+            return [f"requested:{lines}"]
+
+        server = AgentSocketServer(
+            "output-id",
+            lambda _message: None,
+            on_get_output=on_get_output,
+            socket_name=f"ep-output-{os.getpid()}",
+        )
+        sock_path = await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(sock_path)
+            writer.write(b'{"action":"get_output","lines":null}\n')
+            await writer.drain()
+            response = await reader.readline()
+            writer.close()
+            await writer.wait_closed()
+
+            assert json.loads(response.decode())["lines"] == ["requested:100"]
+            assert seen == [100]
+
+            result = await AgentMessenger.request_output(sock_path, lines=None)
+            assert result == ["requested:100"]
+            assert seen == [100, 100]
         finally:
             await server.stop()
 
