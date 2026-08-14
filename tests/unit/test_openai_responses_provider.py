@@ -699,3 +699,4 @@ class TestOpenAIResponsesProviderPrepareRequest:
 
         assert request["prompt_cache_key"] == "harness-context-v1"
         assert request["prompt_cache_retention"] == "24h"
+        assert request["store"] is True

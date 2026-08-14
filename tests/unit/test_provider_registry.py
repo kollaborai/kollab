@@ -369,6 +369,18 @@ class TestConfigCreation:
         assert config.api_key == "sk-ant-test123"
         assert config.max_retries == 3
 
+    def test_openai_responses_store_defaults_true_when_profile_omits_it(self):
+        """The profile adapter must preserve the Responses config default."""
+        profile = {
+            "provider": "openai_responses",
+            "api_key": "sk-test-key-123",
+            "model": "gpt-5.6-luna",
+        }
+
+        config = create_config_from_profile(profile)
+
+        assert config.store_responses is True
+
     def test_create_config_missing_api_key(self):
         """Test missing API key raises error."""
         profile = {"provider": "openai", "model": "gpt-4"}

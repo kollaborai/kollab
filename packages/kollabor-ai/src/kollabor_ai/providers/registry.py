@@ -566,7 +566,10 @@ def create_config_from_profile(
 
     elif provider_type == ProviderType.OPENAI_RESPONSES:
         # Optional Responses API-specific fields
-        base_fields["store_responses"] = profile.get("store_responses", False)
+        # Keep the profile path aligned with OpenAIResponsesConfig. Omitting
+        # this optional field must not silently disable server-side response
+        # state, which is required for Responses continuity and cache reuse.
+        base_fields["store_responses"] = profile.get("store_responses", True)
 
         return OpenAIResponsesConfig(**base_fields)
 
