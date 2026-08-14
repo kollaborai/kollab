@@ -164,6 +164,7 @@ class TestStreamingHandler(unittest.TestCase):
         conversation_history = []
         native_tools = None
         mcp_complete = asyncio.Event()
+
         # Consume the awaitable passed to wait_for before forcing its timeout.
         async def _wait_and_timeout(awaitable, timeout):
             awaitable.close()
