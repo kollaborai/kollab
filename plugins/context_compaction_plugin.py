@@ -738,9 +738,6 @@ class ContextCompactionPlugin(BasePlugin):
         )
         return True
 
-    async def _on_llm_turn_complete(
-        self, data: Dict[str, Any], event
-    ) -> Dict[str, Any]:
     def _compaction_task_done(self, task: asyncio.Task) -> None:
         """Observe and retire a background compaction task."""
         self._compaction_tasks.discard(task)
@@ -753,7 +750,9 @@ class ContextCompactionPlugin(BasePlugin):
         except Exception:
             logger.exception("Failed to inspect completed compaction task")
 
-
+    async def _on_llm_turn_complete(
+        self, data: Dict[str, Any], event
+    ) -> Dict[str, Any]:
         """LLM_REQUEST_POST: check if compaction threshold reached."""
         if self._disabled_for_session or self._compaction_in_progress:
             return data
