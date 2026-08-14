@@ -5,6 +5,7 @@ Before this existed, an agent holding a task had two options: checkpoint
 every 5 minutes). Snooze is the honest third option.
 """
 
+import json
 import re
 import time
 
@@ -148,6 +149,47 @@ def test_cron_ttl_terminalizes_stale_active_task(ledger):
     assert stale.status == "obsolete"
     assert stale.cron_active is False
     assert "task-cron expired" in stale.terminal_reason
+
+
+def test_malformed_persisted_cron_numbers_do_not_abort_cron_pass(ledger):
+    card = _card(ledger)
+    payload = card.to_dict()
+    payload.update(
+        {
+            "updated_at": "not-a-timestamp",
+            "cron_interval": "not-a-duration",
+            "cron_ttl_seconds": "not-a-ttl",
+            "snoozed_until": "not-a-snooze",
+        }
+    )
+    ledger._task_path(card.id).write_text(json.dumps(payload))
+
+    reloaded = ledger.get(card.id)
+    assert reloaded.updated_at == pytest.approx(time.time(), abs=2)
+    assert reloaded.cron_interval == 300.0
+    assert reloaded.cron_ttl_seconds == 7200.0
+    assert reloaded.snoozed_until == 0.0
+    assert ledger.get_cron_due() == []
+
+
+def test_valid_persisted_cron_numbers_are_preserved(ledger):
+    card = _card(ledger)
+    payload = card.to_dict()
+    payload.update(
+        {
+            "updated_at": 123.5,
+            "cron_interval": 12,
+            "cron_ttl_seconds": 90,
+            "snoozed_until": 45.25,
+        }
+    )
+    ledger._task_path(card.id).write_text(json.dumps(payload))
+
+    reloaded = ledger.get(card.id)
+    assert reloaded.updated_at == 123.5
+    assert reloaded.cron_interval == 12.0
+    assert reloaded.cron_ttl_seconds == 90.0
+    assert reloaded.snoozed_until == 45.25
 
 
 def test_nudge_quotes_real_task_id_and_offers_snooze():

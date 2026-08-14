@@ -14,6 +14,7 @@ Lifecycle:
 import fcntl
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -152,6 +153,41 @@ class TaskCard:
     def from_dict(cls, data: Dict) -> "TaskCard":
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known}
+
+        # Task cards are persisted JSON, so a hand-edited or partially
+        # corrupted file can contain strings where the cron loop expects
+        # numbers. Normalize those fields at the persistence boundary; one
+        # malformed card must not abort the entire cron pass.
+        numeric_defaults = {
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "timeout_seconds": 0.0,
+            "cron_interval": 300.0,
+            "cron_ttl_seconds": 7200.0,
+            "snoozed_until": 0.0,
+            "qa_requested_at": None,
+        }
+        for name, default in numeric_defaults.items():
+            if name not in filtered:
+                continue
+            value = filtered[name]
+            if value is None and default is None:
+                continue
+            try:
+                parsed = float(value)
+                if not math.isfinite(parsed):
+                    raise ValueError("non-finite number")
+                filtered[name] = parsed
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Normalizing malformed task field %s=%r for %s to %r",
+                    name,
+                    value,
+                    filtered.get("id", "unknown"),
+                    default,
+                )
+                filtered[name] = default
+
         return cls(**filtered)
 
 
