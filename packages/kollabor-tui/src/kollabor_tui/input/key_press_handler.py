@@ -93,6 +93,10 @@ class KeyPressHandler:
         # State tracking
         self._command_mode = CommandMode.NORMAL
 
+        # Background tasks are owned by this handler so failures are observed
+        # and teardown can cancel and drain in-flight work.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
         # Double Ctrl+C to exit: first press shows a warning,
         # second press within the window actually exits.
         self._ctrl_c_first_press_time: float = 0.0
@@ -217,7 +221,7 @@ class KeyPressHandler:
                                     standalone_escape
                                 )
 
-                    asyncio.create_task(delayed_escape_check())
+                    self._create_background_task(delayed_escape_check())
                 else:
                     # Normal mode: also detect standalone ESC for cancel
                     async def delayed_normal_escape_check():
@@ -228,7 +232,7 @@ class KeyPressHandler:
                         if standalone_escape:
                             await self._handle_escape()
 
-                    asyncio.create_task(delayed_normal_escape_check())
+                    self._create_background_task(delayed_normal_escape_check())
                 # Incomplete escape sequence - wait for more characters
                 return
 
@@ -349,7 +353,7 @@ class KeyPressHandler:
             try:
                 import asyncio
 
-                asyncio.create_task(
+                self._create_background_task(
                     self.event_bus.emit_with_hooks(
                         EventType.KEY_PRESS,
                         {
@@ -363,7 +367,7 @@ class KeyPressHandler:
                     )
                 )
             except Exception:
-                pass  # never block input on hook failure
+                logger.exception("Failed to schedule KEY_PRESS event")
 
             # Check for permission prompt FIRST (highest priority)
             if self.layout_manager and hasattr(
