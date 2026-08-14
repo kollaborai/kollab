@@ -1,5 +1,5 @@
 session context:
-  time:              <trender>date '+%Y-%m-%d %H:%M:%S %Z'</trender>
+  date:              <trender>date '+%Y-%m-%d %Z'</trender>
   system:            <trender>uname -s</trender> <trender>uname -m</trender>
   user:              <trender>whoami</trender> @ <trender>hostname</trender>
   shell:             <trender>echo $SHELL</trender>
@@ -12,7 +12,7 @@ if [ -d .git ]; then
   echo "       branch: $(git branch --show-current 2>/dev/null || echo 'unknown')"
   echo "       remote: $(git remote get-url origin 2>/dev/null || echo 'none')"
   echo "       status: $(git status --short 2>/dev/null | wc -l | tr -d ' ') files modified"
-  echo "       last commit: $(git log -1 --format='%h - %s (%ar)' 2>/dev/null || echo 'none')"
+  echo "       last commit: $(git log -1 --format='%h - %s (%aI)' 2>/dev/null || echo 'none')"
 else
   echo "  [warn] not a git repository"
 fi
@@ -28,7 +28,7 @@ if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
     echo "       running: $(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ') containers"
     if [ $(docker ps -q 2>/dev/null | wc -l) -gt 0 ]; then
       echo "       active containers:"
-      docker ps --format '         - {{.Names}} ({{.Status}})' 2>/dev/null | head -5
+      docker ps --format '         - {{.Names}}' 2>/dev/null | head -5
     fi
   fi
 elif [ -f "Dockerfile" ]; then
@@ -170,7 +170,7 @@ recent activity:
 <trender>
 if [ -d .git ]; then
   echo "  recent commits:"
-  git log --oneline --format='    %h - %s (%ar)' -5 2>/dev/null || echo "    no commits yet"
+  git log --oneline --format='    %h - %s (%aI)' -5 2>/dev/null || echo "    no commits yet"
 else
   echo "  not a git repository"
 fi
