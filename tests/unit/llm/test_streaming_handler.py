@@ -158,15 +158,18 @@ class TestStreamingHandler(unittest.TestCase):
                 )
             )
 
-    @patch(
-        "kollabor.llm.streaming_handler.asyncio.wait_for",
-        side_effect=asyncio.TimeoutError,
-    )
+    @patch("kollabor.llm.streaming_handler.asyncio.wait_for")
     def test_call_llm_waits_for_mcp_discovery(self, mock_wait):
         """Test LLM call waits for MCP discovery."""
         conversation_history = []
         native_tools = None
         mcp_complete = asyncio.Event()
+        # Consume the awaitable passed to wait_for before forcing its timeout.
+        async def _wait_and_timeout(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError
+
+        mock_wait.side_effect = _wait_and_timeout
 
         def is_cancelled_fn():
             return False
