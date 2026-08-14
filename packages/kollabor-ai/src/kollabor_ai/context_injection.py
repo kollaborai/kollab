@@ -123,10 +123,14 @@ class ContextService:
             )
 
         # Schedule event emission (don't block init)
-        if hasattr(event_bus, "loop") and event_bus.loop:
-            event_bus.loop.create_task(_emit_ready())
+        loop = getattr(event_bus, "loop", None)
+        if loop is not None and loop.is_running() is True:
+            loop.create_task(_emit_ready())
         else:
             # No event loop available - skip event emission
+            # A loop that exists but is not running cannot accept this
+            # coroutine safely; creating it there would leave an unawaited
+            # coroutine behind when the loop is closed.
             # The service is still functional, plugins just won't get the ready event
             logger.debug(
                 "No event loop available, skipping CONTEXT_SERVICE_READY event"
