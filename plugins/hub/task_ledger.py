@@ -441,6 +441,7 @@ class TaskLedger:
         assignee: str,
         evidence: str,
         message_id: str,
+        task_id: str = "",
     ) -> bool:
         strong_markers = (
             "task complete",
@@ -457,7 +458,11 @@ class TaskLedger:
         with self._file_lock(self._pending_replies_path()):
             replies = self._read_pending_replies_unlocked()
             for item in replies:
-                if item.get("assignee") == assignee and item.get("status") == "pending":
+                if (
+                    item.get("assignee") == assignee
+                    and item.get("status") == "pending"
+                    and (not task_id or item.get("task_id") == task_id)
+                ):
                     item["status"] = "resolved"
                     item["resolved_by_message_id"] = message_id
                     item["resolved_at"] = time.time()
