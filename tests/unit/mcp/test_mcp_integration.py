@@ -114,6 +114,23 @@ class TestMCPServerConnection(unittest.TestCase):
         connection.initialized = True
         self.assertTrue(connection.initialized)
 
+    def test_reader_eof_marks_connection_inactive(self):
+        """EOF must reopen the reconnect gate instead of leaving a zombie session."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_FakeStdout([]))
+
+            connection._ensure_reader_task()
+            assert connection._reader_task is not None
+            await connection._reader_task
+
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._read_buffer, "")
+
+        asyncio.run(run_test())
+
     def test_json_rpc_notifications_do_not_satisfy_pending_request(self):
         """Notifications without ids are ignored while waiting for a response."""
 

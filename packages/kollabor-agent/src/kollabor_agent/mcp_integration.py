@@ -349,6 +349,17 @@ class MCPServerConnection:
                 if not future.done():
                     future.set_result(None)
                 self._pending_requests.pop(request_id, None)
+            # EOF or a reader failure means the stdio process is no longer a
+            # usable MCP session. Leave the process object for the normal
+            # cleanup path, but make the integration's reconnect gate see the
+            # dead connection and discard any partial JSON before reconnecting.
+            if self.initialized:
+                logger.warning(
+                    "MCP server %s reader closed; marking connection inactive",
+                    self.server_name,
+                )
+            self.initialized = False
+            self._read_buffer = ""
 
     def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
         """Resolve matched responses and ignore notifications."""
