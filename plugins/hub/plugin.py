@@ -5317,6 +5317,19 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.debug(f"bridge forward failed: {e}")
 
+    async def _deliver_task_cron_reminder(
+        self, task: Any, reminder_msg: HubMessage
+    ) -> bool:
+        """Deliver a task reminder only when the assignee is discoverable."""
+        if self._presence is None:
+            return False
+
+        agents = await self._presence.discover_agents_async()
+        for agent in agents:
+            if agent.identity == task.assignee:
+                return await self._deliver_to_agent(agent, reminder_msg)
+        return False
+
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
         while True:
@@ -5412,13 +5425,13 @@ class HubPlugin(BasePlugin):
                                     "source_identity": self._identity.identity,
                                 },
                             )
-                            agents = await self._presence.discover_agents_async()
-                            for a in agents:
-                                if a.identity == task.assignee:
-                                    await self._deliver_to_agent(a, reminder_msg)
-                            task.updated_at = time.time()
-                            if self._task_ledger is not None:
-                                self._task_ledger._save(task)
+                            delivered = await self._deliver_task_cron_reminder(
+                                task, reminder_msg
+                            )
+                            if delivered:
+                                task.updated_at = time.time()
+                                if self._task_ledger is not None:
+                                    self._task_ledger._save(task)
 
             except asyncio.CancelledError:
                 break
@@ -6059,7 +6072,9 @@ class HubPlugin(BasePlugin):
             "reminder_id": message.id,
         }
 
-        if ack_target and ack_target != (self._identity.identity if self._identity else ""):
+        if ack_target and ack_target != (
+            self._identity.identity if self._identity else ""
+        ):
             ack_metadata["ack_target"] = ack_target
             ack = HubMessage(
                 action="message",
@@ -6077,8 +6092,16 @@ class HubPlugin(BasePlugin):
                 metadata=ack_metadata,
             )
             try:
-                await self._route_message(ack)
-                ack_metadata["ack_transport"] = "direct"
+                rejections = await self._route_message(ack)
+                if rejections:
+                    ack_metadata["ack_transport"] = "direct_failed"
+                    logger.warning(
+                        "Stale task-cron acknowledgement for %s was rejected: %s",
+                        task_id or "unknown",
+                        rejections,
+                    )
+                else:
+                    ack_metadata["ack_transport"] = "direct"
             except Exception as e:
                 ack_metadata["ack_transport"] = "direct_failed"
                 logger.warning(

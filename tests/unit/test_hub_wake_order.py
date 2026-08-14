@@ -332,6 +332,87 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm_service.conversation_history, [])
         self.assertEqual(event_bus.emitted, [])
 
+    async def test_stale_task_cron_records_rejected_ack_transport(self):
+        with tempfile.TemporaryDirectory() as tasks_dir:
+            ledger = TaskLedger(tasks_dir)
+            card = ledger.create(
+                assigner="koordinator",
+                assignee="sapphire",
+                directive="review the old harness task",
+                report_to="koordinator",
+            )
+            ledger.terminalize(
+                card.id,
+                status="obsolete",
+                reason="superseded by the current harness task",
+                actor="koordinator",
+            )
+
+            llm_service = FakeLLMService()
+            event_bus = FakeEventBus(llm_service)
+            plugin = HubPlugin(event_bus=event_bus)
+            plugin._task_ledger = ledger
+            plugin._presence = MagicMock()
+            plugin._route_message = AsyncMock(
+                return_value=[("koordinator", "in cooldown")]
+            )
+            plugin._identity = AgentRuntime(
+                name="coder",
+                identity="sapphire",
+                agent_id="sapphire-id",
+                state="idle",
+            )
+
+            await plugin._on_message_received(
+                HubMessage(
+                    action="message",
+                    from_agent="koordinator-id",
+                    from_identity="task-cron",
+                    to="sapphire",
+                    content=f"[task reminder: {card.id}] stale task",
+                    scope=MessageScope.DIRECT.value,
+                    metadata={
+                        "task_cron": True,
+                        "task_id": card.id,
+                        "source_identity": "koordinator",
+                    },
+                )
+            )
+
+            ack = plugin._route_message.await_args.args[0]
+            self.assertEqual(ack.metadata["ack_transport"], "direct_failed")
+            self.assertEqual(llm_service.conversation_history, [])
+
+    async def test_task_cron_delivery_requires_discoverable_target_and_success(self):
+        plugin = HubPlugin(event_bus=MagicMock())
+        plugin._presence = MagicMock()
+        plugin._presence.discover_agents_async = AsyncMock(return_value=[])
+        task = MagicMock(assignee="zircon")
+        reminder = HubMessage(
+            action="message",
+            from_agent="koordinator-id",
+            from_identity="task-cron",
+            to="zircon",
+            content="[task reminder: task-1] inspect the harness",
+            scope=MessageScope.DIRECT.value,
+        )
+
+        self.assertFalse(await plugin._deliver_task_cron_reminder(task, reminder))
+        plugin._presence.discover_agents_async.assert_awaited_once()
+
+        target = AgentRuntime(
+            name="research",
+            identity="zircon",
+            agent_id="zircon-id",
+        )
+        plugin._presence.discover_agents_async.reset_mock()
+        plugin._presence.discover_agents_async.return_value = [target]
+        plugin._deliver_to_agent = AsyncMock(return_value=False)
+        self.assertFalse(await plugin._deliver_task_cron_reminder(task, reminder))
+
+        plugin._deliver_to_agent.return_value = True
+        self.assertTrue(await plugin._deliver_task_cron_reminder(task, reminder))
+
     # ------------------------------------------------------------------ #
     # Regression: addressed messages must always wake (#39)               #
     # ------------------------------------------------------------------ #
