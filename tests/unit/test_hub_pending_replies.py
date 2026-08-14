@@ -222,3 +222,51 @@ def test_production_reply_resolver_passes_inbound_task_id():
         )
     ]
     assert 'task_id=str((message.metadata or {}).get("task_id") or "").strip()' in call
+
+
+@pytest.mark.asyncio
+async def test_inbound_message_resolves_matching_task_only(tmp_path):
+    from collections import OrderedDict
+    from unittest.mock import AsyncMock, MagicMock
+
+    from plugins.hub.models import HubMessage, MessageScope
+    from plugins.hub.plugin import HubPlugin, HubWakeDecision
+
+    ledger = TaskLedger(str(tmp_path))
+    for task_id in ("task-a", "task-b"):
+        ledger.expect_reply(
+            task_id=task_id,
+            assignee="worker",
+            requested_by="lead",
+            message_id=f"msg-{task_id}",
+            deadline_seconds=60,
+        )
+
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._task_ledger = ledger
+    plugin._handle_stale_task_cron = AsyncMock(return_value=False)
+    plugin._decide_hub_wake = lambda *_args, **_kwargs: HubWakeDecision(
+        "wake", False, "test"
+    )
+    plugin._seen_messages = OrderedDict()
+    plugin._presence = MagicMock()
+    plugin._identity = MagicMock(identity="lead", agent_id="lead-id")
+    plugin._vault = None
+    plugin._event_bus = MagicMock()
+    plugin._llm_service = MagicMock()
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._hub_buffer_retry_queued = False
+
+    await plugin._on_message_received(
+        HubMessage(
+            action="message",
+            from_agent="worker-id",
+            from_identity="worker",
+            to="*",
+            content="task complete",
+            scope=MessageScope.BROADCAST.value,
+            metadata={"task_id": "task-b"},
+        )
+    )
+
+    assert [item["task_id"] for item in ledger.pending_replies()] == ["task-a"]
