@@ -57,6 +57,45 @@ def _get_version() -> str:
         return "1.0.0"
 
 
+def _normalize_mcp_input_schema(input_schema: Any) -> Optional[Dict[str, Any]]:
+    """Return a provider-safe object schema, or ``None`` for malformed input."""
+    if input_schema is None:
+        return {"type": "object", "properties": {}, "required": []}
+    if not isinstance(input_schema, dict):
+        return None
+
+    schema = dict(input_schema)
+    schema_type = schema.get("type")
+    if schema_type is None:
+        schema["type"] = "object"
+    elif schema_type != "object":
+        return None
+
+    properties = schema.get("properties", {})
+    if properties is None:
+        properties = {}
+    if not isinstance(properties, dict):
+        return None
+    if any(
+        not isinstance(name, str) or not isinstance(property_schema, dict)
+        for name, property_schema in properties.items()
+    ):
+        return None
+    schema["properties"] = properties
+
+    required = schema.get("required", [])
+    if required is None:
+        required = []
+    if not isinstance(required, list):
+        return None
+    if any(
+        not isinstance(name, str) or name not in properties for name in required
+    ):
+        return None
+    schema["required"] = required
+    return schema
+
+
 class MCPServerConnection:
     """Manages a connection to an MCP server via stdio."""
 
@@ -916,40 +955,68 @@ class MCPIntegration:
         # List tools
         tools = await connection.list_tools()
 
-        # Register tools
-        for tool in tools:
-            tool_name = tool.get("name")
-            if tool_name:
-                self.tool_registry[tool_name] = {
-                    "server": server_name,
-                    "definition": {
-                        "name": tool_name,
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get(
-                            "inputSchema",
-                            {"type": "object", "properties": {}, "required": []},
-                        ),
-                    },
-                    "enabled": True,
-                }
-                logger.info(f"Registered MCP tool: {tool_name} from {server_name}")
+        if not isinstance(tools, list):
+            logger.warning("MCP server %s returned a non-list tool set", server_name)
+            tools = []
 
-                # Emit tool registration event
-                if self.event_bus:
-                    await self.event_bus.emit_with_hooks(
-                        EventType.MCP_TOOL_REGISTER,
-                        {
-                            "tool_name": tool_name,
-                            "server_name": server_name,
-                            "definition": tool,
-                        },
-                        source="mcp_integration",
-                    )
+        # Register tools
+        valid_tools: List[Dict[str, Any]] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                logger.warning("Skipping malformed MCP tool from %s", server_name)
+                continue
+
+            tool_name = tool.get("name")
+            input_schema = _normalize_mcp_input_schema(tool.get("inputSchema"))
+            if not isinstance(tool_name, str) or not tool_name:
+                logger.warning("Skipping MCP tool with invalid name from %s", server_name)
+                continue
+            if input_schema is None:
+                logger.warning(
+                    "Skipping MCP tool %s from %s with invalid inputSchema",
+                    tool_name,
+                    server_name,
+                )
+                continue
+
+            description = tool.get("description", "")
+            if description is None:
+                description = ""
+            elif not isinstance(description, str):
+                description = str(description)
+
+            registered_tool = {
+                **tool,
+                "inputSchema": input_schema,
+            }
+            self.tool_registry[tool_name] = {
+                "server": server_name,
+                "definition": {
+                    "name": tool_name,
+                    "description": description,
+                    "parameters": input_schema,
+                },
+                "enabled": True,
+            }
+            valid_tools.append(registered_tool)
+            logger.info(f"Registered MCP tool: {tool_name} from {server_name}")
+
+            # Emit tool registration event
+            if self.event_bus:
+                await self.event_bus.emit_with_hooks(
+                    EventType.MCP_TOOL_REGISTER,
+                    {
+                        "tool_name": tool_name,
+                        "server_name": server_name,
+                        "definition": registered_tool,
+                    },
+                    source="mcp_integration",
+                )
 
         # Keep connection open for tool calls
         self.server_connections[server_name] = connection
 
-        return tools
+        return valid_tools
 
     async def _discover_local_servers(self, discovered: Dict):
         """Discover locally running MCP servers."""
@@ -1314,19 +1381,27 @@ class MCPIntegration:
                     continue
 
             definition = tool_info.get("definition", {})
+            if not isinstance(definition, dict):
+                logger.warning("Skipping MCP tool %s with malformed definition", tool_name)
+                continue
+
+            raw_parameters = definition.get("parameters")
+            if raw_parameters is None:
+                raw_parameters = definition.get("inputSchema")
+            parameters = _normalize_mcp_input_schema(raw_parameters)
+            if parameters is None:
+                logger.warning(
+                    "Skipping MCP tool %s with invalid input schema", tool_name
+                )
+                continue
+
             tools.append(
                 {
                     "name": tool_name,
-                    "description": definition.get(
-                        "description", f"MCP tool: {tool_name}"
+                    "description": str(
+                        definition.get("description", f"MCP tool: {tool_name}") or ""
                     ),
-                    "parameters": definition.get(
-                        "parameters",
-                        definition.get(
-                            "inputSchema",
-                            {"type": "object", "properties": {}, "required": []},
-                        ),
-                    ),
+                    "parameters": parameters,
                 }
             )
 

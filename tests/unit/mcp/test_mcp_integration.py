@@ -376,6 +376,53 @@ class TestMCPIntegration(unittest.TestCase):
         self.assertIn("test_tool", mcp.tool_registry)
         self.assertEqual(mcp.tool_registry["test_tool"]["server"], "test-server")
 
+    def test_get_tool_definitions_skips_malformed_input_schema(self):
+        """Malformed MCP schemas must not reach an API request."""
+        mcp = MCPIntegration(event_bus=self.event_bus)
+        mcp.tool_registry["bad_tool"] = {
+            "server": "test-server",
+            "definition": {
+                "name": "bad_tool",
+                "description": "Bad schema",
+                "parameters": {"type": "array", "items": {}},
+            },
+            "enabled": True,
+        }
+
+        tools = mcp.get_tool_definitions_for_api()
+
+        self.assertNotIn("bad_tool", {tool["name"] for tool in tools})
+
+    @patch("kollabor_agent.mcp_integration.MCPServerConnection")
+    def test_connect_and_list_tools_filters_malformed_schemas(self, mock_connection):
+        """Discovery should expose only provider-safe MCP schemas."""
+        connection = mock_connection.return_value
+        connection.connect = AsyncMock(return_value=True)
+        connection.initialize = AsyncMock(return_value=True)
+        connection.list_tools = AsyncMock(
+            return_value=[
+                {
+                    "name": "good_tool",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                },
+                {
+                    "name": "bad_tool",
+                    "inputSchema": {"type": "object", "required": ["missing"]},
+                },
+            ]
+        )
+
+        mcp = MCPIntegration(event_bus=self.event_bus)
+        tools = asyncio.run(mcp._connect_and_list_tools("test-server", "echo test"))
+
+        self.assertEqual([tool["name"] for tool in tools], ["good_tool"])
+        self.assertIn("good_tool", mcp.tool_registry)
+        self.assertNotIn("bad_tool", mcp.tool_registry)
+
     @patch("kollabor_agent.mcp_integration.MCPServerConnection")
     def test_connect_and_list_tools_passes_server_environment(self, mock_connection):
         """Configured MCP env reaches the stdio child while auth is preserved."""
