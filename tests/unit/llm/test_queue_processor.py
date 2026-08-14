@@ -313,6 +313,12 @@ class TestQueueProcessor(unittest.TestCase):
                 ]
             ],
         )
+        native_tools_provider = self.streaming_handler.call_llm.call_args.kwargs[
+            "native_tools_provider"
+        ]
+        discovered_tools = [{"name": "list_tasks"}]
+        self.native_tools_handler.tools = discovered_tools
+        self.assertIs(native_tools_provider(), discovered_tools)
         self.assertEqual(self.conversation_history[-1].content, "original prompt")
 
     def test_pipe_mode_suppresses_intermediate_tool_response(self):

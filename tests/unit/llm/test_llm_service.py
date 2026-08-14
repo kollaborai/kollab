@@ -428,6 +428,26 @@ class TestMessageDisplayCoordination(unittest.TestCase):
         }
         return config_map.get(key, default)
 
+    def test_call_llm_refreshes_native_tools_through_streaming_handler(self):
+        """Provide a live tool lookup for the post-discovery streaming call."""
+        initial_tools = [{"name": "local_tool"}]
+        discovered_tools = [{"name": "list_tasks"}]
+        self.service.native_tools = initial_tools
+
+        with patch.object(
+            self.service._streaming,
+            "call_llm",
+            new=AsyncMock(return_value="Test response"),
+        ) as mock_call:
+            result = asyncio.run(self.service._call_llm())
+
+        self.assertEqual(result, "Test response")
+        call_kwargs = mock_call.call_args.kwargs
+        self.assertEqual(call_kwargs["native_tools"], initial_tools)
+
+        self.service.native_tools = discovered_tools
+        self.assertIs(call_kwargs["native_tools_provider"](), discovered_tools)
+
     def test_thinking_display_integration(self):
         """Test that _execute_llm_turn passes thinking_duration to display_complete_response.
 

@@ -87,6 +87,33 @@ class TestStreamingHandler(unittest.TestCase):
         )
 
         self.assertEqual(result, "test response")
+
+    def test_call_llm_refreshes_native_tools_after_mcp_discovery(self):
+        """Use tools discovered while the first request was waiting."""
+        mcp_complete = asyncio.Event()
+        discovered_tools = [{"name": "list_tasks"}]
+        native_tools_provider = MagicMock(return_value=discovered_tools)
+
+        async def complete_discovery():
+            await asyncio.sleep(0)
+            mcp_complete.set()
+
+        self.loop.create_task(complete_discovery())
+        self.loop.run_until_complete(
+            self.handler.call_llm(
+                conversation_history=[],
+                max_history=90,
+                native_tools=None,
+                mcp_discovery_complete=mcp_complete,
+                is_cancelled_fn=lambda: False,
+                native_tools_provider=native_tools_provider,
+            )
+        )
+
+        native_tools_provider.assert_called_once_with()
+        self.assertEqual(
+            self.api_service.call_llm.call_args.kwargs["tools"], discovered_tools
+        )
         self.api_service.call_llm.assert_called_once()
 
     def test_call_llm_forwards_provider_options(self):

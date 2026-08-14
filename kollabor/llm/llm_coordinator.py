@@ -1456,6 +1456,7 @@ class LLMService:
                 native_tools=self.native_tools,
                 mcp_discovery_complete=self.mcp_discovery_complete,
                 is_cancelled_fn=lambda: self.cancel_processing,
+                native_tools_provider=lambda: self.native_tools,
             ),
         )
 

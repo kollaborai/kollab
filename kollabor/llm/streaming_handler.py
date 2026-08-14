@@ -65,6 +65,7 @@ class StreamingHandler:
         is_cancelled_fn: Callable[[], bool],
         turn_id: Optional[str] = None,
         parent_turn_id: Optional[str] = None,
+        native_tools_provider: Optional[Callable[[], Optional[List[dict]]]] = None,
         **provider_kwargs: Any,
     ) -> str:
         """Make API call to LLM using APICommunicationService.
@@ -79,6 +80,9 @@ class StreamingHandler:
             parent_turn_id: Optional. Set on follow-up calls so the raw log
                 links a truncated-and-continued response back to the turn
                 that started it.
+            native_tools_provider: Optional callback used to fetch the current
+                native tools after MCP discovery completes. This avoids using
+                a pre-discovery snapshot on the first request.
             **provider_kwargs: Provider-native request options forwarded to
                 APICommunicationService (for example, Responses API cache
                 controls or response continuity identifiers).
@@ -107,6 +111,12 @@ class StreamingHandler:
                 "MCP discovery did not complete within 5 seconds - "
                 "proceeding with available tools (MCP tools may not be available)"
             )
+
+        # MCP discovery can replace the tool list while the request waits.
+        # Re-read it now instead of sending the snapshot captured by the
+        # coordinator before discovery started.
+        if native_tools_provider is not None:
+            native_tools = native_tools_provider()
 
         # Delegate to API communication service
         try:

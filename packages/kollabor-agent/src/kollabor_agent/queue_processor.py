@@ -773,6 +773,7 @@ class QueueProcessor:
                 native_tools=self._native_tools_handler.tools,
                 mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                 is_cancelled_fn=lambda: self.cancel_processing,
+                native_tools_provider=lambda: self._native_tools_handler.tools,
                 turn_id=root_turn_id,
             )
 
@@ -831,6 +832,7 @@ class QueueProcessor:
                     native_tools=self._native_tools_handler.tools,
                     mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                     is_cancelled_fn=lambda: self.cancel_processing,
+                    native_tools_provider=lambda: self._native_tools_handler.tools,
                     parent_turn_id=root_turn_id,
                 )
 
