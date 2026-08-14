@@ -826,16 +826,12 @@ class OpenAIResponsesProvider(LLMProvider):
             if event in ("response.done", "response.completed"):
                 resp_data = parsed_data.get("response", parsed_data)
                 event_data = {"event": event, "response": resp_data}
-
-                usage_dict = resp_data.get("usage", {})
+                usage = OpenAIResponsesTransformer._usage_info(
+                    resp_data.get("usage")
+                )
                 return StreamingResponse(
                     delta=TextDelta(content=""),
-                    usage=UsageInfo(
-                        prompt_tokens=usage_dict.get("input_tokens", 0),
-                        completion_tokens=usage_dict.get("output_tokens", 0),
-                        total_tokens=usage_dict.get("input_tokens", 0)
-                        + usage_dict.get("output_tokens", 0),
-                    ),
+                    usage=usage,
                     is_final=True,
                     raw_chunk=event_data,
                 )

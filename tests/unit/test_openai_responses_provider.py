@@ -13,6 +13,7 @@ Tests for:
 Target: 75%+ coverage
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -327,6 +328,33 @@ class TestOpenAIResponsesProviderCall:
 
 class TestOpenAIResponsesProviderStream:
     """Test streaming API calls."""
+
+    def test_completed_event_preserves_cache_usage(self, provider_config):
+        """Codex response.completed usage keeps prompt-cache counters."""
+        provider = OpenAIResponsesProvider(provider_config)
+        event = provider._parse_sse_event(
+            "response.completed",
+            json.dumps(
+                {
+                    "response": {
+                        "usage": {
+                            "input_tokens": 3268,
+                            "output_tokens": 28,
+                            "input_tokens_details": {
+                                "cached_tokens": 2816,
+                                "cache_write_tokens": 0,
+                            },
+                        }
+                    }
+                }
+            ).encode(),
+        )
+
+        assert event is not None
+        assert event.usage is not None
+        assert event.usage.prompt_tokens == 3268
+        assert event.usage.cache_read_tokens == 2816
+        assert event.usage.cache_creation_tokens == 0
 
     @pytest.mark.asyncio
     async def test_stream_simple(self, provider_config, sample_messages):
