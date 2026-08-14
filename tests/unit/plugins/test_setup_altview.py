@@ -7,10 +7,14 @@ step navigation.
 """
 
 import asyncio
+import logging
 import re
 import unittest
 from types import SimpleNamespace
 
+import pytest
+
+from plugins.altview.config_altview import ConfigAltView
 from plugins.altview.setup_altview import (
     PROVIDERS,
     STAGE_API_KEY,
@@ -399,3 +403,4 @@ async def test_config_altview_cancels_profile_switch_on_complete():
 
     assert cancelled.is_set()
     assert not view._save_tasks
+
