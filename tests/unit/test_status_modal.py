@@ -136,8 +136,10 @@ class TestStatusModal(unittest.TestCase):
         # Mock the enter status modal method
         self.input_handler._enter_status_modal_mode = AsyncMock()
 
-        # Handle the trigger
-        result = self.input_handler._handle_status_modal_trigger(event_data)
+        # Handle the trigger in an event loop; this method is async.
+        result = asyncio.run(
+            self.input_handler._handle_status_modal_trigger(event_data)
+        )
 
         # Verify trigger was handled
         self.assertIsNotNone(result)
