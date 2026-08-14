@@ -596,7 +596,7 @@ class TaskLedger:
 
     def qa_reject(self, task_id: str, reviewer: str, notes: str) -> Optional[TaskCard]:
         card = self._load_mutable(task_id, "qa_reject")
-        if not card:
+        if not card or card.status != "qa_review":
             return None
         card.status = "active"  # re-activate for rework
         card.qa_reviewer = reviewer

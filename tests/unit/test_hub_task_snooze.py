@@ -94,6 +94,15 @@ def test_expired_qa_review_is_terminalized_before_prompt_injection(ledger):
     assert stale.terminal_reason == "QA review expired without reviewer action"
 
 
+def test_active_task_rejects_qa_rejection_without_mutation(ledger):
+    card = _card(ledger)
+    before = card.to_dict()
+
+    assert ledger.qa_reject(card.id, "reviewer", "not in QA") is None
+
+    assert ledger.get(card.id).to_dict() == before
+
+
 @pytest.mark.parametrize("status", ["cancelled", "obsolete"])
 def test_terminal_task_rejects_late_lifecycle_mutations(ledger, status):
     card = _card(ledger)
