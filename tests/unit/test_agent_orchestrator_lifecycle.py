@@ -44,17 +44,22 @@ def test_failed_startup_is_not_marked_running():
 
 
 def test_startup_task_cannot_mark_replacement_session_running():
-    process = FakeProcess()
+    old_process = FakeProcess()
+    replacement_process = FakeProcess()
     replacement = AgentSession(
         name="zircon",
-        full_name="project-zircon-replacement",
+        full_name="project-zircon",
         status="initializing",
         start_time=0.0,
-        proc=process,
+        proc=replacement_process,
     )
     orchestrator = _orchestrator(replacement)
 
-    _run(orchestrator._wait_and_mark_ready("zircon", "project-zircon-old"))
+    _run(
+        orchestrator._wait_and_mark_ready(
+            "zircon", "project-zircon", expected_proc=old_process
+        )
+    )
 
     assert replacement.status == "initializing"
 
@@ -108,4 +113,3 @@ def test_activity_monitor_untracks_dead_session_with_no_output():
     _run(monitor._check_agents())
 
     assert monitor.get_tracked_agents() == []
-

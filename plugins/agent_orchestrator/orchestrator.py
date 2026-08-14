@@ -317,12 +317,20 @@ class AgentOrchestrator:
         # Task delivered as positional arg in _create_session. The agent
         # processes it as initial_message during its own startup.
         # Background coro just monitors readiness and updates status.
-        coro = self._wait_and_mark_ready(name, full_name)
+        agent = self.agents.get(name)
+        coro = self._wait_and_mark_ready(
+            name, full_name, agent.proc if agent is not None else None
+        )
         await self._run_or_schedule(coro, wait, name, "agent")
 
         return True
 
-    async def _wait_and_mark_ready(self, name: str, full_name: str) -> None:
+    async def _wait_and_mark_ready(
+        self,
+        name: str,
+        full_name: str,
+        expected_proc: Optional[subprocess.Popen] = None,
+    ) -> None:
         """Mark agent running. Initial task already passed via cmd arg.
 
         Detached agents redirect stdout to /dev/null so ring-buffer-based
@@ -336,7 +344,11 @@ class AgentOrchestrator:
             # failed child must not be reported as running, and an old task
             # must not mark a replacement session ready.
             agent = self.agents.get(name)
-            if agent is None or agent.full_name != full_name:
+            if (
+                agent is None
+                or agent.full_name != full_name
+                or (expected_proc is not None and agent.proc is not expected_proc)
+            ):
                 logger.debug(
                     "Skipping stale startup completion for agent %s", name
                 )
@@ -385,7 +397,10 @@ class AgentOrchestrator:
         if not full_name:
             return False
 
-        coro = self._wait_and_mark_ready(name, full_name)
+        agent = self.agents.get(name)
+        coro = self._wait_and_mark_ready(
+            name, full_name, agent.proc if agent is not None else None
+        )
         await self._run_or_schedule(coro, wait, name, "clone agent")
 
         return True
@@ -417,7 +432,10 @@ class AgentOrchestrator:
         if not full_name:
             return False
 
-        coro = self._wait_and_mark_ready(lead_name, full_name)
+        agent = self.agents.get(lead_name)
+        coro = self._wait_and_mark_ready(
+            lead_name, full_name, agent.proc if agent is not None else None
+        )
         await self._run_or_schedule(coro, wait, lead_name, "team lead")
 
         return True
