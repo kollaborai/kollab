@@ -230,6 +230,54 @@ class TestInputLoopManagerAsync(unittest.TestCase):
 
         asyncio.run(run_test())
 
+
+    def test_paste_event_failure_is_observed(self):
+        """Test failed background paste events are consumed and logged."""
+
+        async def run_test():
+            event_bus = MagicMock()
+            event_bus.emit_with_hooks = AsyncMock(
+                side_effect=RuntimeError("event hook failed")
+            )
+            self.manager.event_bus = event_bus
+
+            with patch(
+                "kollabor_tui.input.input_loop_manager.logger.exception"
+            ) as log_exception:
+                await self.manager._handle_paste_chunk("paste content")
+                await asyncio.sleep(0)
+
+            self.assertFalse(self.manager._paste_event_tasks)
+            log_exception.assert_called_once_with("PASTE_DETECTED event task failed")
+
+        asyncio.run(run_test())
+
+    def test_stop_cancels_pending_paste_events(self):
+        """Test stop drains an in-flight paste event before returning."""
+
+        async def run_test():
+            event_started = asyncio.Event()
+            event_release = asyncio.Event()
+
+            async def emit_event(*args):
+                event_started.set()
+                await event_release.wait()
+
+            event_bus = MagicMock()
+            event_bus.emit_with_hooks = emit_event
+            self.manager.event_bus = event_bus
+
+            await self.manager._handle_paste_chunk("paste content")
+            await event_started.wait()
+            self.assertEqual(len(self.manager._paste_event_tasks), 1)
+
+            await self.manager.stop()
+
+            self.assertFalse(self.manager._paste_event_tasks)
+            self.mock_renderer.exit_raw_mode.assert_called_once()
+
+        asyncio.run(run_test())
+
     def test_route_escape_key_normal_mode(self):
         """Test _route_escape_key routes to handle_key_press in normal mode."""
 
