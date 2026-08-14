@@ -57,6 +57,46 @@ class OpenAIResponsesTransformer:
     """
 
     @staticmethod
+    def _usage_info(usage_dict: Optional[Dict[str, Any]]) -> UsageInfo:
+        """Normalize Responses usage, including prompt-cache accounting.
+
+        The public Responses API reports cache counters in
+        ``input_tokens_details``.  The OAuth/Codex transport has also
+        returned the Chat Completions-shaped ``prompt_tokens_details`` in
+        some responses, so accept that shape without changing the request
+        contract.  The top-level aliases keep telemetry useful for proxies
+        that flatten provider usage fields.
+        """
+        usage = usage_dict or {}
+        details = (
+            usage.get("input_tokens_details")
+            or usage.get("prompt_tokens_details")
+            or {}
+        )
+        if not isinstance(details, dict):
+            details = {}
+
+        prompt_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
+        completion_tokens = usage.get(
+            "output_tokens", usage.get("completion_tokens", 0)
+        ) or 0
+        cached_tokens = details.get("cached_tokens", 0) or usage.get(
+            "cache_read_input_tokens", usage.get("cache_read_tokens", 0)
+        ) or 0
+        cache_write_tokens = details.get("cache_write_tokens", 0) or usage.get(
+            "cache_creation_input_tokens", usage.get("cache_creation_tokens", 0)
+        ) or 0
+        total_tokens = usage.get("total_tokens") or prompt_tokens + completion_tokens
+
+        return UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cache_creation_tokens=cache_write_tokens,
+            cache_read_tokens=cached_tokens,
+        )
+
+    @staticmethod
     def transform_response(response: Dict[str, Any], model: str) -> UnifiedResponse:
         """
         Transform complete OpenAI Responses API response to unified format.
@@ -111,17 +151,7 @@ class OpenAIResponsesTransformer:
                 f"id={response.get('id', 'unknown')}"
             )
             # Return empty text response instead of crashing
-            usage_dict = response.get("usage", {})
-            # OpenAI Responses API reports cached tokens in input_tokens_details
-            details = usage_dict.get("input_tokens_details", {}) or {}
-            cached = details.get("cached_tokens", 0)
-            usage = UsageInfo(
-                prompt_tokens=usage_dict.get("input_tokens", 0),
-                completion_tokens=usage_dict.get("output_tokens", 0),
-                total_tokens=usage_dict.get("input_tokens", 0)
-                + usage_dict.get("output_tokens", 0),
-                cache_read_tokens=cached,
-            )
+            usage = OpenAIResponsesTransformer._usage_info(response.get("usage"))
             return UnifiedResponse(
                 content=[TextContent(text="")],
                 usage=usage,
@@ -160,17 +190,8 @@ class OpenAIResponsesTransformer:
             else:
                 logger.warning(f"Unknown output item type: {item_type}")
 
-        # Extract usage (with cache hit metrics from Responses API)
-        usage_dict = response.get("usage", {})
-        details = usage_dict.get("input_tokens_details", {}) or {}
-        cached = details.get("cached_tokens", 0)
-        usage = UsageInfo(
-            prompt_tokens=usage_dict.get("input_tokens", 0),
-            completion_tokens=usage_dict.get("output_tokens", 0),
-            total_tokens=usage_dict.get("input_tokens", 0)
-            + usage_dict.get("output_tokens", 0),
-            cache_read_tokens=cached,
-        )
+        # Extract usage, including cache reads and writes.
+        usage = OpenAIResponsesTransformer._usage_info(response.get("usage"))
 
         return UnifiedResponse(
             content=content_blocks,
@@ -299,20 +320,13 @@ class OpenAIResponsesTransformer:
         # response.done - final chunk with usage
         if event_type == "response.done":
             response_data = chunk.get("response", {})
-            usage_dict = response_data.get("usage", {})
-            # Responses API reports cached tokens in input_tokens_details
-            details = usage_dict.get("input_tokens_details", {}) or {}
-            cached = details.get("cached_tokens", 0)
+            usage = OpenAIResponsesTransformer._usage_info(
+                response_data.get("usage")
+            )
 
             return StreamingResponse(
                 delta=TextDelta(content=""),
-                usage=UsageInfo(
-                    prompt_tokens=usage_dict.get("input_tokens", 0),
-                    completion_tokens=usage_dict.get("output_tokens", 0),
-                    total_tokens=usage_dict.get("input_tokens", 0)
-                    + usage_dict.get("output_tokens", 0),
-                    cache_read_tokens=cached,
-                ),
+                usage=usage,
                 is_final=True,
                 raw_chunk=chunk,
             )
