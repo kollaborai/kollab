@@ -331,6 +331,25 @@ class AgentOrchestrator:
         """
         try:
             await asyncio.sleep(self.kollab_init_delay)
+
+            # The startup task can outlive the session it was created for. A
+            # failed child must not be reported as running, and an old task
+            # must not mark a replacement session ready.
+            agent = self.agents.get(name)
+            if agent is None or agent.full_name != full_name:
+                logger.debug(
+                    "Skipping stale startup completion for agent %s", name
+                )
+                return
+            if not agent.is_alive:
+                logger.warning(
+                    "Agent %s exited during startup (returncode=%s)",
+                    name,
+                    agent.proc.returncode if agent.proc is not None else None,
+                )
+                self._update_status(name, "error")
+                return
+
             self._update_status(name, "running")
             logger.info(f"Background initialization complete for agent: {name}")
         except Exception as e:
@@ -730,7 +749,7 @@ class AgentOrchestrator:
         dead_names = []
 
         for name, agent in self.agents.items():
-            if not agent.is_alive and agent.status != "initializing":
+            if not agent.is_alive:
                 dead_names.append(name)
 
         for name in dead_names:
@@ -750,7 +769,7 @@ class AgentOrchestrator:
         """Refresh agent status from subprocess poll."""
         dead = []
         for name, agent in self.agents.items():
-            if not agent.is_alive and agent.status not in ("initializing", "stopped"):
+            if not agent.is_alive:
                 dead.append(name)
 
         for name in dead:

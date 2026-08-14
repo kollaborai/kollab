@@ -159,6 +159,7 @@ class ActivityMonitor:
             return
 
         completed = []
+        stale = []
 
         for name, state in list(self.tracked.items()):
             try:
@@ -166,7 +167,12 @@ class ActivityMonitor:
                 content = self.orchestrator.capture_output(name, self.capture_lines)
 
                 if not content:
-                    # Session might be gone
+                    # A live session may simply not have produced output yet.
+                    # Once its process is gone, stop tracking it so a dead
+                    # session cannot remain in the monitor forever.
+                    agent = self.orchestrator.get_agent(name)
+                    if agent is None or not agent.is_alive:
+                        stale.append(name)
                     continue
 
                 current_hash = hashlib.md5(content.encode()).hexdigest()
@@ -192,6 +198,10 @@ class ActivityMonitor:
 
             except Exception as e:
                 logger.error(f"Error checking agent {name}: {e}")
+
+        for name in stale:
+            self.untrack(name)
+            logger.warning("Stopped tracking exited agent %s", name)
 
         # Notify completions
         for name, content in completed:
