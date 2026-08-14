@@ -5,7 +5,7 @@ import time
 import unittest
 from dataclasses import dataclass, field
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from kollabor_agent.queue_processor import (
     QueueProcessor,
@@ -314,6 +314,102 @@ class TestQueueProcessor(unittest.TestCase):
             ],
         )
         self.assertEqual(self.conversation_history[-1].content, "original prompt")
+
+    def test_pipe_mode_suppresses_intermediate_tool_response(self):
+        """Pipe mode emits the continuation, not the pre-tool response."""
+        self.renderer.pipe_mode = True
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = "ok"
+        self.tool_executor.execute_tool = AsyncMock(
+            return_value=ToolExecutionResult(
+                tool_id="terminal_1",
+                tool_type="terminal",
+                success=True,
+                output="",
+            )
+        )
+        self.response_parser.parse_response.return_value = {
+            "content": "intermediate answer",
+            "components": {},
+            "turn_completed": False,
+            "question_gate_active": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("intermediate answer", False, False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.message_display_service.display_complete_response.assert_not_called()
+        self.message_display_service.display_tool_results.assert_called_once()
+
+    def test_pipe_mode_displays_question_gate_response(self):
+        """Pipe mode keeps a response that is waiting for user input visible."""
+        self.renderer.pipe_mode = True
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.response_parser.parse_response.return_value = {
+            "content": "Which file should I inspect?",
+            "components": {},
+            "turn_completed": True,
+            "question_gate_active": True,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("Which file should I inspect?", False, False, False)
+        )
+
+        self.processor.question_gate_enabled = True
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.message_display_service.display_complete_response.assert_called_once()
+        self.message_display_service.display_complete_response.assert_called_once_with(
+            thinking_duration=ANY,
+            response="Which file should I inspect?",
+            tool_results=None,
+            thinking_content=[],
+        )
 
     # ------------------------------------------------------------------
     # Tests for _emit_llm_response_and_handle

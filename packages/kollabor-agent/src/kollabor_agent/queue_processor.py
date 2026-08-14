@@ -1009,9 +1009,29 @@ class QueueProcessor:
                 logger.debug("Plugin requested turn completion")
 
             # Step 5: Display clean text (before tool results)
+            # Pipe mode must emit only the terminal response for a logical
+            # turn.  A tool-bearing response is an intermediate model turn;
+            # displaying it here and then displaying the continuation emits
+            # the same user-facing text twice on stdout.  Question-gated XML
+            # tools are the exception because they are intentionally paused
+            # for user input rather than continued automatically.
+            pipe_mode = getattr(self.renderer, "pipe_mode", False) is True
+            tools_suspended = (
+                self.question_gate_enabled and question_gate_active
+            )
+            tool_execution_pending = bool(has_native_tools) or (
+                bool(all_tools) and not tools_suspended
+            )
+            intermediate_pipe_response = pipe_mode and (
+                tool_execution_pending or not self.turn_completed
+            )
             if suppress_display:
                 logger.info("Hub consumed response, display suppressed")
-            if not suppress_display:
+            if intermediate_pipe_response:
+                logger.debug(
+                    "Pipe mode suppressed intermediate response before tool continuation"
+                )
+            if not suppress_display and not intermediate_pipe_response:
                 self.message_display_service.display_complete_response(
                     thinking_duration=thinking_duration,
                     response=clean_response,
