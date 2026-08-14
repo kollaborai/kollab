@@ -1057,7 +1057,24 @@ class StatusNavigationManager(LayoutEditingMixin, ModalPresenterMixin):
 
         self._shimmer_running = True
         self._shimmer_task = asyncio.create_task(self._effect_animation_loop())
+        self._shimmer_task.add_done_callback(self._on_effect_animation_done)
         logger.debug("Started effect animation loop")
+
+    def _on_effect_animation_done(self, task: asyncio.Task) -> None:
+        """Release the task handle when the animation loop exits."""
+        if self._shimmer_task is task:
+            self._shimmer_task = None
+        self._shimmer_running = False
+
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except Exception:
+            logger.exception("Could not inspect effect animation task")
+            return
+        if error is not None:
+            logger.error("Effect animation task failed: %s", error)
 
     async def _stop_effect_animation(self) -> None:
         """Stop the effect animation background task."""
@@ -1083,6 +1100,8 @@ class StatusNavigationManager(LayoutEditingMixin, ModalPresenterMixin):
             logger.debug("Effect animation loop cancelled")
         except Exception as e:
             logger.error(f"Effect animation loop error: {e}")
+        finally:
+            self._shimmer_running = False
 
     async def render_navigation_state(self) -> None:
         """Render navigation state with selection highlight.
