@@ -909,7 +909,7 @@ class LocalStateService(StateService):
             ):
                 try:
                     llm.create_background_task(
-                        llm._load_native_tools(),
+                        lambda: llm._load_native_tools(),
                         name="reload_native_tools",
                     )
                 except Exception as e:
