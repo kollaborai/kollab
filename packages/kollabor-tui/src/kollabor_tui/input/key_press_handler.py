@@ -126,6 +126,32 @@ class KeyPressHandler:
         self._expand_paste_placeholders_callback = expand_paste_placeholders
         self._show_help_overlay_callback = show_help_overlay
 
+    def _create_background_task(self, coroutine: Awaitable[Any]) -> asyncio.Task[Any]:
+        """Create and own a background task, observing failures."""
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._observe_background_task)
+        return task
+
+    def _observe_background_task(self, task: asyncio.Task[Any]) -> None:
+        """Remove a completed task and consume any exception it raised."""
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Key press background task failed")
+
+    async def cleanup(self) -> None:
+        """Cancel and drain background tasks owned by this handler."""
+        tasks = tuple(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
+
     @property
     def command_mode(self) -> CommandMode:
         """Get current command mode.
@@ -351,8 +377,6 @@ class KeyPressHandler:
 
             # Emit KEY_PRESS event (fire-and-forget for config hooks)
             try:
-                import asyncio
-
                 self._create_background_task(
                     self.event_bus.emit_with_hooks(
                         EventType.KEY_PRESS,
