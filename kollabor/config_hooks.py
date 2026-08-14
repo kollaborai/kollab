@@ -105,6 +105,25 @@ class ConfigHookLoader:
         self._hooks_registered: List[str] = []
         self._pending_tasks: set = set()
 
+    def _on_pending_task_done(self, task: asyncio.Task) -> None:
+        """Remove an async hook task and retrieve failures before cleanup."""
+        self._pending_tasks.discard(task)
+        if task.cancelled():
+            return
+
+        try:
+            error = task.exception()
+        except Exception:
+            logger.exception("Failed to inspect completed async config hook task")
+            return
+
+        if error is not None:
+            logger.error(
+                "Async config hook failed: %s",
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
     async def load_and_register(self) -> int:
         """Load hooks.json files and register all hooks on the event bus.
 
@@ -364,7 +383,7 @@ class ConfigHookLoader:
                     self._run_command(command, payload_json, timeout)
                 )
                 self._pending_tasks.add(task)
-                task.add_done_callback(self._pending_tasks.discard)
+                task.add_done_callback(self._on_pending_task_done)
                 return None
 
             # Synchronous: wait for result
