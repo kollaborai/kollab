@@ -2801,7 +2801,6 @@ class HubPlugin(BasePlugin):
         if watchdog is not None and not watchdog.done():
             watchdog.cancel()
 
-
     async def _perform_self_restart(self) -> None:
         """Run graceful shutdown, then os.execvp to replace this process."""
         try:

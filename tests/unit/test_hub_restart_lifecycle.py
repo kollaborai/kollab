@@ -52,8 +52,9 @@ async def test_restart_watchdog_timeout_execs_when_graceful_path_hangs():
     plugin._self_restart_exec_started = False
     exec_argv = ["/usr/bin/python", "main.py"]
 
-    with patch("plugins.hub.plugin.os.execvp") as execvp, patch(
-        "plugins.hub.plugin.asyncio.sleep", new=AsyncMock()
+    with (
+        patch("plugins.hub.plugin.os.execvp") as execvp,
+        patch("plugins.hub.plugin.asyncio.sleep", new=AsyncMock()),
     ):
         await plugin._self_restart_watchdog(exec_argv, "koordinator")
 
