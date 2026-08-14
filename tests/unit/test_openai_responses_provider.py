@@ -646,6 +646,7 @@ class TestOpenAIResponsesProviderPrepareRequest:
         assert "max_tokens" not in request
         assert "temperature" not in request
         assert request["reasoning"] == {"effort": "max"}
+        assert request["store"] is False
 
     def test_prepare_request_string_input(self, provider_config):
         """Test request with simple string input (not messages array)."""
@@ -700,3 +701,28 @@ class TestOpenAIResponsesProviderPrepareRequest:
         assert request["prompt_cache_key"] == "harness-context-v1"
         assert request["prompt_cache_retention"] == "24h"
         assert request["store"] is True
+
+    def test_codex_request_omits_public_state_and_cache_controls(self):
+        """The ChatGPT/Codex transport rejects public Responses controls."""
+        config = OpenAIResponsesConfig(
+            provider=ProviderType.OPENAI_RESPONSES,
+            api_key="oauth-test-token",
+            model="gpt-5.6-luna",
+            base_url="https://chatgpt.com/backend-api/codex",
+            store_responses=True,
+        )
+        provider = OpenAIResponsesProvider(config)
+
+        request = provider._prepare_request(
+            [{"role": "user", "content": "Use the backend cache."}],
+            tools=None,
+            stream=True,
+            previous_response_id="resp_previous",
+            prompt_cache_key="harness-context-v1",
+            prompt_cache_retention="24h",
+        )
+
+        assert request["store"] is False
+        assert "previous_response_id" not in request
+        assert "prompt_cache_key" not in request
+        assert "prompt_cache_retention" not in request

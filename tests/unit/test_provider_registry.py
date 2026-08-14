@@ -381,6 +381,19 @@ class TestConfigCreation:
 
         assert config.store_responses is True
 
+    def test_openai_responses_codex_profile_defaults_store_false(self):
+        """ChatGPT/Codex rejects the public Responses store=true field."""
+        profile = {
+            "provider": "openai_responses",
+            "api_key": "oauth-test-token",
+            "model": "gpt-5.6-luna",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        }
+
+        config = create_config_from_profile(profile)
+
+        assert config.store_responses is False
+
     def test_create_config_missing_api_key(self):
         """Test missing API key raises error."""
         profile = {"provider": "openai", "model": "gpt-4"}
