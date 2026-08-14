@@ -19,9 +19,7 @@ def _uninitialized_service() -> ConfigService:
 @pytest.mark.asyncio
 async def test_file_change_reload_task_failure_is_observed(caplog):
     service = _uninitialized_service()
-    service._handle_file_change = AsyncMock(
-        side_effect=RuntimeError("reload boom")
-    )
+    service._handle_file_change = AsyncMock(side_effect=RuntimeError("reload boom"))
 
     with caplog.at_level(logging.ERROR, logger="kollabor_config.service"):
         service._schedule_file_change_reload()
