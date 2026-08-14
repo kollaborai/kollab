@@ -252,8 +252,24 @@ async def test_inbound_message_resolves_matching_task_only(tmp_path):
     plugin._presence = MagicMock()
     plugin._identity = MagicMock(identity="lead", agent_id="lead-id")
     plugin._vault = None
-    plugin._event_bus = MagicMock()
-    plugin._llm_service = MagicMock()
+
+    class FakeLLM:
+        conversation_history = []
+        is_processing = False
+
+    class FakeEventBus:
+        def get_service(self, name):
+            return FakeLLM() if name == "llm_service" else None
+
+    plugin.event_bus = FakeEventBus()
+    plugin._event_bus = plugin.event_bus
+    plugin._llm_service = FakeLLM()
+    plugin._history_lock = None
+    plugin._seen_content_hashes = set()
+    plugin._pending_hub_wake_ids = set()
+    plugin._display_hub_message = MagicMock()
+    plugin._bridge = None
+    plugin._change_feed = None
     plugin._route_message = AsyncMock(return_value=[])
     plugin._hub_buffer_retry_queued = False
 
