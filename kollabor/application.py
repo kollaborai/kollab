@@ -2992,8 +2992,11 @@ class TerminalLLMChat:
                 except Exception as e:
                     logger.error(f"Error during task cleanup: {e}")
 
-        # Clear task list
-        self._background_tasks.clear()
+        # Keep ownership of tasks that ignored cancellation past the timeout.
+        # Their done callbacks will remove them once they eventually terminate.
+        self._background_tasks[:] = [
+            task for task in self._background_tasks if not task.done()
+        ]
 
         # Mark startup as incomplete
         self._startup_complete = False
