@@ -312,3 +312,90 @@ class TestSetupAltViewSave(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.asyncio
+async def test_config_altview_observes_profile_switch_failure(caplog):
+    view = ConfigAltView()
+
+    class ConfigService:
+        def set(self, key, value):
+            pass
+
+        def save_key(self, key, value, save_target):
+            return True
+
+        def _notify_reload_callbacks(self):
+            pass
+
+    class Widget:
+        config_path = "kollabor.llm.active_profile"
+
+        def has_pending_changes(self):
+            return True
+
+        def get_pending_value(self):
+            return "broken"
+
+    async def switch_profile(profile):
+        raise RuntimeError("profile switch failed")
+
+    view.config_service = ConfigService()
+    view._section_widgets = [[Widget()]]
+    view.app = SimpleNamespace(
+        llm_service=SimpleNamespace(switch_profile=switch_profile)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        view._do_save("local")
+        await asyncio.sleep(0)
+
+    assert "runtime profile switch failed" in caplog.text
+    assert not view._save_tasks
+
+
+@pytest.mark.asyncio
+async def test_config_altview_cancels_profile_switch_on_complete():
+    view = ConfigAltView()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class ConfigService:
+        def set(self, key, value):
+            pass
+
+        def save_key(self, key, value, save_target):
+            return True
+
+        def _notify_reload_callbacks(self):
+            pass
+
+    class Widget:
+        config_path = "kollabor.llm.active_profile"
+
+        def has_pending_changes(self):
+            return True
+
+        def get_pending_value(self):
+            return "slow"
+
+    async def switch_profile(profile):
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    view.config_service = ConfigService()
+    view._section_widgets = [[Widget()]]
+    view.app = SimpleNamespace(
+        llm_service=SimpleNamespace(switch_profile=switch_profile)
+    )
+
+    view._do_save("local")
+    await started.wait()
+    await view.on_complete()
+
+    assert cancelled.is_set()
+    assert not view._save_tasks
