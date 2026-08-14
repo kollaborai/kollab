@@ -25,7 +25,8 @@ from typing import Any, AsyncIterator
 import pytest
 import pytest_asyncio
 
-from kollabor_rpc import RpcServer
+from kollabor.state.hub_client import HubStateClient
+from kollabor_rpc import RpcError, RpcServer
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.messenger import AgentSocketServer
 
@@ -835,3 +836,200 @@ async def test_rpc_unknown_method_on_attached_path(
             await writer.wait_closed()
         except Exception:
             pass
+
+
+class _HubClientTestWriter:
+    """Minimal StreamWriter double for HubStateClient lifecycle tests."""
+
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+        self.write_event = asyncio.Event()
+        self.closed = False
+        self.wait_closed_called = False
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+        self.write_event.set()
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        self.wait_closed_called = True
+
+
+class _FailingHubClientReader:
+    """Reader double whose next read fails after the test releases it."""
+
+    def __init__(self) -> None:
+        self.fail_event = asyncio.Event()
+
+    async def readline(self) -> bytes:
+        await self.fail_event.wait()
+        raise ConnectionResetError("peer reset")
+
+
+def _rpc_reply_for_last_write(
+    writer: _HubClientTestWriter,
+    *,
+    request_id: str | None = None,
+) -> bytes:
+    request = json.loads(writer.writes[-1].decode("utf-8"))
+    return (
+        json.dumps(
+            {
+                "action": "rpc_reply",
+                "request_id": request_id or request["request_id"],
+                "result": {
+                    "status": "ok",
+                    "identity": "reconnected-peer",
+                },
+                "error": None,
+                "error_kind": None,
+            }
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_hub_state_client_eof_fails_pending_rpc_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Peer EOF must fail in-flight calls instead of waiting for RPC timeout."""
+    reader = asyncio.StreamReader()
+    writer = _HubClientTestWriter()
+    socket_path = tmp_path / "peer.sock"
+    socket_path.touch()
+
+    async def open_connection(_socket_path: str) -> tuple[Any, Any]:
+        return reader, writer
+
+    monkeypatch.setattr(
+        HubStateClient,
+        "discover_peer_socket",
+        staticmethod(lambda _identity: socket_path),
+    )
+    monkeypatch.setattr(
+        "kollabor_rpc.open_unix_connection_with_large_buffer",
+        open_connection,
+    )
+
+    async with HubStateClient.connect("peer", timeout=10.0) as client:
+        call = asyncio.create_task(client.ping())
+        await asyncio.wait_for(writer.write_event.wait(), timeout=1.0)
+
+        reader.feed_eof()
+
+        with pytest.raises(RpcError, match="rpc client closed"):
+            await asyncio.wait_for(call, timeout=0.2)
+        assert client._rpc.pending_count == 0
+
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
+async def test_hub_state_client_read_error_fails_pending_rpc_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Terminal reader errors must fail in-flight calls without timeout delay."""
+    reader = _FailingHubClientReader()
+    writer = _HubClientTestWriter()
+    socket_path = tmp_path / "peer.sock"
+    socket_path.touch()
+
+    async def open_connection(_socket_path: str) -> tuple[Any, Any]:
+        return reader, writer
+
+    monkeypatch.setattr(
+        HubStateClient,
+        "discover_peer_socket",
+        staticmethod(lambda _identity: socket_path),
+    )
+    monkeypatch.setattr(
+        "kollabor_rpc.open_unix_connection_with_large_buffer",
+        open_connection,
+    )
+
+    async with HubStateClient.connect("peer", timeout=10.0) as client:
+        call = asyncio.create_task(client.ping())
+        await asyncio.wait_for(writer.write_event.wait(), timeout=1.0)
+
+        reader.fail_event.set()
+
+        with pytest.raises(RpcError, match="rpc client closed"):
+            await asyncio.wait_for(call, timeout=0.2)
+        assert client._rpc.pending_count == 0
+
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
+async def test_hub_state_client_reconnects_after_eof_and_ignores_stale_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A fresh context works after EOF and ignores an unmatched stale reply."""
+    first_reader = asyncio.StreamReader()
+    first_writer = _HubClientTestWriter()
+    second_reader = asyncio.StreamReader()
+    second_writer = _HubClientTestWriter()
+    connections = iter(
+        [
+            (first_reader, first_writer),
+            (second_reader, second_writer),
+        ]
+    )
+    socket_path = tmp_path / "peer.sock"
+    socket_path.touch()
+
+    async def open_connection(_socket_path: str) -> tuple[Any, Any]:
+        return next(connections)
+
+    monkeypatch.setattr(
+        HubStateClient,
+        "discover_peer_socket",
+        staticmethod(lambda _identity: socket_path),
+    )
+    monkeypatch.setattr(
+        "kollabor_rpc.open_unix_connection_with_large_buffer",
+        open_connection,
+    )
+
+    async with HubStateClient.connect("peer", timeout=10.0) as first_client:
+        first_call = asyncio.create_task(first_client.ping())
+        await asyncio.wait_for(first_writer.write_event.wait(), timeout=1.0)
+        first_reader.feed_eof()
+        with pytest.raises(RpcError, match="rpc client closed"):
+            await asyncio.wait_for(first_call, timeout=0.2)
+
+    async with HubStateClient.connect("peer", timeout=1.0) as second_client:
+        second_call = asyncio.create_task(second_client.ping())
+        await asyncio.wait_for(second_writer.write_event.wait(), timeout=1.0)
+
+        second_reader.feed_data(
+            _rpc_reply_for_last_write(
+                second_writer,
+                request_id="stale-request-from-old-connection",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not second_call.done()
+        assert second_client._rpc.pending_count == 1
+
+        second_reader.feed_data(_rpc_reply_for_last_write(second_writer))
+        result = await asyncio.wait_for(second_call, timeout=0.2)
+
+        assert result["status"] == "ok"
+        assert result["identity"] == "reconnected-peer"
+        assert second_client._rpc.pending_count == 0
+
+    assert first_writer.closed
+    assert second_writer.closed
