@@ -1,1 +1,74 @@
-from types import SimpleNamespace\nfrom unittest.mock import Mock\n\nimport pytest\n\nfrom kollabor_tui.message_coordinator import MessageDisplayCoordinator\n\n\nclass _TerminalState:\n    def write_raw(self, _text):\n        pass\n\n\nclass _Terminal:\n    pipe_mode = True\n    writing_messages = False\n    input_line_written = False\n    last_line_count = 0\n\n    def __init__(self):\n        self.terminal_state = _TerminalState()\n\n    def invalidate_render_cache(self):\n        pass\n\n\n@pytest.mark.asyncio\nasync def test_display_raw_text_requests_attached_render_loop():\n    terminal = _Terminal()\n    coordinator = MessageDisplayCoordinator(terminal, renderer=SimpleNamespace())\n    render_loop = SimpleNamespace(request_render=Mock())\n    coordinator.set_render_loop(render_loop)\n\n    coordinator.display_raw_text(\"hello\")\n\n    render_loop.request_render.assert_called_once_with()\n\n\n@pytest.mark.asyncio\nasync def test_display_raw_text_fallback_observes_render_failure(caplog):\n    terminal = _Terminal()\n\n    async def render_active_area():\n        raise RuntimeError(\"render failed\")\n\n    terminal.render_active_area = render_active_area\n    coordinator = MessageDisplayCoordinator(terminal, renderer=SimpleNamespace())\n\n    coordinator.display_raw_text(\"hello\")\n    await __import__(\"asyncio\").sleep(0)\n    await __import__(\"asyncio\").sleep(0)\n\n    assert \"Render task failed after raw text display\" in caplog.text\n
+"""Regression tests for message-coordinator render scheduling."""
+
+import asyncio
+import logging
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from kollabor_tui.message_coordinator import MessageDisplayCoordinator
+
+
+class _TerminalState:
+    def write_raw(self, _text):
+        pass
+
+
+class _Terminal:
+    pipe_mode = False
+    writing_messages = False
+    input_line_written = False
+    last_line_count = 0
+
+    def __init__(self):
+        self.terminal_state = _TerminalState()
+
+    def clear_active_area(self):
+        pass
+
+    def invalidate_render_cache(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_display_raw_text_requests_attached_render_loop():
+    terminal = _Terminal()
+    coordinator = MessageDisplayCoordinator(terminal, renderer=SimpleNamespace())
+    render_loop = SimpleNamespace(request_render=Mock())
+    coordinator.set_render_loop(render_loop)
+
+    coordinator.display_raw_text("hello")
+
+    render_loop.request_render.assert_called_once_with()
+
+
+def test_display_queued_messages_requests_attached_render_loop():
+    terminal = _Terminal()
+    coordinator = MessageDisplayCoordinator(terminal, renderer=SimpleNamespace())
+    coordinator._display_single_message = Mock()
+    render_loop = SimpleNamespace(request_render=Mock())
+    coordinator.set_render_loop(render_loop)
+    coordinator.queue_message("system", "hello")
+
+    coordinator.display_queued_messages()
+
+    render_loop.request_render.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_display_raw_text_fallback_observes_render_failure(caplog):
+    caplog.set_level(logging.ERROR, logger="kollabor_tui.message_coordinator")
+    terminal = _Terminal()
+
+    async def render_active_area():
+        raise RuntimeError("render failed")
+
+    terminal.render_active_area = render_active_area
+    coordinator = MessageDisplayCoordinator(terminal, renderer=SimpleNamespace())
+
+    coordinator.display_raw_text("hello")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert "Render task failed after raw text display" in caplog.text
