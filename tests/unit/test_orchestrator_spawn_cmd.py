@@ -89,6 +89,8 @@ class TestCreateSessionInitialTask(unittest.TestCase):
         if len(cmd) > 1 and str(cmd[1]).endswith("main.py"):
             self.assertTrue(Path(cmd[1]).is_absolute())
         self.assertIn("--detached", cmd)
+        permissions_idx = cmd.index("--permissions")
+        self.assertEqual(cmd[permissions_idx + 1], "trust")
         self.assertEqual(mock_popen.call_args.kwargs["cwd"], project_dir)
 
     @patch("plugins.agent_orchestrator.orchestrator.threading.Thread")
