@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from kollabor_tui.visual_effects import AgnosterSegment
 from plugins.agent_orchestrator.ring_buffer import RingBuffer
@@ -461,7 +461,12 @@ Aliases: /t, /term, /tmux"""
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _pump_output(proc: subprocess.Popen, ring_buf: RingBuffer, label: str) -> None:
+    def _pump_output(
+        proc: subprocess.Popen,
+        ring_buf: RingBuffer,
+        label: str,
+        on_exit: Optional[Callable[[], None]] = None,
+    ) -> None:
         """Read proc.stdout line-by-line into ring buffer (daemon thread)."""
         stdout = proc.stdout
         assert stdout is not None  # ensured by caller
@@ -476,6 +481,36 @@ Aliases: /t, /term, /tmux"""
             logger.debug(f"[pump] {label} pump ended: {e}")
         finally:
             logger.debug(f"[pump] {label} stdout closed")
+            if on_exit is not None:
+                try:
+                    on_exit()
+                except Exception as e:
+                    logger.debug(f"[pump] {label} exit cleanup failed: {e}")
+
+    def _notify_session_exit(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        session_name: str,
+        session: TerminalSession,
+    ) -> None:
+        """Schedule natural-exit cleanup back on the plugin's event loop."""
+        try:
+            loop.call_soon_threadsafe(
+                self._handle_session_exit, session_name, session
+            )
+        except RuntimeError:
+            self.logger.debug(
+                "Skipping terminal session cleanup after event loop shutdown: %s",
+                session_name,
+            )
+
+    def _handle_session_exit(
+        self, session_name: str, session: TerminalSession
+    ) -> None:
+        """Cancel a dead session's timer while retaining its captured output."""
+        if self.sessions.get(session_name) is not session or session.is_alive():
+            return
+        self._cancel_timeout_task(session_name)
 
     def _capture_output(
         self, session_name: Optional[str], max_lines: Optional[int] = None
@@ -735,21 +770,27 @@ Aliases: /t, /term, /tmux"""
             )
 
             ring_buf = RingBuffer()
-            pump = threading.Thread(
-                target=self._pump_output,
-                args=(proc, ring_buf, name),
-                daemon=True,
-                name=f"pump-bg-{name}",
-            )
-            pump.start()
-
-            self.sessions[name] = TerminalSession(
+            session = TerminalSession(
                 name=name,
                 command=command,
                 proc=proc,
                 ring_buffer=ring_buf,
                 pid=proc.pid,
             )
+            self.sessions[name] = session
+            loop = asyncio.get_running_loop()
+            pump = threading.Thread(
+                target=self._pump_output,
+                args=(proc, ring_buf, name),
+                kwargs={
+                    "on_exit": lambda: self._notify_session_exit(
+                        loop, name, session
+                    )
+                },
+                daemon=True,
+                name=f"pump-bg-{name}",
+            )
+            pump.start()
 
             if timeout:
                 timeout_seconds = self._parse_timeout(timeout)

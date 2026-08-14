@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from plugins.agent_orchestrator.ring_buffer import RingBuffer
 from plugins.terminal_plugin import TerminalSession, TmuxPlugin
 
 
@@ -56,3 +57,29 @@ async def test_timeout_task_failure_is_observed(caplog):
 
     assert "session" not in plugin._timeout_tasks
     assert "Terminal timeout task failed for session 'session'" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_natural_exit_cancels_timer_and_preserves_output():
+    plugin = TmuxPlugin()
+    process = Mock()
+    process.poll.return_value = 0
+    ring_buffer = RingBuffer()
+    ring_buffer.append("completed output")
+    session = TerminalSession(
+        name="session",
+        command="true",
+        proc=process,
+        ring_buffer=ring_buffer,
+    )
+    plugin.sessions["session"] = session
+    task = asyncio.create_task(asyncio.sleep(60))
+    plugin._timeout_tasks["session"] = task
+
+    plugin._handle_session_exit("session", session)
+    await asyncio.gather(task, return_exceptions=True)
+    captured = await plugin.capture_session_output("session")
+
+    assert task.cancelled()
+    assert captured["output"] == ["completed output"]
+    assert "session" not in plugin._timeout_tasks
