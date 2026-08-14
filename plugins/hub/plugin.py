@@ -8250,12 +8250,14 @@ class HubPlugin(BasePlugin):
         dial_target, dial_auth = self._resolve_dial_target(
             peer.identity, peer.socket_path
         )
-        output_lines = await AgentMessenger.request_output(
+        output_lines, capture_error = await AgentMessenger.request_output_diagnostic(
             dial_target,
             lines=lines,
             timeout=5.0,
             auth=dial_auth,
         )
+        if capture_error:
+            return f"capture failed for '{peer.identity}': {capture_error}"
         if not output_lines:
             return f"no recent output from '{peer.identity}'"
 

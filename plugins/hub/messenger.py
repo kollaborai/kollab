@@ -1253,6 +1253,25 @@ class AgentMessenger:
         ssl_ctx: Any = None,
     ) -> List[str]:
         """Request recent output lines from an agent (unix socket or endpoint)."""
+        result, _error = await AgentMessenger.request_output_diagnostic(
+            socket_path,
+            lines=lines,
+            timeout=timeout,
+            auth=auth,
+            ssl_ctx=ssl_ctx,
+        )
+        return result
+
+    @staticmethod
+    async def request_output_diagnostic(
+        socket_path: str,
+        lines: int = 100,
+        timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> tuple[List[str], Optional[str]]:
+        """Request output while distinguishing transport failure from empty output."""
         lines = _coerce_line_count(lines, 100)
         writer = None
         try:
@@ -1265,14 +1284,31 @@ class AgentMessenger:
 
             resp_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
 
-            if resp_line:
+            if not resp_line:
+                return [], "empty response"
+
+            try:
                 resp = json.loads(resp_line.decode().strip())
-                if isinstance(resp, dict) and resp.get("type") == "output":
-                    result = resp.get("lines", [])
-                    return result if isinstance(result, list) else []
-            return []
-        except Exception:
-            return []
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return [], "invalid JSON response"
+
+            if not isinstance(resp, dict):
+                return [], "invalid response envelope"
+            if resp.get("type") != "output":
+                return [], f"unexpected response type: {resp.get('type')!r}"
+
+            result = resp.get("lines", [])
+            if not isinstance(result, list):
+                return [], "output lines were not a list"
+            return result, None
+        except asyncio.TimeoutError:
+            return [], f"timeout after {timeout:g}s"
+        except Exception as exc:
+            logger.debug("Output request failed for %s: %s", socket_path, exc)
+            detail = str(exc).strip()
+            if detail:
+                return [], f"{type(exc).__name__}: {detail}"
+            return [], type(exc).__name__
         finally:
             if writer:
                 writer.close()

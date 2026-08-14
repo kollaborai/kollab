@@ -546,6 +546,38 @@ def test_output_requests_coerce_missing_line_count(tmp_path):
     asyncio.run(run())
 
 
+def test_output_diagnostics_distinguish_empty_output_from_transport_failure():
+    """Capture must expose transport failures instead of reporting idle output."""
+
+    async def run():
+        server = AgentSocketServer(
+            "empty-output-id",
+            lambda _message: None,
+            on_get_output=lambda _lines: [],
+            socket_name=f"ep-empty-output-{os.getpid()}",
+        )
+        sock_path = await server.start()
+        try:
+            result, error = await AgentMessenger.request_output_diagnostic(sock_path)
+            assert result == []
+            assert error is None
+        finally:
+            await server.stop()
+
+        missing_socket = f"/tmp/kollab-missing-output-{os.getpid()}.sock"
+        result, error = await AgentMessenger.request_output_diagnostic(
+            missing_socket, timeout=0.1
+        )
+        assert result == []
+        assert error
+        assert any(
+            kind in error
+            for kind in ("FileNotFoundError", "ConnectionRefusedError", "OSError")
+        )
+
+    asyncio.run(run())
+
+
 def test_offbox_all_dialers_route_through_open(tmp_path):
     """request_status / signal_shutdown / subscribe accept auth= and reach a
     remote endpoint through the same handshake path as send_to_agent."""
