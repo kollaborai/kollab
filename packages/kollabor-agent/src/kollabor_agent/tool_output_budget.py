@@ -476,6 +476,48 @@ def pack_tool_history_messages(
     return stats
 
 
+def pack_tool_history_and_results(
+    messages: Iterable[Any],
+    results: Iterable[Any],
+    store: ToolOutputArtifactStore,
+    *,
+    max_chars: Optional[int],
+    max_result_chars: int,
+    preview_chars: int,
+) -> tuple[ToolOutputPackStats, ToolOutputPackStats]:
+    """Pack the current tool batch before older tool history.
+
+    The current result is the only new evidence the model has for this turn.
+    If history consumes the entire shared budget first, the old ordering leaves
+    the current batch with a zero-character allowance and serializes successful
+    tool calls as empty messages. Pack the current batch first, then reduce old
+    history to whatever budget remains.
+
+    Returns:
+        ``(history_stats, result_stats)`` in the same order used by queue
+        processor telemetry.
+    """
+    result_stats = pack_tool_results(
+        results,
+        store,
+        max_result_chars=max_result_chars,
+        preview_chars=preview_chars,
+        batch_limit_chars=max_chars,
+    )
+    remaining_history_chars = (
+        None
+        if max_chars is None
+        else max(0, max_chars - result_stats.model_chars)
+    )
+    history_stats = pack_tool_history_messages(
+        messages,
+        store,
+        max_chars=remaining_history_chars,
+        preview_chars=preview_chars,
+    )
+    return history_stats, result_stats
+
+
 def build_tool_output_store(
     config: Any, conversation_logger: Any
 ) -> ToolOutputArtifactStore:

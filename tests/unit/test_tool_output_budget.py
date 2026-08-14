@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_agent.tool_output_budget import (
     ToolOutputArtifactStore,
+    pack_tool_history_and_results,
     pack_tool_history_messages,
     pack_tool_results,
     preview_text,
@@ -225,6 +226,36 @@ class TestToolOutputBudget(unittest.TestCase):
                 self.assertEqual(
                     artifact.read_text("utf-8"), "history-output-" + ("x" * 100)
                 )
+
+    def test_current_results_are_packed_before_existing_history(self):
+        with TemporaryDirectory() as directory:
+            store = ToolOutputArtifactStore(Path(directory))
+            messages = [
+                {
+                    "role": "tool",
+                    "content": "old-history-" + ("x" * 100),
+                    "metadata": {"tool_call_id": "call-old"},
+                }
+            ]
+            current = _result("call-current", "current output")
+
+            history_stats, result_stats = pack_tool_history_and_results(
+                messages,
+                [current],
+                store,
+                max_chars=100,
+                max_result_chars=1000,
+                preview_chars=20,
+            )
+
+            self.assertEqual(current.output, "current output")
+            self.assertGreater(result_stats.model_chars, 0)
+            self.assertGreater(history_stats.spilled_count, 0)
+            self.assertTrue(messages[0]["content"])
+            self.assertLessEqual(
+                history_stats.model_chars + result_stats.model_chars,
+                100,
+            )
 
 
 if __name__ == "__main__":

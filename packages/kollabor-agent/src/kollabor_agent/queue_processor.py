@@ -20,8 +20,7 @@ from kollabor_tui.status.core_widgets import get_token_io_state
 
 from .tool_output_budget import (
     build_tool_output_store,
-    pack_tool_history_messages,
-    pack_tool_results,
+    pack_tool_history_and_results,
 )
 
 logger = logging.getLogger(__name__)
@@ -1171,22 +1170,13 @@ class QueueProcessor:
                 raw_tool_calls=raw_tool_calls,
                 xml_tool_calls=all_tools,
             )
-            history_stats = pack_tool_history_messages(
+            history_stats, output_stats = pack_tool_history_and_results(
                 self.conversation_history,
-                self._tool_output_store,
-                max_chars=history_limit,
-                preview_chars=self._tool_output_preview_chars,
-            )
-            batch_limit = self._tool_batch_limit_chars(
-                history_limit=history_limit,
-                existing_tool_chars=history_stats.model_chars,
-            )
-            output_stats = pack_tool_results(
                 all_tool_results,
                 self._tool_output_store,
+                max_chars=history_limit,
                 max_result_chars=self._tool_output_max_chars,
                 preview_chars=self._tool_output_preview_chars,
-                batch_limit_chars=batch_limit,
             )
             if output_stats.result_count or history_stats.result_count:
                 logger.info(
@@ -1503,17 +1493,6 @@ class QueueProcessor:
         # Unknown provider window: still protect the aggregate batch. A zero
         # per-result setting explicitly disables this fallback.
         return self._tool_output_max_chars or None
-
-    @staticmethod
-    def _tool_batch_limit_chars(
-        *,
-        history_limit: Optional[int],
-        existing_tool_chars: int,
-    ) -> Optional[int]:
-        """Return the portion of the shared budget left for this response."""
-        if history_limit is None:
-            return None
-        return max(0, history_limit - existing_tool_chars)
 
     def _track_file_interaction(self, result: ToolExecutionResult) -> None:
         """Record a successful file operation in the conversation logger.
