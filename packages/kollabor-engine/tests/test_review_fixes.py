@@ -313,3 +313,39 @@ async def test_session_mcp_connect_endpoint_connects(app):
         mock_state.reload_mcp_servers.assert_awaited_once_with()
     finally:
         registry.pop("sess_connect", None)
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_reaps_dead_daemons(app):
+    from kollabor_engine.server import get_session_registry
+
+    dead = SimpleNamespace(
+        session_id="sess_dead",
+        alive=False,
+        shutdown=AsyncMock(),
+        to_dict=lambda: {"session_id": "sess_dead"},
+    )
+    live = SimpleNamespace(
+        session_id="sess_live",
+        alive=True,
+        shutdown=AsyncMock(),
+        to_dict=lambda: {"session_id": "sess_live"},
+    )
+    registry = get_session_registry()
+    registry.update({dead.session_id: dead, live.session_id: live})
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/sessions")
+
+        assert response.status_code == 200
+        assert [item["session_id"] for item in response.json()["sessions"]] == [
+            "sess_live"
+        ]
+        dead.shutdown.assert_awaited_once_with()
+        live.shutdown.assert_not_awaited()
+    finally:
+        registry.pop(dead.session_id, None)
+        registry.pop(live.session_id, None)
