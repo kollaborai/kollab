@@ -6436,6 +6436,7 @@ class HubPlugin(BasePlugin):
                         assignee=message.from_identity,
                         evidence=message.content,
                         message_id=message.id,
+                    task_id=str((message.metadata or {}).get("task_id") or "").strip(),
                     )
                 except Exception as e:
                     logger.debug("failed to resolve expected hub reply: %s", e)

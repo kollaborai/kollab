@@ -200,3 +200,12 @@ def test_resolve_reply_can_target_specific_task(tmp_path):
     )
     pending = ledger.pending_replies()
     assert [item["task_id"] for item in pending] == ["task-a"]
+
+
+def test_production_reply_resolver_passes_inbound_task_id():
+    """The live hub message path must disambiguate same-assignee replies."""
+    from pathlib import Path
+
+    source = Path("plugins/hub/plugin.py").read_text()
+    call = source[source.index("resolve_reply(") : source.index("):", source.index("resolve_reply("))]
+    assert 'task_id=str((message.metadata or {}).get("task_id") or "").strip()' in call
