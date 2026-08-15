@@ -481,6 +481,19 @@ Aliases: /t, /term, /tmux"""
             logger.debug(f"[pump] {label} pump ended: {e}")
         finally:
             logger.debug(f"[pump] {label} stdout closed")
+            # Ensure all Popen pipes are released when the reader exits
+            # naturally; otherwise they linger until garbage collection and
+            # trigger ResourceWarning under -X dev.
+            self_proc = proc
+            seen = set()
+            for stream in (self_proc.stdin, self_proc.stdout, self_proc.stderr):
+                if stream is None or id(stream) in seen:
+                    continue
+                seen.add(id(stream))
+                try:
+                    stream.close()
+                except Exception:
+                    pass
             if on_exit is not None:
                 try:
                     on_exit()
