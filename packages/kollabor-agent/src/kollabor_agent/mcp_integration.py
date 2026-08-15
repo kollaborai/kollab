@@ -120,6 +120,7 @@ class MCPServerConnection:
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         """Start the MCP server process."""
@@ -428,6 +429,11 @@ class MCPServerConnection:
         Explicitly closes transports to prevent Python 3.12 asyncio
         __del__ warnings (BaseSubprocessTransport._closed AttributeError).
         """
+        async with self._close_lock:
+            await self._close_impl()
+
+    async def _close_impl(self) -> None:
+        """Close the connection; caller must hold ``_close_lock``."""
         if self.process:
             if self._reader_task and not self._reader_task.done():
                 self._reader_task.cancel()

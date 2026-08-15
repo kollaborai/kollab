@@ -335,6 +335,31 @@ class TestMCPServerConnection(unittest.TestCase):
         asyncio.run(run_test())
 
 
+    def test_concurrent_close_is_race_safe(self):
+        """Concurrent shutdown callers must not dereference a cleared process."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_HangingStdout())
+            request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-close", "method": "tools/call"}
+                )
+            )
+            await asyncio.sleep(0)
+            await asyncio.gather(connection.close(), connection.close())
+            if not request.done():
+                request.cancel()
+            await request
+            self.assertIsNone(connection.process)
+            self.assertEqual(connection._pending_requests, {})
+            self.assertIsNone(connection._reader_task)
+
+        asyncio.run(run_test())
+
+
+
 class TestMCPIntegration(unittest.TestCase):
     """Test MCP integration functionality."""
 
