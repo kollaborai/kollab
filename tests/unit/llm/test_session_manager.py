@@ -50,6 +50,17 @@ class TestSessionManager(unittest.TestCase):
 
         self.prompt_builder = MagicMock()
         self.prompt_builder.build = MagicMock(return_value="system prompt content")
+        self.session_stats = {
+            "messages": 4,
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "total_input_tokens": 30,
+            "total_output_tokens": 40,
+            "cache_read_tokens": 50,
+            "cache_creation_tokens": 60,
+            "total_cache_read_tokens": 70,
+            "total_cache_creation_tokens": 80,
+        }
 
         self.manager = SessionManager(
             conversation_logger=self.conversation_logger,
@@ -58,6 +69,7 @@ class TestSessionManager(unittest.TestCase):
             event_bus=self.event_bus,
             api_service=self.api_service,
             prompt_builder=self.prompt_builder,
+            session_stats=self.session_stats,
         )
 
     def tearDown(self):
@@ -69,6 +81,11 @@ class TestSessionManager(unittest.TestCase):
         self.assertIsNotNone(self.manager)
         self.assertEqual(self.manager.conversation_logger, self.conversation_logger)
         self.assertEqual(self.manager.prompt_builder, self.prompt_builder)
+
+        self.assertIs(self.manager.session_stats, self.session_stats)
+        self.conversation_manager.bind_session_stats.assert_called_once_with(
+            self.session_stats
+        )
 
     def test_initialize_conversation(self):
         """Test initializing conversation."""
@@ -145,6 +162,22 @@ class TestSessionManager(unittest.TestCase):
             )
 
         self.conversation_manager.reset_session.assert_called_once_with("new")
+
+
+    def test_restart_session_resets_shared_session_stats_to_zero(self):
+        """A genuinely fresh session must not inherit persisted counters."""
+        conversation_history = [ConversationMessage(role="system", content="old")]
+        add_message_fn = MagicMock()
+
+        with patch("kollabor_ai.generate_session_name", return_value="fresh"):
+            self.loop.run_until_complete(
+                self.manager.restart_session(conversation_history, add_message_fn)
+            )
+
+        self.assertEqual(
+            self.session_stats,
+            {key: 0 for key in self.session_stats},
+        )
 
     def test_restart_session_resets_logger(self):
         """Test restart calls reset_session on conversation logger."""

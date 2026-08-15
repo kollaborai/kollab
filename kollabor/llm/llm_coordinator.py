@@ -500,6 +500,7 @@ class LLMService:
             event_bus=self.event_bus,
             api_service=self.api_service,
             prompt_builder=self._prompt_builder,
+            session_stats=self.session_stats,
         )
 
         # Queue processor (owns message queue, overflow strategies, LLM turns)

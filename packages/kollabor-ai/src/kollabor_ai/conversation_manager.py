@@ -15,6 +15,18 @@ from kollabor_ai.session_naming import generate_branch_name, generate_session_na
 
 logger = logging.getLogger(__name__)
 
+SESSION_STAT_KEYS = (
+    "messages",
+    "input_tokens",
+    "output_tokens",
+    "total_input_tokens",
+    "total_output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "total_cache_read_tokens",
+    "total_cache_creation_tokens",
+)
+
 
 class ConversationManager:
     """Manage conversation state and history.
@@ -73,9 +85,30 @@ class ConversationManager:
             "model_used": None,
         }
 
+        # Bound by LLMService after its live stats dictionary is initialized.
+        # Keeping the same mutable mapping lets loads restore counters in place.
+        self._session_stats: Optional[Dict[str, Any]] = None
+
         logger.info(
             f"Conversation manager initialized with session: {self.current_session_id}"
         )
+
+    def bind_session_stats(self, session_stats: Dict[str, Any]) -> None:
+        """Bind the live LLM statistics mapping used for persistence and restore."""
+        self._session_stats = session_stats
+
+    def _session_stats_snapshot(self) -> Dict[str, Any]:
+        """Return the stable persisted subset of the live session statistics."""
+        source = self._session_stats or {}
+        return {key: source.get(key, 0) for key in SESSION_STAT_KEYS}
+
+    def _restore_session_stats(self, saved_stats: Optional[Dict[str, Any]]) -> None:
+        """Restore known counters in place, defaulting old sessions to zero."""
+        if self._session_stats is None:
+            return
+        source = saved_stats if isinstance(saved_stats, dict) else {}
+        for key in SESSION_STAT_KEYS:
+            self._session_stats[key] = source.get(key, 0)
 
     def add_message(
         self,
@@ -367,6 +400,7 @@ class ConversationManager:
             "metadata": self.conversation_metadata,
             "summary": self.get_conversation_summary(),
             "messages": self.messages,
+            "session_stats": self._session_stats_snapshot(),
         }
 
         with open(filepath, "w") as f:
@@ -410,8 +444,9 @@ class ConversationManager:
             # Rebuild message index
             self.message_index = {m["uuid"]: m for m in self.messages}
 
-            # Update context window
+            # Update context window and restore persisted usage counters.
             self._update_context_window()
+            self._restore_session_stats(data.get("session_stats"))
 
             logger.info(f"Loaded conversation from: {filepath}")
             return True
@@ -442,6 +477,7 @@ class ConversationManager:
                 "message_index": self.message_index,
                 "context_window": self.context_window,
                 "current_parent_uuid": self.current_parent_uuid,
+                "session_stats": self._session_stats_snapshot(),
                 "saved_at": datetime.now().isoformat(),
             }
 
@@ -455,6 +491,22 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Failed to save session: {e}")
             return False
+
+    def _load_snapshot_session_stats(
+        self, session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Load persisted counters from the sidecar used by streaming sessions."""
+        snapshot_file = self.snapshots_dir / f"{session_id}_snapshot.json"
+        if not snapshot_file.exists():
+            return None
+        try:
+            with open(snapshot_file, "r") as f:
+                snapshot = json.load(f)
+            saved_stats = snapshot.get("session_stats")
+            return saved_stats if isinstance(saved_stats, dict) else None
+        except Exception as e:
+            logger.warning(f"Failed to load session stats from {snapshot_file}: {e}")
+            return None
 
     def load_session(self, session_id: str) -> bool:
         """Load session from storage.
@@ -506,8 +558,13 @@ class ConversationManager:
             if not self.message_index:
                 self.message_index = {m["uuid"]: m for m in self.messages}
 
-            # Update context window
+            # Update context window and restore persisted usage counters. Streaming
+            # JSONL sessions store their counters in the matching saved snapshot.
             self._update_context_window()
+            saved_stats = data.get("session_stats")
+            if saved_stats is None:
+                saved_stats = self._load_snapshot_session_stats(session_id)
+            self._restore_session_stats(saved_stats)
 
             logger.info(f"Loaded session: {session_id} from: {session_file}")
             return True
@@ -689,6 +746,7 @@ class ConversationManager:
                             "message_index": data.get("message_index", {}),
                             "context_window": data.get("context_window", []),
                             "current_parent_uuid": data.get("current_parent_uuid"),
+                            "session_stats": data.get("session_stats"),
                         }
 
                     # Handle conversation logger streaming format
