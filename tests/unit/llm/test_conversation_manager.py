@@ -242,6 +242,45 @@ class TestConversationSessionStatsPersistence(unittest.TestCase):
             self.assertEqual(reader.messages, original_messages)
             self.assertEqual(original_stats, self.SESSION_STATS)
 
+    def test_malformed_complete_session_does_not_partially_mutate_state(self):
+        """Invalid saved containers fail atomically instead of poisoning live state."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        malformed_records = {
+            "metadata": {"messages": [], "metadata": "invalid"},
+            "missing_uuid": {"messages": [{"role": "user", "content": "x"}]},
+            "message_item": {"messages": ["invalid"], "metadata": {}},
+            "message_index": {
+                "messages": [],
+                "metadata": {},
+                "message_index": "invalid",
+            },
+            "context_window": {
+                "messages": [],
+                "metadata": {},
+                "context_window": "invalid",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, record in malformed_records.items():
+                with self.subTest(name=name):
+                    (root / f"{name}.jsonl").write_text(json.dumps(record) + "\n")
+                    reader = self._manager(root)
+                    reader.current_session_id = "current"
+                    reader.add_message("user", "keep this message")
+                    original_messages = list(reader.messages)
+                    original_stats = dict(self.SESSION_STATS)
+                    reader.bind_session_stats(original_stats)
+
+                    self.assertFalse(reader.load_session(name))
+                    self.assertEqual(reader.current_session_id, "current")
+                    self.assertEqual(reader.messages, original_messages)
+                    self.assertEqual(original_stats, self.SESSION_STATS)
+
     def test_metadata_only_streaming_session_remains_loadable(self):
         """A recognized empty streaming session is valid legacy state."""
         import json

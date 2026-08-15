@@ -747,11 +747,36 @@ class ConversationManager:
 
                     # Handle save_session format (complete session object)
                     if "messages" in data and isinstance(data["messages"], list):
+                        saved_messages = data["messages"]
+                        saved_metadata = data.get("metadata", metadata)
+                        saved_index = data.get("message_index", {})
+                        saved_context = data.get("context_window", [])
+                        valid_messages = all(
+                            isinstance(message, dict)
+                            and isinstance(message.get("uuid"), str)
+                            and bool(message["uuid"])
+                            for message in saved_messages
+                        )
+                        valid_index = isinstance(saved_index, dict) and all(
+                            isinstance(message_uuid, str)
+                            and isinstance(message, dict)
+                            for message_uuid, message in saved_index.items()
+                        )
+                        valid_context = isinstance(saved_context, list) and all(
+                            isinstance(message, dict) for message in saved_context
+                        )
+                        if not (
+                            valid_messages
+                            and isinstance(saved_metadata, dict)
+                            and valid_index
+                            and valid_context
+                        ):
+                            continue
                         return {
-                            "messages": data["messages"],
-                            "metadata": data.get("metadata", metadata),
-                            "message_index": data.get("message_index", {}),
-                            "context_window": data.get("context_window", []),
+                            "messages": saved_messages,
+                            "metadata": saved_metadata,
+                            "message_index": saved_index,
+                            "context_window": saved_context,
                             "current_parent_uuid": data.get("current_parent_uuid"),
                             "session_stats": data.get("session_stats"),
                         }
