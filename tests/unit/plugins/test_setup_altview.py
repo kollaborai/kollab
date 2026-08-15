@@ -55,7 +55,13 @@ def _key(name="", char=""):
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    """Run a coroutine on an owned loop without replacing the policy loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        assert loop.is_closed()
 
 
 def _fresh_view():
@@ -404,4 +410,3 @@ async def test_config_altview_cancels_profile_switch_on_complete():
 
     assert cancelled.is_set()
     assert not view._save_tasks
-
