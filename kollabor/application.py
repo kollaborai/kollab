@@ -2978,7 +2978,6 @@ class TerminalLLMChat:
             await self._cleanup_impl()
             self._cleanup_complete = True
 
-
     async def _cleanup_impl(self) -> None:
         """Clean up all resources and cancel background tasks.
 
