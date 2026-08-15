@@ -2966,6 +2966,20 @@ class TerminalLLMChat:
             print(f"Error: {message}", file=sys.stderr)
 
     async def cleanup(self) -> None:
+        """Run cleanup at most once, serializing concurrent callers."""
+        lock = getattr(self, "_cleanup_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._cleanup_lock = lock
+        async with lock:
+            if getattr(self, "_cleanup_complete", False):
+                logger.debug("Application cleanup already complete")
+                return
+            await self._cleanup_impl()
+            self._cleanup_complete = True
+
+
+    async def _cleanup_impl(self) -> None:
         """Clean up all resources and cancel background tasks.
 
         This method is guaranteed to run on all exit paths via finally block.

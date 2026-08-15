@@ -66,3 +66,17 @@ async def test_cleanup_retains_task_that_outlives_cancellation_timeout(monkeypat
     await asyncio.sleep(0)
 
     assert task not in app._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_cleanup_is_idempotent_for_repeated_calls():
+    app = object.__new__(TerminalLLMChat)
+    app._background_tasks = []
+    app.running = True
+    app._startup_complete = True
+    app.shutdown = AsyncMock()
+
+    await app.cleanup()
+    await app.cleanup()
+
+    app.shutdown.assert_awaited_once()
