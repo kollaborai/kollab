@@ -552,10 +552,9 @@ class TestAPIKeyLoader(unittest.IsolatedAsyncioTestCase):
 
         mock_manager = Mock()
 
-        async def get_key(*args):
-            return "keyring-key"
-
-        mock_manager.get_key = AsyncMock(side_effect=get_key)
+        mock_manager.get_key = Mock(
+            return_value=asyncio.coroutine(lambda: "keyring-key")()
+        )
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -1362,7 +1361,7 @@ class TestEnvironmentKeyStorageDetailed(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(key, expected_key)
 
 
-class TestAPIKeyLoaderDetailed(unittest.TestCase):
+class TestAPIKeyLoaderDetailed(unittest.IsolatedAsyncioTestCase):
     """Test detailed API key loader behavior."""
 
     def setUp(self):
@@ -1374,9 +1373,11 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -1391,9 +1392,11 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -1446,7 +1449,16 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -1462,11 +1474,16 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Keyring failed"))
-            )()
-        )
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            raise RuntimeError("Keyring failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
@@ -1491,11 +1508,16 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         # No encrypted storage provided
         loader = APIKeyLoader(key_manager=mock_manager)
@@ -2019,9 +2041,11 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
