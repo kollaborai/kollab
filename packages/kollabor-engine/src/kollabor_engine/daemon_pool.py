@@ -272,6 +272,19 @@ class DaemonHandle:
                 self._writer.close()
             except Exception:
                 pass
+            else:
+                # StreamWriter.close() only schedules transport shutdown. Await
+                # wait_closed() so the socket transport is fully released before
+                # the handle returns; otherwise asyncio debug mode reports
+                # unclosed transports (and close races with a subsequent spawn).
+                wait_closed = getattr(self._writer, "wait_closed", None)
+                if wait_closed is not None:
+                    try:
+                        await wait_closed()
+                    except (ConnectionError, OSError, RuntimeError):
+                        # The peer/event loop may already have gone away. The
+                        # daemon is still stopped below, so this is best effort.
+                        pass
 
         # A spawn that failed before presence was read has no pid yet. Look it
         # up one last time so a failed create never leaves a live daemon behind.
