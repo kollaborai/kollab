@@ -43,7 +43,7 @@ def _make_coordinator(**overrides):
     coord.message_display_service.hide_loading = MagicMock()
     coord.message_display_service.message_coordinator = MagicMock()
     coord.message_display_service.message_coordinator.display_message_sequence = (
-        AsyncMock()
+        MagicMock()
     )
 
     # Functions
