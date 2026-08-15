@@ -25,7 +25,7 @@ import secrets
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from kollabor_ai.providers.security import (
     CRYPTOGRAPHY_AVAILABLE,
@@ -603,8 +603,11 @@ class TestAPIKeyLoader(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
 
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
         loader = APIKeyLoader(key_manager=mock_manager)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -1435,8 +1438,11 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
 
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
         loader = APIKeyLoader(key_manager=mock_manager)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -1480,11 +1486,11 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         # No encrypted storage provided
         loader = APIKeyLoader(key_manager=mock_manager)
@@ -2044,8 +2050,11 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
 
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
         loader = APIKeyLoader(key_manager=mock_manager)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -2059,11 +2068,11 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
@@ -2084,11 +2093,11 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -2388,7 +2397,7 @@ class TestEnvironmentKeyStoragePaths(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
 
 
-class TestAPIKeyLoaderFallbackPaths(unittest.TestCase):
+class TestAPIKeyLoaderFallbackPaths(unittest.IsolatedAsyncioTestCase):
     """Test APIKeyLoader fallback paths."""
 
     async def test_load_api_key_environment_first(self):
@@ -2419,8 +2428,11 @@ class TestAPIKeyLoaderFallbackPaths(unittest.TestCase):
     async def test_migrate_key_success_to_keyring(self):
         """Test migration succeeds to keyring."""
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
 
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
         loader = APIKeyLoader(key_manager=mock_manager)
 
         await loader._migrate_key("test-profile", "test-key")
@@ -2430,11 +2442,11 @@ class TestAPIKeyLoaderFallbackPaths(unittest.TestCase):
     async def test_migrate_key_fallback_to_encrypted(self):
         """Test migration falls back to encrypted storage."""
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
