@@ -529,7 +529,7 @@ class TestPlaintextKeyStorage(TempFileTest):
 # =============================================================================
 
 
-class TestAPIKeyLoader(unittest.TestCase):
+class TestAPIKeyLoader(unittest.IsolatedAsyncioTestCase):
     """Test API key loader with 4-tier fallback."""
 
     def setUp(self):
@@ -551,9 +551,11 @@ class TestAPIKeyLoader(unittest.TestCase):
         profile = {"name": "test-profile"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -603,7 +605,16 @@ class TestAPIKeyLoader(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
