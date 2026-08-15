@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.messenger import (
     INBOX_MAX_REPLAY,
@@ -169,6 +171,22 @@ class TestInboxTTLExpiry:
         assert len(result) == 2
         contents = {m.content for m in result}
         assert contents == {"recent1", "recent2"}
+
+    @pytest.mark.parametrize("payload", ["[]", '"scalar"', "null"])
+    def test_non_object_json_is_discarded(self, tmp_path: Path, payload: str) -> None:
+        """Valid JSON values that are not message objects cannot crash replay."""
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        malformed = inbox / "000000-invalid.json"
+        malformed.write_text(payload)
+        fresh = inbox / "000001-fresh.json"
+        fresh.write_text(json.dumps(_make_msg(content="fresh").to_dict()))
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert [message.content for message in result] == ["fresh"]
+        assert not malformed.exists()
 
 
 # ---------------------------------------------------------------------------

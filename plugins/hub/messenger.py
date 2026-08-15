@@ -1564,6 +1564,18 @@ class AgentMessenger:
                     pass
                 continue
 
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Bad mailbox message %s: expected JSON object, got %s",
+                    f,
+                    type(data).__name__,
+                )
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+                continue
+
             # TTL bounds ordinary chatter only. Durable task controls must
             # reach normal receive so stale cron reminders are explicitly
             # ACKed and assignments are classified instead of disappearing.
