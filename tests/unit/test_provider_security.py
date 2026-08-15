@@ -1765,7 +1765,7 @@ class TestRedactingLogFilterEdgeCases(unittest.TestCase):
         self.assertEqual(record.exc_info[0], ValueError)
 
 
-class TestSingletonFunctions(unittest.TestCase):
+class TestSingletonFunctions(unittest.IsolatedAsyncioTestCase):
     """Test singleton initialization functions."""
 
     @skip_if_no_keyring()
