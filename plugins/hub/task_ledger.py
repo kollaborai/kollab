@@ -393,6 +393,14 @@ class TaskLedger:
     ) -> None:
         with self._file_lock(self._pending_replies_path()):
             replies = self._read_pending_replies_unlocked()
+            # Outbound delivery can be replayed after a retry or reconnect.
+            # Treat the message id as an idempotency key: a pending entry must
+            # be recorded at most once, and a resolved entry must never be
+            # resurrected by a replayed acknowledgement request.
+            if message_id and any(
+                item.get("message_id") == message_id for item in replies
+            ):
+                return
             replies.append(
                 {
                     "task_id": task_id,
