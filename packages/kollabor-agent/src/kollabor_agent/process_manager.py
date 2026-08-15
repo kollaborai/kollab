@@ -769,6 +769,15 @@ class ProcessManager:
             if mp.state in (ProcessState.STOPPED, ProcessState.CRASHED)
         ]
         for name in dead:
+            mp = self._processes[name]
+            # A process can exit naturally without going through kill(), so
+            # strategy-owned resources (notably Popen pipes) still need to be
+            # released before dropping the tracking record.  SubprocessStrategy
+            # handles this idempotently when the process is already reaped.
+            try:
+                await self._kill_process(mp, graceful_timeout=0)
+            except Exception:
+                logger.debug("cleanup failed for dead process %s", name, exc_info=True)
             del self._processes[name]
         return len(dead)
 
