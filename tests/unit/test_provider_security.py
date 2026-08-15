@@ -1313,7 +1313,7 @@ class TestAPIKeyManagerErrors(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
 
 
-class TestEnvironmentKeyStorageDetailed(unittest.TestCase):
+class TestEnvironmentKeyStorageDetailed(unittest.IsolatedAsyncioTestCase):
     """Test detailed environment storage behavior."""
 
     def setUp(self):
