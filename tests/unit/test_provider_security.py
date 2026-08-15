@@ -2460,7 +2460,7 @@ class TestAPIKeyLoaderFallbackPaths(unittest.IsolatedAsyncioTestCase):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManagerErrorPaths(unittest.TestCase):
+class TestAPIKeyManagerErrorPaths(unittest.IsolatedAsyncioTestCase):
     """Test error handling paths in APIKeyManager."""
 
     def setUp(self):
@@ -2470,6 +2470,7 @@ class TestAPIKeyManagerErrorPaths(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_store_key_runtime_error_message(
         self, mock_keyring_enabled, mock_get_keyring, mock_set_password
     ):
@@ -2490,8 +2491,9 @@ class TestAPIKeyManagerErrorPaths(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_get_key_logs_error_on_failure(
-        self, mock_get_keyring, mock_get_password
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
     ):
         """Test get_key logs error when keyring fails."""
         from keyring.errors import KeyringError
@@ -2507,8 +2509,9 @@ class TestAPIKeyManagerErrorPaths(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_delete_key_logs_error_on_failure(
-        self, mock_get_keyring, mock_delete
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
     ):
         """Test delete_key logs error when keyring fails."""
         from keyring.errors import KeyringError
