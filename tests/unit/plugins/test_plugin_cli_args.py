@@ -1,6 +1,7 @@
 """Tests for Plugin CLI Arguments Registration system."""
 
 import argparse
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -105,7 +106,7 @@ class TestBasePlugin(unittest.TestCase):
         args = argparse.Namespace(test_value="hello")
 
         # Should not raise exception
-        plugin.initialize(args)
+        asyncio.run(plugin.initialize(args))
 
     def test_test_plugin_register_cli_args(self):
         """Test TestPlugin.register_cli_args() adds arguments."""
