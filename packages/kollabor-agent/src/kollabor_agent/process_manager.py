@@ -21,15 +21,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -367,7 +358,7 @@ class SubprocessStrategy(SpawnStrategy):
             self._close_fds(proc)
             return True  # already dead
 
-        loop = _get_loop()
+        loop = asyncio.get_running_loop()
         try:
             # Kill the entire process group (sessions use start_new_session=True)
             try:
