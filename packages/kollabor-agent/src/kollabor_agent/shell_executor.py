@@ -138,6 +138,21 @@ class ShellExecutor:
                     execution_time=time.time() - start_time,
                 )
             except asyncio.CancelledError:
+                # Preserve outer task cancellation semantics while still
+                # terminating the subprocess group before transports close.
+                # An explicit ``cancel()`` sets _cancelled and is reported as
+                # a normal cancelled ShellResult; task.cancel() must propagate
+                # so callers (and TaskGroup/timeout scopes) can observe it.
+                outer_cancelled = not self._cancelled
+                if outer_cancelled:
+                    try:
+                        await asyncio.shield(self._kill_process_group())
+                    except asyncio.CancelledError:
+                        # The cleanup itself may observe cancellation; the
+                        # original cancellation still takes precedence.
+                        pass
+                    raise
+
                 await self._kill_process_group()
                 return ShellResult(
                     success=False,
