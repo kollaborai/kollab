@@ -167,6 +167,108 @@ class TestConversationSessionStatsPersistence(unittest.TestCase):
                 {key: 0 for key in self.SESSION_STATS},
             )
 
+    def test_load_session_sanitizes_malformed_counter_values(self):
+        """Malformed individual counters cannot poison later accumulation."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            malformed = {
+                "session_id": "malformed-counters",
+                "metadata": {},
+                "messages": [],
+                "message_index": {},
+                "context_window": [],
+                "current_parent_uuid": None,
+                "session_stats": {
+                    "messages": 3,
+                    "input_tokens": "101",
+                    "output_tokens": None,
+                    "total_input_tokens": 303,
+                    "total_output_tokens": -1,
+                    "cache_read_tokens": 1.5,
+                    "cache_creation_tokens": True,
+                    "total_cache_read_tokens": [],
+                    "total_cache_creation_tokens": 808,
+                    "unknown_counter": 999,
+                },
+            }
+            (root / "malformed-counters.jsonl").write_text(json.dumps(malformed) + "\n")
+
+            restored_stats = {key: 999 for key in self.SESSION_STATS}
+            reader = self._manager(root)
+            reader.bind_session_stats(restored_stats)
+
+            self.assertTrue(reader.load_session("malformed-counters"))
+            self.assertEqual(
+                restored_stats,
+                {
+                    "messages": 3,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_input_tokens": 303,
+                    "total_output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0,
+                    "total_cache_read_tokens": 0,
+                    "total_cache_creation_tokens": 808,
+                },
+            )
+            restored_stats["total_input_tokens"] += restored_stats["input_tokens"]
+            restored_stats["total_cache_read_tokens"] += restored_stats[
+                "cache_read_tokens"
+            ]
+
+    def test_invalid_json_only_session_does_not_mutate_live_state(self):
+        """An unrecognized session fails without clearing the current conversation."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "invalid.jsonl").write_text("{not-json}\n")
+
+            reader = self._manager(root)
+            reader.current_session_id = "current"
+            reader.add_message("user", "keep this message")
+            original_messages = list(reader.messages)
+            original_stats = dict(self.SESSION_STATS)
+            reader.bind_session_stats(original_stats)
+
+            self.assertFalse(reader.load_session("invalid"))
+            self.assertEqual(reader.current_session_id, "current")
+            self.assertEqual(reader.messages, original_messages)
+            self.assertEqual(original_stats, self.SESSION_STATS)
+
+    def test_metadata_only_streaming_session_remains_loadable(self):
+        """A recognized empty streaming session is valid legacy state."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = {
+                "type": "conversation_metadata",
+                "startTime": "2026-08-14T22:00:00Z",
+                "cwd": str(root),
+                "gitBranch": "main",
+            }
+            (root / "metadata-only.jsonl").write_text(json.dumps(metadata) + "\n")
+
+            restored_stats = {key: 999 for key in self.SESSION_STATS}
+            reader = self._manager(root)
+            reader.bind_session_stats(restored_stats)
+
+            self.assertTrue(reader.load_session("metadata-only"))
+            self.assertEqual(reader.messages, [])
+            self.assertEqual(
+                restored_stats,
+                {key: 0 for key in self.SESSION_STATS},
+            )
+
     def test_streaming_session_uses_matching_saved_snapshot_stats(self):
         """The normal streaming resume path reads stats from its saved sidecar."""
         import json

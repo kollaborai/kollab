@@ -103,12 +103,16 @@ class ConversationManager:
         return {key: source.get(key, 0) for key in SESSION_STAT_KEYS}
 
     def _restore_session_stats(self, saved_stats: Optional[Dict[str, Any]]) -> None:
-        """Restore known counters in place, defaulting old sessions to zero."""
+        """Restore valid known counters, defaulting unsafe values to zero."""
         if self._session_stats is None:
             return
         source = saved_stats if isinstance(saved_stats, dict) else {}
         for key in SESSION_STAT_KEYS:
-            self._session_stats[key] = source.get(key, 0)
+            value = source.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                logger.warning("Ignoring invalid persisted session counter: %s", key)
+                value = 0
+            self._session_stats[key] = value
 
     def add_message(
         self,
@@ -729,6 +733,7 @@ class ConversationManager:
             "turn_count": 0,
             "topics": [],
         }
+        recognized_record = False
 
         try:
             with open(session_file, "r") as f:
@@ -736,6 +741,8 @@ class ConversationManager:
                     try:
                         data = json.loads(line.strip())
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(data, dict):
                         continue
 
                     # Handle save_session format (complete session object)
@@ -752,13 +759,16 @@ class ConversationManager:
                     # Handle conversation logger streaming format
                     msg_type = data.get("type")
                     if msg_type == "conversation_metadata":
+                        recognized_record = True
                         metadata["started_at"] = data.get("startTime")
                         metadata["working_directory"] = data.get("cwd", "unknown")
                         metadata["git_branch"] = data.get("gitBranch", "unknown")
                     elif msg_type == "conversation_end":
+                        recognized_record = True
                         summary = data.get("summary", {})
                         metadata["topics"] = summary.get("themes", [])
                     elif msg_type in ("user", "assistant"):
+                        recognized_record = True
                         content = data.get("message", {}).get("content", "")
                         if isinstance(content, list) and content:
                             content = content[0].get("text", "")
@@ -776,6 +786,9 @@ class ConversationManager:
                         )
                         if msg_type == "user":
                             metadata["turn_count"] = metadata.get("turn_count", 0) + 1
+
+            if not recognized_record:
+                return {}
 
             # Build summary-like shape to keep interface stable
             return {
