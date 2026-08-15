@@ -3,7 +3,6 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
-asyncio_default_fixture_loop_scope = "function"
 addopts = "-p no:warnings"
 pythonpath = [
     ".",
