@@ -735,6 +735,50 @@ class TestQueueProcessor(unittest.TestCase):
         )
 
 
+    def test_cache_metrics_accumulate_across_truncated_continuation(self):
+        """Per-turn cache metrics include continuation usage and totals add."""
+        self.conversation_history.append(ConversationMessage(role="user", content="prompt"))
+        self.api_service.last_stop_reason = "length"
+        self.api_service.provider_type = "test"
+        self.api_service.model = "test-model"
+        usages = iter([
+            {"prompt_tokens": 10, "completion_tokens": 4, "cache_read_tokens": 3, "cache_creation_tokens": 2},
+            {"prompt_tokens": 11, "completion_tokens": 5, "cache_read_tokens": 7, "cache_creation_tokens": 6},
+        ])
+        self.api_service.get_last_token_usage = MagicMock(side_effect=lambda: next(usages))
+        async def call_llm(**kwargs):
+            if self.streaming_handler.call_llm.call_count == 1:
+                self.api_service.last_stop_reason = "length"
+                return "partial"
+            self.api_service.last_stop_reason = ""
+            return "final"
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.response_parser.parse_response.return_value = {
+            "content": "final", "components": {}, "turn_completed": True,
+            "question_gate_active": False,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_tool_calls.return_value = []
+        self.api_service.last_thinking_content = None
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.conversation_logger.log_assistant_message = AsyncMock(return_value="id")
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("final", False, False, False))
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(user_message_provided=True, current_parent_uuid="parent")
+        )
+
+        self.assertEqual(self.session_stats["cache_read_tokens"], 10)
+        self.assertEqual(self.session_stats["cache_creation_tokens"], 8)
+        self.assertEqual(self.session_stats["total_cache_read_tokens"], 10)
+        self.assertEqual(self.session_stats["total_cache_creation_tokens"], 8)
+
+
 class TestQueueProcessorToolContinuation(unittest.TestCase):
     def test_state_update_requires_followup(self):
         """Every executed tool result is fed back before the turn can end."""
