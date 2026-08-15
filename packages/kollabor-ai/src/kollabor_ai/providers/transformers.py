@@ -30,6 +30,46 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 
+def _openai_cache_tokens(usage: Dict[str, Any]) -> tuple[int, int]:
+    """Extract OpenAI cache read/creation aliases from usage payloads."""
+    details = usage.get("prompt_tokens_details", {}) or {}
+    read = details.get(
+        "cached_tokens",
+        usage.get("cached_tokens", usage.get("cache_read_input_tokens", 0)),
+    ) or 0
+    creation = 0
+    for key in (
+        "cache_creation_tokens",
+        "cache_creation_input_tokens",
+        "cache_write_tokens",
+    ):
+        creation = details.get(key, usage.get(key, 0)) or 0
+        if creation:
+            break
+    return int(read), int(creation)
+
+
+def _has_openai_usage_fields(usage: Dict[str, Any]) -> bool:
+    """Return whether a usage payload contains meaningful accounting fields."""
+    if not usage:
+        return False
+    known = {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_read_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_tokens",
+        "cache_creation_input_tokens",
+        "cache_write_tokens",
+    }
+    if any(usage.get(key) for key in known):
+        return True
+    details = usage.get("prompt_tokens_details")
+    return isinstance(details, dict) and bool(details)
+
+
 class ToolCallAccumulator:
     """
     Accumulates incremental tool call deltas from streaming responses.
@@ -336,19 +376,20 @@ class OpenAIResponseTransformer:
         # chunk whose delta content is "" (OpenRouter/deepseek). surface usage
         # before the content / empty-choices early-returns swallow the token
         # accounting.
-        if usage and usage.get("total_tokens"):
+        if usage and _has_openai_usage_fields(usage):
             first_choice = choices[0] if choices else {}
             delta0 = first_choice.get("delta", {}) or {}
             # Only yield usage-only chunk if there's no real content/tool calls
             if not (delta0.get("content") or delta0.get("tool_calls")):
-                details = usage.get("prompt_tokens_details", {}) or {}
+                cache_read, cache_creation = _openai_cache_tokens(usage)
                 return StreamingResponse(
                     delta=TextDelta(content=""),
                     usage=UsageInfo(
                         prompt_tokens=usage.get("prompt_tokens", 0),
                         completion_tokens=usage.get("completion_tokens", 0),
                         total_tokens=usage.get("total_tokens", 0),
-                        cache_read_tokens=details.get("cached_tokens", 0),
+                        cache_read_tokens=cache_read,
+                        cache_creation_tokens=cache_creation,
                     ),
                     is_final=True,
                     finish_reason=first_choice.get("finish_reason"),
@@ -406,8 +447,7 @@ class OpenAIResponseTransformer:
             if usage:
                 # OpenAI reports cached tokens under prompt_tokens_details
                 # cached_tokens is a subset of prompt_tokens (already included)
-                details = usage.get("prompt_tokens_details", {}) or {}
-                cached = details.get("cached_tokens", 0)
+                cached, cache_creation = _openai_cache_tokens(usage)
                 return StreamingResponse(
                     delta=TextDelta(content=""),
                     usage=UsageInfo(
@@ -415,6 +455,7 @@ class OpenAIResponseTransformer:
                         completion_tokens=usage.get("completion_tokens", 0),
                         total_tokens=usage.get("total_tokens", 0),
                         cache_read_tokens=cached,
+                        cache_creation_tokens=cache_creation,
                     ),
                     is_final=True,
                     finish_reason=finish_reason,
@@ -494,13 +535,13 @@ class OpenAIResponseTransformer:
 
         # Extract usage (including OpenAI prompt caching metrics)
         usage_dict = response.get("usage", {})
-        details = usage_dict.get("prompt_tokens_details", {}) or {}
-        cached = details.get("cached_tokens", 0)
+        cached, cache_creation = _openai_cache_tokens(usage_dict)
         usage = UsageInfo(
             prompt_tokens=usage_dict.get("prompt_tokens", 0),
             completion_tokens=usage_dict.get("completion_tokens", 0),
             total_tokens=usage_dict.get("total_tokens", 0),
             cache_read_tokens=cached,
+            cache_creation_tokens=cache_creation,
         )
 
         return UnifiedResponse(
