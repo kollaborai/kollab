@@ -2314,7 +2314,7 @@ class TestPlaintextKeyStorageDirectMethods(TempFileTest):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManagerLogging(unittest.TestCase):
+class TestAPIKeyManagerLogging(unittest.IsolatedAsyncioTestCase):
     """Test logging paths in APIKeyManager."""
 
     def setUp(self):
@@ -2324,8 +2324,9 @@ class TestAPIKeyManagerLogging(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_store_key_logs_info_message(
-        self, mock_get_keyring, mock_set_password
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
     ):
         """Test store_key logs success message."""
         mock_get_keyring.return_value = self.mock_backend
@@ -2340,7 +2341,10 @@ class TestAPIKeyManagerLogging(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_logs_info_message(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_logs_info_message(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test delete_key logs success message."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -2464,7 +2468,7 @@ class TestAPIKeyManagerErrorPaths(unittest.TestCase):
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
     async def test_store_key_runtime_error_message(
-        self, mock_get_keyring, mock_set_password
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
     ):
         """Test store_key RuntimeError has helpful message."""
         from keyring.errors import KeyringError
