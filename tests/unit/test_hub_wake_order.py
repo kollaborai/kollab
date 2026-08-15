@@ -329,6 +329,8 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(receipt["acknowledged"])
         self.assertEqual(receipt["ack_transport"], "local_receipt")
         self.assertEqual(receipt["ack_target"], "")
+        self.assertEqual(receipt["reply_to"], reminder.id)
+
         self.assertEqual(llm_service.conversation_history, [])
         self.assertEqual(event_bus.emitted, [])
 

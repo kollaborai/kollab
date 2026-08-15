@@ -6118,6 +6118,10 @@ class HubPlugin(BasePlugin):
             "disposition": "stale",
             "reason": reason,
             "reminder_id": message.id,
+            # Preserve the original routing identity in both direct ACKs and
+            # local receipts so consumers can correlate stale reminders even
+            # when delivery to the target is unavailable.
+            "reply_to": message.id,
         }
 
         if ack_target and ack_target != (
