@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor.llm.agent_hud import (
     AgentHudEntry,
@@ -210,6 +210,51 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(llm_service.conversation_history, [])
             self.assertEqual(event_bus.emitted, [])
 
+    async def test_metadata_only_stale_task_cron_is_acknowledged_without_wake(self):
+        """Durable task-cron metadata must classify stale work regardless of sender."""
+        llm_service = FakeLLMService()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        tasks_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(tasks_dir.cleanup)
+        plugin._task_ledger = TaskLedger(tasks_dir.name)
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._display_hub_message = MagicMock()
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="sapphire",
+            agent_id="sapphire-id",
+            state="idle",
+        )
+
+        reminder = HubMessage(
+            action="message",
+            from_agent="koordinator-id",
+            from_identity="koordinator",
+            to="sapphire",
+            content="metadata-only stale task-cron control",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_cron": True,
+                "task_id": "missing-metadata-only",
+                "source_identity": "koordinator",
+            },
+        )
+
+        await plugin._on_message_received(reminder)
+
+        ack = plugin._route_message.await_args.args[0]
+        self.assertEqual(ack.to, "koordinator")
+        self.assertEqual(ack.reply_to, reminder.id)
+        self.assertEqual(ack.metadata["reminder_id"], reminder.id)
+        self.assertEqual(ack.metadata["disposition"], "stale")
+        plugin._display_hub_message.assert_not_called()
+        self.assertEqual(llm_service.conversation_history, [])
+        self.assertEqual(event_bus.emitted, [])
+
+
     async def test_task_cron_ack_does_not_wake_coordinator(self):
         llm_service = FakeLLMService()
         event_bus = FakeEventBus(llm_service)
@@ -384,6 +429,53 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
             ack = plugin._route_message.await_args.args[0]
             self.assertEqual(ack.metadata["ack_transport"], "direct_failed")
             self.assertEqual(llm_service.conversation_history, [])
+
+    async def test_stale_task_cron_records_invalid_ack_target_as_failed(self):
+        """An undiscoverable, nonqueueable ACK target is not direct success."""
+        llm_service = FakeLLMService()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._task_ledger = None
+        plugin._vault = MagicMock()
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._presence.discover_agents_async = AsyncMock(return_value=[])
+        plugin._trace_delivery = MagicMock()
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="sapphire",
+            agent_id="sapphire-id",
+            state="idle",
+        )
+
+        reminder = HubMessage(
+            action="message",
+            from_agent="task-cron-id",
+            from_identity="task-cron",
+            to="sapphire",
+            content="[task reminder: missing-invalid-target] stale task",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_cron": True,
+                "task_id": "missing-invalid-target",
+                "source_identity": "not-a-valid-hub-identity",
+            },
+        )
+
+        with patch(
+            "plugins.hub.plugin.AgentMessenger.send_to_file", new=AsyncMock()
+        ) as send_to_file:
+            await plugin._on_message_received(reminder)
+
+        send_to_file.assert_not_awaited()
+        receipt = plugin._vault.append_stream.call_args.kwargs["metadata"]
+        self.assertEqual(receipt["ack_transport"], "direct_failed")
+        self.assertEqual(receipt["ack_target"], "not-a-valid-hub-identity")
+        self.assertEqual(receipt["reply_to"], reminder.id)
+        self.assertEqual(receipt["reminder_id"], reminder.id)
+        self.assertEqual(llm_service.conversation_history, [])
+        self.assertEqual(event_bus.emitted, [])
+
 
     async def test_task_cron_delivery_requires_discoverable_target_and_success(self):
         plugin = HubPlugin(event_bus=MagicMock())

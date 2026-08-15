@@ -6076,7 +6076,8 @@ class HubPlugin(BasePlugin):
         disposition to the cron source and returns before the reminder is
         displayed or injected as fresh work.
         """
-        if message.from_identity != "task-cron":
+        metadata = message.metadata or {}
+        if message.from_identity != "task-cron" and not metadata.get("task_cron"):
             return False
 
         task_id = self._task_cron_id(message)
@@ -7543,6 +7544,7 @@ class HubPlugin(BasePlugin):
         agents = await self._presence.discover_agents_async()
         if message.scope == MessageScope.DIRECT.value:
             agents = [agent for agent in agents if agent.identity == message.to]
+        discovered_identities = {agent.identity for agent in agents}
         my_id = self._identity.agent_id if self._identity else ""
         delivered_identities: set[str] = set()
 
@@ -7583,7 +7585,10 @@ class HubPlugin(BasePlugin):
             else:
                 delivered_identities.add(agent.identity)
 
-        if self._should_queue_offline_direct_target(message, delivered_identities):
+        queue_offline = self._should_queue_offline_direct_target(
+            message, delivered_identities
+        )
+        if queue_offline:
             queued_for = list((message.metadata or {}).get("_queued_for", []))
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
@@ -7593,6 +7598,20 @@ class HubPlugin(BasePlugin):
                 "queued_identity_mailbox",
                 target=message.to,
                 detail="offline direct target",
+            )
+        elif (
+            message.scope == MessageScope.DIRECT.value
+            and (message.metadata or {}).get("task_cron_ack")
+            and message.to not in discovered_identities
+            and not (self._identity and message.to == self._identity.identity)
+        ):
+            reason = "target is not a routable hub identity"
+            rejections.append((message.to, reason))
+            self._trace_delivery(
+                message,
+                "rejected",
+                target=message.to,
+                detail=reason,
             )
 
         return rejections
