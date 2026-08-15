@@ -65,9 +65,7 @@ class TestLLMServiceIntegration(unittest.TestCase):
         self.assertEqual(self.service.session_stats["total_cache_read_tokens"], 0)
         self.assertEqual(self.service.session_stats["total_cache_creation_tokens"], 0)
 
-
     def test_service_initialization(self):
-
         """Test service initializes with correct configuration."""
         # After refactoring, API configuration is in api_service
         self.assertEqual(self.service.max_history, 10)
