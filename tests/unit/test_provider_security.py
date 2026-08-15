@@ -59,7 +59,7 @@ def skip_if_no_keyring():
     return unittest.skipIf(not KEYRING_AVAILABLE, "keyring library not available")
 
 
-class TempFileTest(unittest.TestCase):
+class TempFileTest(unittest.IsolatedAsyncioTestCase):
     """Base class for tests using temporary files."""
 
     def setUp(self):
@@ -1066,9 +1066,9 @@ class TestEncryptedFileKeyStorageErrors(TempFileTest):
         # Create empty file
         self.storage_path.write_text("")
 
-        # Should return empty dict (file exists but no data)
-        keystore = self.storage._load_keystore()
-        self.assertEqual(keystore, {})
+        # Empty encrypted files are invalid and should fail closed.
+        with self.assertRaises(RuntimeError):
+            self.storage._load_keystore()
 
     async def test_load_keystore_corrupted_data(self):
         """Test loading corrupted encrypted data."""
