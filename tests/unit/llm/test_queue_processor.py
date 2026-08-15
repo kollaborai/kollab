@@ -62,6 +62,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.task_config = MockTaskConfig()
 
         self.api_service = AsyncMock()
+        self.api_service._provider = None
         self.tool_executor = MagicMock()
         self.response_parser = MagicMock()
         self.message_display_service = MagicMock()
