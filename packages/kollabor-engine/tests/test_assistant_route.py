@@ -12,12 +12,44 @@ import asyncio
 import json
 import sys
 import types
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from kollabor_engine.routes import messages
+
+
+def _close_current_event_loop() -> None:
+    """Close and clear the non-running loop left on the main-thread policy."""
+    policy = asyncio.get_event_loop_policy()
+    try:
+        loop = policy.get_event_loop()
+    except RuntimeError:
+        return
+    if not loop.is_running():
+        loop.close()
+        policy.set_event_loop(None)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _release_pytest_asyncio_replacement_loop() -> Iterator[None]:
+    """Release the clean loop pytest-asyncio 0.21 leaves after async tests."""
+    yield
+    _close_current_event_loop()
+
+
+def test_close_current_event_loop_releases_policy_resource() -> None:
+    """Module cleanup closes and clears its pytest-asyncio replacement loop."""
+    policy = asyncio.get_event_loop_policy()
+    loop = policy.new_event_loop()
+    policy.set_event_loop(loop)
+
+    _close_current_event_loop()
+
+    assert loop.is_closed()
+    with pytest.raises(RuntimeError, match="no current event loop"):
+        policy.get_event_loop()
 
 
 class _FakeCancellationSignal:
