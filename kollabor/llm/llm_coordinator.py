@@ -620,6 +620,10 @@ class LLMService:
             "output_tokens": 0,  # Last request output tokens
             "total_input_tokens": 0,  # Cumulative session input
             "total_output_tokens": 0,  # Cumulative session output
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "total_cache_read_tokens": 0,
+            "total_cache_creation_tokens": 0,
             "messages": 0,
         }
 

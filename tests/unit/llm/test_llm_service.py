@@ -58,7 +58,16 @@ class TestLLMServiceIntegration(unittest.TestCase):
         }
         return config_map.get(key, default)
 
+    def test_session_stats_initialize_cache_counters(self):
+        """Fresh sessions initialize cache metrics to zero."""
+        self.assertEqual(self.service.session_stats["cache_read_tokens"], 0)
+        self.assertEqual(self.service.session_stats["cache_creation_tokens"], 0)
+        self.assertEqual(self.service.session_stats["total_cache_read_tokens"], 0)
+        self.assertEqual(self.service.session_stats["total_cache_creation_tokens"], 0)
+
+
     def test_service_initialization(self):
+
         """Test service initializes with correct configuration."""
         # After refactoring, API configuration is in api_service
         self.assertEqual(self.service.max_history, 10)
