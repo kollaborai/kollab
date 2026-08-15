@@ -116,6 +116,12 @@ class AgentSocketServer:
         # Idle read timeout for off-box connections (overridable for tests).
         self._remote_idle_timeout: float = REMOTE_IDLE_TIMEOUT
 
+        # Listening-server shutdown does not close already accepted streams.
+        # Own both sides explicitly so stop() can drain connection handlers
+        # before their event loop is torn down.
+        self._connection_tasks: set[asyncio.Task[None]] = set()
+        self._connection_writers: set[asyncio.StreamWriter] = set()
+
     async def start(self) -> str:
         """Start the socket server. Returns the socket path."""
         # Clean stale socket
@@ -125,7 +131,7 @@ class AgentSocketServer:
         try:
             self._server = await asyncio.wait_for(
                 asyncio.start_unix_server(
-                    self._handle_connection, path=str(self.socket_path)
+                    self._accept_connection, path=str(self.socket_path)
                 ),
                 timeout=10.0,
             )
@@ -144,7 +150,7 @@ class AgentSocketServer:
             try:
                 self._tcp_server = await asyncio.wait_for(
                     asyncio.start_server(
-                        lambda r, w: self._handle_connection(r, w, require_auth=True),
+                        lambda r, w: self._accept_connection(r, w, require_auth=True),
                         host=self._tcp_host,
                         port=self._tcp_port,
                         ssl=self._tcp_ssl,
@@ -423,6 +429,39 @@ class AgentSocketServer:
         await writer.drain()
         logger.info(f"socket auth succeeded for '{designation}'")
         return designation
+
+    def _accept_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        require_auth: bool = False,
+    ) -> None:
+        """Own an accepted stream until its connection handler is drained."""
+        self._connection_writers.add(writer)
+        task = asyncio.create_task(
+            self._own_connection(reader, writer, require_auth=require_auth)
+        )
+        self._connection_tasks.add(task)
+
+    async def _own_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        require_auth: bool = False,
+    ) -> None:
+        """Run and clean up one accepted connection owned by this server."""
+        task = asyncio.current_task()
+        try:
+            await self._handle_connection(reader, writer, require_auth=require_auth)
+        finally:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except (Exception, asyncio.CancelledError):
+                pass
+            self._connection_writers.discard(writer)
+            if task is not None:
+                self._connection_tasks.discard(task)
 
     async def _handle_connection(
         self,
@@ -736,12 +775,6 @@ class AgentSocketServer:
 
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
 
     async def _get_context(self, lines: int) -> str:
         """Get recent context - override in plugin integration."""
@@ -949,17 +982,38 @@ class AgentSocketServer:
 
     async def stop(self) -> None:
         """Stop the socket server."""
+        listeners: list[asyncio.AbstractServer] = []
         if self._tcp_server:
             self._tcp_server.close()
-            try:
-                await self._tcp_server.wait_closed()
-            except Exception:
-                pass
+            listeners.append(self._tcp_server)
             self._tcp_server = None
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            listeners.append(self._server)
             self._server = None
+
+        # Closing a listening server leaves accepted connections alive. Close
+        # their transports, give handlers a short chance to finish naturally,
+        # then cancel anything still blocked before callers tear down the loop.
+        writers = tuple(self._connection_writers)
+        for writer in writers:
+            writer.close()
+        tasks = tuple(self._connection_tasks)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=1.0)
+            if pending:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        self._connection_tasks.difference_update(tasks)
+        self._connection_writers.difference_update(writers)
+
+        for listener in listeners:
+            try:
+                await asyncio.wait_for(listener.wait_closed(), timeout=1.0)
+            except Exception:
+                pass
+
         if self.socket_path.exists():
             try:
                 self.socket_path.unlink()

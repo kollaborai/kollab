@@ -148,6 +148,29 @@ async def test_rpc_request_on_handshake_path(
 
 
 @pytest.mark.asyncio
+async def test_server_stop_closes_and_drains_accepted_connection(
+    running_server: tuple[AgentSocketServer, RpcServer, str],
+) -> None:
+    """Stopping the listener must also close already accepted unix streams."""
+    server, _, socket_path = running_server
+    reader, writer = await asyncio.open_unix_connection(path=socket_path)
+
+    for _ in range(20):
+        if server._connection_tasks:
+            break
+        await asyncio.sleep(0)
+    assert len(server._connection_tasks) == 1
+
+    await server.stop()
+
+    assert await asyncio.wait_for(reader.read(), timeout=1.0) == b""
+    assert not server._connection_tasks
+    assert not server._connection_writers
+    writer.close()
+    await writer.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_rpc_request_on_attached_path(
     running_server: tuple[AgentSocketServer, RpcServer, str],
 ) -> None:
