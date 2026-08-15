@@ -38,6 +38,16 @@ from kollabor_ai.providers.models import (
 from kollabor_ai.providers.openai_responses_provider import OpenAIResponsesProvider
 
 
+def _run(coro):
+    """Run a coroutine on an owned loop without replacing the policy loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        assert loop.is_closed()
+
+
 def _http_status_error(status_code: int, headers=None, message="provider error"):
     request = httpx.Request("POST", "https://provider.test/v1/messages")
     response = httpx.Response(
@@ -168,7 +178,7 @@ def test_retry_loop_uses_configured_count_for_typed_529():
                 await service.call_llm([{"role": "user", "content": "hello"}])
         return sleep
 
-    sleep = asyncio.run(run())
+    sleep = _run(run())
     assert provider.call.await_count == 3
     assert sleep.await_count == 2
 
@@ -187,7 +197,7 @@ def test_retry_loop_fails_fast_when_server_delay_exceeds_cap():
                 await service.call_llm([{"role": "user", "content": "hello"}])
         return sleep
 
-    sleep = asyncio.run(run())
+    sleep = _run(run())
     assert provider.call.await_count == 1
     sleep.assert_not_awaited()
 
@@ -231,7 +241,7 @@ def test_permanent_typed_error_does_not_retry_because_message_mentions_500():
                 await service.call_llm([{"role": "user", "content": "hello"}])
         return sleep
 
-    sleep = asyncio.run(run())
+    sleep = _run(run())
     assert provider.call.await_count == 1
     sleep.assert_not_awaited()
 
