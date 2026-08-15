@@ -1236,7 +1236,7 @@ class TestPlaintextKeyStorageErrors(TempFileTest):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManagerErrors(unittest.TestCase):
+class TestAPIKeyManagerErrors(unittest.IsolatedAsyncioTestCase):
     """Test error handling in API key manager."""
 
     def setUp(self):
@@ -1253,7 +1253,8 @@ class TestAPIKeyManagerErrors(unittest.TestCase):
         self.assertIn("keyring library not available", str(ctx.exception))
 
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_store_key_logging(self, mock_get_keyring):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_store_key_logging(self, mock_keyring_enabled, mock_get_keyring):
         """Test key storage logs success message."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -1264,7 +1265,10 @@ class TestAPIKeyManagerErrors(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_get_key_error_logging(self, mock_get_keyring, mock_get_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_get_key_error_logging(
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
+    ):
         """Test key retrieval errors are logged."""
         from keyring.errors import KeyringError
 
@@ -1280,7 +1284,10 @@ class TestAPIKeyManagerErrors(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_error_handling(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_error_handling(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test delete key handles general KeyringError."""
         from keyring.errors import KeyringError
 
