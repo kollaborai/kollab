@@ -120,14 +120,6 @@ class HubWakeDecision:
     reason: str = ""
 
 
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
-
 @dataclass
 class HubCronJob:
     """A scheduled recurring message to a hub agent."""
@@ -289,6 +281,7 @@ class HubPlugin(BasePlugin):
 
         # State
         self._roster: List[Dict] = []
+        self._startup_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
         self._dreaming_task: Optional[asyncio.Task] = None
@@ -3788,7 +3781,8 @@ class HubPlugin(BasePlugin):
                 except Exception as e:
                     logger.error(f"Hub _start_hub failed: {e}", exc_info=True)
 
-            _get_loop().call_soon(lambda: asyncio.ensure_future(_safe_start()))
+            loop = asyncio.get_running_loop()
+            self._startup_task = loop.create_task(_safe_start())
 
     async def _reconcile_agent_bundle(self, bundle: str) -> None:
         """Switch the active agent bundle to match this agent's hub role.
@@ -10457,6 +10451,14 @@ class HubPlugin(BasePlugin):
                 self._change_feed.release_all(self._identity.identity)
             except Exception as e:
                 logger.debug(f"Lane release on shutdown failed: {e}")
+
+        if self._startup_task:
+            self._startup_task.cancel()
+            try:
+                await self._startup_task
+            except asyncio.CancelledError:
+                pass
+
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             try:
