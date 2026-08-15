@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from kollabor_engine import daemon_pool
 
 
