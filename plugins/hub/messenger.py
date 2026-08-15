@@ -925,17 +925,19 @@ class AgentSocketServer:
         recv_task = asyncio.create_task(_recv_input())
 
         try:
-            done, pending = await asyncio.wait(
+            await asyncio.wait(
                 [send_task, recv_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
         finally:
+            # Always stop both child loops, including when this stream task is
+            # cancelled externally (for example during server shutdown). A
+            # normal detach cancels the still-running sender; cancellation of
+            # this coroutine must do the same or the sender leaks indefinitely.
+            for task in (send_task, recv_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(send_task, recv_task, return_exceptions=True)
             if self._display_tap is not None:
                 self._display_tap.unsubscribe(client_id)
             try:

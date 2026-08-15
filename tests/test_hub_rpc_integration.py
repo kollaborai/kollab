@@ -217,6 +217,49 @@ async def test_rpc_request_on_attached_path(
 
 
 @pytest.mark.asyncio
+async def test_attach_stream_cancellation_unsubscribes_and_stops_children(
+    running_server: tuple[AgentSocketServer, RpcServer, str],
+) -> None:
+    """Cancelling an attach stream must remove its subscriber and child tasks."""
+    server, _, _ = running_server
+
+    class _BlockingReader:
+        async def readline(self) -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+    class _Writer:
+        def write(self, data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    client_id = "cancelled-attach-client"
+    task = asyncio.create_task(
+        server._stream_to_attacher(
+            _BlockingReader(), _Writer(), client_id, "readonly"
+        )
+    )
+    for _ in range(20):
+        if server._display_tap.subscriber_count == 1:
+            break
+        await asyncio.sleep(0)
+    assert server._display_tap.subscriber_count == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert server._display_tap.subscriber_count == 0
+
+
+@pytest.mark.asyncio
 async def test_attach_registers_display_subscriber_before_snapshot_drains(
     running_server: tuple[AgentSocketServer, RpcServer, str],
 ) -> None:
