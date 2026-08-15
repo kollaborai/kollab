@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "packages" / "kollabor-agent" / "src"))
 
-from kollabor_agent.process_manager import SubprocessStrategy, SpawnRequest
+from kollabor_agent.process_manager import SpawnRequest, SubprocessStrategy
 
 
 class TestFilterEnv(unittest.TestCase):

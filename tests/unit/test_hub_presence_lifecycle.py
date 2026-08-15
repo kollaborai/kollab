@@ -1,7 +1,7 @@
 """Presence lifecycle regression tests."""
 
-from concurrent.futures import ThreadPoolExecutor
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from plugins.hub.presence import _atomic_write

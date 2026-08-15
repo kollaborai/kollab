@@ -20,7 +20,6 @@ import aiohttp
 # Ensure we can import kollabor_agent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from kollabor_agent.tool_definition import ToolDefinition, ToolParameter
 from kollabor_agent.tool_registry import ToolRegistry
 
 

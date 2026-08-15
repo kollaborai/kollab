@@ -1,7 +1,7 @@
 import io
 
-from plugins.terminal_plugin import TmuxPlugin
 from plugins.agent_orchestrator.ring_buffer import RingBuffer
+from plugins.terminal_plugin import TmuxPlugin
 
 
 class _FakeStream(io.BytesIO):
