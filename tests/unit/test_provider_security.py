@@ -2829,7 +2829,7 @@ class TestLoggingRedactorExceptionFallback(unittest.TestCase):
 
 
 @skip_if_no_keyring()
-class TestGetKeyManagerSingleton(unittest.TestCase):
+class TestGetKeyManagerSingleton(unittest.IsolatedAsyncioTestCase):
     """Test get_key_manager singleton function."""
 
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
