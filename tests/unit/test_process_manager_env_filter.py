@@ -11,6 +11,7 @@ Callers that genuinely need a credential can pass it via SpawnRequest.env.
 
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -119,6 +120,20 @@ class TestFilterEnv(unittest.TestCase):
 class TestSpawnEnvFiltering(unittest.IsolatedAsyncioTestCase):
     """Integration: spawn() must NOT pass raw os.environ to child process."""
 
+    async def test_spawn_mock_preserves_asyncio_thread_lifecycle(self):
+        """The spawn mock must not replace asyncio's process-wide Thread class."""
+        strategy = SubprocessStrategy()
+        real_thread = threading.Thread
+
+        with (
+            patch("subprocess.Popen", return_value=MagicMock(pid=42)),
+            patch.object(strategy, "_pump_stdout"),
+        ):
+            result = await strategy.spawn(SpawnRequest(name="test-agent", cmd=[]))
+            self.assertIs(threading.Thread, real_thread)
+
+        self.assertTrue(result.success)
+
     async def test_spawn_with_none_env_filters_secrets(self):
         """When request.env is None, spawn() must filter secrets from os.environ."""
         strategy = SubprocessStrategy()
@@ -145,7 +160,7 @@ class TestSpawnEnvFiltering(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("subprocess.Popen", side_effect=_fake_popen),
-            patch("threading.Thread"),
+            patch.object(strategy, "_pump_stdout"),
             patch.dict(os.environ, fake_environ, clear=True),
         ):
             request = SpawnRequest(name="test-agent", cmd=["echo", "hi"])
@@ -179,7 +194,7 @@ class TestSpawnEnvFiltering(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("subprocess.Popen", side_effect=_fake_popen),
-            patch("threading.Thread"),
+            patch.object(strategy, "_pump_stdout"),
         ):
             request = SpawnRequest(
                 name="credentialed-agent",
