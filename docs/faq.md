@@ -1,7 +1,7 @@
 ---
 title: "FAQ"
 created: 2026-02-24
-modified: 2026-04-08
+modified: 2026-08-06
 status: active
 ---
 # FAQ
@@ -31,9 +31,6 @@ Yes, MIT-licensed. You pay only for the LLM API usage to your provider.
 ## Setup
 
 ### How do I install?
-
-macOS:
-  brew install kollaborai/tap/kollab
 
 Cross-platform:
   curl -sS https://raw.githubusercontent.com/kollaborai/kollab/main/install.sh | bash
@@ -87,6 +84,25 @@ Create a loadout preset:
   /llm new
 
 See [features/profiles.md](features/profiles.md) for profile management.
+
+### What is the difference between an agent name and a hub identity?
+
+`--agent` selects a behavior bundle such as `coder` or `research`. `--as`
+selects the hub identity, such as `lapis`, used for messages, capture, vaults,
+and offline inbox delivery. `--profile` selects the provider connection; a
+loadout can add a model and parameter preset. See [features/agents.md](features/agents.md).
+
+### How do I open the browser UI?
+
+Run:
+
+```bash
+kollab --web-ui
+```
+
+It starts or reuses the local engine on `127.0.0.1:7433` and serves the browser
+UI on `127.0.0.1:8080`. See the [engine README](../packages/kollabor-engine/README.md)
+and [web UI README](../packages/kollabor-webui/README.md).
 
 ### How do I use pipe mode?
 

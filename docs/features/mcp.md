@@ -1,7 +1,7 @@
 ---
 title: "MCP (Model Context Protocol)"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-08-06
 status: active
 ---
 # MCP (Model Context Protocol)
@@ -194,6 +194,7 @@ export BRAVE_API_KEY="xxx"
 | `/mcp show` | Show server status |
 | `/mcp servers` | Show server status |
 | `/mcp tools [server]` | Show available tools |
+| `/mcp reload` | Reload MCP config and reconnect enabled servers |
 
 Inside the `/mcp` manager, `g` toggles the global MCP subsystem
 (`plugins.mcp.enabled`). Server-level actions still manage individual entries.

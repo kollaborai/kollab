@@ -2,12 +2,12 @@
 title: "Architecture Overview"
 doc_type: architecture-reference
 created: 2026-02-24
-modified: 2026-04-10
+modified: 2026-08-06
 status: active
 ---
 # Architecture Overview
 
-Kollab is a monorepo containing 8 extracted packages plus the core
+Kollab is a monorepo containing 9 extracted packages plus the core
 orchestration layer. Everything is event-driven with hooks at every level.
 
 ## Monorepo Structure
@@ -30,8 +30,9 @@ kollab/
 │   ├── kollabor-events/         # Event bus + hooks
 │   ├── kollabor-config/         # Configuration management
 │   ├── kollabor-plugins/        # Plugin framework
-│   ├── kollabor-engine/         # HTTP server (future)
-│   └── kollabor-webui/          # Web UI (future)
+│   ├── kollabor-engine/         # Local HTTP/SSE engine
+│   ├── kollabor-rpc/            # Daemon/attach RPC protocol
+│   └── kollabor-webui/          # Assistant-ui browser client
 │
 ├── plugins/                     # Plugin implementations
 └── bundles/agents/              # Agent definitions
@@ -47,6 +48,9 @@ kollab/
 | kollabor-events | Event bus, hook registry | EventBus, EventType, Hook |
 | kollabor-config | Config loading, migration | ConfigService, ConfigManager |
 | kollabor-plugins | Plugin discovery, loading | PluginRegistry, PluginFactory, KollaborPluginSDK |
+| kollabor-engine | Local HTTP/SSE runtime, sessions, permissions, MCP, hub | FastAPI app, EngineSession |
+| kollabor-rpc | Daemon/attach transport and RPC helpers | RpcServer, RpcClient |
+| kollabor-webui | Browser client for engine sessions, tools, permissions, MCP, and hub | `kollabor-webui` |
 
 ## Data Flow
 

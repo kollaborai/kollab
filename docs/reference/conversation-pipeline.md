@@ -460,7 +460,7 @@ Gaps and Inconsistencies
       session_parser handles this correctly but it's unintuitive.
 
   [4] No conversation_metadata update on provider change
-      If the user switches providers mid-session (/profile), the
+      If the user switches providers mid-session (/llm; historically /profile), the
       conversation_metadata is not updated. The provider field in
       the metadata entry reflects the initial provider only.
 

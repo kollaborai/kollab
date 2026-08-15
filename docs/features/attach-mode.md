@@ -1,7 +1,7 @@
 ---
 title: "Attach Mode"
 created: 2026-04-10
-modified: 2026-04-10
+modified: 2026-08-06
 status: active
 ---
 # Attach Mode
@@ -38,8 +38,8 @@ Detach with Ctrl+Z (daemon keeps running). Reattach anytime with --attach.
 These flags cross the attach-client -> daemon boundary via RPC (kollabor/application.py:173-209):
 
 ```
---profile <name>      Switch LLM profile on daemon
---agent <name>        Switch active agent on daemon
+--profile <name>      Switch profile or loadout on daemon
+--agent <bundle>      Switch active agent bundle on daemon
 --skill <name>        Load a skill onto active agent
 --system-prompt <path> Install custom system prompt
 --context <name>      Attach to named conversation context
@@ -81,6 +81,8 @@ Write methods (phase 4.5):
 - activate_skill, deactivate_skill, set_system_prompt
 - set_approval_mode, restart_session
 - enable_mcp_server, disable_mcp_server
+- reload_mcp_servers
+- hub_send_msg, hub_broadcast
 - clear_session_approvals, clear_project_approvals
 - create_context, attach_to_context, archive_context
 - resume_conversation
@@ -113,7 +115,7 @@ Context RPCs: list_contexts, get_active_context, create_context, attach_to_conte
 
 ## Hub CLI
 
-The --hub flag enables daemon management without attaching a TUI. These work against the daemon's hub plugin state via filesystem reads (presence files, vault files).
+The --hub flag enables daemon management without attaching a TUI. Read commands use the daemon's hub state; attach-mode hub writes use StateService RPC where supported.
 
 Subcommands (kollabor/cli.py:386-395, verify with _print_hub_help at line 1256):
 
@@ -147,25 +149,35 @@ Ctrl+Z detaches from the daemon without killing it (kollabor/application.py:1488
 Reattach with the same identity:
 
 ```bash
-kollab --attach jarvis
+kollab --attach koordinator
 # picks up exactly where you left off
 ```
 
-State persists across attach cycles: conversation history, active profile, loaded skills, hub designation, work queue.
+State persists across attach cycles: conversation history, active profile, loaded skills, hub identity, work queue.
 
 ## Known Gaps
 
-Deferred to phase 4.6 (`docs/architecture/records/audits/AUDIT-2026-04-10-plugin-command-migration-phase-4-5-step-8.md:259-267`):
+The original phase-4.6 migration audit remains useful historical context, but the
+current boundary is narrower.
 
-- /login OAuth browser split: client runs browser, daemon stores token
-- /hub msg, broadcast, stop, spawn, org: cross-process messaging via RPC
-- /terminal view, attach: needs streaming transport for live session output
-- /sub completion notification: MessageInjector rewrite
-- /resume modal, search, branch, filter: session management UI
-- MCP hot-reload on config change: restart message is current UX
+Implemented through StateService RPC:
 
-Read-only queries that work in attach mode (phase 4.5 step 8):
-- state.get_hub_status_text, state.get_hub_whoami_text, state.get_hub_work_text
+- `/hub msg` and `/hub broadcast`
+- `/mcp reload` (explicitly reloads config and reconnects enabled servers)
+
+Still deferred or client-local:
+
+- `/login` OAuth browser split: the client runs the browser while the daemon stores the token
+- `/hub stop`, `/hub spawn`, `/hub org`: orchestrator control is not exposed as StateService RPC
+- `/terminal view`, `/terminal attach`: needs streaming transport for live session output
+- `/sub` completion notifications: MessageInjector rewrite
+- `/resume` modal, search, branch, filter: session-management UI/RPC work
+- automatic MCP reload on file change: use `/mcp reload` explicitly
+
+State queries and writes available in attach mode include:
+
+- `state.get_hub_status_text`, `state.get_hub_whoami_text`, `state.get_hub_work_text`
+- `state.hub_send_msg`, `state.hub_broadcast`, `state.reload_mcp_servers`
 
 ## Troubleshooting
 

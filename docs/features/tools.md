@@ -1,7 +1,7 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-08-06
 status: active
 ---
 # Tool Calling
@@ -73,6 +73,19 @@ With working directory:
 Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
+
+### Workspace Switching
+
+`workspace-set` changes the agent's session workspace at runtime:
+
+```xml
+<workspace-set><path>../sibling-project</path></workspace-set>
+```
+
+The path must exist and be a directory. Relative paths resolve from the current
+workspace; after a successful switch, file operations and terminal commands
+without an explicit `cwd` use the new directory. The change is session-scoped
+and requires the normal medium-risk tool approval.
 
 ### File Operations
 
@@ -248,6 +261,39 @@ Tool registry format:
     }
 }
 ```
+
+## On-demand Tool Loading
+
+Kollab registers two built-in discovery tools:
+
+- `tool-search` searches the built-in and MCP catalogs by keyword and returns a
+  compact name/source/description list. Its query is optional; without one it
+  returns the available catalog.
+- `tool-load` loads the full schema for a selected built-in or MCP tool into the
+  current session. An MCP tool must come from the requested server and that
+  server must be online.
+
+This keeps every tool schema out of every request. The normal flow is:
+
+```text
+tool-search(query="browser") -> choose a result -> tool-load(name="...") -> call it
+```
+
+Agents can still be restricted by their `agent.json` `tools` field. `tools:
+["*"]` exposes every registered tool to the bundle; a narrower list exposes
+only named tools. Permission approvals remain a separate runtime gate.
+
+## Large Tool Results and Context Budgets
+
+Tool results are bounded both per result and across the retained tool-history
+aggregate. When a result must be reduced, Kollab writes the complete UTF-8
+content to a managed `.output` artifact and returns a bounded preview plus the
+artifact path to the model. Native tool-call/result envelopes remain paired.
+
+Artifacts live under the current project's conversation data, so a model can
+inspect the full result later without forcing the entire payload back into the
+context window. See [tool-output artifacts](../specs/tool-output-artifacts.md)
+for limits, configuration, and recovery behavior.
 
 ## Tool Calling Methods
 

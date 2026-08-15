@@ -1,7 +1,7 @@
 ---
 title: "Hub Quick Start"
 created: 2026-04-05
-modified: 2026-04-05
+modified: 2026-08-06
 status: active
 ---
 # Hub Quick Start
@@ -18,18 +18,30 @@ Open three terminal windows and launch one agent in each:
 
 ```bash
 # Terminal 1
-kollab --agent jarvis
-
-# Terminal 2
 kollab --agent coder
 
+# Terminal 2
+kollab --agent research
+
 # Terminal 3
-kollab --agent reviewer
+kollab --agent technical-writer
 ```
 
-Each agent gets a gem designation (lapis, peridot, ruby, etc.)
-assigned automatically. The first agent to start becomes the
-coordinator (marked with `*` in status).
+Each process gets a hub identity (lapis, peridot, ruby, etc.) assigned
+automatically. The identity is the name used for messages, capture, vaults, and
+offline inbox delivery. The `--agent` value is a separate agent bundle that
+defines behavior. The first process to start becomes the coordinator (marked
+with `*` in status).
+
+For a stable identity and an explicit bundle, use both flags:
+
+```bash
+kollab --agent coder --as lapis --profile openai-oauth
+```
+
+Here `coder` is the bundle, `lapis` is the hub identity, and `openai-oauth` is
+the provider profile. See [Agents and Skills](../features/agents.md) for the
+full mapping and organization-role format.
 
 Check who's online from any agent:
 
@@ -71,17 +83,24 @@ session:
 kollab --hub status
 
 # Send a message to an agent
-kollab --hub msg jarvis "refactor the database layer"
+kollab --hub msg lapis "refactor the database layer"
 
 # View the last 100 lines of an agent's output
-kollab --hub capture jarvis 100
+kollab --hub capture lapis 100
 
-# Stream an agent's output in real-time (read-only)
-kollab --attach jarvis
+# Attach interactively to a live agent
+kollab --attach lapis
 
 # Shut down an agent remotely
-kollab --hub kill lapis
+kollab --hub stop lapis
 ```
+
+`capture` targets a live hub peer or live orchestrator session. It does not
+target an agent bundle and it cannot read an offline inbox. If status shows
+`offline inboxes: lapis(1)` but not a live `lapis` peer, the message is queued
+for later delivery and `capture lapis` correctly reports that no capturable
+agent exists yet. Send with `--hub msg lapis ...` and capture the identity shown
+under the online roster after it reconnects.
 
 ## Assign Tasks
 
@@ -110,7 +129,7 @@ it through QA review.
 Hub cron lets you send messages to agents on a schedule:
 
 ```
-/hub cron add jarvis 5m "status update: what are you working on?"
+/hub cron add lapis 5m "status update: what are you working on?"
 /hub cron add all 1h "run the test suite and report results"
 ```
 
@@ -127,14 +146,14 @@ Manage cron jobs:
 
 ## Persistent Memory (Vaults)
 
-Each agent designation gets a vault at `~/.kollab/hub/vaults/<designation>/`
+Each agent identity gets a vault at `~/.kollab/hub/vaults/<identity>/`
 with three tiers:
 
 - **stream.jsonl** -- raw append-only log of everything (ground truth)
 - **working_memory.md** -- rolling context injected into the system prompt
 - **crystallized.md** -- distilled long-term knowledge
 
-When an agent is launched with the same designation, it gets its
+When an agent is launched with the same identity, it gets its
 vault hydrated back. It remembers previous sessions.
 
 Inspect vaults:
@@ -164,7 +183,7 @@ Talk to your agents from your phone:
 ```bash
 export KOLLAB_HUB_BRIDGE_TOKEN=your-bot-token    # from @BotFather
 export KOLLAB_HUB_BRIDGE_CHAT_ID=your-chat-id    # from @userinfobot
-kollab --agent jarvis
+kollab --agent coder --as lapis
 /hub bridge setup
 /hub bridge enable
 ```
@@ -181,8 +200,23 @@ Define a team in a JSON org chart and launch them all at once:
 /hub org my-team "build the authentication system"
 ```
 
-Org files live in `bundles/agents/` and define agent names,
-capabilities, and team structure.
+Bundled org files live in `plugins/hub/organizations/`; user overrides live in
+`~/.kollab/hub/organizations/`. Each role has an `identity` (the hub name), an
+`agent_bundle` (the behavior package), and an optional role prompt.
+
+```json
+{
+  "identity": "qa-eng",
+  "role": "QA Engineer",
+  "agent_bundle": "research",
+  "prompt": "Test the change and report reproducible failures.",
+  "reports_to": "apps-lead"
+}
+```
+
+The launcher turns that role into `kollab --agent research --as qa-eng` and
+adds the role prompt. Copy a bundled chart to the user override directory when
+you want to customize it without editing the installation.
 
 ```
 /hub orgs
@@ -193,10 +227,10 @@ capabilities, and team structure.
 | Command | What it does |
 |---|---|
 | `/hub status` | Who's online, coordinator, states |
-| `/hub whoami` | Your designation and identity |
+| `/hub whoami` | Your hub identity and display name |
 | `/hub msg <agent> <text>` | Send message to agent |
 | `/hub broadcast <text>` | Message all agents |
-| `/hub kill <agent>` | Remote shutdown |
+| `/hub stop <agent\|all>` | Remote shutdown (`kill` is an alias) |
 | `/hub spawn <name> <task>` | Spawn a sub-agent |
 | `/hub capture <name> [lines]` | View agent output |
 | `/hub stop <name\|all>` | Stop agent(s) |
@@ -222,6 +256,6 @@ capabilities, and team structure.
 | `kollab --hub msg <agent> <text>` | Send message (no TUI) |
 | `kollab --hub capture <agent> [n]` | View agent output (no TUI) |
 | `kollab --hub kill <agent>` | Remote shutdown (no TUI) |
-| `kollab --attach <agent>` | Stream agent output live |
-| `kollab --agent <name>` | Launch with agent identity |
-| `kollab --designation <gem>` | Override hub designation |
+| `kollab --attach <identity>` | Interactive TUI proxy to a live agent |
+| `kollab --agent <bundle>` | Launch with a behavior bundle |
+| `kollab --as <identity>` | Choose a stable hub identity |

@@ -1,7 +1,7 @@
 ---
 title: "Kollab Command Reference"
 created: 2026-04-06
-modified: 2026-04-10
+modified: 2026-08-06
 status: active
 ---
 # Kollab Command Reference
@@ -24,16 +24,16 @@ start a detached agent:
   the hub plugin joins the mesh, gets an identity, starts a vault.
 
 attach to a running agent:
-  kollab --attach jarvis                full TUI proxy
+  kollab --attach ruby                  full TUI proxy
   kollab --attach lapis --context bug-fix  attach to context
 
   boots the full kollabor app (banner, input bar, status bar, plugins)
-  but connects to jarvis's socket instead of a local LLM. everything
-  you type goes to jarvis. everything jarvis outputs streams back.
+  but connects to ruby's socket instead of a local LLM. everything
+  you type goes to ruby. everything ruby outputs streams back.
   semantic events over unix socket - the local renderer handles all
   formatting (theme, colors, boxes, spinner).
 
-  ctrl+c to detach. jarvis keeps running.
+  ctrl+z to detach. ruby keeps running.
 
   in attach mode, launch flags cross the client-daemon boundary via
   state_service rpc: --profile, --agent, --skill, --system-prompt,
@@ -42,9 +42,9 @@ attach to a running agent:
 manage agents from CLI (no TUI needed):
   kollab --hub                           prints hub help (new in 4.5)
   kollab --hub status                    list online agents
-  kollab --hub msg jarvis "hello"        send message
-  kollab --hub capture jarvis 50         read last 50 output lines
-  kollab --hub stop jarvis               send shutdown signal
+  kollab --hub msg ruby "hello"          send message
+  kollab --hub capture ruby 50           read last 50 output lines
+  kollab --hub stop ruby                 send shutdown signal
   kollab --hub stop all                  stop all agents
   kollab --hub broadcast "stand down"    message all agents
 
@@ -65,9 +65,11 @@ core:
   --simple                        plain text output (no boxes/colors)
 
 agent and profile (cross attach boundary):
-  -a, --agent AGENT               use specific agent (e.g. lint-editor)
+  -a, --agent BUNDLE              use specific agent bundle (e.g. coder)
   -s, --skill SKILL               load skill (repeatable: -s foo -s bar)
-  --profile PROFILE               use specific LLM profile
+  --profile PROFILE               use a configured profile or loadout
+  --as NAME                       choose a stable hub identity
+  --project PATH                  override project root for hub siloing
   --system-prompt FILE            custom system prompt file
   --save                          save auto-created profile to global config
   --default                       set --profile as startup default profile
@@ -75,12 +77,14 @@ agent and profile (cross attach boundary):
   --context NAME                  conversation context (new in 4.5)
 
 hub and mesh:
-  --attach DESIGNATION            attach to running agent (full TUI proxy)
+  --attach IDENTITY               attach to running agent (full TUI proxy)
   --hub CMD [CMD ...]             hub CLI (see --hub section below)
   --org ORG                       launch organization on startup
+  --web-ui                        launch the local engine + browser UI
 
 execution:
   --detached                      run as headless daemon (forks, no & needed)
+  --daemon                        run daemon + attach client; Ctrl+Z detaches
   --stay                          stay interactive after CLI command
   --login PROVIDER                OAuth login (openai)
   --reset-config                  reset configs to defaults
@@ -92,6 +96,8 @@ plugin-registered:
   --session NAME                  agent orchestrator session name
   --capture LINES                 capture N lines from session
   --list-agents                   list active orchestrator agents
+  --doctor                        run first-run readiness checks
+  --updates                       browse recent Kollab updates
 
 
 ## --hub CLI
@@ -122,6 +128,12 @@ examples:
   kollab --hub broadcast "rolling to lunch, bbiab"
   kollab --hub capture koordinator 200
   kollab --hub org engineering "ship the billing flow"
+
+capture addresses a live hub identity or live orchestrator session. It does not
+address a bundle name, and an offline inbox is not a capturable process. For
+example, `offline inboxes: lapis(1)` means a message is waiting for `lapis`; it
+does not mean `kollab --hub capture lapis` can read output before that identity
+is online.
 
 interactive equivalents:
   /hub status       /hub msg <name> <text>    /hub broadcast <text>
@@ -172,10 +184,11 @@ fully migrated (works in attach mode):
   /agent set /agent clear
   /skills load /skills unload
   /permissions (all subcommands)
-  /mcp show /mcp servers /mcp enable /mcp disable /mcp test /mcp tools
+  /mcp show /mcp servers /mcp enable /mcp disable /mcp test /mcp tools /mcp reload
   /resume <id>                    (one-shot resume by id)
   /save (all formats)
   /hub status /hub whoami /hub work
+  /hub msg /hub broadcast          (StateService RPC)
   /hub vault /hub vaults /hub tasks /hub cron
   /deepthought (read-only, stale in attach)
 
@@ -188,9 +201,8 @@ client-only in attach mode (safe):
   /hub notify /hub bridge         local task mgmt
   /fork modal                     ui-only (modal picker)
 
-deferred to phase 4.6:
-  /hub msg /hub broadcast         cross-process messaging (big rpc)
-  /hub stop/spawn/org             orchestrator needs cross-process
+deferred or client-local:
+  /hub stop/spawn/org             orchestrator control is not a StateService RPC
   /terminal view/attach           needs streaming transport
   /sub completion notifications   MessageInjector rewrite
   /resume modal/search/branch     needs list/search rpcs
@@ -328,12 +340,12 @@ type / in the input box to open the command menu.
 
   communication:
     status                        show hub status and online agents
-    whoami                        show your designation
+    whoami                        show your hub identity
     msg <agent> <message>         send message to peer
     broadcast <message>           broadcast to all peers
 
   agent management:
-    stop <designation|all>        stop agent(s) on the mesh
+    stop <identity|all>           stop agent(s) on the mesh
     spawn <name> <task>           spawn new agent (via orchestrator)
     capture <name|all> [lines]    capture agent output
     agents                        list all active agents
@@ -413,15 +425,28 @@ The app parses them automatically after each response.
 There are two separate systems that parse XML tags:
   - agent orchestrator (plugins/agent_orchestrator/xml_parser.py)
     manages subprocess-based agents. these agents do NOT get hub
-    designations or vaults. they are tracked by the orchestrator
+    identities or vaults. they are tracked by the orchestrator
     and addressable by the name you give them.
   - hub plugin (plugins/hub/plugin.py)
     manages mesh communication between hub peers. hub peers are
-    agents with designations, vaults, and presence on the mesh.
+    agents with identities, vaults, and presence on the mesh.
     hub peers are NOT managed by the orchestrator.
 
 these two systems are currently separate. an agent spawned via
-<agent> does not automatically join the hub mesh with a designation.
+<agent> does not automatically join the hub mesh with an identity.
+
+### workspace
+
+#### <workspace-set> - switch the session workspace
+
+  syntax:
+    <workspace-set><path>/path/to/project</path></workspace-set>
+
+  how it works:
+    - requires an existing directory
+    - resolves relative paths from the current workspace
+    - updates the workspace used by later file and terminal tools
+    - applies to the current session and does not persist across restarts
 
 
 ### agent orchestration (orchestrator-managed subprocess agents)
@@ -455,7 +480,7 @@ executed by: plugins/agent_orchestrator/plugin.py
     - the orchestrator tracks them by name for capture/stop/message
 
   limitations:
-    - agents do NOT get a hub designation or vault
+    - agents do NOT get a hub identity or vault
     - agents are NOT visible on the hub mesh
     - agents cannot use <hub_msg> to message hub peers
     - no persistent memory across sessions
@@ -556,7 +581,7 @@ executed by: plugins/agent_orchestrator/plugin.py
     - sends a text message to a running orchestrator-managed agent
     - the agent receives it as injected input
     - agent must be running (spawned via <agent> or <clone>)
-    - target is the agent NAME, not a hub designation
+    - target is the orchestrator agent NAME, not a hub identity
 
   example:
     <message to="test-writer">focus on edge cases for the retry
@@ -617,23 +642,25 @@ executed by: plugins/agent_orchestrator/plugin.py
 
 parsed by: plugins/hub/plugin.py (response hook)
 these tags are for communication between hub peers (agents with
-designations that are visible on the mesh).
+identities that are visible on the mesh).
 
 #### <hub_msg> - send message to hub peer
 
   syntax:
-    <hub_msg to="designation">message content</hub_msg>
+    <hub_msg to="identity">message content</hub_msg>
 
   how it works:
-    - sends a message to a peer on the hub mesh by designation
-    - message is delivered via unix socket
+    - sends a message to a peer on the hub mesh by identity
+    - message is delivered via unix socket when online, or queued in the
+      durable identity inbox for a known offline pool identity
     - the receiving agent sees it injected into their conversation
     - the receiving agent's LLM generates a response
     - all peers on the mesh can observe the message (open channel)
 
   limitations:
-    - target must be a hub designation (e.g. "lapis", "jarvis")
-    - target must be online (has presence file + live socket)
+    - target must be a known hub identity (e.g. "lapis", "jarvis")
+    - offline delivery is supported for durable pool identities; capture still
+      requires a live peer or orchestrator session
     - NOT for orchestrator-managed agents (use <message> instead)
 
   example:
@@ -657,7 +684,7 @@ designations that are visible on the mesh).
 #### <hub_stop> - stop hub peer(s)
 
   syntax:
-    <hub_stop>designation</hub_stop>
+    <hub_stop>identity</hub_stop>
     <hub_stop>all</hub_stop>
 
   how it works:
@@ -692,6 +719,16 @@ designations that are visible on the mesh).
   example:
     <task_checkpoint id="auth-review-001">completed initial scan,
     found 2 potential issues in token validation</task_checkpoint>
+
+#### <task_snooze> - quiet task reminders without closing the task
+
+  syntax:
+    <task_snooze id="task-id" minutes="30"/>
+
+  how it works:
+    - suppresses cron reminders and checkpoint nudges for the requested interval
+    - keeps the task active and present in the agent prompt
+    - caps one snooze at one hour and does not reset the cron TTL clock
 
 #### <task_complete> - mark task as complete, request QA
 

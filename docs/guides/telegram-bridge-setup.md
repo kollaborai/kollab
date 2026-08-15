@@ -1,7 +1,7 @@
 ---
 title: "Telegram Bridge Setup"
 created: 2026-04-05
-modified: 2026-04-05
+modified: 2026-08-06
 status: active
 ---
 # Telegram Bridge Setup
@@ -52,7 +52,7 @@ persist across sessions.
 ## Step 4: Run Setup
 
 ```bash
-kollab --agent jarvis
+kollab --agent coder --as lapis
 ```
 
 Once inside kollab, run:
