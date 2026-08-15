@@ -884,7 +884,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "assistant-stream", specifier = ">=0.0.34" },
+    { name = "assistant-stream", specifier = "==0.0.34" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "kollabor-agent", editable = "packages/kollabor-agent" },
