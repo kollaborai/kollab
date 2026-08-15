@@ -2357,7 +2357,7 @@ class TestAPIKeyManagerLogging(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class TestEnvironmentKeyStoragePaths(unittest.TestCase):
+class TestEnvironmentKeyStoragePaths(unittest.IsolatedAsyncioTestCase):
     """Test environment storage paths for missing coverage."""
 
     def setUp(self):
