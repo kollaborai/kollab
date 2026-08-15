@@ -382,7 +382,7 @@ class TestEncryptedFileKeyStorage(TempFileTest):
 # =============================================================================
 
 
-class TestEnvironmentKeyStorage(unittest.TestCase):
+class TestEnvironmentKeyStorage(unittest.IsolatedAsyncioTestCase):
     """Test environment variable storage."""
 
     def setUp(self):
