@@ -9,25 +9,23 @@ Bounds:
   - Replay cap:    when total > max_replay, a summary HubMessage is
                    prepended and only the newest max_replay messages returned.
 
-Single-block delivery: when a bounded replay batch is detected
-  (_deliver_inbox_batch → _inject_inbox_replay), the whole set is
-  coalesced into ONE inject_system_message call, NOT N separate
-  _on_message_received calls.
+Single-block delivery: when a bounded replay batch is detected,
+  ordinary messages are coalesced into one inject_system_message call.
+  Task-cron controls retain normal _on_message_received semantics and are
+  excluded from the replay block.
 
 Coordinator visibility: get_all_inbox_counts() scans dirs without consuming.
 """
 
 import asyncio
 import json
-import tempfile
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import List
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-
+from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.messenger import (
     INBOX_MAX_REPLAY,
     INBOX_MAX_SIZE,
@@ -35,8 +33,8 @@ from plugins.hub.messenger import (
     AgentMessenger,
     _prune_inbox,
 )
-from plugins.hub.models import HubMessage
-
+from plugins.hub.models import HubMessage, MessageScope
+from plugins.hub.task_ledger import TaskLedger
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -417,6 +415,8 @@ def _make_plugin_stub():
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = None
     plugin._identity = None
+    plugin._seen_messages = OrderedDict()
+    plugin._seen_content_hashes = {}
     return plugin
 
 
@@ -533,6 +533,188 @@ class TestSingleBlockDelivery:
         block = captured[0]
         for i in range(5):
             assert f"msg {i}" in block
+
+    def test_replay_stale_task_cron_is_acknowledged_and_excluded(
+        self, tmp_path: Path
+    ) -> None:
+        """Stale task-cron controls use the receive path, not the replay block."""
+        plugin = _make_plugin_stub()
+        plugin._task_ledger = TaskLedger(str(tmp_path / "tasks"))
+        plugin._vault = MagicMock()
+        plugin._presence = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="lapis",
+            agent_id="lapis-id",
+            state="idle",
+        )
+
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        llm_mock.conversation_history = []
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        bus.emit_with_hooks = AsyncMock()
+        plugin.event_bus = bus
+
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_agent="task-cron-id",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: missing-card] stale replay task",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_cron": True,
+                "task_id": "missing-card",
+                "source_identity": "koordinator",
+            },
+        )
+
+        self._run(plugin._deliver_inbox_batch([summary, reminder, *ordinary]))
+
+        ack = plugin._route_message.await_args.args[0]
+        assert ack.to == "koordinator"
+        assert ack.reply_to == reminder.id
+        assert ack.metadata["task_cron_ack"] is True
+        assert ack.metadata["task_id"] == "missing-card"
+        assert ack.metadata["disposition"] == "stale"
+        assert ack.metadata["reason"] == "task card not found"
+        bus.emit_with_hooks.assert_not_awaited()
+        assert llm_mock.conversation_history == []
+
+        inject_mock.assert_awaited_once()
+        block = inject_mock.await_args.args[0]
+        assert "stale replay task" not in block
+        assert "msg 0" in block
+        assert "msg 1" in block
+
+    def test_replay_active_task_cron_uses_receive_path_and_is_excluded(
+        self, tmp_path: Path
+    ) -> None:
+        """An active task reminder keeps receive semantics outside coalescing."""
+        plugin = _make_plugin_stub()
+        ledger = TaskLedger(str(tmp_path / "tasks"))
+        card = ledger.create(
+            assigner="koordinator",
+            assignee="lapis",
+            directive="continue active replay task",
+            report_to="koordinator",
+        )
+        plugin._task_ledger = ledger
+
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        plugin.event_bus = bus
+
+        received: List[HubMessage] = []
+
+        async def capture_receive(message: HubMessage) -> None:
+            received.append(message)
+
+        plugin._on_message_received = capture_receive
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content=f"[task reminder: {card.id}] continue active replay task",
+            scope=MessageScope.DIRECT.value,
+            metadata={"task_cron": True, "task_id": card.id},
+        )
+
+        self._run(
+            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
+        )
+
+        assert received == [reminder]
+        inject_mock.assert_awaited_once()
+        block = inject_mock.await_args.args[0]
+        assert "continue active replay task" not in block
+        assert "msg 0" in block
+        assert "msg 1" in block
+
+    def test_replay_task_cron_control_is_not_duplicated_in_fallback(self) -> None:
+        """Fallback delivers controls once and only ordinary messages afterward."""
+        plugin = _make_plugin_stub()
+        bus = MagicMock()
+        bus.get_service.return_value = None
+        plugin.event_bus = bus
+
+        received: List[HubMessage] = []
+
+        async def capture_receive(message: HubMessage) -> None:
+            received.append(message)
+
+        plugin._on_message_received = capture_receive
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: active] control fallback",
+            scope=MessageScope.DIRECT.value,
+            metadata={"task_cron": True, "task_id": "active"},
+        )
+
+        self._run(
+            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
+        )
+
+        assert received == [reminder, ordinary[0], ordinary[1]]
+        assert received.count(reminder) == 1
+
+    def test_replay_with_only_task_cron_controls_does_not_inject_empty_block(
+        self, tmp_path: Path
+    ) -> None:
+        """A control-only replay is handled without an empty HUD injection."""
+        plugin = _make_plugin_stub()
+        plugin._task_ledger = TaskLedger(str(tmp_path / "tasks"))
+        plugin._vault = MagicMock()
+        plugin._presence = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="lapis",
+            agent_id="lapis-id",
+            state="idle",
+        )
+
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        llm_mock.conversation_history = []
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        bus.emit_with_hooks = AsyncMock()
+        plugin.event_bus = bus
+
+        summary = _make_summary_batch(n_msgs=1, n_total=30)[0]
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: missing-only] stale replay task",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_cron": True,
+                "task_id": "missing-only",
+                "source_identity": "koordinator",
+            },
+        )
+
+        self._run(plugin._deliver_inbox_batch([summary, reminder]))
+
+        plugin._route_message.assert_awaited_once()
+        inject_mock.assert_not_awaited()
+        bus.emit_with_hooks.assert_not_awaited()
+        assert llm_mock.conversation_history == []
 
     # ------------------------------------------------------------------
     # _deliver_inbox_batch: normal batch → individual delivery, NOT inject

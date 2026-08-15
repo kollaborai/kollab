@@ -4709,9 +4709,8 @@ class HubPlugin(BasePlugin):
         with a summary header prepended — never the full uncontrolled flood.
 
         When a bounded replay batch is detected (inbox_summary present as
-        the first message), the entire batch is coalesced into ONE
-        system-message injection via _deliver_inbox_batch instead of
-        calling _on_message_received per message.
+        the first message), ordinary messages are coalesced into one system
+        injection. Task-cron controls keep the normal receive path.
         """
         poll_interval = 5
         if self.config:
@@ -4736,9 +4735,9 @@ class HubPlugin(BasePlugin):
     async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
         """Deliver a batch of offline inbox messages.
 
-        When the batch starts with an inbox_summary (bounded replay), the
-        whole batch is coalesced into a single system-message injection so
-        the LLM receives one clean block instead of N separate injections.
+        When the batch starts with an inbox_summary (bounded replay), ordinary
+        messages are coalesced into a single system-message injection. Control
+        messages keep the normal receive path and are excluded from that block.
 
         Single messages and small batches without a summary go through the
         normal per-message _on_message_received path so existing live-delivery
@@ -4754,17 +4753,30 @@ class HubPlugin(BasePlugin):
         """Coalesce a bounded inbox replay into a single injected block.
 
         messages[0] must be the inbox_summary; messages[1:] are the replayed
-        messages (newest INBOX_MAX_REPLAY at most).
+        messages (newest INBOX_MAX_REPLAY at most). Task-cron controls use the
+        normal receive path before ordinary replay messages are coalesced.
 
-        Falls back to per-message _on_message_received delivery if
-        inject_system_message is unavailable (e.g. during tests or when the
-        LLM service hasn't initialised yet).
+        Falls back to per-message _on_message_received delivery for ordinary
+        messages if inject_system_message is unavailable (e.g. during tests or
+        when the LLM service hasn't initialised yet).
         """
         summary = messages[0]
         replay_msgs = messages[1:]
 
+        # Task-cron reminders are control messages, not replay prose. Route
+        # them through the normal receive path first so stale reminders are
+        # acknowledged and active reminders retain their wake semantics. Do
+        # not duplicate them in the coalesced HUD block or fallback delivery.
+        control_msgs = [msg for msg in replay_msgs if msg.from_identity == "task-cron"]
+        ordinary_msgs = [msg for msg in replay_msgs if msg.from_identity != "task-cron"]
+        for msg in control_msgs:
+            await self._on_message_received(msg)
+
+        if not ordinary_msgs:
+            return
+
         lines: List[str] = [summary.content, ""]
-        for msg in replay_msgs:
+        for msg in ordinary_msgs:
             sender = msg.from_identity or msg.from_agent or "?"
             if msg.timestamp:
                 ts = time.strftime("%H:%M", time.localtime(msg.timestamp))
@@ -4788,7 +4800,7 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     "Injected inbox replay block: %d message(s) shown "
                     "(%s total queued)",
-                    len(replay_msgs),
+                    len(ordinary_msgs),
                     summary.metadata.get("total", "?"),
                 )
                 return
@@ -4796,7 +4808,7 @@ class HubPlugin(BasePlugin):
                 logger.debug("inbox replay injection failed: %s", exc)
 
         # Fallback: individual delivery (no inject_system_message)
-        for msg in replay_msgs:
+        for msg in ordinary_msgs:
             await self._on_message_received(msg)
 
     async def _dreaming_loop(self) -> None:
