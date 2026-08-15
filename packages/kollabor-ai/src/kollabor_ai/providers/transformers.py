@@ -33,10 +33,15 @@ logger = logging.getLogger(__name__)
 def _openai_cache_tokens(usage: Dict[str, Any]) -> tuple[int, int]:
     """Extract OpenAI cache read/creation aliases from usage payloads."""
     details = usage.get("prompt_tokens_details", {}) or {}
-    read = details.get(
+    read = 0
+    for key in (
         "cached_tokens",
-        usage.get("cached_tokens", usage.get("cache_read_input_tokens", 0)),
-    ) or 0
+        "cache_read_tokens",
+        "cache_read_input_tokens",
+    ):
+        read = details.get(key, usage.get(key, 0)) or 0
+        if read:
+            break
     creation = 0
     for key in (
         "cache_creation_tokens",
