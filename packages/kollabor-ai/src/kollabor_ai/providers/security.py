@@ -916,9 +916,21 @@ class LoggingRedactor:
             re.compile(r'"password":\s*"[^"]+"', re.IGNORECASE),
             '"password": "[REDACTED]"',
         ),
+        (
+            re.compile(r'"credentials?":\s*"[^"]+"', re.IGNORECASE),
+            '"credential": "[REDACTED]"',
+        ),
+        (
+            re.compile(r'"private[_-]?key":\s*"[^"]+"', re.IGNORECASE),
+            '"private_key": "[REDACTED]"',
+        ),
         # URL query credentials (Gemini uses ``key``; profiles may use api_key)
         (
-            re.compile(r"([?&](?:api[_-]?key|key)=)[^&#\s]+", re.IGNORECASE),
+            re.compile(
+                r"([?&](?:api[_-]?key|key|access[_-]?token|refresh[_-]?token|"
+                r"client[_-]?secret|token|credentials?)=)[^&#\s]+",
+                re.IGNORECASE,
+            ),
             r"\1[REDACTED]",
         ),
         # URLs with embedded keys
@@ -948,6 +960,9 @@ class LoggingRedactor:
         "clientsecret",
         "secret",
         "password",
+        "credential",
+        "credentials",
+        "privatekey",
     }
 
     @classmethod

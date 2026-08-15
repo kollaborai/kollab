@@ -800,6 +800,9 @@ class TestLoggingRedactor(unittest.TestCase):
             "access-token": "opaque",
             "Authorization": "Basic abc",
             "nested": {"clientSecret": "tiny"},
+            "credential": "opaque",
+            "credentials": "tiny",
+            "private_key": "short",
             "token_count": 42,
             "secretary": "Ada",
             "model": "gpt-4",
@@ -815,6 +818,9 @@ class TestLoggingRedactor(unittest.TestCase):
             "password",
             "access-token",
             "Authorization",
+            "credential",
+            "credentials",
+            "private_key",
         ):
             self.assertEqual(redacted[key], "[REDACTED]")
         self.assertEqual(redacted["nested"]["clientSecret"], "[REDACTED]")
@@ -830,6 +836,9 @@ class TestLoggingRedactor(unittest.TestCase):
             "token",
             "client_secret",
             "secret",
+            "credential",
+            "credentials",
+            "private_key",
         ):
             with self.subTest(field=field):
                 text = f'{{"{field}": "x"}}'
@@ -859,6 +868,10 @@ class TestLoggingRedactor(unittest.TestCase):
             "api-key: x",
             "https://example.test/v1?key=x&model=chat",
             "https://example.test/v1?api_key=x&model=chat",
+            "https://example.test/v1?access_token=x&model=chat",
+            "https://example.test/v1?refresh-token=x&model=chat",
+            "https://example.test/v1?client_secret=x&model=chat",
+            "https://example.test/v1?credential=x&model=chat",
         )
 
         for text in samples:
@@ -876,6 +889,10 @@ class TestLoggingRedactor(unittest.TestCase):
             "Authorization: Basic abc",
             "https://example.test/v1?key=x&model=chat",
             "https://example.test/v1?api_key=x&model=chat",
+            "https://example.test/v1?access_token=x&model=chat",
+            "https://example.test/v1?refresh-token=x&model=chat",
+            "https://example.test/v1?client_secret=x&model=chat",
+            "https://example.test/v1?credential=x&model=chat",
         )
 
         for message in samples:

@@ -96,7 +96,8 @@ class ProviderError(Exception):
 
         # Remove query credentials while preserving surrounding URL context.
         message = re.sub(
-            r"([?&](?:api[_-]?key|key)=)[^&#\s]+",
+            r"([?&](?:api[_-]?key|key|access[_-]?token|refresh[_-]?token|"
+            r"client[_-]?secret|token|credentials?)=)[^&#\s]+",
             r"\1[REDACTED]",
             message,
             flags=re.IGNORECASE,
