@@ -214,7 +214,11 @@ class TestLLMServiceIntegration(unittest.TestCase):
         self.service.is_processing = True
 
         # Cancel should set flag
-        self.service.cancel_current_request()
+        async def cancel_and_drain():
+            self.service.cancel_current_request()
+            await self.service._task_manager.wait_for_tasks()
+
+        asyncio.run(cancel_and_drain())
 
         self.assertTrue(self.service.cancel_processing)
 

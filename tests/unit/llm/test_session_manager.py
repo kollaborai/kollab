@@ -16,6 +16,7 @@ class TestSessionManager(unittest.TestCase):
         asyncio.set_event_loop(self.loop)
 
         self.conversation_logger = AsyncMock()
+        self.conversation_logger.reset_session = MagicMock()
         self.conversation_logger.session_id = "test-session"
         self.conversation_logger.conversations_dir = MagicMock()
         self.conversation_logger.conversations_dir.__truediv__ = lambda s, o: Path(
