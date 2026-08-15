@@ -604,6 +604,7 @@ class TestAPIKeyLoader(unittest.TestCase):
 
         mock_manager = Mock()
         mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
         loader = APIKeyLoader(key_manager=mock_manager)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -1435,6 +1436,7 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
 
         mock_manager = Mock()
         mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
         loader = APIKeyLoader(key_manager=mock_manager)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -2043,6 +2045,7 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
 
         mock_manager = Mock()
         mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
         loader = APIKeyLoader(key_manager=mock_manager)
 
         with patch.dict(os.environ, {}, clear=True):
