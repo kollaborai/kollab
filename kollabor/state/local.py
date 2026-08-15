@@ -341,6 +341,11 @@ class LocalStateService(StateService):
             total_input_tokens=int(stats.get("total_input_tokens", 0) or 0),
             total_output_tokens=int(stats.get("total_output_tokens", 0) or 0),
             cache_read_tokens=int(stats.get("cache_read_tokens", 0) or 0),
+            cache_creation_tokens=int(stats.get("cache_creation_tokens", 0) or 0),
+            total_cache_read_tokens=int(stats.get("total_cache_read_tokens", 0) or 0),
+            total_cache_creation_tokens=int(
+                stats.get("total_cache_creation_tokens", 0) or 0
+            ),
             thinking_duration=float(stats.get("thinking_duration", 0.0) or 0.0),
             cost_usd=float(stats.get("cost_usd", 0.0) or 0.0),
             total_cost_usd=float(stats.get("total_cost_usd", 0.0) or 0.0),

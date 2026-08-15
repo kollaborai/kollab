@@ -27,6 +27,9 @@ class FakeStateService:
             output_tokens=5,
             total_input_tokens=100,
             total_output_tokens=50,
+            cache_creation_tokens=7,
+            total_cache_read_tokens=1000,
+            total_cache_creation_tokens=70,
         )
 
     async def get_processing_state(self):
@@ -78,6 +81,9 @@ async def test_refresh_merges_without_erasing_existing_remote_state_keys():
     assert ctx.remote_state["profile_name"] == "openai-oauth"
     assert ctx.remote_state["total_input_tokens"] == 100
     assert ctx.remote_state["total_output_tokens"] == 50
+    assert ctx.remote_state["cache_creation_tokens"] == 7
+    assert ctx.remote_state["total_cache_read_tokens"] == 1000
+    assert ctx.remote_state["total_cache_creation_tokens"] == 70
 
 
 @pytest.mark.asyncio

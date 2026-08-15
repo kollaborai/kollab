@@ -23,6 +23,7 @@ from kollabor.state import (
     AgentListSnapshot,
     AgentSnapshot,
     LocalStateService,
+    SessionStats,
     SkillInfo,
     SkillListSnapshot,
     SystemPromptSnapshot,
@@ -114,6 +115,27 @@ def _make_llm_service(*, with_inject: bool = True) -> MagicMock:
         if hasattr(llm, "inject_system_message"):
             del llm.inject_system_message
     return llm
+
+
+class TestSessionStatsCacheCounters(unittest.IsolatedAsyncioTestCase):
+    async def test_get_session_stats_preserves_cache_counters(self) -> None:
+        llm = _make_llm_service()
+        llm.session_stats = {
+            "cache_read_tokens": 11,
+            "cache_creation_tokens": 7,
+            "total_cache_read_tokens": 111,
+            "total_cache_creation_tokens": 77,
+        }
+        llm.conversation_manager = SimpleNamespace(current_session_id="sess-1")
+        svc = LocalStateService(llm_service=llm, profile_manager=MagicMock())
+
+        stats = await svc.get_session_stats()
+
+        self.assertIsInstance(stats, SessionStats)
+        self.assertEqual(stats.cache_read_tokens, 11)
+        self.assertEqual(stats.cache_creation_tokens, 7)
+        self.assertEqual(stats.total_cache_read_tokens, 111)
+        self.assertEqual(stats.total_cache_creation_tokens, 77)
 
 
 # === MCP global enable ===
