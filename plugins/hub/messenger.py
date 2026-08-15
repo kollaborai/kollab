@@ -19,6 +19,10 @@ from .presence import _atomic_write, get_messages_dir, get_socket_dir
 # preserved until normal receive can classify them; oldest ordinary entries
 # are evicted first at write time.
 INBOX_MAX_SIZE: int = 50
+# Hard cap on durable controls per inbox. Controls bypass ordinary replay
+# limits but must not grow without bound. Oldest controls are evicted
+# (with loud logging) when this cap is exceeded.
+INBOX_MAX_CONTROLS: int = 200
 # Messages older than this (seconds) are silently discarded on read.
 INBOX_TTL_SECS: int = 7 * 86400  # 7 days
 # Max ordinary messages replayed to a reconnecting agent per mailbox poll.
@@ -64,44 +68,89 @@ def _is_durable_control(data: Any) -> bool:
     )
 
 
+# Simple cache for control classification: filename -> (is_control, mtime)
+# Invalidated on file modification to avoid stale reads.
+_control_classification_cache: Dict[str, tuple[bool, float]] = {}
+
+
+def _is_control_cached(path: Path) -> bool:
+    """Check if a message file is a durable control, with mtime-based caching."""
+    try:
+        stat = path.stat()
+        mtime = stat.st_mtime
+        key = str(path)
+        cached = _control_classification_cache.get(key)
+        if cached and cached[1] == mtime:
+            return cached[0]
+        # Need to read and classify
+        with open(path) as fh:
+            data = json.load(fh)
+        is_control = _is_durable_control(data)
+        _control_classification_cache[key] = (is_control, mtime)
+        return is_control
+    except Exception:
+        # On any error, treat as ordinary (safe default)
+        return False
+
+
 def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
     """Evict oldest ordinary messages while preserving durable controls.
 
     ``max_size`` bounds ordinary chatter, not task controls that still require
     normal receive classification or an explicit stale ACK. Malformed files
     are treated as ordinary and remain eligible for eviction.
+
+    Durable controls are also capped at INBOX_MAX_CONTROLS to prevent
+    unbounded growth. Oldest controls are evicted with loud logging when
+    this cap is exceeded.
+
+    Classification uses an mtime-based cache to avoid re-reading files
+    on every prune call.
     """
     try:
         files = sorted(msg_dir.glob("*.json"))
         ordinary_files: List[Path] = []
-        control_count = 0
+        control_files: List[Path] = []
         for path in files:
-            try:
-                with open(path) as fh:
-                    data = json.load(fh)
-            except Exception:
-                data = {}
-            if _is_durable_control(data):
-                control_count += 1
+            if _is_control_cached(path):
+                control_files.append(path)
             else:
                 ordinary_files.append(path)
 
-        excess = len(ordinary_files) - max_size
-        if excess <= 0:
-            return
-        for path in ordinary_files[:excess]:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
-        logger.info(
-            "Inbox prune: evicted %d oldest ordinary message(s) from %r "
-            "(ordinary_limit=%d, controls_preserved=%d)",
-            excess,
-            msg_dir.name,
-            max_size,
-            control_count,
-        )
+        # Evict oldest ordinary messages first
+        excess_ordinary = len(ordinary_files) - max_size
+        if excess_ordinary > 0:
+            for path in ordinary_files[:excess_ordinary]:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            logger.info(
+                "Inbox prune: evicted %d oldest ordinary message(s) from %r "
+                "(ordinary_limit=%d, controls_preserved=%d)",
+                excess_ordinary,
+                msg_dir.name,
+                max_size,
+                len(control_files),
+            )
+
+        # Evict oldest controls if they exceed the hard cap
+        excess_controls = len(control_files) - INBOX_MAX_CONTROLS
+        if excess_controls > 0:
+            for path in control_files[:excess_controls]:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            logger.warning(
+                "Inbox prune: EVICTED %d oldest durable control(s) from %r "
+                "(control_cap=%d, controls_remaining=%d) — "
+                "controls overflow indicates delivery or classification failure",
+                excess_controls,
+                msg_dir.name,
+                INBOX_MAX_CONTROLS,
+                len(control_files) - excess_controls,
+            )
     except Exception as e:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
 

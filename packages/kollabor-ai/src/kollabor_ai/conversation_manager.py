@@ -771,6 +771,16 @@ class ConversationManager:
                             and valid_index
                             and valid_context
                         ):
+                            logger.warning(
+                                "save_session format validation failed for %s: "
+                                "valid_messages=%s valid_index=%s valid_context=%s "
+                                "metadata_is_dict=%s",
+                                session_file,
+                                valid_messages,
+                                valid_index,
+                                valid_context,
+                                isinstance(saved_metadata, dict),
+                            )
                             continue
                         return {
                             "messages": saved_messages,
