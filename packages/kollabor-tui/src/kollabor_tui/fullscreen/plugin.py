@@ -1,22 +1,13 @@
 """Base class for full-screen plugins."""
 
-import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from kollabor_tui.fullscreen.renderer import FullScreenRenderer
 from kollabor_tui.key_parser import KeyPress
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +125,7 @@ class FullScreenPlugin(ABC):
         when the plugin begins execution (after initialization).
         """
         self.running = True
-        self.start_time = _get_loop().time()
+        self.start_time = time.monotonic()
         self.frame_count = 0
         logger.info(f"Plugin {self.name} started")
 
@@ -163,7 +154,7 @@ class FullScreenPlugin(ABC):
         Returns:
             Dictionary with runtime statistics.
         """
-        current_time = _get_loop().time()
+        current_time = time.monotonic()
         runtime = current_time - self.start_time if self.running else 0
 
         return {
@@ -178,7 +169,7 @@ class FullScreenPlugin(ABC):
     def update_frame_stats(self):
         """Update frame statistics. Called by the framework."""
         self.frame_count += 1
-        self.last_frame_time = _get_loop().time()
+        self.last_frame_time = time.monotonic()
 
 
 class ExamplePlugin(FullScreenPlugin):
