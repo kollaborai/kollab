@@ -78,9 +78,28 @@ class ProviderError(Exception):
             r"Bearer\s+[a-zA-Z0-9\-._~+/]+=*", "Bearer [REDACTED]", message
         )
 
-        # Remove authorization headers
+        # Remove authorization headers, including optional Basic/Bearer schemes.
         message = re.sub(
-            r"Authorization:\s+[^\s]+", "Authorization: [REDACTED]", message
+            r"Authorization:\s*(?:(?:Bearer|Basic)\s+)?[^\s,;]+",
+            "Authorization: [REDACTED]",
+            message,
+            flags=re.IGNORECASE,
+        )
+
+        # Remove provider-specific API key headers.
+        message = re.sub(
+            r"\b(x-goog-api-key|x-api-key|api-key)\s*:\s*[^\s,;]+",
+            r"\1: [REDACTED]",
+            message,
+            flags=re.IGNORECASE,
+        )
+
+        # Remove query credentials while preserving surrounding URL context.
+        message = re.sub(
+            r"([?&](?:api[_-]?key|key)=)[^&#\s]+",
+            r"\1[REDACTED]",
+            message,
+            flags=re.IGNORECASE,
         )
 
         return message

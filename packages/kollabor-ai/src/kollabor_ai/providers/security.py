@@ -870,10 +870,20 @@ class LoggingRedactor:
         (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), "[REDACTED-ANTHROPIC-KEY]"),
         # Bearer tokens
         (re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]{20,}"), "Bearer [REDACTED]"),
-        # Authorization headers
+        # Authorization and provider-specific API key headers
         (
-            re.compile(r"Authorization:\s*[^\s]+", re.IGNORECASE),
+            re.compile(
+                r"Authorization:\s*(?:(?:Bearer|Basic)\s+)?[^\s,;]+",
+                re.IGNORECASE,
+            ),
             "Authorization: [REDACTED]",
+        ),
+        (
+            re.compile(
+                r"\b(x-goog-api-key|x-api-key|api-key)\s*:\s*[^\s,;]+",
+                re.IGNORECASE,
+            ),
+            r"\1: [REDACTED]",
         ),
         (
             re.compile(r'"authorization":\s*"[^"]+"', re.IGNORECASE),
@@ -905,6 +915,11 @@ class LoggingRedactor:
         (
             re.compile(r'"password":\s*"[^"]+"', re.IGNORECASE),
             '"password": "[REDACTED]"',
+        ),
+        # URL query credentials (Gemini uses ``key``; profiles may use api_key)
+        (
+            re.compile(r"([?&](?:api[_-]?key|key)=)[^&#\s]+", re.IGNORECASE),
+            r"\1[REDACTED]",
         ),
         # URLs with embedded keys
         (re.compile(r"(https?://[^/]+/)sk-[a-zA-Z0-9_-]{20,}"), r"\1[REDACTED-KEY]"),
