@@ -749,7 +749,7 @@ class ToolExecutor:
         import re as _re
 
         _spawn_pat = _re.compile(
-            r"(?:python3?\s+main\.py|kollab)\s+.*(?:--detached|--agent|&\s*$)",
+            r"^\s*(?:python3?\s+main\.py|kollab)\s+.*(?:--detached|--agent|&\s*$)",
             _re.IGNORECASE,
         )
         if _spawn_pat.search(command):
