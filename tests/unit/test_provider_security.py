@@ -1470,6 +1470,7 @@ class TestAPIKeyLoaderDetailed(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key, "config-key")
         mock_manager.store_key.assert_called_once_with("test-profile", "config-key")
 
+    @skip_if_no_cryptography()
     async def test_load_from_config_migrates_to_encrypted_on_keyring_failure(self):
         """Test migration falls back to encrypted storage if keyring fails."""
         profile = {"name": "test-profile", "api_key": "config-key"}
@@ -2099,6 +2100,7 @@ class TestAPIKeyLoaderMissingPaths(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(key, "config-key")
 
+    @skip_if_no_cryptography()
     async def test_migration_to_encrypted_fallback(self):
         """Test migration falls back to encrypted storage."""
         profile = {"name": "test-profile", "api_key": "config-key"}
@@ -2485,6 +2487,7 @@ class TestAPIKeyLoaderFallbackPaths(unittest.IsolatedAsyncioTestCase):
 
         mock_manager.store_key.assert_called_once_with("test-profile", "test-key")
 
+    @skip_if_no_cryptography()
     async def test_migrate_key_fallback_to_encrypted(self):
         """Test migration falls back to encrypted storage."""
         mock_manager = Mock()
@@ -2725,6 +2728,7 @@ class TestPlaintextKeyStorageExceptionPaths(TempFileTest):
 class TestAPIKeyLoaderCompleteFallback(unittest.IsolatedAsyncioTestCase):
     """Test complete fallback chain in APIKeyLoader."""
 
+    @skip_if_no_cryptography()
     async def test_complete_fallback_chain(self):
         """Test all tiers are tried in order."""
         profile = {"name": "test-profile", "api_key": "config-key"}
