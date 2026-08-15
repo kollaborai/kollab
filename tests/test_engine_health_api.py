@@ -50,6 +50,7 @@ def _stop_server(proc: subprocess.Popen[str]) -> None:
 
 def test_stop_server_closes_stdout_after_wait():
     """Subprocess cleanup must release the stdout pipe owned by the parent."""
+
     class FakeProcess:
         def __init__(self) -> None:
             self.stdout = tempfile.TemporaryFile(mode="w+")
@@ -151,7 +152,6 @@ def test_endpoints():
             print("  protected endpoint OK")
 
             print("\nAll tests passed!")
-            return 0
 
         finally:
             _stop_server(proc)
