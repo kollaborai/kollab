@@ -552,9 +552,10 @@ class TestAPIKeyLoader(unittest.IsolatedAsyncioTestCase):
 
         mock_manager = Mock()
 
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -2041,11 +2042,9 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile"}
 
         mock_manager = Mock()
-
-        async def get_key(*args):
-            return "keyring-key"
-
-        mock_manager.get_key = AsyncMock(side_effect=get_key)
+        mock_manager.get_key = Mock(
+            return_value=asyncio.coroutine(lambda: "keyring-key")()
+        )
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
