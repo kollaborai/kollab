@@ -2722,7 +2722,7 @@ class TestPlaintextKeyStorageExceptionPaths(TempFileTest):
             self.assertFalse(result)
 
 
-class TestAPIKeyLoaderCompleteFallback(unittest.TestCase):
+class TestAPIKeyLoaderCompleteFallback(unittest.IsolatedAsyncioTestCase):
     """Test complete fallback chain in APIKeyLoader."""
 
     async def test_complete_fallback_chain(self):
@@ -2731,7 +2731,11 @@ class TestAPIKeyLoaderCompleteFallback(unittest.TestCase):
 
         # Create loader with all backends
         mock_manager = Mock()
-        mock_manager.get_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
+        async def get_key(_profile_name):
+            return None
+
+        mock_manager.get_key = get_key
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
