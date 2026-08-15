@@ -164,6 +164,38 @@ def test_attach_bridge_client_event_can_send_response_without_waiting_for_reply(
     asyncio.run(run_bridge())
 
 
+def test_attach_bridge_fire_and_forget_ignores_cancellation():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        rpc_client = BlockingRpcClient()
+        layout_manager = FakeLayoutManager()
+        loop = asyncio.get_running_loop()
+        errors = []
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+
+        await bridge.handle_client_event(
+            rpc_client=rpc_client,
+            layout_manager=layout_manager,
+            event={"type": "permission_request", "details": {"tool_id": "terminal_0"}},
+            wait_for_rpc_reply=False,
+        )
+        await asyncio.wait_for(rpc_client.started.wait(), timeout=1)
+
+        rpc_tasks = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task() and not task.done()
+        ]
+        assert rpc_tasks
+        for task in rpc_tasks:
+            task.cancel()
+        await asyncio.sleep(0)
+
+        assert not errors
+
+    asyncio.run(run_bridge())
+
+
 def test_attach_bridge_waits_for_late_visible_client():
     async def run_bridge():
         bridge = AttachPermissionBridge()
