@@ -27,6 +27,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+from kollabor_ai.providers.errors import ProviderError
 from kollabor_ai.providers.security import (
     CRYPTOGRAPHY_AVAILABLE,
     KEYRING_AVAILABLE,
@@ -787,6 +788,103 @@ class TestLoggingRedactor(unittest.TestCase):
         self.assertEqual(redacted["model"], "gpt-4")
         # Nested dict should also be redacted
         self.assertNotIn("sk-example-redaction-key-0000", str(redacted["nested"]))
+
+    def test_redact_sensitive_mapping_fields_regardless_of_value_shape(self):
+        """Sensitive field names redact even short or non-pattern values."""
+        data = {
+            "api_key": "x",
+            "api-token": "opaque",
+            "x-api-key": "tiny",
+            "x-goog-api-key": "g",
+            "password": "short",
+            "access-token": "opaque",
+            "Authorization": "Basic abc",
+            "nested": {"clientSecret": "tiny"},
+            "token_count": 42,
+            "secretary": "Ada",
+            "model": "gpt-4",
+        }
+
+        redacted = LoggingRedactor.redact(data)
+
+        for key in (
+            "api_key",
+            "api-token",
+            "x-api-key",
+            "x-goog-api-key",
+            "password",
+            "access-token",
+            "Authorization",
+        ):
+            self.assertEqual(redacted[key], "[REDACTED]")
+        self.assertEqual(redacted["nested"]["clientSecret"], "[REDACTED]")
+        self.assertEqual(redacted["token_count"], 42)
+        self.assertEqual(redacted["secretary"], "Ada")
+        self.assertEqual(redacted["model"], "gpt-4")
+
+    def test_redact_short_sensitive_fields_in_json_string(self):
+        """Short JSON credential fields cannot bypass string redaction."""
+        for field in (
+            "access_token",
+            "refresh-token",
+            "token",
+            "client_secret",
+            "secret",
+        ):
+            with self.subTest(field=field):
+                text = f'{{"{field}": "x"}}'
+                redacted = LoggingRedactor.redact(text)
+                self.assertNotIn('"x"', redacted)
+                self.assertIn("[REDACTED]", redacted)
+
+    def test_redact_short_sensitive_object_attribute(self):
+        """Sensitive object attributes redact without value-pattern matches."""
+
+        class TestObject:
+            def __init__(self):
+                self.api_token = "x"
+                self.token_count = 42
+
+        redacted = LoggingRedactor.redact(TestObject())
+
+        self.assertEqual(redacted["__dict__"]["api_token"], "[REDACTED]")
+        self.assertEqual(redacted["__dict__"]["token_count"], 42)
+
+
+    def test_redact_provider_header_and_query_credentials(self):
+        """Provider-specific headers and query keys redact any value shape."""
+        samples = (
+            "x-api-key: x",
+            "x-goog-api-key: x",
+            "api-key: x",
+            "https://example.test/v1?key=x&model=chat",
+            "https://example.test/v1?api_key=x&model=chat",
+        )
+
+        for text in samples:
+            with self.subTest(text=text):
+                redacted = LoggingRedactor.redact(text)
+                self.assertNotIn("x", redacted.split("[REDACTED]")[-1])
+                self.assertIn("[REDACTED]", redacted)
+
+    def test_provider_error_safe_message_redacts_headers_and_query_credentials(self):
+        """Provider safe messages cannot expose header or query credentials."""
+        samples = (
+            "x-api-key: x",
+            "x-goog-api-key: x",
+            "api-key: x",
+            "Authorization: Basic abc",
+            "https://example.test/v1?key=x&model=chat",
+            "https://example.test/v1?api_key=x&model=chat",
+        )
+
+        for message in samples:
+            with self.subTest(message=message):
+                safe_message = str(ProviderError(message, "synthetic"))
+                self.assertIn("[REDACTED]", safe_message)
+                self.assertNotIn("=x", safe_message)
+                self.assertNotIn(": x", safe_message)
+                self.assertNotIn("abc", safe_message)
 
     def test_redact_list(self):
         """Test redacting sensitive data in list."""
