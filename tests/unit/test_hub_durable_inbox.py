@@ -299,20 +299,20 @@ class TestBoundedReplay:
     def test_prune_malformed_json_value_does_not_disable_bound(
         self, tmp_path: Path
     ) -> None:
-        """A valid JSON non-object remains ordinary and cannot abort pruning."""
-        inbox = tmp_path / "lapis"
-        inbox.mkdir()
-        (inbox / "00000000-list.json").write_text("[]")
-        for i in range(5):
-            (inbox / f"{i + 1:08d}.json").write_text(
-                json.dumps(_make_msg(content=f"ordinary {i}").to_dict())
-            )
+        """Malformed and non-object JSON remain evictable ordinary entries."""
+        payloads = ["[]", '"scalar"', "null", "not-json"]
+        for case, payload in enumerate(payloads):
+            inbox = tmp_path / f"lapis-{case}"
+            inbox.mkdir()
+            (inbox / "00000000-malformed.json").write_text(payload)
+            for i in range(5):
+                (inbox / f"{i + 1:08d}.json").write_text(
+                    json.dumps(_make_msg(content=f"ordinary {i}").to_dict())
+                )
 
-        from plugins.hub.messenger import _prune_inbox
+            _prune_inbox(inbox, max_size=2)
 
-        _prune_inbox(inbox, max_size=2)
-
-        assert len(list(inbox.glob("*.json"))) == 2
+            assert len(list(inbox.glob("*.json"))) == 2
 
     def test_ttl_expired_task_cron_is_preserved_for_stale_ack(
         self, tmp_path: Path

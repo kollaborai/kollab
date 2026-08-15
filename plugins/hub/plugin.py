@@ -42,7 +42,12 @@ from .messaging_bridge import (
     IncomingMessage,
     MessagingBridge,
 )
-from .messenger import AgentMessenger, AgentSocketServer, _coerce_line_count
+from .messenger import (
+    AgentMessenger,
+    AgentSocketServer,
+    _coerce_line_count,
+    _is_durable_control,
+)
 from .models import (
     COORDINATOR_IDENTITY,
     POOL_BY_NAME,
@@ -4768,11 +4773,7 @@ class HubPlugin(BasePlugin):
         # task-cron reminders are explicitly acknowledged when stale. Do not
         # duplicate controls in the coalesced HUD block or fallback delivery.
         control_msgs = [
-            msg
-            for msg in replay_msgs
-            if msg.from_identity == "task-cron"
-            or bool((msg.metadata or {}).get("task_cron"))
-            or bool((msg.metadata or {}).get("task_assignment"))
+            msg for msg in replay_msgs if _is_durable_control(msg.to_dict())
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
         for msg in control_msgs:
