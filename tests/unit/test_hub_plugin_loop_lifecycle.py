@@ -1,8 +1,7 @@
 """Focused regression coverage for hub plugin startup loop ownership."""
 
 import asyncio
-import gc
-import warnings
+import inspect
 
 import pytest
 
@@ -20,22 +19,32 @@ class _EventBus:
         return None
 
 
-def test_register_hooks_without_running_loop_does_not_allocate_resources():
+def test_register_hooks_without_running_loop_does_not_allocate_resources(monkeypatch):
     """Invalid sync driving fails before any coroutine, task, or loop is created."""
     plugin = HubPlugin()
     plugin.event_bus = _EventBus()
     plugin._cli_args = None
     register_hooks = plugin.register_hooks()
+    allocation_attempts = []
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ResourceWarning)
+    def reject_allocation(*args, **kwargs):
+        allocation_attempts.append((args, kwargs))
+        raise AssertionError("register_hooks must not allocate loop-owned resources")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", reject_allocation)
+    monkeypatch.setattr(asyncio, "ensure_future", reject_allocation)
+
+    try:
         with pytest.raises(RuntimeError, match="no running event loop"):
             register_hooks.send(None)
+    finally:
         register_hooks.close()
-        gc.collect()
 
+    assert inspect.getcoroutinestate(register_hooks) == inspect.CORO_CLOSED
     assert plugin._startup_task is None
-    assert [warning for warning in caught if warning.category is ResourceWarning] == []
+    assert allocation_attempts == []
+    with pytest.raises(RuntimeError, match="no running event loop"):
+        asyncio.get_running_loop()
 
 
 def test_register_hooks_schedules_and_shutdown_drains_startup_task(monkeypatch):
