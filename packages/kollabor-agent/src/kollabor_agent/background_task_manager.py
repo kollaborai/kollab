@@ -287,27 +287,35 @@ class BackgroundTaskManager:
         start_time = time.time()
         poll_interval = 0.01  # 10ms polling
 
-        while len(self._background_tasks) >= self._max_concurrent_tasks:
-            # Check timeout
-            elapsed = time.time() - start_time
-            if (
-                self.task_config.queue.block_timeout is not None
-                and elapsed >= self.task_config.queue.block_timeout
-            ):
-                self._queue_metrics["block_timeout_count"] += 1
-                if self.task_config.queue.log_queue_events:
-                    logger.warning(
-                        f"Background task block timeout after {elapsed:.2f}s"
+        try:
+            while len(self._background_tasks) >= self._max_concurrent_tasks:
+                # Check timeout
+                elapsed = time.time() - start_time
+                if (
+                    self.task_config.queue.block_timeout is not None
+                    and elapsed >= self.task_config.queue.block_timeout
+                ):
+                    self._queue_metrics["block_timeout_count"] += 1
+                    if self.task_config.queue.log_queue_events:
+                        logger.warning(
+                            f"Background task block timeout after {elapsed:.2f}s"
+                        )
+                    raise RuntimeError(
+                        f"Timeout waiting for available task slot (timeout: {self.task_config.queue.block_timeout}s)"
                     )
-                raise RuntimeError(
-                    f"Timeout waiting for available task slot (timeout: {self.task_config.queue.block_timeout}s)"
-                )
 
-            # Brief sleep before next poll
-            await asyncio.sleep(poll_interval)
+                # Brief sleep before next poll
+                await asyncio.sleep(poll_interval)
 
-        # Space is available, create the actual task using the normal path
-        return self.create_background_task(coro, name)
+            # Space is available, create the actual task using the normal path
+            return self.create_background_task(coro, name)
+        except BaseException:
+            # A blocking wrapper may be cancelled before it hands the awaitable
+            # to create_background_task. Close coroutine objects to prevent
+            # unawaited-coroutine warnings; factories need no cleanup.
+            if inspect.iscoroutine(coro):
+                coro.close()
+            raise
 
     async def _safe_task_wrapper(self, coro, task_name: str):
         """Wrapper that safely executes task and handles exceptions."""

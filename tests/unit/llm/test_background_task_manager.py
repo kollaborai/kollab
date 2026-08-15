@@ -153,6 +153,30 @@ class TestBackgroundTaskManager(unittest.TestCase):
             self.manager.create_background_task(noop(), "test")
         self.assertEqual(self.queue_metrics["drop_newest_count"], 1)
 
+    def test_block_wrapper_cancellation_closes_pending_coroutine(self):
+        """Cancelling a blocked wrapper must not leak its unstarted coroutine."""
+        self.task_config.queue.overflow_strategy = "block"
+        self.manager._background_tasks.add(MagicMock())
+        closed = False
+
+        async def pending_work():
+            nonlocal closed
+            try:
+                await asyncio.sleep(10)
+            finally:
+                closed = True
+
+        async def run():
+            coro = pending_work()
+            task = self.manager.create_background_task(coro, "blocked")
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return coro
+
+        coro = self.loop.run_until_complete(run())
+        self.assertTrue(coro.cr_frame is None)
+
+
     def test_overflow_drop_oldest(self):
         self.task_config.queue.overflow_strategy = "drop_oldest"
         for i in range(5):
