@@ -4,8 +4,8 @@ A playable retro 80s arcade-style shooter: fly through a starfield,
 dodge enemy fire, and shoot down invaders. Arrows/A-D move, space fires.
 """
 
-import asyncio
 import logging
+import time
 
 from kollabor_tui.fullscreen import FullScreenPlugin
 from kollabor_tui.fullscreen.components.space_shooter_components import (
@@ -15,14 +15,6 @@ from kollabor_tui.fullscreen.plugin import PluginMetadata
 from kollabor_tui.key_parser import KeyPress
 
 logger = logging.getLogger(__name__)
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
 
 
 class SpaceShooterPlugin(FullScreenPlugin):
@@ -77,7 +69,7 @@ class SpaceShooterPlugin(FullScreenPlugin):
     async def on_start(self):
         """Called when space shooter plugin starts."""
         await super().on_start()
-        self.start_time = _get_loop().time()
+        self.start_time = time.monotonic()
 
         logger.info("Space shooter plugin starting via full-screen framework")
 
@@ -99,7 +91,7 @@ class SpaceShooterPlugin(FullScreenPlugin):
 
         try:
             # Calculate current time for animation
-            current_time = _get_loop().time() - self.start_time
+            current_time = time.monotonic() - self.start_time
 
             # Update animation
             self.space_renderer.update(current_time)
