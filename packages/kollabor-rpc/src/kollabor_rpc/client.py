@@ -180,4 +180,9 @@ class RpcClient:
         for _request_id, fut in list(self._pending.items()):
             if not fut.done():
                 fut.set_exception(RpcError("rpc client closed"))
+                # Mark the exception retrieved immediately.  A caller may
+                # cancel its task before it resumes to observe the close
+                # error; without this, asyncio reports an un-retrieved
+                # Future exception during loop shutdown.
+                fut.exception()
         self._pending.clear()
