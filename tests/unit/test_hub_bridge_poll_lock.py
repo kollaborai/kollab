@@ -11,6 +11,7 @@ BridgeConflictError on 409 so the loop backs off instead of spinning.
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 
 from plugins.hub.messaging_bridge import (
     BridgeConflictError,
@@ -23,10 +24,26 @@ from plugins.hub.messaging_bridge import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def poll_locks(tmp_path):
+    """Own poll locks for a test and release them on every exit path."""
+    locks = []
+
+    def create(key: str) -> BridgePollLock:
+        lock = BridgePollLock(key, tmp_path)
+        locks.append(lock)
+        return lock
+
+    yield create
+
+    for lock in reversed(locks):
+        lock.release()
+
+
 class TestBridgePollLock:
-    def test_second_holder_blocked_while_first_holds(self, tmp_path):
-        a = BridgePollLock("telegram:tok-1", tmp_path)
-        b = BridgePollLock("telegram:tok-1", tmp_path)
+    def test_second_holder_blocked_while_first_holds(self, poll_locks):
+        a = poll_locks("telegram:tok-1")
+        b = poll_locks("telegram:tok-1")
 
         assert a.acquire() is True
         assert a.held is True
@@ -34,9 +51,9 @@ class TestBridgePollLock:
         assert b.acquire() is False
         assert b.held is False
 
-    def test_release_lets_standby_take_over(self, tmp_path):
-        a = BridgePollLock("telegram:tok-1", tmp_path)
-        b = BridgePollLock("telegram:tok-1", tmp_path)
+    def test_release_lets_standby_take_over(self, poll_locks):
+        a = poll_locks("telegram:tok-1")
+        b = poll_locks("telegram:tok-1")
 
         assert a.acquire() is True
         assert b.acquire() is False
@@ -48,17 +65,17 @@ class TestBridgePollLock:
         assert b.held is True
         b.release()
 
-    def test_different_tokens_do_not_block(self, tmp_path):
-        a = BridgePollLock("telegram:tok-A", tmp_path)
-        b = BridgePollLock("telegram:tok-B", tmp_path)
+    def test_different_tokens_do_not_block(self, poll_locks):
+        a = poll_locks("telegram:tok-A")
+        b = poll_locks("telegram:tok-B")
         # Distinct bot tokens are independent inboxes; both may poll.
         assert a.acquire() is True
         assert b.acquire() is True
         a.release()
         b.release()
 
-    def test_acquire_is_idempotent_while_held(self, tmp_path):
-        a = BridgePollLock("telegram:tok-1", tmp_path)
+    def test_acquire_is_idempotent_while_held(self, poll_locks):
+        a = poll_locks("telegram:tok-1")
         assert a.acquire() is True
         # Re-acquiring our own lock is a no-op success, not a new fd leak.
         fd = a._fd
@@ -66,15 +83,15 @@ class TestBridgePollLock:
         assert a._fd is fd
         a.release()
 
-    def test_release_is_safe_when_not_held(self, tmp_path):
-        a = BridgePollLock("telegram:tok-1", tmp_path)
+    def test_release_is_safe_when_not_held(self, poll_locks):
+        a = poll_locks("telegram:tok-1")
         # Should not raise even though nothing was acquired.
         a.release()
         assert a.held is False
 
-    def test_lock_filename_keyed_on_token(self, tmp_path):
-        a = BridgePollLock("telegram:tok-A", tmp_path)
-        b = BridgePollLock("telegram:tok-B", tmp_path)
+    def test_lock_filename_keyed_on_token(self, poll_locks):
+        a = poll_locks("telegram:tok-A")
+        b = poll_locks("telegram:tok-B")
         assert a._lock_path != b._lock_path
         assert a._lock_path.name.startswith("bridge-poll-")
 
@@ -84,21 +101,31 @@ class TestBridgePollLock:
 # ---------------------------------------------------------------------------
 
 
-def _bridge_with_response(json_payload: dict) -> TelegramBridge:
-    """Build a TelegramBridge whose client returns the given getUpdates JSON."""
-    bridge = TelegramBridge(token="123:ABC", chat_id="456")
-    resp = MagicMock()
-    resp.json = MagicMock(return_value=json_payload)
-    client = AsyncMock()
-    client.get = AsyncMock(return_value=resp)
-    bridge._client = client
-    return bridge
+@pytest_asyncio.fixture
+async def bridge_with_response():
+    """Own fake Telegram clients and disconnect them on every exit path."""
+    bridges = []
+
+    def create(json_payload: dict) -> TelegramBridge:
+        bridge = TelegramBridge(token="123:ABC", chat_id="456")
+        resp = MagicMock()
+        resp.json = MagicMock(return_value=json_payload)
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        bridge._client = client
+        bridges.append(bridge)
+        return bridge
+
+    yield create
+
+    for bridge in reversed(bridges):
+        await bridge.disconnect()
 
 
 class TestTelegramPollConflict:
     @pytest.mark.asyncio
-    async def test_409_raises_bridge_conflict(self):
-        bridge = _bridge_with_response(
+    async def test_409_raises_bridge_conflict(self, bridge_with_response):
+        bridge = bridge_with_response(
             {
                 "ok": False,
                 "error_code": 409,
@@ -112,14 +139,14 @@ class TestTelegramPollConflict:
             await bridge.poll()
 
     @pytest.mark.asyncio
-    async def test_non_409_not_ok_returns_empty(self):
+    async def test_non_409_not_ok_returns_empty(self, bridge_with_response):
         # Other not-ok responses (e.g. 400) must NOT raise -- just no messages.
-        bridge = _bridge_with_response(
+        bridge = bridge_with_response(
             {"ok": False, "error_code": 400, "description": "Bad Request"}
         )
         assert await bridge.poll() == []
 
     @pytest.mark.asyncio
-    async def test_ok_empty_result_returns_empty(self):
-        bridge = _bridge_with_response({"ok": True, "result": []})
+    async def test_ok_empty_result_returns_empty(self, bridge_with_response):
+        bridge = bridge_with_response({"ok": True, "result": []})
         assert await bridge.poll() == []
