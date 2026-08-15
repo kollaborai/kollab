@@ -296,6 +296,24 @@ class TestBoundedReplay:
         )
         assert ordinary_count == 2
 
+    def test_prune_malformed_json_value_does_not_disable_bound(
+        self, tmp_path: Path
+    ) -> None:
+        """A valid JSON non-object remains ordinary and cannot abort pruning."""
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        (inbox / "00000000-list.json").write_text("[]")
+        for i in range(5):
+            (inbox / f"{i + 1:08d}.json").write_text(
+                json.dumps(_make_msg(content=f"ordinary {i}").to_dict())
+            )
+
+        from plugins.hub.messenger import _prune_inbox
+
+        _prune_inbox(inbox, max_size=2)
+
+        assert len(list(inbox.glob("*.json"))) == 2
+
     def test_ttl_expired_task_cron_is_preserved_for_stale_ack(
         self, tmp_path: Path
     ) -> None:
@@ -764,6 +782,42 @@ class TestSingleBlockDelivery:
         assert "retained directive" not in block
         assert "msg 0" in block
         assert "msg 1" in block
+
+    def test_replay_metadata_task_cron_uses_normal_receive_once(self) -> None:
+        """Anything preserved as task-cron metadata is classified, not flattened."""
+        plugin = _make_plugin_stub()
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        plugin.event_bus = bus
+
+        received: List[HubMessage] = []
+
+        async def capture_receive(message: HubMessage) -> None:
+            received.append(message)
+
+        plugin._on_message_received = capture_receive
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_identity="koordinator",
+            to="lapis",
+            content="[task reminder: metadata-only] classify me",
+            metadata={"task_cron": True, "task_id": "metadata-only"},
+        )
+
+        self._run(
+            plugin._deliver_inbox_batch(
+                [summary, ordinary[0], reminder, ordinary[1]]
+            )
+        )
+
+        assert received == [reminder]
+        inject_mock.assert_awaited_once()
+        assert "classify me" not in inject_mock.await_args.args[0]
+
 
     def test_replay_active_task_cron_uses_receive_path_and_is_excluded(
         self, tmp_path: Path

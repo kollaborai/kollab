@@ -4771,6 +4771,7 @@ class HubPlugin(BasePlugin):
             msg
             for msg in replay_msgs
             if msg.from_identity == "task-cron"
+            or bool((msg.metadata or {}).get("task_cron"))
             or bool((msg.metadata or {}).get("task_assignment"))
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]

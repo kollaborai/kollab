@@ -44,13 +44,16 @@ def _coerce_line_count(value: Any, default: int) -> int:
 logger = logging.getLogger(__name__)
 
 
-def _is_durable_control(data: Dict[str, Any]) -> bool:
+def _is_durable_control(data: Any) -> bool:
     """Return whether a mailbox payload must bypass ordinary replay limits.
 
     Task assignments require normal receive classification, and task-cron
     reminders require an explicit stale/active decision plus correlated ACK.
     They therefore have priority over ordinary chatter at every inbox bound.
+    Valid JSON scalars and arrays are malformed mailbox records, not controls.
     """
+    if not isinstance(data, dict):
+        return False
     metadata = data.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
