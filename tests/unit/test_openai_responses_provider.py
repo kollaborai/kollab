@@ -496,7 +496,10 @@ class TestOpenAIResponsesProviderStream:
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
+            stream_context = AsyncMock()
+            stream_context.__aenter__.return_value = mock_response
+            stream_context.__aexit__.return_value = None
+            mock_client.stream = MagicMock(return_value=stream_context)
             mock_client_class.return_value = mock_client
 
             provider = OpenAIResponsesProvider(provider_config)

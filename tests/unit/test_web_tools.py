@@ -146,6 +146,7 @@ def _make_mock_aiohttp_response(status=200, text="", url="https://example.com"):
     resp.status = status
     resp.reason = "OK" if status < 400 else "Error"
     resp.text = AsyncMock(return_value=text)
+    resp.headers = {}
     resp.url = url
     resp.__aenter__ = AsyncMock(return_value=resp)
     resp.__aexit__ = AsyncMock(return_value=None)
