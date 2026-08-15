@@ -15,13 +15,14 @@ from .models import HubMessage
 from .presence import _atomic_write, get_messages_dir, get_socket_dir
 
 # --- Durable inbox bounds ---
-# Max messages kept on disk per inbox. Oldest are evicted at write time.
+# Max ordinary messages kept on disk per inbox. Durable task controls are
+# preserved until normal receive can classify them; oldest ordinary entries
+# are evicted first at write time.
 INBOX_MAX_SIZE: int = 50
 # Messages older than this (seconds) are silently discarded on read.
 INBOX_TTL_SECS: int = 7 * 86400  # 7 days
-# Max messages replayed to a reconnecting agent per mailbox poll cycle.
-# When the inbox exceeds this, a summary is prepended and only the newest
-# INBOX_MAX_REPLAY messages are returned.
+# Max ordinary messages replayed to a reconnecting agent per mailbox poll.
+# Durable task controls bypass this cap and retain normal receive semantics.
 INBOX_MAX_REPLAY: int = 20
 
 # Idle timeout (seconds) for the off-box read loop. An authenticated remote
@@ -43,25 +44,60 @@ def _coerce_line_count(value: Any, default: int) -> int:
 logger = logging.getLogger(__name__)
 
 
-def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
-    """Evict the oldest messages from an inbox directory if it exceeds max_size.
+def _is_durable_control(data: Dict[str, Any]) -> bool:
+    """Return whether a mailbox payload must bypass ordinary replay limits.
 
-    Called by send_to_file after each write so inboxes can never grow
-    unboundedly even when an agent is offline for a long time.
+    Task assignments require normal receive classification, and task-cron
+    reminders require an explicit stale/active decision plus correlated ACK.
+    They therefore have priority over ordinary chatter at every inbox bound.
+    """
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return bool(
+        metadata.get("task_cron")
+        or metadata.get("task_assignment")
+        or data.get("from_identity") == "task-cron"
+    )
+
+
+def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
+    """Evict oldest ordinary messages while preserving durable controls.
+
+    ``max_size`` bounds ordinary chatter, not task controls that still require
+    normal receive classification or an explicit stale ACK. Malformed files
+    are treated as ordinary and remain eligible for eviction.
     """
     try:
         files = sorted(msg_dir.glob("*.json"))
-        excess = len(files) - max_size
+        ordinary_files: List[Path] = []
+        control_count = 0
+        for path in files:
+            try:
+                with open(path) as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = {}
+            if _is_durable_control(data):
+                control_count += 1
+            else:
+                ordinary_files.append(path)
+
+        excess = len(ordinary_files) - max_size
         if excess <= 0:
             return
-        for f in files[:excess]:
+        for path in ordinary_files[:excess]:
             try:
-                f.unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
             except Exception:
                 pass
         logger.info(
-            f"Inbox prune: evicted {excess} oldest message(s) from "
-            f"{msg_dir.name!r} (limit={max_size})"
+            "Inbox prune: evicted %d oldest ordinary message(s) from %r "
+            "(ordinary_limit=%d, controls_preserved=%d)",
+            excess,
+            msg_dir.name,
+            max_size,
+            control_count,
         )
     except Exception as e:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
@@ -1477,8 +1513,8 @@ class AgentMessenger:
     async def send_to_file(target_agent_id: str, message: HubMessage) -> None:
         """Fallback: write message to agent's filesystem mailbox.
 
-        After writing, prunes the inbox to INBOX_MAX_SIZE entries (oldest
-        first) so a flood of messages can never grow an inbox unboundedly.
+        After writing, prunes ordinary traffic to INBOX_MAX_SIZE entries
+        (oldest first). Durable task controls are preserved until classified.
         """
         msg_dir = get_messages_dir() / target_agent_id
         msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1498,12 +1534,11 @@ class AgentMessenger:
 
         Args:
             agent_id: Agent identity or agent_id to read from.
-            max_replay: If > 0, cap the number of messages returned to this
-                many (newest first). When the inbox exceeds ``max_replay`` a
-                synthetic ``inbox_summary`` message is prepended so the
-                recipient knows how many they missed without being flooded.
-                Expired messages (older than INBOX_TTL_SECS) are silently
-                discarded regardless of this limit.
+            max_replay: If > 0, cap ordinary messages returned to this many
+                (newest first). Durable task controls bypass the cap so normal
+                receive can classify them exactly once. A synthetic
+                ``inbox_summary`` reports dropped ordinary traffic. TTL also
+                applies only to ordinary traffic; controls must be classified.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
@@ -1526,9 +1561,15 @@ class AgentMessenger:
                     pass
                 continue
 
-            # Silently discard TTL-expired messages
+            # TTL bounds ordinary chatter only. Durable task controls must
+            # reach normal receive so stale cron reminders are explicitly
+            # ACKed and assignments are classified instead of disappearing.
             ts = data.get("timestamp", 0) or 0
-            if ts and (now - float(ts)) > INBOX_TTL_SECS:
+            if (
+                not _is_durable_control(data)
+                and ts
+                and (now - float(ts)) > INBOX_TTL_SECS
+            ):
                 expired_count += 1
                 try:
                     f.unlink()
@@ -1559,9 +1600,18 @@ class AgentMessenger:
             )
 
         total = len(messages)
+        controls = [
+            message for message in messages if _is_durable_control(message.to_dict())
+        ]
+        ordinary = [message for message in messages if message not in controls]
 
-        if max_replay > 0 and total > max_replay:
-            # Collect unique senders from the full set for the summary
+        if max_replay > 0 and len(ordinary) > max_replay:
+            replayed_ordinary = ordinary[-max_replay:]
+            dropped = len(ordinary) - len(replayed_ordinary)
+            replayed_ids = {message.id for message in controls + replayed_ordinary}
+            replayed = [message for message in messages if message.id in replayed_ids]
+
+            # Collect unique senders from the full set for the summary.
             senders: List[str] = list(
                 dict.fromkeys(
                     m.from_identity or m.from_agent
@@ -1576,8 +1626,9 @@ class AgentMessenger:
             summary_content = (
                 f"[offline inbox] {total} message(s) arrived while offline"
                 f" (senders: {sender_str or 'unknown'}). "
-                f"Showing most recent {max_replay}. "
-                f"Older messages have been dropped to prevent flooding."
+                f"Showing most recent {max_replay} ordinary message(s) and "
+                f"{len(controls)} preserved task control(s). "
+                f"Older ordinary messages have been dropped to prevent flooding."
             )
             summary = HubMessage(
                 action="inbox_summary",
@@ -1588,16 +1639,21 @@ class AgentMessenger:
                 timestamp=0.0,
                 metadata={
                     "total": total,
-                    "showing": max_replay,
+                    "showing": len(replayed_ordinary),
+                    "controls_preserved": len(controls),
                     "senders": senders,
-                    "dropped": total - max_replay,
+                    "dropped": dropped,
                 },
             )
             logger.info(
-                f"Inbox replay bounded for {agent_id}: {total} total, "
-                f"replaying last {max_replay}"
+                "Inbox replay bounded for %s: %d total, replaying %d ordinary "
+                "and preserving %d control(s)",
+                agent_id,
+                total,
+                len(replayed_ordinary),
+                len(controls),
             )
-            return [summary] + messages[-max_replay:]
+            return [summary] + replayed
 
         return messages
 

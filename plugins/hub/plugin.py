@@ -4763,12 +4763,17 @@ class HubPlugin(BasePlugin):
         summary = messages[0]
         replay_msgs = messages[1:]
 
-        # Task-cron reminders are control messages, not replay prose. Route
-        # them through the normal receive path first so stale reminders are
-        # acknowledged and active reminders retain their wake semantics. Do
-        # not duplicate them in the coalesced HUD block or fallback delivery.
-        control_msgs = [msg for msg in replay_msgs if msg.from_identity == "task-cron"]
-        ordinary_msgs = [msg for msg in replay_msgs if msg.from_identity != "task-cron"]
+        # Durable task controls are not replay prose. Route them through the
+        # normal receive path first so task assignments are classified and
+        # task-cron reminders are explicitly acknowledged when stale. Do not
+        # duplicate controls in the coalesced HUD block or fallback delivery.
+        control_msgs = [
+            msg
+            for msg in replay_msgs
+            if msg.from_identity == "task-cron"
+            or bool((msg.metadata or {}).get("task_assignment"))
+        ]
+        ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
         for msg in control_msgs:
             await self._on_message_received(msg)
 
@@ -6124,6 +6129,9 @@ class HubPlugin(BasePlugin):
             "disposition": "stale",
             "reason": reason,
             "reminder_id": message.id,
+            # Serialized before routing so durable filesystem ACKs carry the
+            # same transport receipt later recorded in the local vault.
+            "ack_transport": "direct",
             # Preserve the original routing identity in both direct ACKs and
             # local receipts so consumers can correlate stale reminders even
             # when delivery to the target is unavailable.
