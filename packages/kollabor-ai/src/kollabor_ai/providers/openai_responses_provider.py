@@ -31,7 +31,6 @@ from .models import (
     StreamingResponse,
     TextDelta,
     UnifiedResponse,
-    UsageInfo,
 )
 from .openai_responses_transformer import OpenAIResponsesTransformer
 from .registry import register_provider

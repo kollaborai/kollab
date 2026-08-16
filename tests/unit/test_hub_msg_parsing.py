@@ -10,11 +10,11 @@ import pytest
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from plugins.hub.models import HubMessage
-from plugins.hub.plugin import HubPlugin
 from plugins.hub.nudge_engine import (
     HUB_LOOP_THRESHOLD,
     NudgeEngine,
 )
+from plugins.hub.plugin import HubPlugin
 
 # ------------------------------------------------------------------ #
 # Regex patterns extracted from plugins/hub/plugin.py _parse_hub_messages

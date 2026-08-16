@@ -12,13 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from plugins.hub.plugin import HubPlugin
 from plugins.hub.notifier import (
     HubNotifier,
     TelegramNotifier,
     WebhookNotifier,
 )
-
+from plugins.hub.plugin import HubPlugin
 
 # ---------------------------------------------------------------------------
 # Helpers

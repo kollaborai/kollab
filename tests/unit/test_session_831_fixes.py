@@ -1,13 +1,8 @@
 """Tests for session 831 fixes: console vault stream, is_displaying race, tmux refs."""
 
-import json
-import os
 import threading
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 class TestHubConsoleVaultStream:
@@ -103,7 +98,7 @@ class TestIsDisplayingLock:
 
         # Try from main thread — should be blocked
         coord.queue_message("system", "msg2", display_type="info")
-        result = coord.display_queued_messages()
+        coord.display_queued_messages()
         if coord.is_displaying:
             blocked.append("main")
 

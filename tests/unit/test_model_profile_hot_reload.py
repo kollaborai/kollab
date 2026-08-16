@@ -71,7 +71,7 @@ class TestModelProfileHotReload(unittest.TestCase):
         # which now passes reload_profile=True to state_service.set_active_profile.
         # We rely on unit tests in profile.py to verify the slash logic;
         # this test just confirms the code path exists.
-        pm = _ProfileManager()
+        _ = _ProfileManager()
         state = _StateService()
         event_bus = SimpleNamespace(
             get_service=lambda name: state if name == "state_service" else None

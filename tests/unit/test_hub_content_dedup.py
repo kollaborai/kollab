@@ -11,11 +11,9 @@ any second identical message from the same sender arriving within the window
 is silently dropped at the receiver.
 """
 
-import asyncio
-import collections
 import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
@@ -59,12 +57,6 @@ class TestContentDedup(unittest.IsolatedAsyncioTestCase):
 
     async def _process(self, plugin: HubPlugin, message: HubMessage) -> bool:
         """Call _on_message_received; return True if the message was NOT dropped."""
-        processed = False
-
-        # Patch the part of _on_message_received that runs AFTER the dedup gate
-        # so we can detect if execution reached that point.
-        original_vault_append = None  # nothing to restore (vault is None)
-
         # We'll detect pass-through by checking _seen_content_hashes grew.
         before = len(plugin._seen_content_hashes)
         await plugin._on_message_received(message)
@@ -146,7 +138,6 @@ class TestContentDedup(unittest.IsolatedAsyncioTestCase):
         )
 
         # Second send (different UUID, same content) — window has expired → accepted
-        before = len(plugin._seen_content_hashes)
         await plugin._on_message_received(_msg(content, msg_id="cccccccccccccccccccccccccccccccc"))
         after = len(plugin._seen_content_hashes)
 
@@ -159,14 +150,13 @@ class TestContentDedup(unittest.IsolatedAsyncioTestCase):
         msg = _msg("hello world", msg_id="deadbeefdeadbeefdeadbeefdeadbeef")
 
         await plugin._on_message_received(msg)
-        before = len(plugin._seen_content_hashes)
 
         # Retransmit the EXACT same object (same id)
         await plugin._on_message_received(msg)
         after = len(plugin._seen_content_hashes)
 
         # Message-id dedup fires first; content hash stays the same size
-        self.assertEqual(before, after, "Exact retransmission should be caught by message-id dedup")
+        self.assertEqual(after, 1, "Exact retransmission should be caught by message-id dedup")
 
 
 if __name__ == "__main__":
