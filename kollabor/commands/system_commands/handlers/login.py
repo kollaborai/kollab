@@ -232,7 +232,7 @@ class LoginCommandHandler(BaseCommandHandler):
             default_note = (
                 "  default: yes (active on next launch)"
                 if make_default
-                else "  default: no (active this session only, run /profile to change)"
+                else "  default: no (active this session only, run /llm to change)"
             )
 
             return CommandResult(

@@ -1,0 +1,32 @@
+{
+  "name": "loadout-catalog-sections",
+  "description": "/llm renders a section for every configured provider and a row counter, and never drops a provider silently (regression for the OpenRouter empty-registry bug)",
+  "config": {
+    "command": "python main.py --no-daemon",
+    "app_init_sleep": 4,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "slash_command", "command": "llm" },
+    { "action": "wait_for", "pattern": "Loadouts", "timeout": 15 },
+    { "action": "capture" },
+    { "action": "section", "name": "picker opened with a provider section" },
+    { "action": "assert_contains", "pattern": "Loadouts" },
+    { "action": "assert_contains", "pattern": "Models" },
+    { "action": "section", "name": "row counter is rendered" },
+    { "action": "assert_contains", "pattern": "models\\)|of " },
+    { "action": "section", "name": "filter narrows across providers" },
+    { "action": "send_keys", "keys": "gpt" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "filter: gpt" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "section", "name": "esc clears filter before closing" },
+    { "action": "assert_contains", "pattern": "type to filter" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1 }
+  ]
+}

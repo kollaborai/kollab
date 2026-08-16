@@ -25,6 +25,7 @@ unique substring, with suggestions on failure) meant for CLI/command
 input; ``get()`` is the strict exact-name lookup for programmatic use.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -146,12 +147,18 @@ class LoadoutManager:
     def list_loadouts(self) -> List[Loadout]:
         """Explicit loadouts (sorted by name), then implicit ones.
 
-        Implicit loadouts are synthesized from ``provider_profiles()`` x
-        the model registry, in that order (provider-profile order, then
-        the registry's curated per-provider order). An implicit loadout is
-        dropped when its name collides with an explicit loadout or with an
-        implicit already emitted for an earlier provider profile -- first
-        provider profile wins.
+        Implicit loadouts are synthesized from ``provider_profiles()`` x the
+        model registry, then x the provider's cached live catalog, in that
+        order (provider-profile order, then the registry's curated per-provider
+        order, then catalog order). An implicit loadout is dropped when its
+        name collides with an explicit loadout or with an implicit already
+        emitted for an earlier provider profile -- first provider profile wins.
+
+        The catalog half is read from cache only, so this stays synchronous and
+        never blocks. A provider whose catalog has not been fetched yet simply
+        contributes its registry models (possibly none) -- call
+        ``refresh_catalogs()`` to warm it. This is what lets proxy providers
+        with no bundled registry entries (OpenRouter) appear at all.
         """
         explicit = self._explicit_loadouts()
         result: List[Loadout] = sorted(explicit.values(), key=lambda lo: lo.name)
@@ -160,7 +167,15 @@ class LoadoutManager:
         for profile in self.provider_profiles():
             provider = (profile.get_provider() or "").lower()
             registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
-            for model_name, _info in list_models_for_provider(registry_provider):
+            model_names = [
+                name for name, _info in list_models_for_provider(registry_provider)
+            ]
+            model_names.extend(
+                str(entry.get("id") or "")
+                for entry in self._cached_catalog(profile)
+                if entry.get("id")
+            )
+            for model_name in model_names:
                 if model_name in seen:
                     continue
                 seen.add(model_name)
@@ -173,6 +188,50 @@ class LoadoutManager:
                     )
                 )
         return result
+
+    @staticmethod
+    def _cached_catalog(profile: Any) -> List[Dict[str, Any]]:
+        """This profile's cached live catalog. Empty when cold or unavailable."""
+        try:
+            from kollabor_ai.model_catalog import cached_provider_models
+
+            return list(cached_provider_models(profile))
+        except Exception as exc:  # noqa: BLE001 -- catalog must never break listing
+            logger.debug("cached catalog unavailable for %s: %s", profile, exc)
+            return []
+
+    async def refresh_catalogs(self) -> Dict[str, int]:
+        """Fetch every configured provider's live catalog into the cache.
+
+        Runs the fetches concurrently -- wall-clock is the slowest provider,
+        not their sum. Returns ``{profile_name: model_count}``; a provider that
+        fails or has no listing API reports 0 and is not an error. Callers
+        re-read ``list_loadouts()`` afterwards to pick the results up.
+        """
+        try:
+            from kollabor_ai.model_catalog import get_provider_models
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("model catalog unavailable: %s", exc)
+            return {}
+
+        profiles = self.provider_profiles()
+        if not profiles:
+            return {}
+
+        results = await asyncio.gather(
+            *(get_provider_models(profile) for profile in profiles),
+            return_exceptions=True,
+        )
+
+        counts: Dict[str, int] = {}
+        for profile, models in zip(profiles, results):
+            if isinstance(models, BaseException):
+                logger.warning("catalog fetch failed for %s: %s", profile.name, models)
+                counts[profile.name] = 0
+            else:
+                counts[profile.name] = len(models)
+        logger.info("loadout catalogs refreshed: %s", counts)
+        return counts
 
     def get(self, name: str) -> Optional[Loadout]:
         """Exact-name lookup (explicit or implicit)."""

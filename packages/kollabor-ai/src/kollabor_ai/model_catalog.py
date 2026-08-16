@@ -18,14 +18,158 @@ empty list so the picker still opens.
 """
 
 import asyncio
+import json
 import logging
-from typing import Any, Dict, List
+import os
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 8.0
+
+# Disk cache. Same shape as kollabor_agent.agent_manager's agent metadata
+# cache: versioned JSON, discarded whole on version mismatch or TTL expiry.
+# Bump CACHE_VERSION when the cached entry shape changes.
+CACHE_VERSION = 1
+CACHE_TTL_SECONDS = 3600  # 1h -- provider catalogs move slowly
+_MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _cache_file() -> Optional[Path]:
+    """Path to the on-disk catalog cache, or None when it must not be touched.
+
+    Disabled under pytest for the same reason ``keyring_enabled()`` is: the
+    cache is keyed by profile name, so a developer's real ``~/.kollab`` entry
+    would leak into any test whose fake profile happens to share a name --
+    making the suite pass on a clean machine and fail on a working one. Tests
+    that exercise the cache patch this function with a tmp_path.
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return None
+    try:
+        from kollabor_config import get_config_directory
+
+        return get_config_directory() / "model_catalog.cache"
+    except Exception as e:  # noqa: BLE001 -- cache is best-effort
+        logger.debug("model catalog cache path unavailable: %s", e)
+        return None
+
+
+def _profile_key(profile: Any) -> str:
+    """Cache key for a profile: its name, falling back to its provider."""
+    if profile is None:
+        return ""
+    name = str(getattr(profile, "name", "") or "")
+    if name:
+        return name
+    try:
+        return (profile.get_provider() or "").lower()
+    except Exception:
+        return str(getattr(profile, "provider", "") or "").lower()
+
+
+def _load_disk_cache() -> Dict[str, Dict[str, Any]]:
+    """Load the whole cache file. Returns {} on any problem."""
+    path = _cache_file()
+    if path is None or not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != CACHE_VERSION:
+            logger.debug("model catalog cache version mismatch, ignoring")
+            return {}
+        entries = data.get("entries", {})
+        return entries if isinstance(entries, dict) else {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to load model catalog cache: %s", e)
+        return {}
+
+
+def _save_disk_cache(entries: Dict[str, Dict[str, Any]]) -> None:
+    """Write the whole cache file. Never raises."""
+    path = _cache_file()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": CACHE_VERSION, "entries": entries}
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to save model catalog cache: %s", e)
+
+
+def _fresh(entry: Any, max_age: float) -> bool:
+    """Whether a cache entry is a usable, unexpired record."""
+    if not isinstance(entry, dict):
+        return False
+    if not isinstance(entry.get("models"), list):
+        return False
+    return (time.time() - float(entry.get("timestamp", 0) or 0)) <= max_age
+
+
+def cached_provider_models(
+    profile: Any, max_age: float = CACHE_TTL_SECONDS
+) -> List[Dict[str, str]]:
+    """Cached catalog for a profile. Never fetches, never blocks, never raises.
+
+    This is what synchronous callers (loadout synthesis, name resolution) read.
+    Returns an empty list when nothing has been cached yet.
+    """
+    key = _profile_key(profile)
+    if not key:
+        return []
+
+    entry = _MEMORY_CACHE.get(key)
+    if not _fresh(entry, max_age):
+        entry = _load_disk_cache().get(key)
+        if _fresh(entry, max_age):
+            _MEMORY_CACHE[key] = entry  # type: ignore[assignment]
+        else:
+            return []
+    return list(entry.get("models", []))  # type: ignore[union-attr]
+
+
+def _store(profile: Any, models: List[Dict[str, str]]) -> None:
+    """Record a fetched catalog in both the memory and disk caches."""
+    key = _profile_key(profile)
+    if not key:
+        return
+    entry = {"timestamp": time.time(), "models": models}
+    _MEMORY_CACHE[key] = entry
+    entries = _load_disk_cache()
+    entries[key] = entry
+    _save_disk_cache(entries)
+
+
+async def get_provider_models(
+    profile: Any,
+    *,
+    max_age: float = CACHE_TTL_SECONDS,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> List[Dict[str, str]]:
+    """Cached-then-live catalog for a profile.
+
+    Returns the cached list when it is younger than ``max_age``; otherwise
+    fetches, stores, and returns the fresh one. A failed fetch falls back to
+    whatever is cached (even if stale) so a flaky network never empties a
+    picker that had content a moment ago.
+    """
+    cached = cached_provider_models(profile, max_age=max_age)
+    if cached:
+        return cached
+
+    models = await list_provider_models(profile, timeout=timeout)
+    if models:
+        _store(profile, models)
+        return models
+
+    # Fetch failed or returned nothing -- serve a stale entry if we have one.
+    return cached_provider_models(profile, max_age=float("inf"))
+
 
 # Providers that speak the OpenAI wire protocol, so GET {base_url}/models
 # returns {"data": [{"id": ...}]}. "custom" covers xAI, Z.AI, Kimi, and local

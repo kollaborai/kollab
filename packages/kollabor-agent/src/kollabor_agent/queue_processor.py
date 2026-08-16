@@ -50,6 +50,7 @@ def _config_int(config: Any, key: str, default: int) -> int:
             return default
     return default
 
+
 # Hard ceiling on continuation turns in one LOOP 2 pass. Runaway backstop,
 # NOT a work limit — sits far above any healthy investigation depth. Stops a
 # no-progress spin (turn_completed never flips) from looping forever. Replaces
@@ -424,7 +425,8 @@ class QueueProcessor:
                         if "'str' object has no attribute 'get'" in error_msg:
                             error_msg = (
                                 "API format mismatch. Your profile's tool_format setting may be wrong.\n"
-                                "Run /profile, press 'e' to edit, and check Tool Format matches your API."
+                                "Set tool_format on the profile in ~/.kollab/config.json to match your API\n"
+                                "('openai' or 'anthropic'), then restart."
                             )
                         self.message_display_service.display_error_message(error_msg)
                         break
@@ -722,10 +724,7 @@ class QueueProcessor:
                 # fallback only when the ledger rail was unavailable.
                 if self.event_bus:
                     _llm = self.event_bus.get_service("llm_service")
-                    if (
-                        _llm is not None
-                        and type(_llm).__module__ != "unittest.mock"
-                    ):
+                    if _llm is not None and type(_llm).__module__ != "unittest.mock":
                         legacy = getattr(_llm, "context_service", None)
                         if (
                             legacy is not None
@@ -756,8 +755,10 @@ class QueueProcessor:
             continuation_count = 0
             accumulated_response = ""
             accumulated_tokens = {
-                "prompt": 0, "completion": 0,
-                "cache_creation": 0, "cache_read": 0,
+                "prompt": 0,
+                "completion": 0,
+                "cache_creation": 0,
+                "cache_read": 0,
             }
 
             # turn_id binds the initial call and any auto-continuations
@@ -788,9 +789,7 @@ class QueueProcessor:
                 # Accumulate token usage from the truncated call
                 trunc_usage = self.api_service.get_last_token_usage()
                 if trunc_usage:
-                    accumulated_tokens["prompt"] += trunc_usage.get(
-                        "prompt_tokens", 0
-                    )
+                    accumulated_tokens["prompt"] += trunc_usage.get("prompt_tokens", 0)
                     accumulated_tokens["completion"] += trunc_usage.get(
                         "completion_tokens", 0
                     )
@@ -856,9 +855,7 @@ class QueueProcessor:
             if token_usage:
                 prompt_tokens += token_usage.get("prompt_tokens", 0)
                 completion_tokens += token_usage.get("completion_tokens", 0)
-                cache_creation_tokens += token_usage.get(
-                    "cache_creation_tokens", 0
-                )
+                cache_creation_tokens += token_usage.get("cache_creation_tokens", 0)
                 cache_read_tokens += token_usage.get("cache_read_tokens", 0)
 
                 # Finalize token I/O with actual counts
@@ -885,11 +882,8 @@ class QueueProcessor:
                     + cache_read_tokens
                 )
 
-
                 # Cost calculation
-                provider_type = getattr(
-                    self.api_service, "provider_type", ""
-                )
+                provider_type = getattr(self.api_service, "provider_type", "")
                 model = getattr(self.api_service, "model", "unknown")
                 turn_cost = calculate_cost(
                     provider_type,
@@ -900,8 +894,7 @@ class QueueProcessor:
                 )
                 self.session_stats["cost_usd"] = turn_cost
                 self.session_stats["total_cost_usd"] = (
-                    self.session_stats.get("total_cost_usd", 0.0)
-                    + turn_cost
+                    self.session_stats.get("total_cost_usd", 0.0) + turn_cost
                 )
 
                 logger.debug(
@@ -998,8 +991,11 @@ class QueueProcessor:
             # Step 4: Emit LLM_RESPONSE (hub/plugins can set force_continue, etc.)
             clean_response, force_continue, suppress_display, turn_complete = (
                 await self._emit_llm_response_and_handle(
-                    response, clean_response, thinking_duration,
-                    all_tools=all_tools, has_native_tools=has_native_tools,
+                    response,
+                    clean_response,
+                    thinking_duration,
+                    all_tools=all_tools,
+                    has_native_tools=has_native_tools,
                 )
             )
             if force_continue:
@@ -1017,9 +1013,7 @@ class QueueProcessor:
             # tools are the exception because they are intentionally paused
             # for user input rather than continued automatically.
             pipe_mode = getattr(self.renderer, "pipe_mode", False) is True
-            tools_suspended = (
-                self.question_gate_enabled and question_gate_active
-            )
+            tools_suspended = self.question_gate_enabled and question_gate_active
             tool_execution_pending = bool(has_native_tools) or (
                 bool(all_tools) and not tools_suspended
             )
@@ -1279,7 +1273,9 @@ class QueueProcessor:
                                         "tool_call_id": tc.id,
                                         **{
                                             key: value
-                                            for key, value in (result.metadata or {}).items()
+                                            for key, value in (
+                                                result.metadata or {}
+                                            ).items()
                                             if key.startswith("tool_output_")
                                         },
                                     },
@@ -1307,6 +1303,7 @@ class QueueProcessor:
                         self._track_file_interaction(result)
                     if batched:
                         import uuid as _uuid
+
                         tool_msg_uuid = str(_uuid.uuid4())
                         tool_msg = ConversationMessage(
                             role="user",
@@ -1315,7 +1312,8 @@ class QueueProcessor:
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(
-                            history_results, tool_msg_uuid,
+                            history_results,
+                            tool_msg_uuid,
                             message=tool_msg,
                         )
             else:
@@ -1336,13 +1334,14 @@ class QueueProcessor:
                             subtype="tool_result",
                             tool_use_id=result.tool_id,
                         )
-                        tool_context = self.tool_executor.format_result_for_conversation(
-                            result
+                        tool_context = (
+                            self.tool_executor.format_result_for_conversation(result)
                         )
                         batched_tool_results.append(f"Tool result: {tool_context}")
                         self._track_file_interaction(result)
                     if batched_tool_results:
                         import uuid as _uuid
+
                         tool_msg_uuid = str(_uuid.uuid4())
                         tool_msg = ConversationMessage(
                             role="user",
@@ -1351,7 +1350,8 @@ class QueueProcessor:
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(
-                            history_results_xml, tool_msg_uuid,
+                            history_results_xml,
+                            tool_msg_uuid,
                             message=tool_msg,
                         )
 
@@ -1359,9 +1359,7 @@ class QueueProcessor:
             all_results = native_results + xml_tool_results
             failed = [r for r in all_results if not r.success]
             if failed:
-                sig = "|".join(
-                    f"{r.tool_type}:{(r.error or '')[:80]}" for r in failed
-                )
+                sig = "|".join(f"{r.tool_type}:{(r.error or '')[:80]}" for r in failed)
                 self._last_tool_error_sig = sig
             else:
                 self._last_tool_error_sig = None
@@ -1392,7 +1390,8 @@ class QueueProcessor:
             if "'str' object has no attribute 'get'" in error_msg:
                 error_msg = (
                     "API format mismatch. Your profile's tool_format setting may be wrong.\n"
-                    "Run /profile, press 'e' to edit, and check Tool Format matches your API."
+                    "Set tool_format on the profile in ~/.kollab/config.json to match your API\n"
+                    "('openai' or 'anthropic'), then restart."
                 )
             self.message_display_service.display_error_message(error_msg)
             self.turn_completed = True
@@ -1438,11 +1437,15 @@ class QueueProcessor:
             "config",
             None,
         )
-        context_window = _config_int(
-            provider_config,
-            "context_window",
-            0,
-        ) if provider_config is not None else 0
+        context_window = (
+            _config_int(
+                provider_config,
+                "context_window",
+                0,
+            )
+            if provider_config is not None
+            else 0
+        )
 
         derived: Optional[int] = None
         if context_window > 0:
@@ -1467,9 +1470,7 @@ class QueueProcessor:
                         len(str(getattr(message, "content", "") or "")) // 3 + 1
                     )
             current_response_tokens = len(str(response or "")) // 3 + 1
-            call_tokens = len(
-                str(raw_tool_calls or xml_tool_calls or "")
-            ) // 3 + 1
+            call_tokens = len(str(raw_tool_calls or xml_tool_calls or "")) // 3 + 1
             remaining_tokens = (
                 effective_budget
                 - non_tool_tokens
@@ -1512,9 +1513,7 @@ class QueueProcessor:
             )
         to_path = result.metadata.get("to_path")
         if to_path:
-            self.conversation_logger.record_file_interaction(
-                to_path, result.tool_type
-            )
+            self.conversation_logger.record_file_interaction(to_path, result.tool_type)
 
     def _ingest_tool_results(
         self,
@@ -1579,8 +1578,7 @@ class QueueProcessor:
                     ctx_ids.append(entry.ctx_id)
             except Exception as e:
                 logger.warning(
-                    f"Failed to ingest tool result into context "
-                    f"service: {e}"
+                    f"Failed to ingest tool result into context " f"service: {e}"
                 )
 
     async def _emit_llm_response_and_handle(
