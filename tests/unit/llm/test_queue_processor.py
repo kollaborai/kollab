@@ -5,13 +5,14 @@ import time
 import unittest
 from dataclasses import dataclass, field
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from kollabor_agent.queue_processor import (
     QueueProcessor,
     _tool_results_requiring_followup,
 )
 from kollabor_agent.tool_executor import ToolExecutionResult
+from kollabor_events.data_models import ConversationMessage
 
 
 @dataclass
@@ -61,6 +62,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.task_config = MockTaskConfig()
 
         self.api_service = AsyncMock()
+        self.api_service._provider = None
         self.tool_executor = MagicMock()
         self.response_parser = MagicMock()
         self.message_display_service = MagicMock()
@@ -235,6 +237,186 @@ class TestQueueProcessor(unittest.TestCase):
 
         process_batch_fn.assert_called_once_with(["msg1", "msg2"])
         self.assertFalse(self.processor.is_processing)
+
+    def test_context_injection_is_ephemeral_for_wire_request(self):
+        """Context blocks reach the request but do not persist in history."""
+
+        class ContextService:
+            def increment_turn(self):
+                pass
+
+            def build_curator_injection(self):
+                return "[ephemeral context]"
+
+            def build_context_snapshot(self):
+                return None
+
+            def build_confirmation_injection(self):
+                return None
+
+            def build_divergence_warnings(self):
+                return None
+
+            def drain_ephemeral_injections(self):
+                return ["[legacy context]"]
+
+        wire_contents = []
+
+        async def capture_request(**kwargs):
+            wire_contents.append(
+                [message.content for message in kwargs["conversation_history"]]
+            )
+            return "test response"
+
+        self.event_bus.get_service.return_value = ContextService()
+        self.conversation_history.append(
+            ConversationMessage(role="user", content="original prompt")
+        )
+        self.streaming_handler.call_llm.side_effect = capture_request
+        self.api_service.last_stop_reason = ""
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_tool_calls.return_value = []
+        self.api_service.last_thinking_content = None
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.response_parser.parse_response.return_value = {
+            "content": "test response",
+            "components": {},
+            "turn_completed": True,
+            "question_gate_active": False,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("test response", False, False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.assertEqual(
+            wire_contents,
+            [
+                [
+                    "[ephemeral context]\n\n---\n\n"
+                    "[legacy context]\n\n---\n\noriginal prompt"
+                ]
+            ],
+        )
+        native_tools_provider = self.streaming_handler.call_llm.call_args.kwargs[
+            "native_tools_provider"
+        ]
+        discovered_tools = [{"name": "list_tasks"}]
+        self.native_tools_handler.tools = discovered_tools
+        self.assertIs(native_tools_provider(), discovered_tools)
+        self.assertEqual(self.conversation_history[-1].content, "original prompt")
+
+    def test_pipe_mode_suppresses_intermediate_tool_response(self):
+        """Pipe mode emits the continuation, not the pre-tool response."""
+        self.renderer.pipe_mode = True
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = "ok"
+        self.tool_executor.execute_tool = AsyncMock(
+            return_value=ToolExecutionResult(
+                tool_id="terminal_1",
+                tool_type="terminal",
+                success=True,
+                output="",
+            )
+        )
+        self.response_parser.parse_response.return_value = {
+            "content": "intermediate answer",
+            "components": {},
+            "turn_completed": False,
+            "question_gate_active": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("intermediate answer", False, False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.message_display_service.display_complete_response.assert_not_called()
+        self.message_display_service.display_tool_results.assert_called_once()
+
+    def test_pipe_mode_displays_question_gate_response(self):
+        """Pipe mode keeps a response that is waiting for user input visible."""
+        self.renderer.pipe_mode = True
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.response_parser.parse_response.return_value = {
+            "content": "Which file should I inspect?",
+            "components": {},
+            "turn_completed": True,
+            "question_gate_active": True,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("Which file should I inspect?", False, False, False)
+        )
+
+        self.processor.question_gate_enabled = True
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.message_display_service.display_complete_response.assert_called_once()
+        self.message_display_service.display_complete_response.assert_called_once_with(
+            thinking_duration=ANY,
+            response="Which file should I inspect?",
+            tool_results=None,
+            thinking_content=[],
+        )
 
     # ------------------------------------------------------------------
     # Tests for _emit_llm_response_and_handle
@@ -524,6 +706,77 @@ class TestQueueProcessor(unittest.TestCase):
         self.event_bus.get_service = MagicMock(side_effect=RuntimeError("boom"))
         # Should not raise
         self.loop.run_until_complete(self.processor._bridge_relay("hello"))
+
+    def test_file_ingestion_uses_raw_hash_for_unchanged_read_detection(self):
+        """Rendered read headers must not replace the disk-content hash."""
+        from kollabor_ai.context_service.hash_utils import compute_hash
+        from kollabor_ai.context_service.service import ContextService
+
+        context_service = ContextService(heavy_threshold_kb=1)
+        self.event_bus.get_service.return_value = context_service
+        path = "/workspace/large.py"
+        raw = b"x" * 9000
+        result = ToolExecutionResult(
+            tool_id="file_read_1",
+            tool_type="file_read",
+            success=True,
+            output="rendered read header\n\n" + raw.decode("utf-8"),
+            metadata={
+                "file_path": path,
+                "file_content_hash": compute_hash(raw),
+            },
+        )
+
+        self.processor._ingest_tool_results([result], "message-1")
+
+        self.assertEqual(
+            context_service.file_read_hook(path, raw)["action"],
+            "stale",
+        )
+
+
+    def test_cache_metrics_accumulate_across_truncated_continuation(self):
+        """Per-turn cache metrics include continuation usage and totals add."""
+        self.conversation_history.append(ConversationMessage(role="user", content="prompt"))
+        self.api_service.last_stop_reason = "length"
+        self.api_service.provider_type = "test"
+        self.api_service.model = "test-model"
+        usages = iter([
+            {"prompt_tokens": 10, "completion_tokens": 4, "cache_read_tokens": 3, "cache_creation_tokens": 2},
+            {"prompt_tokens": 11, "completion_tokens": 5, "cache_read_tokens": 7, "cache_creation_tokens": 6},
+        ])
+        self.api_service.get_last_token_usage = MagicMock(side_effect=lambda: next(usages))
+        async def call_llm(**kwargs):
+            if self.streaming_handler.call_llm.call_count == 1:
+                self.api_service.last_stop_reason = "length"
+                return "partial"
+            self.api_service.last_stop_reason = ""
+            return "final"
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.response_parser.parse_response.return_value = {
+            "content": "final", "components": {}, "turn_completed": True,
+            "question_gate_active": False,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_tool_calls.return_value = []
+        self.api_service.last_thinking_content = None
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.conversation_logger.log_assistant_message = AsyncMock(return_value="id")
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("final", False, False, False))
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(user_message_provided=True, current_parent_uuid="parent")
+        )
+
+        self.assertEqual(self.session_stats["cache_read_tokens"], 10)
+        self.assertEqual(self.session_stats["cache_creation_tokens"], 8)
+        self.assertEqual(self.session_stats["total_cache_read_tokens"], 10)
+        self.assertEqual(self.session_stats["total_cache_creation_tokens"], 8)
 
 
 class TestQueueProcessorToolContinuation(unittest.TestCase):

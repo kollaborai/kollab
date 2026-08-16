@@ -11,7 +11,9 @@
 <p align="center">
   <a href="docs/getting-started.md">Getting Started</a> ·
   <a href="docs/providers.md">Providers</a> ·
+  <a href="docs/features/loadouts.md">Models</a> ·
   <a href="docs/features/agents.md">Agents</a> ·
+  <a href="packages/kollabor-webui/README.md">Web UI</a> ·
   <a href="docs/plugins/overview.md">Plugins</a> ·
   <a href="docs/guides/hub-quick-start.md">Hub</a>
 </p>
@@ -22,8 +24,8 @@
 
 Kollab is a terminal-native AI workspace for developers who want more than a
 single chat box. It brings interactive chat, slash commands, provider profiles,
-tool permissions, MCP servers, plugins, pipe mode, and collaborating agents into
-one CLI.
+model loadouts, tool permissions, MCP servers, plugins, pipe mode, a local browser
+UI, and collaborating agents into one CLI.
 
 The point is not to hide the machinery. Kollab gives you a fast daily AI
 terminal, but it also exposes the runtime underneath it: every meaningful stage
@@ -34,8 +36,9 @@ observe, transform, or block.
 That lets Kollab do things that are still unusual in a terminal AI app: multiple
 agents can discover each other without a central server, exchange hub messages,
 carry task ledgers across context compaction, keep vault-backed memory, receive
-scheduled prompts, and advertise identity, trust, and capabilities through an
-experimental Agent DNS layer.
+scheduled prompts, search and load tools on demand, preserve oversized tool
+results as inspectable artifacts, and advertise identity, trust, and capabilities
+through an experimental Agent DNS layer.
 
 Kollab is still beta, and some of the ambitious pieces are being hardened. But
 the shape is already there: a local, inspectable AI workspace that can grow from
@@ -45,13 +48,19 @@ one chat session into a small team of coordinated agents.
 
 - Chat with frontier, local, or OpenAI-compatible models from a fast terminal UI.
 - Switch providers and model profiles without leaving the session.
+- Browse the model registry and activate named loadouts for model, effort, sampling, and output-budget presets.
 - Use a ChatGPT subscription through OpenAI OAuth, or bring API keys for other providers.
 - Run one-shot prompts and shell pipelines with `kollab -p`.
+- Switch the session workspace at runtime so later file and terminal tools target a different project directory.
 - Connect MCP servers for filesystems, GitHub, databases, browsers, search, and custom tools.
+- Use built-in `web-search` and `web-fetch` tools with smart content extraction and bounded results.
 - Gate shell, file, and MCP tool use through risk-aware approvals.
+- Search and load native or MCP tools on demand instead of injecting every schema into every request.
 - Launch specialized agents from bundled, global, or project-local definitions.
 - Coordinate multiple terminal agents through the hub: status, messages, task ledgers, vault memory, attach mode, and recurring prompts.
+- Keep long-running tasks alive across compaction with checkpoints, QA review, and reminder snoozes.
 - Resolve agents by identity, capability, and trust with the experimental Agent DNS layer.
+- Start the local engine and assistant-ui browser client together with `kollab --web-ui`.
 - Extend the runtime with Python plugins, slash commands, widgets, XML tool tags, and JSON config hooks.
 - Save, resume, inspect, and compact conversations as work evolves.
 
@@ -77,20 +86,39 @@ were approved, and which hooks or plugins changed the flow.
 | Terminal chat | Streaming responses, command menu, status layout, themes, widgets, conversation history, and resume |
 | Providers and profiles | Anthropic, OpenAI, Google Gemini, Azure OpenAI, OpenRouter, Ollama, LM Studio, and custom OpenAI-compatible endpoints |
 | OpenAI OAuth | `kollab --login openai` for ChatGPT subscription-backed usage without an API key |
+| Model registry and loadouts | Catalog metadata, context windows, pricing, provider-aware sampling, reasoning effort, and named `/llm` presets |
 | Pipe mode | `git diff \| kollab "review this" -p --timeout 5min` for scripts, CI, shell workflows, and automation |
 | Tool permissions | Approval modes, risk assessment, session/project approvals, blocked tools, trusted tools, and safe wildcard matching |
-| MCP integration | Project and global MCP configs, `/mcp` management, external tools, and approval-aware MCP calls |
+| Tools and MCP | Native/XML tool parity, `workspace-set`, `web-search`/`web-fetch`, on-demand `tool-search`/`tool-load`, project/global MCP configs, and approval-aware external calls |
+| Context protection | Aggregate tool-output budgets with lossless `.output` artifacts and bounded previews when context gets large |
 | Agent system | Bundled agents (`bundles/agents/`), optional local/global agents, **[Agent Skills](https://agentskills.io/specification)** modules (`bundles/skills/` + `.kollab/skills/` + `~/.kollab/skills/`), and dynamic prompts |
-| Agent hub | Peer discovery, hub messages, broadcasts, task ledger, output capture, vault memory, cron messages, Telegram bridge, and org launch files |
+| Agent hub | Peer discovery, identity/bundle mapping, hub messages, broadcasts, task ledger, checkpoint/snooze/QA flows, output capture, vault memory, cron messages, Telegram bridge, and org launch files |
 | Agent DNS | Experimental identity, trust, capability lookup, Ed25519 keys, AID-style TXT export, ARDP-style registration payloads, and DNS roster commands |
 | Plugin system | Event hooks, custom commands, startup info, config widgets, XML tags, context injection, and clean shutdown |
-| Engine and attach mode | Local daemon/backend pieces, RPC state services, and attach workflows for long-running sessions |
+| Engine, web UI, and attach mode | Local FastAPI engine, assistant-ui browser client, bearer-token wiring, RPC state services, multi-context daemons, and attach workflows |
 
 ## Agent Hub
 
 The hub is Kollab's agent collaboration layer. Agents launched in the same
 project can discover each other automatically, communicate over local sockets,
 and coordinate through a shared command surface.
+
+Keep these three names separate:
+
+- **identity** — the stable hub name or mailbox, such as `lapis`. It is what
+  `/hub status`, `/hub msg`, and `/hub capture` address.
+- **bundle** — the behavior package, such as `coder` or `research`: system
+  prompt, prompt sections, allowed tools, and declared skills.
+- **provider profile/loadout** — the model connection and tuning. A profile owns
+  credentials; a loadout combines a profile with a model and parameters such as
+  effort or output budget.
+
+This launch runs the `coder` bundle under the `lapis` identity with the
+`openai-oauth` provider profile:
+
+```bash
+kollab --agent coder --as lapis --profile openai-oauth
+```
 
 ```bash
 kollab --agent coder --as lapis
@@ -104,13 +132,22 @@ Hub features include:
 
 - Zero-config peer discovery for local agents in the same project.
 - Optional fixed identities with `--as` (for example, `--as lapis`) when you
-  want stable names instead of auto-assigned designations.
-- Direct messages, broadcasts, live output capture, and read-only attach mode.
-- Durable task ledgers with `active -> done -> QA review -> closed` workflows.
+  want stable names instead of auto-assigned identities.
+- Direct messages, broadcasts, live output capture, and interactive attach mode.
+- Durable task ledgers with `active -> done -> QA review -> closed` workflows, including the `task_snooze` reminder control.
 - Vault-backed memory with raw streams, rolling working memory, and crystallized long-term notes.
 - Recurring hub messages through `/hub cron`.
 - Optional Telegram forwarding for remote check-ins.
 - Organization launch files for starting multi-agent teams.
+
+An `offline inbox` is durable mail waiting for a known identity; it is not a
+live process. `capture` only works for an online peer or active orchestrator
+session, so `agent 'lapis' not found` means there is no capturable live runtime
+under that name. A direct message can still be queued for the identity and
+delivered when it reconnects.
+
+`research` is normally a bundle name, not a hub identity. Capture the identity
+shown by `/hub status` instead.
 
 ## Agent DNS
 
@@ -147,6 +184,22 @@ by default, always requires the handshake, and refuses to bind a plaintext port
 without an explicit opt-in. `/hub dns connect <authority>` imports a remote
 mesh's published keys so the inbound handshake can verify it. See
 `docs/specs/hub-remote-endpoint.md`.
+
+## Browser UI and Local Engine
+
+The optional browser surface uses the same provider, tool, permission, MCP, and
+hub runtime as the terminal app. From a source checkout or installed workspace:
+
+```bash
+kollab --web-ui
+# browser: http://127.0.0.1:8080
+# engine:  http://127.0.0.1:7433
+```
+
+The flag starts the local engine when needed, launches `kollabor-webui`, reuses a
+healthy engine on port `7433`, and cleans up child processes on exit. For separate
+development loops, see the [engine README](packages/kollabor-engine/README.md)
+and [web UI README](packages/kollabor-webui/README.md).
 
 ## Why It Exists
 
@@ -267,8 +320,9 @@ export KOLLAB_WORK_BASE_URL="https://api.anthropic.com"
 # reject sampling params -- see bundles/data/models.json supports_sampling)
 export KOLLAB_WORK_MAX_TOKENS=4096
 export KOLLAB_WORK_TEMPERATURE=0.3
-export KOLLAB_WORK_TIMEOUT=30000
+export KOLLAB_WORK_TIMEOUT=30
 export KOLLAB_WORK_TOP_P=0.95
+export KOLLAB_WORK_EFFORT=high
 export KOLLAB_WORK_STREAMING=true
 export KOLLAB_WORK_SUPPORTS_TOOLS=true
 export KOLLAB_WORK_DESCRIPTION="Claude profile for work tasks"
@@ -287,7 +341,7 @@ kollab --profile work --default --local
 
 Common profile fields:
 `MODEL`, `PROVIDER`, `API_KEY`, `BASE_URL`, `MAX_TOKENS`, `TEMPERATURE`,
-`TIMEOUT`, `TOP_P`, `STREAMING`, `SUPPORTS_TOOLS`, `DESCRIPTION`,
+`TIMEOUT` (seconds), `TOP_P`, `EFFORT`, `STREAMING`, `SUPPORTS_TOOLS`, `DESCRIPTION`,
 `EXTRA_HEADERS` (JSON string).
 
 Resolution order is:
@@ -322,7 +376,8 @@ kollab --agent technical-writer --as sapphire --skill readme-writing
 ```
 
 Agents can be bundled with the project, installed globally, or defined inside a
-workspace under `.kollab/agents/`. See [docs/features/agents.md](docs/features/agents.md).
+workspace under `.kollab/agents/`. `--agent` selects the bundle; `--as` selects
+the hub identity. See [docs/features/agents.md](docs/features/agents.md).
 
 ### Coordinate Agents With The Hub
 
@@ -336,7 +391,7 @@ kollab --org engineering
 kollab --hub stop lapis
 ```
 
-Hub capabilities include designations, project-scoped memory, task ledger
+Hub capabilities include identities, project-scoped memory, task ledger
 workflows, recurring hub messages, optional Telegram forwarding, organization
 launch files, and experimental DNS-style identity and trust commands. Start with
 [docs/guides/hub-quick-start.md](docs/guides/hub-quick-start.md).
@@ -347,6 +402,7 @@ launch files, and experimental DNS-style identity and trust commands. Start with
 /permissions
 /mcp
 /mcp show
+/mcp reload
 ```
 
 Inside `/mcp`, press `g` to toggle the global MCP subsystem, or manage
@@ -355,6 +411,11 @@ individual configured servers with the per-server actions.
 MCP tools run through the same approval system as native tools. See
 [docs/features/permissions.md](docs/features/permissions.md) and
 [docs/features/mcp.md](docs/features/mcp.md).
+
+The built-in `tool-search` and `tool-load` tools let an agent discover a tool by
+keyword and load its full schema only when needed. Large tool results remain
+available as managed `.output` artifacts while the model receives a bounded
+preview; see [tool-output artifacts](docs/specs/tool-output-artifacts.md).
 
 ### Extend Kollab
 
@@ -379,8 +440,10 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | Command | Description |
 | --- | --- |
 | `/llm` | Switch model loadouts — provider + model + param presets |
+| `/model` | Quick model selection and reasoning effort (`/model effort max`) |
 | `/agent` | Switch agent definitions when available |
 | `/skill` | Load or unload agent skills when available |
+| `/setup` | Guided provider/profile setup |
 | `/save` | Save conversation output |
 | `/hub` | Manage the agent hub |
 | `/hub dns` | Resolve agents, inspect trust, find capabilities, and show Agent DNS keys |
@@ -390,9 +453,22 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/mcp` | Open the MCP manager |
 | `/resume` | Resume a previous conversation |
 | `/config` | Open the settings editor |
+| `/updates` | Browse recent release notes in the terminal |
 | `/help` | Show available commands |
 
 Type `/` in the app to see the full command menu. Plugins can add more commands.
+
+Common CLI-only or plugin surfaces:
+
+```bash
+kollab --help
+kollab --doctor                 # first-run readiness check
+kollab --updates                # recent changes
+kollab --sub list               # agent orchestrator sessions
+kollab --attach lapis           # interactively attach to a live identity
+kollab --hub status             # hub inspection without a TUI
+kollab --web-ui                 # local engine + browser UI
+```
 
 ## Repository Layout
 
@@ -447,8 +523,18 @@ architecture guidance, see [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
 - [Getting Started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [Provider Profiles](docs/providers.md)
+- [Models and Loadouts](docs/features/loadouts.md)
+- [Reasoning Effort](docs/features/reasoning-effort.md)
+- [Setup Wizard](docs/features/setup-wizard.md)
 - [Agent System](docs/features/agents.md)
 - [Hub Quick Start](docs/guides/hub-quick-start.md)
+- [Tasks and Checkpoints](docs/features/tasks.md)
+- [Tool Calling](docs/features/tools.md)
+- [Attach Mode](docs/features/attach-mode.md)
+- [Command Reference](docs/reference/commands.md)
+- [Engine](packages/kollabor-engine/README.md) and [Web UI](packages/kollabor-webui/README.md)
+- [Tool-output Artifacts](docs/specs/tool-output-artifacts.md)
+- [Documentation Index](docs/README.md)
 - [Telegram Bridge Setup](docs/guides/telegram-bridge-setup.md)
 - [MCP](docs/features/mcp.md)
 - [Permissions](docs/features/permissions.md)

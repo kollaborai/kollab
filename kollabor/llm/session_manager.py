@@ -30,6 +30,7 @@ class SessionManager:
         event_bus,
         api_service,
         prompt_builder,
+        session_stats=None,
     ):
         """Initialize the session manager.
 
@@ -47,6 +48,8 @@ class SessionManager:
         self.event_bus = event_bus
         self.api_service = api_service
         self.prompt_builder = prompt_builder
+        self.session_stats = session_stats if session_stats is not None else {}
+        self.conversation_manager.bind_session_stats(self.session_stats)
 
     async def initialize_conversation(
         self,
@@ -135,8 +138,10 @@ class SessionManager:
             # 4. Reset conversation_logger for new session
             self.conversation_logger.reset_session(new_session_id)
 
-            # 5. Reset conversation_manager for new session
+            # 5. Reset conversation_manager and usage counters for a fresh session
             self.conversation_manager.reset_session(new_session_id)
+            for key in self.session_stats:
+                self.session_stats[key] = 0
 
             # 6. Update api_service session
             self.api_service.set_session_id(new_session_id)

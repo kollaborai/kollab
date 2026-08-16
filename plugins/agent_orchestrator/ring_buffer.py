@@ -29,6 +29,12 @@ class RingBuffer:
 
     def get_last(self, n: int) -> List[str]:
         """Return the last n lines from the buffer."""
+        try:
+            n = max(0, int(n))
+        except (TypeError, ValueError, OverflowError):
+            n = 0
+        if n == 0:
+            return []
         with self._lock:
             if n >= len(self._buffer):
                 return list(self._buffer)

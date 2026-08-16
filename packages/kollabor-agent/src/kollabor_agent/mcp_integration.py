@@ -57,6 +57,45 @@ def _get_version() -> str:
         return "1.0.0"
 
 
+def _normalize_mcp_input_schema(input_schema: Any) -> Optional[Dict[str, Any]]:
+    """Return a provider-safe object schema, or ``None`` for malformed input."""
+    if input_schema is None:
+        return {"type": "object", "properties": {}, "required": []}
+    if not isinstance(input_schema, dict):
+        return None
+
+    schema = dict(input_schema)
+    schema_type = schema.get("type")
+    if schema_type is None:
+        schema["type"] = "object"
+    elif schema_type != "object":
+        return None
+
+    properties = schema.get("properties", {})
+    if properties is None:
+        properties = {}
+    if not isinstance(properties, dict):
+        return None
+    if any(
+        not isinstance(name, str) or not isinstance(property_schema, dict)
+        for name, property_schema in properties.items()
+    ):
+        return None
+    schema["properties"] = properties
+
+    required = schema.get("required", [])
+    if required is None:
+        required = []
+    if not isinstance(required, list):
+        return None
+    if any(
+        not isinstance(name, str) or name not in properties for name in required
+    ):
+        return None
+    schema["required"] = required
+    return schema
+
+
 class MCPServerConnection:
     """Manages a connection to an MCP server via stdio."""
 
@@ -81,6 +120,7 @@ class MCPServerConnection:
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         """Start the MCP server process."""
@@ -349,6 +389,17 @@ class MCPServerConnection:
                 if not future.done():
                     future.set_result(None)
                 self._pending_requests.pop(request_id, None)
+            # EOF or a reader failure means the stdio process is no longer a
+            # usable MCP session. Leave the process object for the normal
+            # cleanup path, but make the integration's reconnect gate see the
+            # dead connection and discard any partial JSON before reconnecting.
+            if self.initialized:
+                logger.warning(
+                    "MCP server %s reader closed; marking connection inactive",
+                    self.server_name,
+                )
+            self.initialized = False
+            self._read_buffer = ""
 
     def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
         """Resolve matched responses and ignore notifications."""
@@ -378,6 +429,11 @@ class MCPServerConnection:
         Explicitly closes transports to prevent Python 3.12 asyncio
         __del__ warnings (BaseSubprocessTransport._closed AttributeError).
         """
+        async with self._close_lock:
+            await self._close_impl()
+
+    async def _close_impl(self) -> None:
+        """Close the connection; caller must hold ``_close_lock``."""
         if self.process:
             if self._reader_task and not self._reader_task.done():
                 self._reader_task.cancel()
@@ -475,6 +531,23 @@ class MCPIntegration:
         self._load_mcp_config()
 
         logger.info("MCP Integration initialized")
+
+    def _mcp_enabled(self) -> bool:
+        """Return whether MCP is enabled for this process.
+
+        The application applies launch-only overrides to the in-memory config
+        dictionary carried by the event bus.  Reading that shared dictionary
+        here keeps discovery, schema exposure, reloads, and execution behind
+        the same switch without persisting the override.
+        """
+        config = getattr(self.event_bus, "config", None)
+        if isinstance(config, dict):
+            plugins = config.get("plugins", {})
+            if isinstance(plugins, dict):
+                mcp = plugins.get("mcp", {})
+                if isinstance(mcp, dict) and "enabled" in mcp:
+                    return bool(mcp["enabled"])
+        return True
 
     def _load_mcp_config(self):
         """Load MCP configuration from Kollab config directories."""
@@ -609,6 +682,10 @@ class MCPIntegration:
         Returns:
             Dictionary of discovered MCP servers and their capabilities
         """
+        if not self._mcp_enabled():
+            logger.info("MCP disabled for this process; skipping discovery")
+            return {}
+
         # Emit discovery start event
         if self.event_bus:
             await self.event_bus.emit_with_hooks(
@@ -695,6 +772,14 @@ class MCPIntegration:
             Summary counts for configured, discovered, and reconnected
             servers after the reload.
         """
+        if not self._mcp_enabled():
+            await self.shutdown()
+            return {
+                "configured": len(self.mcp_servers),
+                "discovered": 0,
+                "reconnected": 0,
+            }
+
         await self.shutdown()
         self.mcp_servers.clear()
         self._load_mcp_config()
@@ -803,27 +888,43 @@ class MCPIntegration:
         if server_name in self.server_connections:
             await self.server_connections[server_name].close()
 
+        server_config = self.mcp_servers.get(server_name, {})
+        configured_env = server_config.get("env", {})
+        if not isinstance(configured_env, dict):
+            configured_env = {}
+
+        # Preserve per-server runtime configuration (for example the web URL
+        # and shared inbox key) while letting an explicit engine/session
+        # credential take precedence over ambient or config values.
+        extra_env = {
+            str(key): str(value)
+            for key, value in configured_env.items()
+            if value is not None
+        }
+
         # Create new connection, injecting session auth into subprocess env
         connection = MCPServerConnection(
             server_name,
             command,
             cwd=self.workspace,
-            extra_env={
-                # Fall back to the ambient env when the caller didn't pass an
-                # explicit token/id. A mentiko chain-run agent is launched via
-                # application.py, which constructs MCPIntegration WITHOUT
-                # user_token/session_id — but the mentiko engine exports
-                # MENTIKO_SESSION_TOKEN / MENTIKO_SESSION_ID into the agent's
-                # environment. Without this fallback the MCP subprocess gets an
-                # empty token and every ops call fails "session auth required".
-                # The engine-session path still passes user_token explicitly, so
-                # it takes precedence and is unaffected.
-                "MENTIKO_SESSION_TOKEN": self.user_token
-                or os.environ.get("MENTIKO_SESSION_TOKEN", ""),
-                "MENTIKO_SESSION_ID": self.session_id
-                or os.environ.get("MENTIKO_SESSION_ID", ""),
-            },
+            extra_env=extra_env,
         )
+
+        # Fall back to the ambient env when the caller didn't pass an explicit
+        # token/id. A mentiko chain-run agent is launched via application.py,
+        # which constructs MCPIntegration WITHOUT user_token/session_id — but
+        # the mentiko engine exports these into the agent's environment.
+        # Without this fallback the MCP subprocess gets an empty token and
+        # every ops call fails "session auth required". Explicit integration
+        # values take precedence over both sources.
+        if self.user_token or os.environ.get("MENTIKO_SESSION_TOKEN"):
+            extra_env["MENTIKO_SESSION_TOKEN"] = self.user_token or os.environ[
+                "MENTIKO_SESSION_TOKEN"
+            ]
+        if self.session_id or os.environ.get("MENTIKO_SESSION_ID"):
+            extra_env["MENTIKO_SESSION_ID"] = self.session_id or os.environ[
+                "MENTIKO_SESSION_ID"
+            ]
 
         if not await connection.connect():
             logger.warning(f"Failed to connect to MCP server: {server_name}")
@@ -860,40 +961,68 @@ class MCPIntegration:
         # List tools
         tools = await connection.list_tools()
 
-        # Register tools
-        for tool in tools:
-            tool_name = tool.get("name")
-            if tool_name:
-                self.tool_registry[tool_name] = {
-                    "server": server_name,
-                    "definition": {
-                        "name": tool_name,
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get(
-                            "inputSchema",
-                            {"type": "object", "properties": {}, "required": []},
-                        ),
-                    },
-                    "enabled": True,
-                }
-                logger.info(f"Registered MCP tool: {tool_name} from {server_name}")
+        if not isinstance(tools, list):
+            logger.warning("MCP server %s returned a non-list tool set", server_name)
+            tools = []
 
-                # Emit tool registration event
-                if self.event_bus:
-                    await self.event_bus.emit_with_hooks(
-                        EventType.MCP_TOOL_REGISTER,
-                        {
-                            "tool_name": tool_name,
-                            "server_name": server_name,
-                            "definition": tool,
-                        },
-                        source="mcp_integration",
-                    )
+        # Register tools
+        valid_tools: List[Dict[str, Any]] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                logger.warning("Skipping malformed MCP tool from %s", server_name)
+                continue
+
+            tool_name = tool.get("name")
+            input_schema = _normalize_mcp_input_schema(tool.get("inputSchema"))
+            if not isinstance(tool_name, str) or not tool_name:
+                logger.warning("Skipping MCP tool with invalid name from %s", server_name)
+                continue
+            if input_schema is None:
+                logger.warning(
+                    "Skipping MCP tool %s from %s with invalid inputSchema",
+                    tool_name,
+                    server_name,
+                )
+                continue
+
+            description = tool.get("description", "")
+            if description is None:
+                description = ""
+            elif not isinstance(description, str):
+                description = str(description)
+
+            registered_tool = {
+                **tool,
+                "inputSchema": input_schema,
+            }
+            self.tool_registry[tool_name] = {
+                "server": server_name,
+                "definition": {
+                    "name": tool_name,
+                    "description": description,
+                    "parameters": input_schema,
+                },
+                "enabled": True,
+            }
+            valid_tools.append(registered_tool)
+            logger.info(f"Registered MCP tool: {tool_name} from {server_name}")
+
+            # Emit tool registration event
+            if self.event_bus:
+                await self.event_bus.emit_with_hooks(
+                    EventType.MCP_TOOL_REGISTER,
+                    {
+                        "tool_name": tool_name,
+                        "server_name": server_name,
+                        "definition": registered_tool,
+                    },
+                    source="mcp_integration",
+                )
 
         # Keep connection open for tool calls
         self.server_connections[server_name] = connection
 
-        return tools
+        return valid_tools
 
     async def _discover_local_servers(self, discovered: Dict):
         """Discover locally running MCP servers."""
@@ -1012,6 +1141,9 @@ class MCPIntegration:
         Returns:
             Tool execution result
         """
+        if not self._mcp_enabled():
+            return {"error": "MCP is disabled for this process"}
+
         if tool_name not in self.tool_registry:
             return {
                 "error": f"Tool '{tool_name}' not found",
@@ -1206,6 +1338,9 @@ class MCPIntegration:
         Returns:
             List of available tools with their information
         """
+        if not self._mcp_enabled():
+            return []
+
         tools = []
         for tool_name, tool_info in self.tool_registry.items():
             tools.append(
@@ -1228,27 +1363,51 @@ class MCPIntegration:
         Returns:
             List of tool definitions in generic API format
         """
+        if not self._mcp_enabled():
+            return []
+
         tools = []
+        allowed_mcp_tools = self._get_bundle_tool_list()
 
         # Add MCP tools from registry
         for tool_name, tool_info in self.tool_registry.items():
             if not tool_info.get("enabled", True):
                 continue
 
+            if allowed_mcp_tools is not None:
+                allowed = set(allowed_mcp_tools)
+                server_name = str(tool_info.get("server", ""))
+                permitted = (
+                    "mcp" in allowed
+                    or "mcp-tool" in allowed
+                    or tool_name in allowed
+                    or f"mcp:{server_name}:{tool_name}" in allowed
+                )
+                if not permitted:
+                    continue
+
             definition = tool_info.get("definition", {})
+            if not isinstance(definition, dict):
+                logger.warning("Skipping MCP tool %s with malformed definition", tool_name)
+                continue
+
+            raw_parameters = definition.get("parameters")
+            if raw_parameters is None:
+                raw_parameters = definition.get("inputSchema")
+            parameters = _normalize_mcp_input_schema(raw_parameters)
+            if parameters is None:
+                logger.warning(
+                    "Skipping MCP tool %s with invalid input schema", tool_name
+                )
+                continue
+
             tools.append(
                 {
                     "name": tool_name,
-                    "description": definition.get(
-                        "description", f"MCP tool: {tool_name}"
+                    "description": str(
+                        definition.get("description", f"MCP tool: {tool_name}") or ""
                     ),
-                    "parameters": definition.get(
-                        "parameters",
-                        definition.get(
-                            "inputSchema",
-                            {"type": "object", "properties": {}, "required": []},
-                        ),
-                    ),
+                    "parameters": parameters,
                 }
             )
 
@@ -1315,6 +1474,8 @@ class MCPIntegration:
 
             result = []
             for tool in tools:
+                if not tool.expose_native:
+                    continue
                 schema = tool.to_json_schema()
                 result.append({
                     "name": schema["name"],

@@ -222,6 +222,7 @@ class TerminalAltView(AltView):
     async def on_complete(self) -> None:
         self._cached_lines = []
         self._current_session = None
+        await super().on_complete()
 
     # -- helpers --
 

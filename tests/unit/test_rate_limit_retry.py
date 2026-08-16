@@ -4,9 +4,10 @@ Tests the retry loop in call_llm():
   - max_retries = 5
   - base_delay = 5.0s with exponential backoff
   - catches RateLimitError and "429" in error message
+  - retries transient connection and timeout errors
   - uses retry_after from error when available
   - delay capped at 120s
-  - non-rate-limit errors raise immediately
+  - non-transient errors raise immediately
 
 Run: python -m pytest tests/unit/test_rate_limit_retry.py -v
 """
@@ -15,11 +16,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.providers.errors import (
+    APIConnectionError,
     AuthenticationError,
     RateLimitError,
     ServerError,
+    map_openai_error,
 )
 
 
@@ -84,10 +89,62 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
         service._provider = _make_provider(raise_error=error)
         service._initialized = True
 
-        with patch("kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel") as mock_sleep:
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ) as mock_sleep:
             with self.assertRaises(AuthenticationError):
                 await service.call_llm([{"role": "user", "content": "hi"}])
             mock_sleep.assert_not_called()
+
+    async def test_retry_on_connection_error(self) -> None:
+        service = _make_service()
+        error = APIConnectionError(
+            "peer closed connection without sending complete message body",
+            "openai_responses",
+            error_code="connection_error",
+        )
+        service._provider = _make_provider(raise_error=error)
+        service._initialized = True
+
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ) as mock_sleep:
+            with self.assertRaises(APIConnectionError):
+                await service.call_llm([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(mock_sleep.call_count, 5)
+
+    async def test_success_after_connection_error_retry(self) -> None:
+        service = _make_service()
+        error = APIConnectionError(
+            "peer closed connection without sending complete message body",
+            "openai_responses",
+            error_code="connection_error",
+        )
+        provider = _make_provider(return_value="hello world")
+        provider.call = AsyncMock(side_effect=[error, provider.call.return_value])
+        service._provider = provider
+        service._initialized = True
+
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ) as mock_sleep:
+            result = await service.call_llm([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result, "hello world")
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    async def test_remote_protocol_error_maps_to_connection_error(self) -> None:
+        raw_error = httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+
+        mapped = map_openai_error(raw_error, "openai_responses")
+
+        self.assertIsInstance(mapped, APIConnectionError)
+        self.assertEqual(mapped.error_code, "connection_error")
+        self.assertIs(mapped.original_error, raw_error)
 
     async def test_retry_on_rate_limit_error(self) -> None:
         service = _make_service()
@@ -95,7 +152,9 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
         service._provider = _make_provider(raise_error=rl_error)
         service._initialized = True
 
-        with patch("kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel") as mock_sleep:
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ) as mock_sleep:
             with self.assertRaises(RateLimitError):
                 await service.call_llm([{"role": "user", "content": "hi"}])
 
@@ -109,7 +168,9 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
         service._provider = _make_provider(raise_error=error)
         service._initialized = True
 
-        with patch("kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel") as mock_sleep:
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ) as mock_sleep:
             with self.assertRaises(RuntimeError):
                 await service.call_llm([{"role": "user", "content": "hi"}])
 
@@ -124,7 +185,9 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
         service._provider = provider
         service._initialized = True
 
-        with patch("kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel") as mock_sleep:
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ) as mock_sleep:
             result = await service.call_llm([{"role": "user", "content": "hi"}])
 
         self.assertEqual(result, "hello world")
@@ -136,7 +199,9 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
         service._provider = _make_provider(raise_error=rl_error)
         service._initialized = True
 
-        with patch("kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"):
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ):
             with self.assertRaises(RateLimitError):
                 await service.call_llm([{"role": "user", "content": "hi"}])
 
@@ -151,8 +216,12 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
             "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel",
             side_effect=lambda d: delays.append(d),
         ):
-            with self.assertRaises(RateLimitError):
-                await service.call_llm([{"role": "user", "content": "hi"}])
+            with patch(
+                "kollabor_ai.api_communication_service.random.uniform",
+                return_value=1.0,
+            ):
+                with self.assertRaises(RateLimitError):
+                    await service.call_llm([{"role": "user", "content": "hi"}])
 
         # All delays should be 7.5 (retry_after overrides exponential backoff)
         for d in delays:
@@ -169,8 +238,12 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
             "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel",
             side_effect=lambda d: delays.append(d),
         ):
-            with self.assertRaises(RateLimitError):
-                await service.call_llm([{"role": "user", "content": "hi"}])
+            with patch(
+                "kollabor_ai.api_communication_service.random.uniform",
+                return_value=1.0,
+            ):
+                with self.assertRaises(RateLimitError):
+                    await service.call_llm([{"role": "user", "content": "hi"}])
 
         # base_delay=5.0, exponential: 5, 10, 20, 40, 80 (5 retries)
         self.assertEqual(delays[0], 5.0)  # 5 * 2^0
@@ -202,7 +275,9 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
         service._provider = _make_provider(raise_error=error)
         service._initialized = True
 
-        with patch("kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel") as mock_sleep:
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ) as mock_sleep:
             with self.assertRaises(ServerError):
                 await service.call_llm([{"role": "user", "content": "hi"}])
             # server errors (500) now retry with exponential backoff
@@ -214,7 +289,9 @@ class TestRateLimitRetry(unittest.IsolatedAsyncioTestCase):
         service._provider = _make_provider(raise_error=rl_error)
         service._initialized = True
 
-        with patch("kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"):
+        with patch(
+            "kollabor_ai.api_communication_service.APICommunicationService._sleep_or_cancel"
+        ):
             with self.assertRaises(RateLimitError):
                 await service.call_llm([{"role": "user", "content": "hi"}])
 

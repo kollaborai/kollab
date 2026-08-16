@@ -1,7 +1,7 @@
 ---
 title: "Documentation"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-08-06
 status: active
 ---
 # Documentation
@@ -11,6 +11,9 @@ status: active
 - [Getting Started](getting-started.md) - Installation, first run, quick start
 - [Configuration](configuration.md) - Config files, environment variables, settings
 - [Profiles](features/profiles.md) - LLM profile management and switching
+- [Loadouts](features/loadouts.md) - Named provider/model/parameter presets
+- [Reasoning Effort](features/reasoning-effort.md) - Provider-aware effort levels and sampling rules
+- [Setup Wizard](features/setup-wizard.md) - Guided provider connection setup
 - [Providers](providers.md) - Anthropic, OpenAI, Gemini, Azure, OpenRouter, Ollama, custom
 - [Release Process](release-process.md) - Maintainer checklist for public releases
 
@@ -18,7 +21,10 @@ status: active
 
 - [Slash Commands](features/slash-commands.md) - All commands and how to add custom ones
 - [Agents](features/agents.md) - Agent system, bundles, custom agents
+- [Attach Mode](features/attach-mode.md) - Daemons, RPC state, contexts, and reattach
 - [Tools](features/tools.md) - Tool calling, built-in tools, custom tools
+- [Tasks](features/tasks.md) - Durable task ledger, checkpoints, snoozes, and QA
+- [Tool-output Artifacts](specs/tool-output-artifacts.md) - Context budgets and lossless spill files
 - [MCP](features/mcp.md) - Model Context Protocol integration
 - [Permissions](features/permissions.md) - Tool approval modes and risk assessment
 - [Pipe Mode](features/pipe-mode.md) - Scripting and automation
@@ -47,6 +53,13 @@ status: active
 
 - [MCP Setup](mcp/MCP_SETUP.md) - Server configuration
 - [MCP Server Examples](mcp/MCP_SERVER_EXAMPLES.md) - Example server implementations
+
+## Runtime Reference
+
+- [Command Reference](reference/commands.md) - CLI flags, hub commands, slash commands, and tool tags
+- [Environment Variables](reference/env-vars.md) - `KOLLAB_*` configuration and runtime controls
+- [Engine README](../packages/kollabor-engine/README.md) - Local HTTP/SSE backend
+- [Web UI README](../packages/kollabor-webui/README.md) - Browser assistant-ui client
 
 ## Other
 

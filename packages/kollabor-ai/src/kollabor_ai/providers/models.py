@@ -181,6 +181,8 @@ class AnthropicConfig(ProviderConfig):
 
     provider: Literal[ProviderType.ANTHROPIC] = ProviderType.ANTHROPIC
     api_version: str = Field(default="2023-06-01")
+    # Retained for profile compatibility; APICommunicationService owns the
+    # actual retry loop so all providers share one bounded policy.
     max_retries: int = Field(default=2, ge=0, le=5)
 
     @field_validator("api_key")

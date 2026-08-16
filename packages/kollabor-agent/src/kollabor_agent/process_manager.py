@@ -21,15 +21,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -124,6 +115,12 @@ class RingBuffer:
             self._total += 1
 
     def get_last(self, n: int) -> List[str]:
+        try:
+            n = max(0, int(n))
+        except (TypeError, ValueError, OverflowError):
+            n = 0
+        if n == 0:
+            return []
         with self._lock:
             if n >= len(self._buf):
                 return list(self._buf)
@@ -361,7 +358,7 @@ class SubprocessStrategy(SpawnStrategy):
             self._close_fds(proc)
             return True  # already dead
 
-        loop = _get_loop()
+        loop = asyncio.get_running_loop()
         try:
             # Kill the entire process group (sessions use start_new_session=True)
             try:
@@ -763,6 +760,15 @@ class ProcessManager:
             if mp.state in (ProcessState.STOPPED, ProcessState.CRASHED)
         ]
         for name in dead:
+            mp = self._processes[name]
+            # A process can exit naturally without going through kill(), so
+            # strategy-owned resources (notably Popen pipes) still need to be
+            # released before dropping the tracking record.  SubprocessStrategy
+            # handles this idempotently when the process is already reaped.
+            try:
+                await self._kill_process(mp, graceful_timeout=0)
+            except Exception:
+                logger.debug("cleanup failed for dead process %s", name, exc_info=True)
             del self._processes[name]
         return len(dead)
 

@@ -319,5 +319,4 @@ class EngineSession:
             "identity": self.daemon.identity if self.daemon else "",
             "daemon_pid": self.daemon.pid if self.daemon else 0,
             "mcp_servers": self.mcp_server_names,
-            "mcp_connected": [],
         }

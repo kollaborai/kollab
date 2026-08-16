@@ -151,6 +151,7 @@ class OpenRouterProvider(LLMProvider):
                 "api_key": self.config.api_key,
                 "base_url": self.config.base_url,
                 "timeout": self.config.timeout,
+                "max_retries": 0,
             }
 
             # Add custom headers if present

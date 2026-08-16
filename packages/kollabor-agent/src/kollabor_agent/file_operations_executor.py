@@ -18,6 +18,7 @@ comprehensive error handling. Implements 11 file operation types:
 """
 
 import ast
+import hashlib
 import logging
 import os
 import shutil
@@ -29,6 +30,8 @@ from kollabor_config.config_utils import (
     get_config_directory_candidates,
     get_project_data_dir,
 )
+
+from .tool_output_budget import ToolOutputArtifactStore, preview_text
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,11 @@ WRITE_OPERATION_TYPES = frozenset(
         "file_insert_before",
     }
 )
+
+
+def _context_content_hash(content: bytes) -> str:
+    """Match ContextService's compact content hash without a package cycle."""
+    return hashlib.blake2b(content, digest_size=8).hexdigest()
 
 
 class PathAccessMode:
@@ -119,6 +127,9 @@ class FileOperationsExecutor:
         self.max_read_output_chars = self._get_config(
             "file_operations.max_read_output_chars", 80000
         )
+        self._tool_output_store: Optional[ToolOutputArtifactStore] = None
+        self._tool_output_preview_chars = 12000
+        self._last_tool_output_path: Optional[str] = None
         self.create_parent_directories = self._get_config(
             "file_operations.create_parent_directories", True
         )
@@ -151,6 +162,16 @@ class FileOperationsExecutor:
         if self.config:
             return self.config.get(key, default)
         return default
+
+    def configure_tool_output_store(
+        self,
+        store: ToolOutputArtifactStore,
+        *,
+        preview_chars: int = 12000,
+    ) -> None:
+        """Preserve complete oversized read slices in the shared store."""
+        self._tool_output_store = store
+        self._tool_output_preview_chars = preview_chars
 
     def set_path_access_mode(self, mode: str) -> None:
         """Set path access mode for file operations."""
@@ -1407,7 +1428,12 @@ class FileOperationsExecutor:
         return self.event_bus.get_service("context_service")
 
     def _cap_read_output(
-        self, content: str, filepath: str, total_lines: int, start_line: int = 0
+        self,
+        content: str,
+        filepath: str,
+        total_lines: int,
+        start_line: int = 0,
+        tool_id: str = "file_read",
     ) -> Tuple[str, str]:
         """Cap a read's returned text so one file can't blow the context window.
 
@@ -1429,6 +1455,8 @@ class FileOperationsExecutor:
             (possibly_truncated_content, guidance_note). guidance_note is ""
             when nothing was truncated.
         """
+        self._last_tool_output_path = None
+        original_content = content
         max_lines = self.max_read_lines
         max_chars = self.max_read_output_chars
         full_chars = len(content)
@@ -1448,6 +1476,26 @@ class FileOperationsExecutor:
         if not truncated:
             return content, ""
 
+        artifact_path: Optional[Path] = None
+        if self._tool_output_store is not None:
+            try:
+                artifact_path = self._tool_output_store.write_output(
+                    original_content,
+                    tool_id=tool_id,
+                    tool_type="file_read",
+                )
+                self._last_tool_output_path = str(artifact_path)
+                preview_limit = self._tool_output_preview_chars
+                if max_chars:
+                    preview_limit = min(int(max_chars), preview_limit)
+                content = preview_text(original_content, preview_limit)
+            except Exception as exc:
+                logger.warning(
+                    "Could not save oversized file_read output for %s: %s",
+                    filepath,
+                    exc,
+                )
+
         shown = content.count("\n") + 1
         next_offset = start_line + shown
         full_tokens_k = max(1, full_chars // 3500)
@@ -1461,6 +1509,8 @@ class FileOperationsExecutor:
             f"To continue, read this file again with offset={next_offset}, "
             f"limit={max_lines} — or grep it for the specific part you need."
         )
+        if artifact_path is not None:
+            note += f"\nThe complete returned output is saved at: {artifact_path}"
         return content, note
 
     def _execute_read(self, operation: Dict[str, Any]) -> Dict[str, Any]:
@@ -1476,6 +1526,7 @@ class FileOperationsExecutor:
         lines_spec = operation.get("lines")  # Optional: "10-20"
         offset = operation.get("offset")  # Optional: line offset (0-indexed)
         limit = operation.get("limit")  # Optional: number of lines to read
+        self._last_tool_output_path = None
 
         # Validation
         if not filepath:
@@ -1507,6 +1558,8 @@ class FileOperationsExecutor:
         except Exception as e:
             return {"success": False, "error": f"Failed to read file: {str(e)}"}
 
+        file_content_hash = _context_content_hash(disk_content_bytes)
+
         # Consult ContextService for dedup before returning content
         context_svc = self._get_context_service()
         force = operation.get("force", False)
@@ -1522,12 +1575,14 @@ class FileOperationsExecutor:
                 return {
                     "success": True,
                     "output": hook_result["content"].decode("utf-8"),
+                    "file_content_hash": file_content_hash,
                 }
 
             if hook_result["action"] == "diff":
                 return {
                     "success": True,
                     "output": hook_result["content"].decode("utf-8"),
+                    "file_content_hash": file_content_hash,
                 }
 
             # fresh or force_fresh: fall through to normal read path
@@ -1560,15 +1615,23 @@ class FileOperationsExecutor:
             display_end = start_line + line_count
 
             content, note = self._cap_read_output(
-                content, filepath, total_lines, start_line=start_line
+                content,
+                filepath,
+                total_lines,
+                start_line=start_line,
+                tool_id=str(operation.get("id", "file_read")),
             )
-            return {
+            result = {
                 "success": True,
                 "output": (
                     f"✓ Read {line_count} lines from {filepath} "
                     f"(lines {display_start}-{display_end}):\n\n{content}{note}"
                 ),
             }
+            if self._last_tool_output_path:
+                result["tool_output_path"] = self._last_tool_output_path
+            result["file_content_hash"] = file_content_hash
+            return result
 
         # Handle line range if specified (lines="10-20" style)
         if lines_spec:
@@ -1586,19 +1649,32 @@ class FileOperationsExecutor:
                 line_count = len(selected_lines)
 
                 content, note = self._cap_read_output(
-                    content, filepath, total_lines, start_line=start_line
+                    content,
+                    filepath,
+                    total_lines,
+                    start_line=start_line,
+                    tool_id=str(operation.get("id", "file_read")),
                 )
-                return {
+                result = {
                     "success": True,
                     "output": f"✓ Read {line_count} lines from {filepath} (lines {lines_spec}):\n\n{content}{note}",
                 }
+                if self._last_tool_output_path:
+                    result["tool_output_path"] = self._last_tool_output_path
+                result["file_content_hash"] = file_content_hash
+                return result
             except Exception as e:
                 return {
                     "success": False,
                     "error": f"Invalid line specification '{lines_spec}': {str(e)}",
                 }
 
-        content, note = self._cap_read_output(content, filepath, total_lines)
+        content, note = self._cap_read_output(
+            content,
+            filepath,
+            total_lines,
+            tool_id=str(operation.get("id", "file_read")),
+        )
         if note:
             # Truncated: report what was actually returned, not the file's full
             # length, so the UI summary and the model both see the real size.
@@ -1610,10 +1686,14 @@ class FileOperationsExecutor:
             )
         else:
             header = f"✓ Read {total_lines} lines from {filepath}:"
-        return {
+        result = {
             "success": True,
             "output": f"{header}\n\n{content}{note}",
         }
+        if self._last_tool_output_path:
+            result["tool_output_path"] = self._last_tool_output_path
+        result["file_content_hash"] = file_content_hash
+        return result
 
     def _execute_grep(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute grep file operation (search for pattern in file).

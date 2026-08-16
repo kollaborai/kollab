@@ -1,6 +1,7 @@
 """Tests for Plugin CLI Arguments Registration system."""
 
 import argparse
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -105,7 +106,7 @@ class TestBasePlugin(unittest.TestCase):
         args = argparse.Namespace(test_value="hello")
 
         # Should not raise exception
-        plugin.initialize(args)
+        asyncio.run(plugin.initialize(args))
 
     def test_test_plugin_register_cli_args(self):
         """Test TestPlugin.register_cli_args() adds arguments."""
@@ -180,6 +181,14 @@ class TestParseArgumentsWithPlugins(unittest.TestCase):
         self.assertEqual(args.test_arg, "value")
         self.assertEqual(args.agent, "test-agent")
         self.assertEqual(args.profile, "test-profile")
+
+    def test_parse_arguments_supports_process_local_no_mcp(self):
+        """The MCP safety switch is a core argument and defaults off."""
+        args = parse_arguments(plugin_classes=[], argv=[])
+        self.assertFalse(args.no_mcp)
+
+        args = parse_arguments(plugin_classes=[], argv=["--no-mcp"])
+        self.assertTrue(args.no_mcp)
 
 
 class TestHandleEarlyPluginArgs(unittest.TestCase):

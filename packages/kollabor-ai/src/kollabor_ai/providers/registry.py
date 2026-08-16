@@ -566,7 +566,16 @@ def create_config_from_profile(
 
     elif provider_type == ProviderType.OPENAI_RESPONSES:
         # Optional Responses API-specific fields
-        base_fields["store_responses"] = profile.get("store_responses", False)
+        # The public Responses API defaults to stored responses, but the
+        # ChatGPT/Codex OAuth transport rejects store=true with HTTP 400.
+        # Choose the transport-safe default while still honoring an explicit
+        # profile value; the provider also enforces the Codex restriction at
+        # request-build time for hand-constructed configs.
+        configured_store = profile.get("store_responses")
+        if configured_store is None:
+            base_url = str(base_fields.get("base_url") or "").lower()
+            configured_store = "chatgpt.com" not in base_url
+        base_fields["store_responses"] = configured_store
 
         return OpenAIResponsesConfig(**base_fields)
 

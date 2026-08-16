@@ -1406,7 +1406,7 @@ The important question is not "did the peer speak?" It is:
 Add a reference link in `docs/architecture/README.md`:
 
 ```markdown
-- [Agent DNS Trust and Delivery](reference/agent-dns-reference.md)
+- [Agent DNS Trust and Delivery](../../architecture/reference/agent-dns-reference.md)
   documents identity, trust, liveness, remote envelopes, durable mailboxes,
   delivery traces, and wake boundaries.
 ```

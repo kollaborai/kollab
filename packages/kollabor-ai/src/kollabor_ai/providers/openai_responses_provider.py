@@ -22,7 +22,7 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import LLMProvider
-from .errors import AuthenticationError, ProviderError, map_openai_error
+from .errors import ProviderError, map_http_status_error, map_openai_error
 from .message_sanitizer import strip_local_message_metadata_from_message
 from .models import (
     OpenAIResponsesConfig,
@@ -251,19 +251,24 @@ class OpenAIResponsesProvider(LLMProvider):
                     else {}
                 )
 
-                # Detect specific error types by status code and error response
-                if response.status_code == 401:
-                    error_info = error_data.get("error", {})
-                    raise AuthenticationError(
-                        error_info.get("message", "Authentication failed"),
-                        provider="openai_responses",
-                        error_code=error_info.get("type", "authentication_error"),
-                    )
-
-                raise map_openai_error(
-                    Exception(f"API error {response.status_code}: {error_data}"),
-                    "openai_responses",
+                error_info = (
+                    error_data.get("error", {})
+                    if isinstance(error_data, dict)
+                    else {}
                 )
+                if not isinstance(error_info, dict):
+                    error_info = {}
+                error = RuntimeError(
+                    error_info.get(
+                        "message", f"API error {response.status_code}: {error_data}"
+                    )
+                )
+                raise map_http_status_error(
+                    error,
+                    "openai_responses",
+                    response.status_code,
+                    response.headers,
+                ) from error
 
             # Parse response
             response_dict = response.json()
@@ -326,18 +331,24 @@ class OpenAIResponsesProvider(LLMProvider):
                     except Exception:
                         pass
 
-                    if response.status_code == 401:
-                        error_info = error_data.get("error", {})
-                        raise AuthenticationError(
-                            error_info.get("message", "Authentication failed"),
-                            provider="openai_responses",
-                            error_code=error_info.get("type", "authentication_error"),
-                        )
-
-                    raise map_openai_error(
-                        Exception(f"API error {response.status_code}: {error_data}"),
-                        "openai_responses",
+                    error_info = (
+                        error_data.get("error", {})
+                        if isinstance(error_data, dict)
+                        else {}
                     )
+                    if not isinstance(error_info, dict):
+                        error_info = {}
+                    error = RuntimeError(
+                        error_info.get(
+                            "message", f"API error {response.status_code}: {error_data}"
+                        )
+                    )
+                    raise map_http_status_error(
+                        error,
+                        "openai_responses",
+                        response.status_code,
+                        response.headers,
+                    ) from error
 
                 # Consume SSE stream, capture the final response payload
                 # Also accumulate text deltas in case the final payload
@@ -461,10 +472,24 @@ class OpenAIResponsesProvider(LLMProvider):
                         error_data = json.loads(response.text)
                     except Exception:
                         pass
-                    raise map_openai_error(
-                        Exception(f"API error {response.status_code}: {error_data}"),
-                        "openai_responses",
+                    error_info = (
+                        error_data.get("error", {})
+                        if isinstance(error_data, dict)
+                        else {}
                     )
+                    if not isinstance(error_info, dict):
+                        error_info = {}
+                    error = RuntimeError(
+                        error_info.get(
+                            "message", f"API error {response.status_code}: {error_data}"
+                        )
+                    )
+                    raise map_http_status_error(
+                        error,
+                        "openai_responses",
+                        response.status_code,
+                        response.headers,
+                    ) from error
 
                 # Parse SSE stream
                 async for chunk in self._parse_sse_stream(response):
@@ -503,10 +528,16 @@ class OpenAIResponsesProvider(LLMProvider):
         Returns:
             Dictionary of API parameters
         """
+        store_responses = self.config.store_responses
+        if self._requires_streaming:
+            # The ChatGPT/Codex OAuth backend rejects store=true even though
+            # the public Responses API supports it. Keep the wire contract
+            # valid for this transport regardless of profile/config origin.
+            store_responses = False
         params: Dict[str, Any] = {
             "model": self.model,
             "stream": stream,
-            "store": self.config.store_responses,
+            "store": store_responses,
         }
 
         # Extract system message to instructions
@@ -571,24 +602,40 @@ class OpenAIResponsesProvider(LLMProvider):
         # 1. A simple string (if single user message)
         # 2. An items array (for complex conversations)
 
-        # For now, use items array format for consistency
-        # TODO: Optimize to use string format for simple single-turn prompts
-        params["input"] = input_messages
+        # For now, use items array format for consistency.
+        # TODO: Optimize to use string format for simple single-turn prompts.
+        #
+        # Responses API accepts an omitted input only when the request is a
+        # continuation identified by previous_response_id. Sending input=[]
+        # (or instructions alone) is rejected with a 400 missing-input error.
+        # The public Responses API supports server-managed continuations, but
+        # the ChatGPT/Codex OAuth transport rejects previous_response_id.
+        previous_response_id = (
+            None if self._requires_streaming else kwargs.get("previous_response_id")
+        )
+        if input_messages:
+            params["input"] = input_messages
+        elif not previous_response_id:
+            raise ProviderError(
+                "OpenAI Responses request requires input or previous_response_id",
+                provider="openai_responses",
+                error_code="missing_input",
+            )
 
-        # ChatGPT codex backend rejects temperature and max_tokens
         if not self._requires_streaming:
-            # ...and so does any reasoning model the registry marks, on the
-            # plain Responses API too (see providers/tuning.py).
+            # The public Responses API calls the provider-neutral output
+            # budget `max_output_tokens`. ChatGPT's OAuth/Codex transport has
+            # a different contract and rejects both output-token parameter
+            # names, so leave that backend on its server-side default.
+            requested_max_tokens = kwargs.get("max_tokens", self.config.max_tokens)
+            if requested_max_tokens is not None:
+                params["max_output_tokens"] = requested_max_tokens
+
             sampling = sampling_params(self.config, self.model)
             if "temperature" in kwargs:
                 params["temperature"] = kwargs["temperature"]
             elif "temperature" in sampling:
                 params["temperature"] = sampling["temperature"]
-
-            if "max_tokens" in kwargs:
-                params["max_tokens"] = kwargs["max_tokens"]
-            else:
-                params["max_tokens"] = self.config.max_tokens
 
         # Reasoning effort (opt-in). The Responses API nests it under
         # reasoning; the codex backend reports the levels each model accepts
@@ -606,9 +653,21 @@ class OpenAIResponsesProvider(LLMProvider):
                     **effort["reasoning"],
                 }
 
-        # Add previous_response_id for state chaining
-        if "previous_response_id" in kwargs:
-            params["previous_response_id"] = kwargs["previous_response_id"]
+        # Add previous_response_id for state chaining. An empty input is valid
+        # only on this continuation path; the guard above prevents malformed
+        # initial requests from reaching the HTTP client.
+        if previous_response_id:
+            params["previous_response_id"] = previous_response_id
+
+        # Preserve public Responses API cache controls when the service
+        # forwards them. The ChatGPT/Codex OAuth transport rejects the
+        # retention field and ignores the key, so its backend cache remains
+        # implicit and must not receive these public-API-only parameters.
+        if not self._requires_streaming:
+            for cache_key in ("prompt_cache_key", "prompt_cache_retention"):
+                cache_value = kwargs.get(cache_key)
+                if cache_value is not None:
+                    params[cache_key] = cache_value
 
         # Transform tools to Responses API format
         # Responses API uses flat format: {"type": "function", "name": ..., ...}
@@ -792,16 +851,12 @@ class OpenAIResponsesProvider(LLMProvider):
             if event in ("response.done", "response.completed"):
                 resp_data = parsed_data.get("response", parsed_data)
                 event_data = {"event": event, "response": resp_data}
-
-                usage_dict = resp_data.get("usage", {})
+                usage = OpenAIResponsesTransformer._usage_info(
+                    resp_data.get("usage")
+                )
                 return StreamingResponse(
                     delta=TextDelta(content=""),
-                    usage=UsageInfo(
-                        prompt_tokens=usage_dict.get("input_tokens", 0),
-                        completion_tokens=usage_dict.get("output_tokens", 0),
-                        total_tokens=usage_dict.get("input_tokens", 0)
-                        + usage_dict.get("output_tokens", 0),
-                    ),
+                    usage=usage,
                     is_final=True,
                     raw_chunk=event_data,
                 )

@@ -42,6 +42,13 @@ class TestBundleScoping:
         assert tools[0].name == "git"
         assert tools[0].xml_tag_name == "terminal"  # delegates to terminal
 
+    def test_wildcard_returns_every_registered_tool(self):
+        """The wildcard must expand for direct registry consumers too."""
+        tools = self.registry.get_for_bundle(["*"])
+        assert {tool.name for tool in tools} == {
+            tool.name for tool in self.registry.list()
+        }
+
     def test_unknown_tools_are_silently_skipped(self):
         """Unknown tool names don't cause errors, just warnings."""
         tools = self.registry.get_for_bundle(["file-read", "nonexistent", "also-fake"])

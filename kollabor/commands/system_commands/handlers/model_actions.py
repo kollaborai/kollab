@@ -40,12 +40,14 @@ async def handle_model_modal_actions(
                 # Reinitialize the provider with new profile settings
                 if handler.llm_service and hasattr(handler.llm_service, "api_service"):
                     handler.llm_service.create_background_task(
-                        handler.llm_service.api_service.reinitialize_provider(profile),
+                        lambda: handler.llm_service.api_service.reinitialize_provider(
+                            profile
+                        ),
                         name="reinitialize_provider",
                     )
                     # Reload native tools (profile may have different supports_tools setting)
                     handler.llm_service.create_background_task(
-                        handler.llm_service._load_native_tools(),
+                        lambda: handler.llm_service._load_native_tools(),
                         name="reload_native_tools",
                     )
                 tools_mode = "enabled" if profile.get_supports_tools() else "disabled"

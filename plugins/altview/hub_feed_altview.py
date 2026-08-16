@@ -156,3 +156,4 @@ class HubFeedAltView(AltView):
 
     async def on_complete(self) -> None:
         self._feed = None
+        await super().on_complete()

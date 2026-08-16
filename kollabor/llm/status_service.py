@@ -112,6 +112,19 @@ class StatusService:
             status["C"].append(f"Messages: {session_stats['messages']}")
             status["C"].append(f"Tokens In: {session_stats.get('input_tokens', 0)}")
             status["C"].append(f"Tokens Out: {session_stats.get('output_tokens', 0)}")
+            status["C"].append(
+                f"Cache Read: {session_stats.get('cache_read_tokens', 0)}"
+            )
+            status["C"].append(
+                f"Cache Creation: {session_stats.get('cache_creation_tokens', 0)}"
+            )
+            status["C"].append(
+                f"Total Cache Read: {session_stats.get('total_cache_read_tokens', 0)}"
+            )
+            status["C"].append(
+                "Total Cache Creation: "
+                f"{session_stats.get('total_cache_creation_tokens', 0)}"
+            )
 
         # Area A - Tool execution stats
         tool_stats = coord.tool_executor.get_execution_stats()

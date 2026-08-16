@@ -125,6 +125,9 @@ class ToolRegistry:
         Returns:
             List of ToolDefinition instances. Unknown names logged as warnings.
         """
+        if "*" in allowed_names:
+            return self.list()
+
         result = []
         for name in allowed_names:
             tool = self.get(name)

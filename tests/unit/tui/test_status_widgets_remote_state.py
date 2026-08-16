@@ -217,42 +217,20 @@ class TestRenderStatsRemoteStatePreference(unittest.TestCase):
         self.assertIn("⟳ 46.8K", out)
 
 
-class TestRenderStatusHealth(unittest.TestCase):
-    """render_status should expose source, mode, freshness, and age."""
+class TestRenderStatus(unittest.TestCase):
+    """render_status should expose only user-facing processing state."""
 
-    def test_remote_daemon_fresh_state(self) -> None:
+    def test_remote_state_does_not_leak_health_diagnostics(self) -> None:
         ctx = _make_ctx(
             remote_state={
-                "_source": "state_refresher",
+                "_source": "state_service",
                 "_updated_at": 100.0,
                 "_stale": False,
                 "_degraded": False,
                 "daemon_pid": 123,
             }
         )
-        out = _strip_ansi(render_status(80, ctx, now=101.8))
-
-        self.assertIn("Ready", out)
-        self.assertIn("daemon", out)
-        self.assertIn("fresh", out)
-        self.assertIn("state_refresher", out)
-        self.assertNotIn("1.8s", out)
-
-    def test_status_health_respects_widget_width(self) -> None:
-        ctx = _make_ctx(
-            remote_state={
-                "_source": "state_refresher",
-                "_updated_at": 100.0,
-                "_stale": False,
-                "_degraded": False,
-                "daemon_pid": 123,
-            }
-        )
-
-        out = _strip_ansi(render_status(24, ctx, now=101.8))
-
-        self.assertLessEqual(len(out), 24)
-        self.assertNotIn("state_refresher", out)
+        self.assertEqual(_strip_ansi(render_status(80, ctx)), "* Ready")
 
     def test_working_status_respects_widget_width(self) -> None:
         ctx = _make_ctx(
@@ -264,12 +242,12 @@ class TestRenderStatusHealth(unittest.TestCase):
             }
         )
 
-        out = _strip_ansi(render_status(8, ctx, now=101.8))
+        out = _strip_ansi(render_status(8, ctx))
 
         self.assertLessEqual(len(out), 8)
         self.assertEqual(out, "*W")
 
-    def test_attach_degraded_stale_state(self) -> None:
+    def test_attach_degraded_state_still_shows_user_facing_status(self) -> None:
         ctx = _make_ctx(
             remote_state={
                 "_source": "attach",
@@ -281,22 +259,15 @@ class TestRenderStatusHealth(unittest.TestCase):
             }
         )
         ctx.is_attach_mode = True
-        out = _strip_ansi(render_status(80, ctx, now=112.4))
-
-        self.assertIn("attach", out)
-        self.assertIn("stale", out)
-        self.assertIn("degraded", out)
-        self.assertNotIn("12.4s", out)
+        self.assertEqual(_strip_ansi(render_status(80, ctx)), "* Ready")
 
     def test_local_state_when_no_remote_snapshot(self) -> None:
         ctx = _make_ctx(remote_state={})
-        out = _strip_ansi(render_status(80, ctx, now=100.0))
-
-        self.assertIn("Ready", out)
+        self.assertEqual(_strip_ansi(render_status(80, ctx)), "* Ready")
 
     def test_ready_status_word_is_bright_white(self) -> None:
         ctx = _make_ctx(remote_state={})
-        out = render_status(80, ctx, now=100.0)
+        out = render_status(80, ctx)
 
         self.assertIn(_fg("Ready", (255, 255, 255)), out)
 

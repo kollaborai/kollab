@@ -13,6 +13,7 @@ Tests for:
 Target: 75%+ coverage
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -328,6 +329,33 @@ class TestOpenAIResponsesProviderCall:
 class TestOpenAIResponsesProviderStream:
     """Test streaming API calls."""
 
+    def test_completed_event_preserves_cache_usage(self, provider_config):
+        """Codex response.completed usage keeps prompt-cache counters."""
+        provider = OpenAIResponsesProvider(provider_config)
+        event = provider._parse_sse_event(
+            "response.completed",
+            json.dumps(
+                {
+                    "response": {
+                        "usage": {
+                            "input_tokens": 3268,
+                            "output_tokens": 28,
+                            "input_tokens_details": {
+                                "cached_tokens": 2816,
+                                "cache_write_tokens": 0,
+                            },
+                        }
+                    }
+                }
+            ).encode(),
+        )
+
+        assert event is not None
+        assert event.usage is not None
+        assert event.usage.prompt_tokens == 3268
+        assert event.usage.cache_read_tokens == 2816
+        assert event.usage.cache_creation_tokens == 0
+
     @pytest.mark.asyncio
     async def test_stream_simple(self, provider_config, sample_messages):
         """Test simple streaming response."""
@@ -468,7 +496,10 @@ class TestOpenAIResponsesProviderStream:
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
+            stream_context = AsyncMock()
+            stream_context.__aenter__.return_value = mock_response
+            stream_context.__aexit__.return_value = None
+            mock_client.stream = MagicMock(return_value=stream_context)
             mock_client_class.return_value = mock_client
 
             provider = OpenAIResponsesProvider(provider_config)
@@ -620,7 +651,33 @@ class TestOpenAIResponsesProviderPrepareRequest:
             messages=sample_messages, tools=None, stream=False, max_tokens=1000
         )
 
-        assert request["max_tokens"] == 1000
+        assert request["max_output_tokens"] == 1000
+        assert "max_tokens" not in request
+
+    def test_prepare_request_oauth_omits_unsupported_output_budget(
+        self, sample_messages
+    ):
+        """ChatGPT OAuth rejects both output-token parameter names."""
+        config = OpenAIResponsesConfig(
+            provider=ProviderType.OPENAI_RESPONSES,
+            api_key="oauth-test-token",
+            model="gpt-5.6-luna",
+            base_url="https://chatgpt.com/backend-api/codex",
+            max_tokens=16384,
+            effort="max",
+        )
+        provider = OpenAIResponsesProvider(config)
+
+        request = provider._prepare_request(
+            messages=sample_messages, tools=None, stream=True
+        )
+
+        assert request["stream"] is True
+        assert "max_output_tokens" not in request
+        assert "max_tokens" not in request
+        assert "temperature" not in request
+        assert request["reasoning"] == {"effort": "max"}
+        assert request["store"] is False
 
     def test_prepare_request_string_input(self, provider_config):
         """Test request with simple string input (not messages array)."""
@@ -633,3 +690,70 @@ class TestOpenAIResponsesProviderPrepareRequest:
         # For Responses API, single user message can be a string
         # This is an optimization for simple prompts
         assert "input" in request
+
+    def test_prepare_request_omits_empty_input_for_continuation(self, provider_config):
+        """A continuation may rely on the server-side response state."""
+        provider = OpenAIResponsesProvider(provider_config)
+
+        request = provider._prepare_request(
+            [{"role": "system", "content": "Continue the prior task."}],
+            tools=None,
+            stream=False,
+            previous_response_id="resp_previous",
+        )
+
+        assert "input" not in request
+        assert request["previous_response_id"] == "resp_previous"
+        assert request["instructions"] == "Continue the prior task."
+
+    def test_prepare_request_rejects_empty_initial_request(self, provider_config):
+        """Do not send the Responses API's invalid empty-input request."""
+        provider = OpenAIResponsesProvider(provider_config)
+
+        with pytest.raises(ProviderError, match="requires input"):
+            provider._prepare_request(
+                [{"role": "system", "content": "Only instructions"}],
+                tools=None,
+                stream=False,
+            )
+
+    def test_prepare_request_preserves_cache_controls(self, provider_config):
+        """Responses cache controls survive request preparation."""
+        provider = OpenAIResponsesProvider(provider_config)
+
+        request = provider._prepare_request(
+            [{"role": "user", "content": "Use the cached context."}],
+            tools=None,
+            stream=False,
+            prompt_cache_key="harness-context-v1",
+            prompt_cache_retention="24h",
+        )
+
+        assert request["prompt_cache_key"] == "harness-context-v1"
+        assert request["prompt_cache_retention"] == "24h"
+        assert request["store"] is True
+
+    def test_codex_request_omits_public_state_and_cache_controls(self):
+        """The ChatGPT/Codex transport rejects public Responses controls."""
+        config = OpenAIResponsesConfig(
+            provider=ProviderType.OPENAI_RESPONSES,
+            api_key="oauth-test-token",
+            model="gpt-5.6-luna",
+            base_url="https://chatgpt.com/backend-api/codex",
+            store_responses=True,
+        )
+        provider = OpenAIResponsesProvider(config)
+
+        request = provider._prepare_request(
+            [{"role": "user", "content": "Use the backend cache."}],
+            tools=None,
+            stream=True,
+            previous_response_id="resp_previous",
+            prompt_cache_key="harness-context-v1",
+            prompt_cache_retention="24h",
+        )
+
+        assert request["store"] is False
+        assert "previous_response_id" not in request
+        assert "prompt_cache_key" not in request
+        assert "prompt_cache_retention" not in request

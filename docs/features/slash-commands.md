@@ -1,7 +1,7 @@
 ---
 title: "Slash Commands"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-08-06
 status: active
 ---
 # Slash Commands
@@ -18,7 +18,11 @@ Type `/` to open the command menu. Commands are filtered as you type:
 
   Available Commands:
   ├─ help           Show available commands
-  ├─ profile        Manage LLM profiles
+  ├─ llm            Browse model loadouts
+  ├─ setup          Configure a provider connection
+  ├─ model          Select a model or reasoning effort
+  ├─ agent          Switch agent bundles
+  ├─ hub            Coordinate hub identities
   ├─ permissions    Manage permission settings
   ├─ mcp            Manage MCP servers
   └─ save           Save conversation
@@ -36,11 +40,19 @@ Use arrow keys to navigate, Enter to execute.
 | `/version` | - | Display version information |
 | `/save` | - | Save conversation (transcript, markdown, jsonl, clipboard) |
 | `/llm` | `/loadout`, `/ld` | Switch model loadouts (provider + model + params) |
+| `/model` | `/mod`, `/m` | Select a model; `/model effort <level>` sets reasoning effort |
+| `/setup` | `/onboard`, `/wizard` | Configure a provider and save a profile |
+| `/agent` | - | Select or clear the active agent bundle |
+| `/skill` | `/skills` | Load or unload Agent Skills |
+| `/hub` | - | Inspect and coordinate the local agent mesh |
 | `/permissions` | `/perms`, `/security` | Manage permission modes |
 | `/mcp` | `/mcps`, `/servers` | Open the MCP manager |
 | `/resume` | - | Resume previous conversation |
 | `/terminal` | `/tmux`, `/t` | Manage tmux sessions |
 | `/login` | - | OAuth login for providers |
+| `/config` | `/settings`, `/preferences` | Edit configuration |
+| `/status` | `/info`, `/diagnostics` | Show runtime diagnostics |
+| `/updates` | - | Browse recent release notes |
 | `/matrix` | - | Matrix rain effect |
 | `/widgets` | `showcase`, `widget-showcase`, `storybook` | Interactive widget gallery |
 
@@ -79,14 +91,14 @@ Commands are organized by category:
 Commands can be invoked from the command line:
 
 ```bash
-# Execute command and exit
-kollab --profile list
+# Show the current CLI surface
+kollab --help
 
-# Execute command, then enter interactive mode
-kollab --profile list --stay
+# Execute a hub command without opening the TUI
+kollab --hub status
 
-# Command with arguments
-kollab --mcp show --stay
+# Start the local engine and browser UI
+kollab --web-ui
 ```
 
 ## Implementation
@@ -141,13 +153,10 @@ class MyPlugin(BasePlugin):
 
 ## Reserved Commands
 
-These commands cannot be overridden by plugins (from registry.py):
-- `help`, `version`, `config`, `status`
-- `permissions`, `profile`, `agent`, `skill`
-- `model`, `cd`
-
-note: `/config` and `/status` are listed as reserved but not implemented.
-      `/agent` and `/skill` are reserved but not implemented.
+These core commands cannot be overridden by plugins (from registry.py):
+`help`, `version`, `config`, `status`, `permissions`, `agent`, `skill`, `model`,
+and `cd`. Provider setup and model switching use `/setup` and `/llm`; `/profile`
+is historical terminology, not the current interactive command.
 
 ## Command Result Display
 

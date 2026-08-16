@@ -15,6 +15,7 @@ Keyboard:
     Esc          exit (clears search if active, else exits)
 """
 
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -73,6 +74,10 @@ class ConfigAltView(AltView):
         # Save prompt
         self._save_prompt: bool = False
 
+        # Background profile-switch tasks started by saves. Keep ownership so
+        # failures are observed and teardown can cancel pending work.
+        self._save_tasks: set[asyncio.Task[Any]] = set()
+
     # -- external setup -----------------------------------------------------
 
     def set_app(self, app: Any) -> None:
@@ -96,6 +101,11 @@ class ConfigAltView(AltView):
         )
 
     async def on_complete(self) -> None:
+        pending = tuple(self._save_tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await super().on_complete()
 
     # -- widget creation (mirrors modal_renderer._create_widget) ------------
@@ -744,9 +754,29 @@ class ConfigAltView(AltView):
             if new_profile and self.app:
                 llm = getattr(self.app, "llm_service", None)
                 if llm and hasattr(llm, "switch_profile"):
-                    import asyncio
+                    task = asyncio.create_task(llm.switch_profile(new_profile))
+                    self._save_tasks.add(task)
 
-                    asyncio.ensure_future(llm.switch_profile(new_profile))
+                    def _observe_profile_switch(
+                        completed: asyncio.Task[Any],
+                    ) -> None:
+                        self._save_tasks.discard(completed)
+                        if completed.cancelled():
+                            return
+                        try:
+                            error = completed.exception()
+                        except Exception:
+                            logger.exception(
+                                "ConfigAltView: could not inspect runtime profile switch"
+                            )
+                        else:
+                            if error is not None:
+                                logger.error(
+                                    "ConfigAltView: runtime profile switch failed: %s",
+                                    error,
+                                )
+
+                    task.add_done_callback(_observe_profile_switch)
                     logger.info(
                         "ConfigAltView: triggered runtime profile switch -> %s",
                         new_profile,

@@ -8,13 +8,18 @@ forget their active tasks.
 Lifecycle:
   assign -> active -> (checkpoint)* -> complete/fail -> QA review -> closed
   assign -> standby -> active -> (checkpoint)* -> ... (standby = no cron)
+  assign -> obsolete/cancelled (audited terminal state, no cron)
 """
 
+import fcntl
 import json
 import logging
+import math
 import os
+import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,7 +32,7 @@ class TaskCard:
     """A task assignment that survives context compaction."""
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    status: str = "active"  # active, standby, paused, done, failed, qa_review, closed
+    status: str = "active"  # active, standby, paused, done, failed, qa_review, closed, cancelled, obsolete
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -55,6 +60,13 @@ class TaskCard:
     qa_reviewer: Optional[str] = None
     qa_passed: Optional[bool] = None
     qa_notes: Optional[str] = None
+    qa_requested_at: Optional[float] = None
+
+    # Terminalization audit
+    terminal_reason: Optional[str] = None
+    terminal_actor: Optional[str] = None
+    terminal_message_id: Optional[str] = None
+    terminalized_at: Optional[float] = None
 
     # Metadata
     project: str = field(default_factory=os.getcwd)
@@ -94,6 +106,13 @@ class TaskCard:
             self.timeout_seconds > 0 and self.elapsed_seconds() > self.timeout_seconds
         )
 
+    def qa_review_expired(self) -> bool:
+        """Return whether this QA card has waited past its review TTL."""
+        if self.status != "qa_review" or self.cron_ttl_seconds <= 0:
+            return False
+        requested_at = self.qa_requested_at or self.updated_at
+        return time.time() - requested_at > self.cron_ttl_seconds
+
     def last_checkpoint_note(self) -> str:
         if self.checkpoints:
             return str(self.checkpoints[-1].get("note", ""))
@@ -122,6 +141,11 @@ class TaskCard:
             "qa_reviewer": self.qa_reviewer,
             "qa_passed": self.qa_passed,
             "qa_notes": self.qa_notes,
+            "qa_requested_at": self.qa_requested_at,
+            "terminal_reason": self.terminal_reason,
+            "terminal_actor": self.terminal_actor,
+            "terminal_message_id": self.terminal_message_id,
+            "terminalized_at": self.terminalized_at,
             "project": self.project,
         }
 
@@ -129,11 +153,51 @@ class TaskCard:
     def from_dict(cls, data: Dict) -> "TaskCard":
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known}
+
+        # Task cards are persisted JSON, so a hand-edited or partially
+        # corrupted file can contain strings where the cron loop expects
+        # numbers. Normalize those fields at the persistence boundary; one
+        # malformed card must not abort the entire cron pass.
+        numeric_defaults = {
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "timeout_seconds": 0.0,
+            "cron_interval": 300.0,
+            "cron_ttl_seconds": 7200.0,
+            "snoozed_until": 0.0,
+            "qa_requested_at": None,
+        }
+        for name, default in numeric_defaults.items():
+            if name not in filtered:
+                continue
+            value = filtered[name]
+            if value is None and default is None:
+                continue
+            try:
+                parsed = float(value)
+                if not math.isfinite(parsed):
+                    raise ValueError("non-finite number")
+                filtered[name] = parsed
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Normalizing malformed task field %s=%r for %s to %r",
+                    name,
+                    value,
+                    filtered.get("id", "unknown"),
+                    default,
+                )
+                filtered[name] = default
+
         return cls(**filtered)
 
 
 class TaskLedger:
     """Manages TaskCards on disk. Survives any crash or compaction."""
+
+    TERMINAL_STATUSES = frozenset(
+        {"done", "failed", "closed", "cancelled", "obsolete"}
+    )
+    EXPLICIT_TERMINAL_STATUSES = frozenset({"cancelled", "obsolete"})
 
     def __init__(self, tasks_dir: Optional[str] = None):
         if tasks_dir:
@@ -150,27 +214,82 @@ class TaskLedger:
     def _pending_replies_path(self) -> Path:
         return self._tasks_dir / "_pending_replies.json"
 
-    def _load_pending_replies(self) -> List[Dict[str, Any]]:
+    def _task_files(self):
+        """Yield task card files without the pending-reply envelope."""
+        pending_name = self._pending_replies_path().name
+        return (
+            path
+            for path in self._tasks_dir.glob("*.json")
+            if path.name != pending_name
+        )
+
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Hold an advisory lock beside a shared JSON file."""
+        lock_path = path.with_suffix(".lock")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    @staticmethod
+    def _load_json_object(path: Path) -> Any:
+        """Load one JSON value, recovering a valid prefix after old corruption."""
+        raw = path.read_text()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            value, end = decoder.raw_decode(raw.lstrip())
+            if not isinstance(value, dict):
+                raise
+            logger.warning("Recovered valid JSON prefix from corrupted ledger file %s", path)
+            return value
+
+    @staticmethod
+    def _write_json_atomic(path: Path, data: Any) -> None:
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.stem}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+
+    def _read_pending_replies_unlocked(self) -> List[Dict[str, Any]]:
         path = self._pending_replies_path()
         if not path.exists():
             return []
         try:
-            with open(path) as f:
-                data = json.load(f)
+            data = self._load_json_object(path)
             replies = data.get("expected_replies", [])
             return replies if isinstance(replies, list) else []
         except Exception as e:
             logger.debug(f"Failed to load pending replies: {e}")
             return []
 
+    def _write_pending_replies_unlocked(self, replies: List[Dict[str, Any]]) -> None:
+        self._write_json_atomic(
+            self._pending_replies_path(), {"expected_replies": replies}
+        )
+
+    def _load_pending_replies(self) -> List[Dict[str, Any]]:
+        with self._file_lock(self._pending_replies_path()):
+            return self._read_pending_replies_unlocked()
+
     def _save_pending_replies(self, replies: List[Dict[str, Any]]) -> None:
-        path = self._pending_replies_path()
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump({"expected_replies": replies}, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.rename(path)
+        with self._file_lock(self._pending_replies_path()):
+            self._write_pending_replies_unlocked(replies)
 
     def _save(self, card: TaskCard) -> None:
         card.updated_at = time.time()
@@ -186,23 +305,38 @@ class TaskLedger:
 
     def _write_card(self, card: TaskCard) -> None:
         path = self._task_path(card.id)
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(card.to_dict(), f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.rename(path)
+        with self._file_lock(path):
+            self._write_json_atomic(path, card.to_dict())
 
     def _load(self, task_id: str) -> Optional[TaskCard]:
         path = self._task_path(task_id)
         if not path.exists():
             return None
         try:
-            with open(path) as f:
-                return TaskCard.from_dict(json.load(f))
+            return TaskCard.from_dict(self._load_json_object(path))
         except Exception as e:
             logger.debug(f"Failed to load task {task_id}: {e}")
             return None
+
+    def _load_mutable(self, task_id: str, operation: str) -> Optional[TaskCard]:
+        """Load a task only when a late operation may still mutate it.
+
+        Terminal cards are durable acknowledgements for stale or superseded
+        work. Once a card is terminal, progress, completion, QA, and snooze
+        directives must not reopen it or change its audit record.
+        """
+        card = self._load(task_id)
+        if card is None:
+            return None
+        if card.status in self.TERMINAL_STATUSES:
+            logger.info(
+                "Ignoring %s for terminal task %s (%s)",
+                operation,
+                card.id,
+                card.status,
+            )
+            return None
+        return card
 
     def create(
         self,
@@ -216,6 +350,17 @@ class TaskLedger:
         cron_interval: float = 300,
         status: str = "active",
     ) -> TaskCard:
+        required = {
+            "assigner": assigner,
+            "assignee": assignee,
+            "directive": directive,
+        }
+        missing = [name for name, value in required.items() if not str(value).strip()]
+        if missing:
+            raise ValueError(
+                "task assignment requires non-empty " + ", ".join(missing)
+            )
+
         card = TaskCard(
             assigner=assigner,
             assignee=assignee,
@@ -246,19 +391,28 @@ class TaskLedger:
         message_id: str,
         deadline_seconds: int,
     ) -> None:
-        replies = self._load_pending_replies()
-        replies.append(
-            {
-                "task_id": task_id,
-                "assignee": assignee,
-                "requested_by": requested_by,
-                "message_id": message_id,
-                "created_at": time.time(),
-                "deadline_seconds": deadline_seconds,
-                "status": "pending",
-            }
-        )
-        self._save_pending_replies(replies)
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            # Outbound delivery can be replayed after a retry or reconnect.
+            # Treat the message id as an idempotency key: a pending entry must
+            # be recorded at most once, and a resolved entry must never be
+            # resurrected by a replayed acknowledgement request.
+            if message_id and any(
+                item.get("message_id") == message_id for item in replies
+            ):
+                return
+            replies.append(
+                {
+                    "task_id": task_id,
+                    "assignee": assignee,
+                    "requested_by": requested_by,
+                    "message_id": message_id,
+                    "created_at": time.time(),
+                    "deadline_seconds": deadline_seconds,
+                    "status": "pending",
+                }
+            )
+            self._write_pending_replies_unlocked(replies)
 
     # Replies older than this are auto-expired on read.
     PENDING_REPLY_TTL = 86400  # 24 hours
@@ -270,26 +424,24 @@ class TaskLedger:
         pruned from the file. This prevents the pending list from
         growing unbounded when agents go offline without resolving.
         """
-        replies = self._load_pending_replies()
-        now = time.time()
-        changed = False
-        kept = []
-        for item in replies:
-            if item.get("status") == "pending":
-                age = now - item.get("created_at", 0)
-                if age > self.PENDING_REPLY_TTL:
-                    item["status"] = "expired"
-                    item["expired_at"] = now
-                    changed = True
-            kept.append(item)
-        if changed:
-            # Prune: keep only non-expired entries to prevent unbounded growth
-            pruned = [r for r in kept if r.get("status") != "expired"]
-            self._save_pending_replies(pruned)
-            kept = pruned
-        return [
-            item for item in kept if item.get("status") == "pending"
-        ]
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            now = time.time()
+            changed = False
+            kept = []
+            for item in replies:
+                if item.get("status") == "pending":
+                    age = now - item.get("created_at", 0)
+                    if age > self.PENDING_REPLY_TTL:
+                        item["status"] = "expired"
+                        item["expired_at"] = now
+                        changed = True
+                kept.append(item)
+            if changed:
+                # Prune: keep only non-expired entries to prevent unbounded growth
+                kept = [r for r in kept if r.get("status") != "expired"]
+                self._write_pending_replies_unlocked(kept)
+            return [item for item in kept if item.get("status") == "pending"]
 
     def resolve_reply(
         self,
@@ -297,6 +449,7 @@ class TaskLedger:
         assignee: str,
         evidence: str,
         message_id: str,
+        task_id: str = "",
     ) -> bool:
         strong_markers = (
             "task complete",
@@ -310,21 +463,68 @@ class TaskLedger:
         if not any(marker in evidence.lower() for marker in strong_markers):
             return False
 
-        replies = self._load_pending_replies()
-        for item in replies:
-            if item.get("assignee") == assignee and item.get("status") == "pending":
-                item["status"] = "resolved"
-                item["resolved_by_message_id"] = message_id
-                item["resolved_at"] = time.time()
-                self._save_pending_replies(replies)
-                return True
-        return False
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            for item in replies:
+                if (
+                    item.get("assignee") == assignee
+                    and item.get("status") == "pending"
+                    and (not task_id or item.get("task_id") == task_id)
+                ):
+                    item["status"] = "resolved"
+                    item["resolved_by_message_id"] = message_id
+                    item["resolved_at"] = time.time()
+                    self._write_pending_replies_unlocked(replies)
+                    return True
+            return False
+
+    def resolve_pending_reply(
+        self,
+        message_id: str,
+        *,
+        reason: str,
+        resolution: str = "task_terminalized",
+        terminal_status: str = "obsolete",
+        resolved_by_message_id: str = "",
+    ) -> bool:
+        """Resolve one legacy expected reply keyed by outbound message ID."""
+        if not message_id or not reason:
+            return False
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            for item in replies:
+                if (
+                    item.get("message_id") == message_id
+                    and item.get("status") == "pending"
+                ):
+                    item["status"] = "resolved"
+                    item["resolution"] = resolution
+                    item["terminal_status"] = terminal_status
+                    item["resolved_reason"] = reason
+                    item["resolved_by_message_id"] = resolved_by_message_id
+                    item["resolved_at"] = time.time()
+                    self._write_pending_replies_unlocked(replies)
+                    return True
+            return False
 
     def get_active_for(self, identity: str) -> List[TaskCard]:
         """Get all active tasks assigned to this agent."""
         result = []
-        for f in self._tasks_dir.glob("*.json"):
+        for f in self._task_files():
             card = self._load(f.stem)
+            if (
+                card
+                and card.assignee == identity
+                and card.status == "qa_review"
+                and card.qa_review_expired()
+            ):
+                self.terminalize(
+                    card.id,
+                    status="obsolete",
+                    reason="QA review expired without reviewer action",
+                    actor="task-ledger",
+                )
+                continue
             if (
                 card
                 and card.assignee == identity
@@ -335,14 +535,14 @@ class TaskLedger:
 
     def get_all(self, status: Optional[str] = None) -> List[TaskCard]:
         result = []
-        for f in self._tasks_dir.glob("*.json"):
+        for f in self._task_files():
             card = self._load(f.stem)
             if card and (status is None or card.status == status):
                 result.append(card)
         return result
 
     def checkpoint(self, task_id: str, note: str, data: Optional[Dict] = None) -> bool:
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "checkpoint")
         if not card:
             return False
         card.add_checkpoint(note, data)
@@ -360,7 +560,7 @@ class TaskLedger:
         cron and the checkpoint nudge go quiet. Saved with _save_preserve
         so a snooze does not reset the cron TTL clock.
         """
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "snooze")
         if not card:
             return None
         seconds = max(0.0, min(minutes * 60.0, self.MAX_SNOOZE_SECONDS))
@@ -370,7 +570,7 @@ class TaskLedger:
         return card
 
     def complete(self, task_id: str, result: str) -> Optional[TaskCard]:
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "complete")
         if not card:
             return None
         card.status = "done"
@@ -382,49 +582,135 @@ class TaskLedger:
 
     def request_qa(self, task_id: str, result: str) -> Optional[TaskCard]:
         """Mark task as done and request QA review."""
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "request_qa")
         if not card:
             return None
         card.status = "qa_review"
         card.result = result
         card.cron_active = False
+        card.qa_requested_at = time.time()
         self._save(card)
         return card
 
     def qa_approve(
         self, task_id: str, reviewer: str, notes: str = ""
     ) -> Optional[TaskCard]:
-        card = self._load(task_id)
+        card = self._load_mutable(task_id, "qa_approve")
         if not card:
             return None
         card.status = "closed"
         card.qa_reviewer = reviewer
         card.qa_passed = True
         card.qa_notes = notes
+        card.qa_requested_at = None
         card.cron_active = False
         self._save(card)
         return card
 
     def qa_reject(self, task_id: str, reviewer: str, notes: str) -> Optional[TaskCard]:
-        card = self._load(task_id)
-        if not card:
+        card = self._load_mutable(task_id, "qa_reject")
+        if not card or card.status != "qa_review":
             return None
         card.status = "active"  # re-activate for rework
         card.qa_reviewer = reviewer
         card.qa_passed = False
         card.qa_notes = notes
+        card.qa_requested_at = None
         card.cron_active = True  # re-enable cron
         self._save(card)
         return card
 
     def cancel(self, task_id: str) -> bool:
+        """Compatibility wrapper for the audited cancelled terminal state."""
+        return (
+            self.terminalize(
+                task_id,
+                status="cancelled",
+                reason="cancelled via task ledger",
+            )
+            is not None
+        )
+
+    def _resolve_replies_for_task(
+        self,
+        task_id: str,
+        *,
+        terminal_status: str,
+        reason: str,
+        message_id: str = "",
+    ) -> int:
+        with self._file_lock(self._pending_replies_path()):
+            replies = self._read_pending_replies_unlocked()
+            now = time.time()
+            resolved = 0
+            for item in replies:
+                if item.get("task_id") != task_id or item.get("status") != "pending":
+                    continue
+                item["status"] = "resolved"
+                item["resolution"] = "task_terminalized"
+                item["terminal_status"] = terminal_status
+                item["resolved_reason"] = reason
+                item["resolved_by_message_id"] = message_id
+                item["resolved_at"] = now
+                resolved += 1
+            if resolved:
+                self._write_pending_replies_unlocked(replies)
+            return resolved
+
+    def terminalize(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        reason: str,
+        actor: str = "",
+        message_id: str = "",
+    ) -> Optional[TaskCard]:
+        """Move a task to an audited, non-cron terminal state.
+
+        Terminalization is idempotent: a stale or duplicate directive cannot
+        reopen a finished task or append duplicate audit checkpoints. The
+        reason is mandatory so the task does not disappear without an
+        explanation.
+        """
+        status = (status or "").strip().lower()
+        reason = (reason or "").strip()
+        if status not in self.EXPLICIT_TERMINAL_STATUSES:
+            raise ValueError(f"unsupported terminal task status: {status!r}")
+        if not reason:
+            raise ValueError("terminalization reason is required")
+
         card = self._load(task_id)
         if not card:
-            return False
-        card.status = "closed"
+            return None
+        if card.status in self.TERMINAL_STATUSES:
+            return card
+
+        card.status = status
         card.cron_active = False
+        card.snoozed_until = 0
+        card.terminal_reason = reason
+        card.terminal_actor = actor or None
+        card.terminal_message_id = message_id or None
+        card.terminalized_at = time.time()
+        card.add_checkpoint(
+            f"task {status}: {reason}",
+            {
+                "status": status,
+                "reason": reason,
+                "actor": actor,
+                "message_id": message_id,
+            },
+        )
         self._save(card)
-        return True
+        self._resolve_replies_for_task(
+            card.id,
+            terminal_status=status,
+            reason=reason,
+            message_id=message_id,
+        )
+        logger.info("Task %s terminalized as %s: %s", card.id, status, reason)
+        return card
 
     def get_cron_due(self) -> List[TaskCard]:
         """Get tasks whose cron reminder is due.
@@ -439,20 +725,23 @@ class TaskLedger:
         now = time.time()
         due = []
         for card in self.get_all(status="active"):
-            if not card.cron_active:
-                continue
-            if card.snoozed_until > now:
-                continue
-
             # TTL auto-expire: if no update in cron_ttl_seconds, silence cron
             ttl = card.cron_ttl_seconds if card.cron_ttl_seconds > 0 else 0
             if ttl > 0 and (now - card.updated_at) > ttl:
-                logger.info(
-                    f"Task {card.id} cron auto-expired "
-                    f"(no update in {int(ttl / 3600)}h)"
+                self.terminalize(
+                    card.id,
+                    status="obsolete",
+                    reason=(
+                        f"task-cron expired after {int(ttl / 3600)}h "
+                        "without a checkpoint"
+                    ),
+                    actor="task-cron",
                 )
-                card.cron_active = False
-                self._save_preserve(card)
+                continue
+
+            if not card.cron_active:
+                continue
+            if card.snoozed_until > now:
                 continue
 
             last_update = card.updated_at
@@ -465,7 +754,8 @@ class TaskLedger:
         count = 0
         for card in self.get_all():
             if (
-                card.status in ("closed", "failed", "done", "qa_review")
+                card.status
+                in ("closed", "failed", "done", "qa_review", "cancelled", "obsolete")
                 and card.updated_at < cutoff
             ):
                 self._task_path(card.id).unlink(missing_ok=True)

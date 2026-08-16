@@ -65,6 +65,45 @@ class TestHubMeshForce(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejections, [])
         plugin._deliver_to_agent.assert_awaited_once()
 
+    async def test_direct_message_routes_only_to_named_identity(self) -> None:
+        plugin = HubPlugin(event_bus=MagicMock())
+        plugin._dns_registry = FakeDnsRegistry()
+        plugin._identity = AgentRuntime(
+            name="coordinator",
+            identity="koordinator",
+            agent_id="koordinator-id",
+            is_coordinator=True,
+        )
+        target = AgentRuntime(
+            name="coder",
+            identity="lapis",
+            agent_id="lapis-id",
+        )
+        bystander = AgentRuntime(
+            name="coder",
+            identity="sapphire",
+            agent_id="sapphire-id",
+        )
+        plugin._presence = MagicMock()
+        plugin._presence.discover_agents_async = AsyncMock(
+            return_value=[target, bystander]
+        )
+        plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+        rejections = await plugin._route_message(
+            HubMessage(
+                action="message",
+                from_agent="koordinator-id",
+                from_identity="koordinator",
+                to="lapis",
+                content="targeted check",
+                force=True,
+            )
+        )
+
+        self.assertEqual(rejections, [])
+        plugin._deliver_to_agent.assert_awaited_once_with(target, unittest.mock.ANY)
+
     async def test_hub_msg_tool_reports_rejection_as_failure(self) -> None:
         plugin = HubPlugin(event_bus=MagicMock())
         plugin._identity = AgentRuntime(
@@ -114,17 +153,83 @@ class TestHubMeshForce(unittest.IsolatedAsyncioTestCase):
         plugin._display_outgoing_message = MagicMock()
         plugin._bridge_forward = AsyncMock()
         plugin._resolve_scope = MagicMock(return_value="direct")
+        plugin._task_ledger = MagicMock()
+        plugin._task_ledger.get_active_for.return_value = []
 
         await plugin._handle_hub_msg_tool(
             {
                 "id": "hub_msg_2",
                 "to": "lapis",
                 "content": "review Agent HUD and report back",
+                "task_id": "task-42",
             }
         )
 
         routed = plugin._route_message.await_args.args[0]
         self.assertTrue(routed.metadata["task_assignment"])
+        self.assertEqual(routed.metadata["task_id"], "task-42")
+
+    async def test_hub_msg_tool_normalizes_embedded_xml_target_attributes(self) -> None:
+        plugin = HubPlugin(event_bus=MagicMock())
+        plugin._identity = AgentRuntime(
+            name="coordinator",
+            identity="koordinator",
+            agent_id="koordinator-id",
+            is_coordinator=True,
+        )
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._display_outgoing_message = MagicMock()
+        plugin._bridge_forward = AsyncMock()
+        plugin._resolve_scope = MagicMock(return_value="direct")
+        plugin._task_ledger = MagicMock()
+        plugin._task_ledger.get_active_for.return_value = []
+
+        for index, (target, expected_wait) in enumerate(
+            (('to="lapis"', False), ('to="lapis" wait="true"', True))
+        ):
+            with self.subTest(target=target):
+                result = await plugin._handle_hub_msg_tool(
+                    {
+                        "id": f"hub_msg_embedded_attrs_{index}",
+                        "to": target,
+                        "content": f"ACK stale directive {index}",
+                    }
+                )
+
+                self.assertTrue(result.success)
+                routed = plugin._route_message.await_args.args[0]
+                self.assertEqual(routed.to, "lapis")
+                self.assertEqual(routed.metadata["wait"], expected_wait)
+        plugin._task_ledger.expect_reply.assert_not_called()
+
+    async def test_hub_msg_plain_request_does_not_create_task_debt(self) -> None:
+        plugin = HubPlugin(event_bus=MagicMock())
+        plugin._identity = AgentRuntime(
+            name="coordinator",
+            identity="koordinator",
+            agent_id="koordinator-id",
+            is_coordinator=True,
+        )
+        plugin._presence = MagicMock()
+        plugin._presence.scan_all_presence = MagicMock(return_value=[])
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._display_outgoing_message = MagicMock()
+        plugin._bridge_forward = AsyncMock()
+        plugin._resolve_scope = MagicMock(return_value="direct")
+        plugin._task_ledger = MagicMock()
+        plugin._task_ledger.get_active_for.return_value = []
+
+        await plugin._handle_hub_msg_tool(
+            {
+                "id": "hub_msg_plain_request",
+                "to": "lapis",
+                "content": "Please check the provider logs and report back.",
+            }
+        )
+
+        routed = plugin._route_message.await_args.args[0]
+        self.assertNotIn("task_assignment", routed.metadata)
+        plugin._task_ledger.expect_reply.assert_not_called()
 
     async def test_route_message_queues_direct_target_identity_when_offline(self) -> None:
         plugin = HubPlugin(event_bus=MagicMock())

@@ -1581,8 +1581,8 @@ class TerminalManager {
         <input type="number" id="profile-temp" value="0.7" min="0" max="2" step="0.1">
       </div>
       <div class="form-group">
-        <label>Max Tokens</label>
-        <input type="number" id="profile-maxtokens" placeholder="4096">
+        <label>Max Output Tokens</label>
+        <input type="number" id="profile-maxtokens" placeholder="16384">
       </div>
       <div class="form-actions">
         <button class="btn" id="profile-cancel">Cancel</button>

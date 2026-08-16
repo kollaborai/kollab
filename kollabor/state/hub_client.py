@@ -352,6 +352,11 @@ class HubStateClient:
                 raise
             except Exception as e:
                 logger.debug(f"HubStateClient reply router exited: {e}")
+            finally:
+                # EOF and terminal read errors mean no further replies can
+                # arrive. Fail in-flight calls immediately instead of leaving
+                # them blocked until their per-call timeout expires.
+                rpc.close()
 
         router_task = asyncio.create_task(
             _reply_router(), name=f"hub_state_client:{peer_identity}"
@@ -375,9 +380,15 @@ class HubStateClient:
             except Exception as e:
                 logger.debug(f"HubStateClient rpc close error: {e}")
 
-            # Close the socket writer.
+            # Close the socket writer. Even if close() itself fails, still
+            # attempt wait_closed() so transports get every available chance
+            # to release their resources.
             try:
                 writer.close()
-                await writer.wait_closed()
             except Exception as e:
                 logger.debug(f"HubStateClient writer close error: {e}")
+            finally:
+                try:
+                    await writer.wait_closed()
+                except Exception as e:
+                    logger.debug(f"HubStateClient writer wait_closed error: {e}")

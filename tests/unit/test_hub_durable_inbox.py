@@ -9,25 +9,25 @@ Bounds:
   - Replay cap:    when total > max_replay, a summary HubMessage is
                    prepended and only the newest max_replay messages returned.
 
-Single-block delivery: when a bounded replay batch is detected
-  (_deliver_inbox_batch → _inject_inbox_replay), the whole set is
-  coalesced into ONE inject_system_message call, NOT N separate
-  _on_message_received calls.
+Single-block delivery: when a bounded replay batch is detected,
+  ordinary messages are coalesced into one inject_system_message call.
+  Task-cron controls retain normal _on_message_received semantics and are
+  excluded from the replay block.
 
 Coordinator visibility: get_all_inbox_counts() scans dirs without consuming.
 """
 
 import asyncio
 import json
-import tempfile
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import List
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
+from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.messenger import (
     INBOX_MAX_REPLAY,
     INBOX_MAX_SIZE,
@@ -35,8 +35,8 @@ from plugins.hub.messenger import (
     AgentMessenger,
     _prune_inbox,
 )
-from plugins.hub.models import HubMessage
-
+from plugins.hub.models import HubMessage, MessageScope
+from plugins.hub.task_ledger import TaskLedger
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -172,6 +172,22 @@ class TestInboxTTLExpiry:
         contents = {m.content for m in result}
         assert contents == {"recent1", "recent2"}
 
+    @pytest.mark.parametrize("payload", ["[]", '"scalar"', "null"])
+    def test_non_object_json_is_discarded(self, tmp_path: Path, payload: str) -> None:
+        """Valid JSON values that are not message objects cannot crash replay."""
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        malformed = inbox / "000000-invalid.json"
+        malformed.write_text(payload)
+        fresh = inbox / "000001-fresh.json"
+        fresh.write_text(json.dumps(_make_msg(content="fresh").to_dict()))
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert [message.content for message in result] == ["fresh"]
+        assert not malformed.exists()
+
 
 # ---------------------------------------------------------------------------
 # 3. Bounded replay with summary header
@@ -256,6 +272,159 @@ class TestBoundedReplay:
 
         assert len(result) == 30
         assert all(m.action == "message" for m in result)
+
+    def test_prune_preserves_old_task_controls_and_bounds_ordinary(
+        self, tmp_path: Path
+    ) -> None:
+        """Write-time pruning evicts ordinary chatter before controls."""
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        controls = [
+            HubMessage(
+                action="message",
+                from_identity="task-cron",
+                content="old task-cron",
+                metadata={"task_cron": True, "task_id": "cron-old"},
+            ),
+            HubMessage(
+                action="message",
+                from_identity="koordinator",
+                content="old assignment",
+                metadata={"task_assignment": True, "task_id": "task-old"},
+            ),
+        ]
+        for i, message in enumerate(controls):
+            (inbox / f"{i:08d}.json").write_text(json.dumps(message.to_dict()))
+        for i in range(4):
+            (inbox / f"{i + 2:08d}.json").write_text(
+                json.dumps(_make_msg(content=f"ordinary {i}").to_dict())
+            )
+
+        from plugins.hub.messenger import _prune_inbox
+
+        _prune_inbox(inbox, max_size=2)
+
+        remaining = [json.loads(path.read_text()) for path in sorted(inbox.glob("*.json"))]
+        remaining_ids = {data["id"] for data in remaining}
+        assert {message.id for message in controls} <= remaining_ids
+        ordinary_count = sum(
+            not data.get("metadata", {}).get("task_cron")
+            and not data.get("metadata", {}).get("task_assignment")
+            for data in remaining
+        )
+        assert ordinary_count == 2
+
+    def test_prune_malformed_json_value_does_not_disable_bound(
+        self, tmp_path: Path
+    ) -> None:
+        """Malformed and non-object JSON remain evictable ordinary entries."""
+        payloads = ["[]", '"scalar"', "null", "not-json"]
+        for case, payload in enumerate(payloads):
+            inbox = tmp_path / f"lapis-{case}"
+            inbox.mkdir()
+            (inbox / "00000000-malformed.json").write_text(payload)
+            for i in range(5):
+                (inbox / f"{i + 1:08d}.json").write_text(
+                    json.dumps(_make_msg(content=f"ordinary {i}").to_dict())
+                )
+
+            _prune_inbox(inbox, max_size=2)
+
+            assert len(list(inbox.glob("*.json"))) == 2
+
+    def test_ttl_expired_task_cron_is_preserved_for_stale_ack(
+        self, tmp_path: Path
+    ) -> None:
+        """TTL cannot silently delete a cron control before classification."""
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: ttl-old] classify me",
+            metadata={"task_cron": True, "task_id": "ttl-old"},
+        )
+        data = reminder.to_dict()
+        data["timestamp"] = time.time() - INBOX_TTL_SECS - 100
+        (inbox / "old-control.json").write_text(json.dumps(data))
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis", max_replay=20)
+
+        assert [message.id for message in result] == [reminder.id]
+
+    def test_old_task_cron_is_preserved_beyond_ordinary_replay_bound(
+        self, tmp_path: Path
+    ) -> None:
+        """Controls survive the cap while ordinary replay stays bounded."""
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        now = time.time()
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: stale-old] classify me",
+            metadata={"task_cron": True, "task_id": "stale-old"},
+        )
+        reminder_data = reminder.to_dict()
+        reminder_data["timestamp"] = now - 100
+        (inbox / "00000000.000000-x-from-task-cron.json").write_text(
+            json.dumps(reminder_data)
+        )
+        for i in range(25):
+            data = _make_msg(content=f"ordinary {i}").to_dict()
+            data["timestamp"] = now - (25 - i)
+            (inbox / f"{i + 1:08d}.000000-x-from-peer.json").write_text(
+                json.dumps(data)
+            )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis", max_replay=20)
+
+        assert result[0].action == "inbox_summary"
+        replayed = result[1:]
+        assert reminder.id in {message.id for message in replayed}
+        ordinary = [
+            message for message in replayed if not message.metadata.get("task_cron")
+        ]
+        assert len(ordinary) == 20
+        assert result[0].metadata["controls_preserved"] == 1
+        assert result[0].metadata["dropped"] == 5
+
+    def test_old_task_assignment_is_preserved_beyond_ordinary_replay_bound(
+        self, tmp_path: Path
+    ) -> None:
+        """Task assignments receive the same control-priority replay policy."""
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        now = time.time()
+        assignment = HubMessage(
+            action="message",
+            from_identity="koordinator",
+            to="lapis",
+            content="objective: retained assignment",
+            metadata={"task_assignment": True, "task_id": "task-old"},
+        )
+        data = assignment.to_dict()
+        data["timestamp"] = now - 100
+        (inbox / "00000000.000000-x-from-koordinator.json").write_text(
+            json.dumps(data)
+        )
+        for i in range(25):
+            ordinary = _make_msg(content=f"ordinary {i}").to_dict()
+            ordinary["timestamp"] = now - (25 - i)
+            (inbox / f"{i + 1:08d}.000000-x-from-peer.json").write_text(
+                json.dumps(ordinary)
+            )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis", max_replay=20)
+
+        assert assignment.id in {message.id for message in result[1:]}
+        assert result[0].metadata["controls_preserved"] == 1
+        assert result[0].metadata["dropped"] == 5
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +586,8 @@ def _make_plugin_stub():
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = None
     plugin._identity = None
+    plugin._seen_messages = OrderedDict()
+    plugin._seen_content_hashes = {}
     return plugin
 
 
@@ -533,6 +704,330 @@ class TestSingleBlockDelivery:
         block = captured[0]
         for i in range(5):
             assert f"msg {i}" in block
+
+    def test_replay_stale_task_cron_is_acknowledged_and_excluded(
+        self, tmp_path: Path
+    ) -> None:
+        """Stale task-cron controls use the receive path, not the replay block."""
+        plugin = _make_plugin_stub()
+        plugin._task_ledger = TaskLedger(str(tmp_path / "tasks"))
+        plugin._vault = MagicMock()
+        plugin._presence = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="lapis",
+            agent_id="lapis-id",
+            state="idle",
+        )
+
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        llm_mock.conversation_history = []
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        bus.emit_with_hooks = AsyncMock()
+        plugin.event_bus = bus
+
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_agent="task-cron-id",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: missing-card] stale replay task",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_cron": True,
+                "task_id": "missing-card",
+                "source_identity": "koordinator",
+            },
+        )
+
+        self._run(plugin._deliver_inbox_batch([summary, reminder, *ordinary]))
+
+        ack = plugin._route_message.await_args.args[0]
+        assert ack.to == "koordinator"
+        assert ack.reply_to == reminder.id
+        assert ack.metadata["task_cron_ack"] is True
+        assert ack.metadata["task_id"] == "missing-card"
+        assert ack.metadata["disposition"] == "stale"
+        assert ack.metadata["reason"] == "task card not found"
+        bus.emit_with_hooks.assert_not_awaited()
+        assert llm_mock.conversation_history == []
+
+        inject_mock.assert_awaited_once()
+        block = inject_mock.await_args.args[0]
+        assert "stale replay task" not in block
+        assert "msg 0" in block
+        assert "msg 1" in block
+
+    def test_replay_task_assignment_uses_normal_receive_once(self) -> None:
+        """Retained task directives are classified, never flattened into prose."""
+        plugin = _make_plugin_stub()
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        plugin.event_bus = bus
+
+        received: List[HubMessage] = []
+
+        async def capture_receive(message: HubMessage) -> None:
+            received.append(message)
+
+        plugin._on_message_received = capture_receive
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        assignment = HubMessage(
+            action="message",
+            from_identity="koordinator",
+            to="lapis",
+            content="objective: execute the retained directive",
+            metadata={"task_assignment": True, "task_id": "task-retained"},
+        )
+
+        self._run(
+            plugin._deliver_inbox_batch(
+                [summary, ordinary[0], assignment, ordinary[1]]
+            )
+        )
+
+        assert received == [assignment]
+        inject_mock.assert_awaited_once()
+        block = inject_mock.await_args.args[0]
+        assert "retained directive" not in block
+        assert "msg 0" in block
+        assert "msg 1" in block
+
+    def test_replay_metadata_task_cron_uses_normal_receive_once(self) -> None:
+        """Anything preserved as task-cron metadata is classified, not flattened."""
+        plugin = _make_plugin_stub()
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        plugin.event_bus = bus
+
+        received: List[HubMessage] = []
+
+        async def capture_receive(message: HubMessage) -> None:
+            received.append(message)
+
+        plugin._on_message_received = capture_receive
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_identity="koordinator",
+            to="lapis",
+            content="[task reminder: metadata-only] classify me",
+            metadata={"task_cron": True, "task_id": "metadata-only"},
+        )
+
+        self._run(
+            plugin._deliver_inbox_batch(
+                [summary, ordinary[0], reminder, ordinary[1]]
+            )
+        )
+
+        assert received == [reminder]
+        inject_mock.assert_awaited_once()
+        assert "classify me" not in inject_mock.await_args.args[0]
+
+
+    def test_replay_active_task_cron_uses_receive_path_and_is_excluded(
+        self, tmp_path: Path
+    ) -> None:
+        """An active task reminder keeps receive semantics outside coalescing."""
+        plugin = _make_plugin_stub()
+        ledger = TaskLedger(str(tmp_path / "tasks"))
+        card = ledger.create(
+            assigner="koordinator",
+            assignee="lapis",
+            directive="continue active replay task",
+            report_to="koordinator",
+        )
+        plugin._task_ledger = ledger
+
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        plugin.event_bus = bus
+
+        received: List[HubMessage] = []
+
+        async def capture_receive(message: HubMessage) -> None:
+            received.append(message)
+
+        plugin._on_message_received = capture_receive
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content=f"[task reminder: {card.id}] continue active replay task",
+            scope=MessageScope.DIRECT.value,
+            metadata={"task_cron": True, "task_id": card.id},
+        )
+
+        self._run(
+            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
+        )
+
+        assert received == [reminder]
+        inject_mock.assert_awaited_once()
+        block = inject_mock.await_args.args[0]
+        assert "continue active replay task" not in block
+        assert "msg 0" in block
+        assert "msg 1" in block
+
+    def test_old_stale_task_cron_is_acknowledged_without_wake(
+        self, tmp_path: Path
+    ) -> None:
+        """A control older than the ordinary cap still receives a correlated ACK."""
+        inbox = tmp_path / "mailbox" / "lapis"
+        inbox.mkdir(parents=True)
+        now = time.time()
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: stale-bounded] classify me",
+            metadata={
+                "task_cron": True,
+                "task_id": "stale-bounded",
+                "source_identity": "koordinator",
+            },
+        )
+        reminder_data = reminder.to_dict()
+        reminder_data["timestamp"] = now - 100
+        (inbox / "00000000.000000-x-from-task-cron.json").write_text(
+            json.dumps(reminder_data)
+        )
+        for i in range(25):
+            data = _make_msg(content=f"ordinary bounded {i}").to_dict()
+            data["timestamp"] = now - (25 - i)
+            (inbox / f"{i + 1:08d}.000000-x-from-peer.json").write_text(
+                json.dumps(data)
+            )
+
+        with patch(
+            "plugins.hub.messenger.get_messages_dir",
+            return_value=tmp_path / "mailbox",
+        ):
+            batch = AgentMessenger.read_mailbox("lapis", max_replay=20)
+
+        plugin = _make_plugin_stub()
+        plugin._task_ledger = TaskLedger(str(tmp_path / "tasks"))
+        plugin._vault = MagicMock()
+        plugin._presence = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="lapis",
+            agent_id="lapis-id",
+            state="idle",
+        )
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        llm_mock.conversation_history = []
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        bus.emit_with_hooks = AsyncMock()
+        plugin.event_bus = bus
+
+        self._run(plugin._deliver_inbox_batch(batch))
+
+        ack = plugin._route_message.await_args.args[0]
+        assert ack.reply_to == reminder.id
+        assert ack.metadata["reminder_id"] == reminder.id
+        assert ack.metadata["task_id"] == "stale-bounded"
+        assert ack.metadata["disposition"] == "stale"
+        bus.emit_with_hooks.assert_not_awaited()
+        assert llm_mock.conversation_history == []
+        inject_mock.assert_awaited_once()
+        assert "classify me" not in inject_mock.await_args.args[0]
+
+    def test_replay_task_cron_control_is_not_duplicated_in_fallback(self) -> None:
+        """Fallback delivers controls once and only ordinary messages afterward."""
+        plugin = _make_plugin_stub()
+        bus = MagicMock()
+        bus.get_service.return_value = None
+        plugin.event_bus = bus
+
+        received: List[HubMessage] = []
+
+        async def capture_receive(message: HubMessage) -> None:
+            received.append(message)
+
+        plugin._on_message_received = capture_receive
+        summary, *ordinary = _make_summary_batch(n_msgs=2, n_total=30)
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: active] control fallback",
+            scope=MessageScope.DIRECT.value,
+            metadata={"task_cron": True, "task_id": "active"},
+        )
+
+        self._run(
+            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
+        )
+
+        assert received == [reminder, ordinary[0], ordinary[1]]
+        assert received.count(reminder) == 1
+
+    def test_replay_with_only_task_cron_controls_does_not_inject_empty_block(
+        self, tmp_path: Path
+    ) -> None:
+        """A control-only replay is handled without an empty HUD injection."""
+        plugin = _make_plugin_stub()
+        plugin._task_ledger = TaskLedger(str(tmp_path / "tasks"))
+        plugin._vault = MagicMock()
+        plugin._presence = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="lapis",
+            agent_id="lapis-id",
+            state="idle",
+        )
+
+        inject_mock = AsyncMock()
+        llm_mock = MagicMock()
+        llm_mock.inject_system_message = inject_mock
+        llm_mock.conversation_history = []
+        bus = MagicMock()
+        bus.get_service.return_value = llm_mock
+        bus.emit_with_hooks = AsyncMock()
+        plugin.event_bus = bus
+
+        summary = _make_summary_batch(n_msgs=1, n_total=30)[0]
+        reminder = HubMessage(
+            action="message",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: missing-only] stale replay task",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_cron": True,
+                "task_id": "missing-only",
+                "source_identity": "koordinator",
+            },
+        )
+
+        self._run(plugin._deliver_inbox_batch([summary, reminder]))
+
+        plugin._route_message.assert_awaited_once()
+        inject_mock.assert_not_awaited()
+        bus.emit_with_hooks.assert_not_awaited()
+        assert llm_mock.conversation_history == []
 
     # ------------------------------------------------------------------
     # _deliver_inbox_batch: normal batch → individual delivery, NOT inject

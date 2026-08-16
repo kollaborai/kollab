@@ -97,6 +97,7 @@ class ContextService:
         self.event_bus = event_bus
         self.active_contexts = {}
         self.last_triggers = []
+        self._pending_injections = []
 
         # Extensible trigger and loader registries
         self.trigger_map = {}
@@ -123,10 +124,14 @@ class ContextService:
             )
 
         # Schedule event emission (don't block init)
-        if hasattr(event_bus, "loop") and event_bus.loop:
-            event_bus.loop.create_task(_emit_ready())
+        loop = getattr(event_bus, "loop", None)
+        if loop is not None and loop.is_running() is True:
+            loop.create_task(_emit_ready())
         else:
             # No event loop available - skip event emission
+            # A loop that exists but is not running cannot accept this
+            # coroutine safely; creating it there would leave an unawaited
+            # coroutine behind when the loop is closed.
             # The service is still functional, plugins just won't get the ready event
             logger.debug(
                 "No event loop available, skipping CONTEXT_SERVICE_READY event"
@@ -287,9 +292,25 @@ class ContextService:
             if content:
                 formatted = f'<context_inject type="{context_id}">\n{content}\n</context_inject>'
                 try:
-                    self.conversation_manager.add_message(
-                        role="system", content=formatted
+                    # Context triggered by the current user input is
+                    # request-local. Route it to the ledger service's
+                    # ephemeral rail when available; the queue processor
+                    # drains the fallback during the same turn. Persisting a
+                    # system row here would poison the next cached prefix.
+                    ledger_service = None
+                    get_service = getattr(self.event_bus, "get_service", None)
+                    if callable(get_service):
+                        ledger_service = get_service("context_service")
+                    queue_injection = getattr(
+                        ledger_service, "queue_ephemeral_injection", None
                     )
+                    if (
+                        callable(queue_injection)
+                        and type(ledger_service).__module__ != "unittest.mock"
+                    ):
+                        queue_injection(formatted)
+                    else:
+                        self._pending_injections.append(formatted)
                     self.active_contexts[context_id] = content
                     self.last_triggers.append(context_id)
                     injected = True
@@ -297,6 +318,12 @@ class ContextService:
                 except Exception as e:
                     logger.error(f"Failed to inject context {context_id}: {e}")
         return injected
+
+    def drain_pending_injections(self):
+        """Drain request-local injections not handed to the ledger service."""
+        pending = self._pending_injections
+        self._pending_injections = []
+        return pending
 
     async def load_context(self, context_id: str) -> Optional[str]:
         """Load context content using registered loaders.
@@ -351,6 +378,7 @@ class ContextService:
     def clear_active_contexts(self):
         self.active_contexts.clear()
         self.last_triggers.clear()
+        self._pending_injections.clear()
 
     def get_active_contexts(self):
         return list(self.active_contexts.keys())

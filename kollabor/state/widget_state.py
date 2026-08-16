@@ -30,6 +30,9 @@ class WidgetState:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
     cost_usd: float = 0.0
     total_cost_usd: float = 0.0
     session: str = ""

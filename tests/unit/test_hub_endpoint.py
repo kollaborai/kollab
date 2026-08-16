@@ -8,6 +8,7 @@ same code path and is exercised separately via the context builders.
 """
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -29,6 +30,17 @@ from plugins.hub.dns.registry import AgentRegistry
 from plugins.hub.dns.storage import DNSStorage
 from plugins.hub.messenger import AgentMessenger, AgentSocketServer
 from plugins.hub.models import HubMessage
+
+
+def _run(coro):
+    """Run a coroutine on a fresh loop without replacing the policy loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        assert loop.is_closed()
+
 
 # --- URI helpers -------------------------------------------------------------
 
@@ -273,7 +285,7 @@ def test_failed_endpoint_bind_captures_error_and_keeps_unix_alive(tmp_path):
             await server.stop()
             blocker.close()
 
-    asyncio.run(run())
+    _run(run())
 
 
 def test_offbox_idle_connection_dropped_after_timeout(tmp_path):
@@ -328,7 +340,7 @@ def test_offbox_idle_connection_dropped_after_timeout(tmp_path):
                 pass
             await server.stop()
 
-    asyncio.run(run())
+    _run(run())
 
 
 def test_offbox_handshake_and_delivery(tmp_path):
@@ -350,7 +362,7 @@ def test_offbox_handshake_and_delivery(tmp_path):
         finally:
             await server.stop()
 
-    asyncio.run(run())
+    _run(run())
 
 
 def test_offbox_rejects_unregistered_client(tmp_path):
@@ -374,7 +386,7 @@ def test_offbox_rejects_unregistered_client(tmp_path):
         finally:
             await server.stop()
 
-    asyncio.run(run())
+    _run(run())
 
 
 def _mint_self_signed_cert(tmp_path, cn="127.0.0.1"):
@@ -476,7 +488,7 @@ def test_offbox_tls_round_trip_end_to_end(tmp_path):
         finally:
             await server.stop()
 
-    asyncio.run(run())
+    _run(run())
 
 
 def test_local_unix_delivery_unchanged_without_auth(tmp_path):
@@ -505,7 +517,76 @@ def test_local_unix_delivery_unchanged_without_auth(tmp_path):
         finally:
             await server.stop()
 
-    asyncio.run(run())
+    _run(run())
+
+
+def test_output_requests_coerce_missing_line_count(tmp_path):
+    """A null native/socket line count must use the capture default."""
+
+    async def run():
+        seen = []
+
+        def on_get_output(lines):
+            seen.append(lines)
+            return [f"requested:{lines}"]
+
+        server = AgentSocketServer(
+            "output-id",
+            lambda _message: None,
+            on_get_output=on_get_output,
+            socket_name=f"ep-output-{os.getpid()}",
+        )
+        sock_path = await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(sock_path)
+            writer.write(b'{"action":"get_output","lines":null}\n')
+            await writer.drain()
+            response = await reader.readline()
+            writer.close()
+            await writer.wait_closed()
+
+            assert json.loads(response.decode())["lines"] == ["requested:100"]
+            assert seen == [100]
+
+            result = await AgentMessenger.request_output(sock_path, lines=None)
+            assert result == ["requested:100"]
+            assert seen == [100, 100]
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+def test_output_diagnostics_distinguish_empty_output_from_transport_failure():
+    """Capture must expose transport failures instead of reporting idle output."""
+
+    async def run():
+        server = AgentSocketServer(
+            "empty-output-id",
+            lambda _message: None,
+            on_get_output=lambda _lines: [],
+            socket_name=f"ep-empty-output-{os.getpid()}",
+        )
+        sock_path = await server.start()
+        try:
+            result, error = await AgentMessenger.request_output_diagnostic(sock_path)
+            assert result == []
+            assert error is None
+        finally:
+            await server.stop()
+
+        missing_socket = f"/tmp/kollab-missing-output-{os.getpid()}.sock"
+        result, error = await AgentMessenger.request_output_diagnostic(
+            missing_socket, timeout=0.1
+        )
+        assert result == []
+        assert error
+        assert any(
+            kind in error
+            for kind in ("FileNotFoundError", "ConnectionRefusedError", "OSError")
+        )
+
+    _run(run())
 
 
 def test_offbox_all_dialers_route_through_open(tmp_path):
@@ -558,7 +639,7 @@ def test_offbox_all_dialers_route_through_open(tmp_path):
         finally:
             await server.stop()
 
-    asyncio.run(run())
+    _run(run())
 
 
 def test_resolve_dial_target_upgrades_remote(tmp_path):

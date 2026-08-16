@@ -1,7 +1,7 @@
 ---
 title: "Configuration"
 created: 2026-02-24
-modified: 2026-04-09
+modified: 2026-08-06
 status: active
 ---
 # Configuration
@@ -21,7 +21,7 @@ Profiles define how you connect to LLM providers. Each profile specifies the pro
 | `api_key` | string | API authentication key |
 | `base_url` | string | Custom endpoint URL (for custom providers) |
 | `temperature` | float | Sampling randomness (0.0-2.0, default: 0.7) |
-| `max_tokens` | int | Maximum tokens to generate (default: 4096) |
+| `max_tokens` | int | Maximum output tokens to generate (default: 16384; standard Responses providers send this as `max_output_tokens`, while ChatGPT OAuth/Codex uses its backend default) |
 | `timeout` | float | Request timeout in seconds (default: 60.0) |
 
 ### Environment Variable Pattern
@@ -113,6 +113,7 @@ The base config is divided into sections:
     "llm": {
       "auto_detect_provider": true,
       "max_history": 90,
+      "max_retries": 5,
       "save_conversations": true,
       "conversation_format": "jsonl",
       "oauth": {
@@ -154,6 +155,12 @@ config.get("kollabor.llm.max_history", 90)
 config.get("terminal.render_fps", 20)
 ```
 
+`kollabor.llm.max_retries` is the shared provider retry limit. It defaults to 5
+retries after the first request; set it to 0 to disable retries. Fallback retries
+use bounded exponential backoff with jitter. Valid `Retry-After` and
+`Retry-After-Ms` values up to 120 seconds are honored; longer provider-directed
+delays fail fast.
+
 ## Updates
 
 Kollab checks GitHub releases in the background during startup. By default it
@@ -177,7 +184,9 @@ Automatic updates use the active install style when possible:
 - source checkouts: safe fast-forward Git update plus editable reinstall
 - `uv tool`: `uv tool upgrade kollab`
 - `pipx`: `pipx upgrade kollab`
-- Homebrew: `brew upgrade kollab`
+- Homebrew: not currently advertised; follow
+  [homebrew-tap/README.md](../homebrew-tap/README.md) until a published wheel
+  and real formula SHA are available
 - pip fallback: current Python runs `python -m pip install --upgrade kollab`
 
 Restart Kollab after an automatic update so the running process picks up the new

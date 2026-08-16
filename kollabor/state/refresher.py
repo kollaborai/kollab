@@ -201,6 +201,9 @@ class WidgetStateRefresher:
             flat["total_input_tokens"] = stats.total_input_tokens
             flat["total_output_tokens"] = stats.total_output_tokens
             flat["cache_read_tokens"] = stats.cache_read_tokens
+            flat["cache_creation_tokens"] = stats.cache_creation_tokens
+            flat["total_cache_read_tokens"] = stats.total_cache_read_tokens
+            flat["total_cache_creation_tokens"] = stats.total_cache_creation_tokens
             flat["cost_usd"] = stats.cost_usd
             flat["total_cost_usd"] = stats.total_cost_usd
             flat["session"] = stats.session_id

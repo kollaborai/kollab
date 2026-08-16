@@ -180,7 +180,7 @@ class TestSlashCommandRegistry(unittest.TestCase):
         self.assertEqual(len(results), 1)
 
 
-class TestSlashCommandExecutor(unittest.TestCase):
+class TestSlashCommandExecutor(unittest.IsolatedAsyncioTestCase):
     """Test the command executor."""
 
     def setUp(self):

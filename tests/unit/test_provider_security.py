@@ -25,8 +25,9 @@ import secrets
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from kollabor_ai.providers.errors import ProviderError
 from kollabor_ai.providers.security import (
     CRYPTOGRAPHY_AVAILABLE,
     KEYRING_AVAILABLE,
@@ -59,7 +60,7 @@ def skip_if_no_keyring():
     return unittest.skipIf(not KEYRING_AVAILABLE, "keyring library not available")
 
 
-class TempFileTest(unittest.TestCase):
+class TempFileTest(unittest.IsolatedAsyncioTestCase):
     """Base class for tests using temporary files."""
 
     def setUp(self):
@@ -81,7 +82,7 @@ class TempFileTest(unittest.TestCase):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManager(unittest.TestCase):
+class TestAPIKeyManager(unittest.IsolatedAsyncioTestCase):
     """Test OS native keyring storage."""
 
     def setUp(self):
@@ -110,7 +111,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_store_key_success(self, mock_get_keyring, mock_set_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_store_key_success(
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
+    ):
         """Test successful key storage."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -123,7 +127,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_store_key_failure(self, mock_get_keyring, mock_set_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_store_key_failure(
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
+    ):
         """Test key storage failure handling."""
         from keyring.errors import KeyringError
 
@@ -139,7 +146,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_get_key_success(self, mock_get_keyring, mock_get_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_get_key_success(
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
+    ):
         """Test successful key retrieval."""
         mock_get_keyring.return_value = self.mock_backend
         mock_get_password.return_value = "sk-example-header-key-0000"
@@ -152,7 +162,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_get_key_not_found(self, mock_get_keyring, mock_get_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_get_key_not_found(
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
+    ):
         """Test key retrieval when not found."""
         from keyring.errors import KeyringError
 
@@ -166,7 +179,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_success(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_success(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test successful key deletion."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -178,7 +194,10 @@ class TestAPIKeyManager(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_not_found(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_not_found(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test key deletion when not found."""
         from keyring.errors import PasswordDeleteError
 
@@ -198,6 +217,7 @@ class TestAPIKeyManager(unittest.TestCase):
             ) as mock_get_keyring,
             patch("kollabor_ai.providers.security.keyring.set_password"),
             patch("kollabor_ai.providers.security.keyring.get_password"),
+            patch("kollabor_ai.providers.security.keyring_enabled", return_value=True),
         ):
 
             mock_get_keyring.return_value = self.mock_backend
@@ -363,7 +383,7 @@ class TestEncryptedFileKeyStorage(TempFileTest):
 # =============================================================================
 
 
-class TestEnvironmentKeyStorage(unittest.TestCase):
+class TestEnvironmentKeyStorage(unittest.IsolatedAsyncioTestCase):
     """Test environment variable storage."""
 
     def setUp(self):
@@ -510,7 +530,7 @@ class TestPlaintextKeyStorage(TempFileTest):
 # =============================================================================
 
 
-class TestAPIKeyLoader(unittest.TestCase):
+class TestAPIKeyLoader(unittest.IsolatedAsyncioTestCase):
     """Test API key loader with 4-tier fallback."""
 
     def setUp(self):
@@ -532,9 +552,11 @@ class TestAPIKeyLoader(unittest.TestCase):
         profile = {"name": "test-profile"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -584,7 +606,16 @@ class TestAPIKeyLoader(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -757,6 +788,120 @@ class TestLoggingRedactor(unittest.TestCase):
         self.assertEqual(redacted["model"], "gpt-4")
         # Nested dict should also be redacted
         self.assertNotIn("sk-example-redaction-key-0000", str(redacted["nested"]))
+
+    def test_redact_sensitive_mapping_fields_regardless_of_value_shape(self):
+        """Sensitive field names redact even short or non-pattern values."""
+        data = {
+            "api_key": "x",
+            "api-token": "opaque",
+            "x-api-key": "tiny",
+            "x-goog-api-key": "g",
+            "password": "short",
+            "access-token": "opaque",
+            "Authorization": "Basic abc",
+            "nested": {"clientSecret": "tiny"},
+            "credential": "opaque",
+            "credentials": "tiny",
+            "private_key": "short",
+            "token_count": 42,
+            "secretary": "Ada",
+            "model": "gpt-4",
+        }
+
+        redacted = LoggingRedactor.redact(data)
+
+        for key in (
+            "api_key",
+            "api-token",
+            "x-api-key",
+            "x-goog-api-key",
+            "password",
+            "access-token",
+            "Authorization",
+            "credential",
+            "credentials",
+            "private_key",
+        ):
+            self.assertEqual(redacted[key], "[REDACTED]")
+        self.assertEqual(redacted["nested"]["clientSecret"], "[REDACTED]")
+        self.assertEqual(redacted["token_count"], 42)
+        self.assertEqual(redacted["secretary"], "Ada")
+        self.assertEqual(redacted["model"], "gpt-4")
+
+    def test_redact_short_sensitive_fields_in_json_string(self):
+        """Short JSON credential fields cannot bypass string redaction."""
+        for field in (
+            "access_token",
+            "refresh-token",
+            "token",
+            "client_secret",
+            "secret",
+            "credential",
+            "credentials",
+            "private_key",
+        ):
+            with self.subTest(field=field):
+                text = f'{{"{field}": "x"}}'
+                redacted = LoggingRedactor.redact(text)
+                self.assertNotIn('"x"', redacted)
+                self.assertIn("[REDACTED]", redacted)
+
+    def test_redact_short_sensitive_object_attribute(self):
+        """Sensitive object attributes redact without value-pattern matches."""
+
+        class TestObject:
+            def __init__(self):
+                self.api_token = "x"
+                self.token_count = 42
+
+        redacted = LoggingRedactor.redact(TestObject())
+
+        self.assertEqual(redacted["__dict__"]["api_token"], "[REDACTED]")
+        self.assertEqual(redacted["__dict__"]["token_count"], 42)
+
+
+    def test_redact_provider_header_and_query_credentials(self):
+        """Provider-specific headers and query keys redact any value shape."""
+        samples = (
+            "x-api-key: x",
+            "x-goog-api-key: x",
+            "api-key: x",
+            "https://example.test/v1?key=x&model=chat",
+            "https://example.test/v1?api_key=x&model=chat",
+            "https://example.test/v1?access_token=x&model=chat",
+            "https://example.test/v1?refresh-token=x&model=chat",
+            "https://example.test/v1?client_secret=x&model=chat",
+            "https://example.test/v1?credential=x&model=chat",
+        )
+
+        for text in samples:
+            with self.subTest(text=text):
+                redacted = LoggingRedactor.redact(text)
+                self.assertNotIn("x", redacted.split("[REDACTED]")[-1])
+                self.assertIn("[REDACTED]", redacted)
+
+    def test_provider_error_safe_message_redacts_headers_and_query_credentials(self):
+        """Provider safe messages cannot expose header or query credentials."""
+        samples = (
+            "x-api-key: x",
+            "x-goog-api-key: x",
+            "api-key: x",
+            "Authorization: Basic abc",
+            "https://example.test/v1?key=x&model=chat",
+            "https://example.test/v1?api_key=x&model=chat",
+            "https://example.test/v1?access_token=x&model=chat",
+            "https://example.test/v1?refresh-token=x&model=chat",
+            "https://example.test/v1?client_secret=x&model=chat",
+            "https://example.test/v1?credential=x&model=chat",
+        )
+
+        for message in samples:
+            with self.subTest(message=message):
+                safe_message = str(ProviderError(message, "synthetic"))
+                self.assertIn("[REDACTED]", safe_message)
+                self.assertNotIn("=x", safe_message)
+                self.assertNotIn(": x", safe_message)
+                self.assertNotIn("abc", safe_message)
 
     def test_redact_list(self):
         """Test redacting sensitive data in list."""
@@ -1047,9 +1192,9 @@ class TestEncryptedFileKeyStorageErrors(TempFileTest):
         # Create empty file
         self.storage_path.write_text("")
 
-        # Should return empty dict (file exists but no data)
-        keystore = self.storage._load_keystore()
-        self.assertEqual(keystore, {})
+        # Empty encrypted files are invalid and should fail closed.
+        with self.assertRaises(RuntimeError):
+            self.storage._load_keystore()
 
     async def test_load_keystore_corrupted_data(self):
         """Test loading corrupted encrypted data."""
@@ -1217,7 +1362,7 @@ class TestPlaintextKeyStorageErrors(TempFileTest):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManagerErrors(unittest.TestCase):
+class TestAPIKeyManagerErrors(unittest.IsolatedAsyncioTestCase):
     """Test error handling in API key manager."""
 
     def setUp(self):
@@ -1234,7 +1379,8 @@ class TestAPIKeyManagerErrors(unittest.TestCase):
         self.assertIn("keyring library not available", str(ctx.exception))
 
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_store_key_logging(self, mock_get_keyring):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_store_key_logging(self, mock_keyring_enabled, mock_get_keyring):
         """Test key storage logs success message."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -1245,7 +1391,10 @@ class TestAPIKeyManagerErrors(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_get_key_error_logging(self, mock_get_keyring, mock_get_password):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_get_key_error_logging(
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
+    ):
         """Test key retrieval errors are logged."""
         from keyring.errors import KeyringError
 
@@ -1261,7 +1410,10 @@ class TestAPIKeyManagerErrors(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_error_handling(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_error_handling(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test delete key handles general KeyringError."""
         from keyring.errors import KeyringError
 
@@ -1276,7 +1428,7 @@ class TestAPIKeyManagerErrors(unittest.TestCase):
         self.assertFalse(result)
 
 
-class TestEnvironmentKeyStorageDetailed(unittest.TestCase):
+class TestEnvironmentKeyStorageDetailed(unittest.IsolatedAsyncioTestCase):
     """Test detailed environment storage behavior."""
 
     def setUp(self):
@@ -1325,7 +1477,7 @@ class TestEnvironmentKeyStorageDetailed(unittest.TestCase):
                 self.assertEqual(key, expected_key)
 
 
-class TestAPIKeyLoaderDetailed(unittest.TestCase):
+class TestAPIKeyLoaderDetailed(unittest.IsolatedAsyncioTestCase):
     """Test detailed API key loader behavior."""
 
     def setUp(self):
@@ -1337,9 +1489,11 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -1354,9 +1508,11 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -1409,7 +1565,16 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -1420,16 +1585,22 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         self.assertEqual(key, "config-key")
         mock_manager.store_key.assert_called_once_with("test-profile", "config-key")
 
+    @skip_if_no_cryptography()
     async def test_load_from_config_migrates_to_encrypted_on_keyring_failure(self):
         """Test migration falls back to encrypted storage if keyring fails."""
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Keyring failed"))
-            )()
-        )
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            raise RuntimeError("Keyring failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
@@ -1454,11 +1625,16 @@ class TestAPIKeyLoaderDetailed(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         # No encrypted storage provided
         loader = APIKeyLoader(key_manager=mock_manager)
@@ -1705,7 +1881,7 @@ class TestRedactingLogFilterEdgeCases(unittest.TestCase):
         self.assertEqual(record.exc_info[0], ValueError)
 
 
-class TestSingletonFunctions(unittest.TestCase):
+class TestSingletonFunctions(unittest.IsolatedAsyncioTestCase):
     """Test singleton initialization functions."""
 
     @skip_if_no_keyring()
@@ -1974,7 +2150,7 @@ class TestPlaintextKeyStorageDetailed(TempFileTest):
             self.assertEqual(permissions, "0o600")
 
 
-class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
+class TestAPIKeyLoaderMissingPaths(unittest.IsolatedAsyncioTestCase):
     """Test APIKeyLoader paths not covered elsewhere."""
 
     async def test_load_key_debug_logging(self):
@@ -1982,9 +2158,11 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile"}
 
         mock_manager = Mock()
-        mock_manager.get_key = Mock(
-            return_value=asyncio.coroutine(lambda: "keyring-key")()
-        )
+
+        async def get_key(*args):
+            return "keyring-key"
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -2018,7 +2196,16 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -2028,16 +2215,22 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
 
         self.assertEqual(key, "config-key")
 
+    @skip_if_no_cryptography()
     async def test_migration_to_encrypted_fallback(self):
         """Test migration falls back to encrypted storage."""
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
@@ -2058,11 +2251,16 @@ class TestAPIKeyLoaderMissingPaths(unittest.TestCase):
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def get_key(*args):
+            return None
+
+        mock_manager.get_key = AsyncMock(side_effect=get_key)
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         loader = APIKeyLoader(key_manager=mock_manager)
 
@@ -2140,9 +2338,7 @@ class TestLoggingRedactorAllPatterns(unittest.TestCase):
 
     def test_redact_multiple_keys_in_string(self):
         """Test multiple keys in same string are redacted."""
-        text = (
-            "OpenAI: sk-example-openai-redaction-0000, Anthropic: sk-ant-example-anthropic-key-0000"
-        )
+        text = "OpenAI: sk-example-openai-redaction-0000, Anthropic: sk-ant-example-anthropic-key-0000"
         redacted = LoggingRedactor.redact(text)
 
         self.assertNotIn("sk-example-openai-redaction-0000", redacted)
@@ -2290,7 +2486,7 @@ class TestPlaintextKeyStorageDirectMethods(TempFileTest):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManagerLogging(unittest.TestCase):
+class TestAPIKeyManagerLogging(unittest.IsolatedAsyncioTestCase):
     """Test logging paths in APIKeyManager."""
 
     def setUp(self):
@@ -2300,8 +2496,9 @@ class TestAPIKeyManagerLogging(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_store_key_logs_info_message(
-        self, mock_get_keyring, mock_set_password
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
     ):
         """Test store_key logs success message."""
         mock_get_keyring.return_value = self.mock_backend
@@ -2316,7 +2513,10 @@ class TestAPIKeyManagerLogging(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
-    async def test_delete_key_logs_info_message(self, mock_get_keyring, mock_delete):
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
+    async def test_delete_key_logs_info_message(
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
+    ):
         """Test delete_key logs success message."""
         mock_get_keyring.return_value = self.mock_backend
 
@@ -2329,7 +2529,7 @@ class TestAPIKeyManagerLogging(unittest.TestCase):
         )
 
 
-class TestEnvironmentKeyStoragePaths(unittest.TestCase):
+class TestEnvironmentKeyStoragePaths(unittest.IsolatedAsyncioTestCase):
     """Test environment storage paths for missing coverage."""
 
     def setUp(self):
@@ -2360,7 +2560,7 @@ class TestEnvironmentKeyStoragePaths(unittest.TestCase):
         self.assertFalse(result)
 
 
-class TestAPIKeyLoaderFallbackPaths(unittest.TestCase):
+class TestAPIKeyLoaderFallbackPaths(unittest.IsolatedAsyncioTestCase):
     """Test APIKeyLoader fallback paths."""
 
     async def test_load_api_key_environment_first(self):
@@ -2391,22 +2591,26 @@ class TestAPIKeyLoaderFallbackPaths(unittest.TestCase):
     async def test_migrate_key_success_to_keyring(self):
         """Test migration succeeds to keyring."""
         mock_manager = Mock()
-        mock_manager.store_key = Mock(return_value=asyncio.coroutine(lambda: None)())
 
+        async def store_key(*args):
+            return None
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
         loader = APIKeyLoader(key_manager=mock_manager)
 
         await loader._migrate_key("test-profile", "test-key")
 
         mock_manager.store_key.assert_called_once_with("test-profile", "test-key")
 
+    @skip_if_no_cryptography()
     async def test_migrate_key_fallback_to_encrypted(self):
         """Test migration falls back to encrypted storage."""
         mock_manager = Mock()
-        mock_manager.store_key = Mock(
-            side_effect=asyncio.coroutine(
-                lambda: (_ for _ in ()).throw(RuntimeError("Failed"))
-            )()
-        )
+
+        async def store_key(*args):
+            raise RuntimeError("Failed")
+
+        mock_manager.store_key = AsyncMock(side_effect=store_key)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
@@ -2429,7 +2633,7 @@ class TestAPIKeyLoaderFallbackPaths(unittest.TestCase):
 
 
 @skip_if_no_keyring()
-class TestAPIKeyManagerErrorPaths(unittest.TestCase):
+class TestAPIKeyManagerErrorPaths(unittest.IsolatedAsyncioTestCase):
     """Test error handling paths in APIKeyManager."""
 
     def setUp(self):
@@ -2439,8 +2643,9 @@ class TestAPIKeyManagerErrorPaths(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.set_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_store_key_runtime_error_message(
-        self, mock_get_keyring, mock_set_password
+        self, mock_keyring_enabled, mock_get_keyring, mock_set_password
     ):
         """Test store_key RuntimeError has helpful message."""
         from keyring.errors import KeyringError
@@ -2459,8 +2664,9 @@ class TestAPIKeyManagerErrorPaths(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.get_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_get_key_logs_error_on_failure(
-        self, mock_get_keyring, mock_get_password
+        self, mock_keyring_enabled, mock_get_keyring, mock_get_password
     ):
         """Test get_key logs error when keyring fails."""
         from keyring.errors import KeyringError
@@ -2476,8 +2682,9 @@ class TestAPIKeyManagerErrorPaths(unittest.TestCase):
 
     @patch("kollabor_ai.providers.security.keyring.delete_password")
     @patch("kollabor_ai.providers.security.keyring.get_keyring")
+    @patch("kollabor_ai.providers.security.keyring_enabled", return_value=True)
     async def test_delete_key_logs_error_on_failure(
-        self, mock_get_keyring, mock_delete
+        self, mock_keyring_enabled, mock_get_keyring, mock_delete
     ):
         """Test delete_key logs error when keyring fails."""
         from keyring.errors import KeyringError
@@ -2633,16 +2840,21 @@ class TestPlaintextKeyStorageExceptionPaths(TempFileTest):
             self.assertFalse(result)
 
 
-class TestAPIKeyLoaderCompleteFallback(unittest.TestCase):
+class TestAPIKeyLoaderCompleteFallback(unittest.IsolatedAsyncioTestCase):
     """Test complete fallback chain in APIKeyLoader."""
 
+    @skip_if_no_cryptography()
     async def test_complete_fallback_chain(self):
         """Test all tiers are tried in order."""
         profile = {"name": "test-profile", "api_key": "config-key"}
 
         # Create loader with all backends
         mock_manager = Mock()
-        mock_manager.get_key = Mock(return_value=asyncio.coroutine(lambda: None)())
+
+        async def get_key(_profile_name):
+            return None
+
+        mock_manager.get_key = get_key
 
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = Path(temp_dir) / "keys.enc"
@@ -2736,7 +2948,7 @@ class TestLoggingRedactorExceptionFallback(unittest.TestCase):
 
 
 @skip_if_no_keyring()
-class TestGetKeyManagerSingleton(unittest.TestCase):
+class TestGetKeyManagerSingleton(unittest.IsolatedAsyncioTestCase):
     """Test get_key_manager singleton function."""
 
     @patch("kollabor_ai.providers.security.keyring.get_keyring")

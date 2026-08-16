@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -11,15 +12,6 @@ from kollabor_tui.render_loop import EventDrivenRenderLoop, RenderTrigger
 
 from .plugin import FullScreenPlugin
 from .renderer import FullScreenRenderer
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 
 # Platform-specific imports for input handling
 IS_WINDOWS = sys.platform == "win32"
@@ -45,7 +37,7 @@ class SessionStats:
     @property
     def duration(self) -> float:
         """Get session duration in seconds."""
-        end = self.end_time or _get_loop().time()
+        end = self.end_time or time.monotonic()
         return end - self.start_time
 
 
@@ -144,7 +136,7 @@ class FullScreenSession:
 
             logger.info(f"Starting full-screen session for {self.plugin.name}")
             self.running = True
-            self.stats.start_time = _get_loop().time()
+            self.stats.start_time = time.monotonic()
 
             # Main session loop
             await self._session_loop()
@@ -416,7 +408,7 @@ class FullScreenSession:
         """Clean up session resources."""
         try:
             self.running = False
-            self.stats.end_time = _get_loop().time()
+            self.stats.end_time = time.monotonic()
 
             # Calculate final stats
             if self.stats.duration > 0:

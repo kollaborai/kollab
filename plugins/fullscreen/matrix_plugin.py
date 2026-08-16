@@ -1,21 +1,12 @@
 """Matrix rain plugin using the full-screen framework."""
 
-import asyncio
 import logging
+import time
 
 from kollabor_tui.fullscreen import FullScreenPlugin
 from kollabor_tui.fullscreen.components.matrix_components import MatrixRenderer
 from kollabor_tui.fullscreen.plugin import PluginMetadata
 from kollabor_tui.key_parser import KeyPress
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +63,7 @@ class MatrixRainPlugin(FullScreenPlugin):
     async def on_start(self):
         """Called when Matrix plugin starts."""
         await super().on_start()
-        self.start_time = _get_loop().time()
+        self.start_time = time.monotonic()
 
         logger.info("MatrixRainPlugin.on_start() called")
 
@@ -94,7 +85,7 @@ class MatrixRainPlugin(FullScreenPlugin):
 
         try:
             # Calculate current time for Matrix animation
-            current_time = _get_loop().time() - self.start_time
+            current_time = time.monotonic() - self.start_time
 
             # Update Matrix animation
             self.matrix_renderer.update(current_time)

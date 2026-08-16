@@ -58,6 +58,13 @@ class TestLLMServiceIntegration(unittest.TestCase):
         }
         return config_map.get(key, default)
 
+    def test_session_stats_initialize_cache_counters(self):
+        """Fresh sessions initialize cache metrics to zero."""
+        self.assertEqual(self.service.session_stats["cache_read_tokens"], 0)
+        self.assertEqual(self.service.session_stats["cache_creation_tokens"], 0)
+        self.assertEqual(self.service.session_stats["total_cache_read_tokens"], 0)
+        self.assertEqual(self.service.session_stats["total_cache_creation_tokens"], 0)
+
     def test_service_initialization(self):
         """Test service initializes with correct configuration."""
         # After refactoring, API configuration is in api_service
@@ -214,7 +221,11 @@ class TestLLMServiceIntegration(unittest.TestCase):
         self.service.is_processing = True
 
         # Cancel should set flag
-        self.service.cancel_current_request()
+        async def cancel_and_drain():
+            self.service.cancel_current_request()
+            await self.service._task_manager.wait_for_tasks()
+
+        asyncio.run(cancel_and_drain())
 
         self.assertTrue(self.service.cancel_processing)
 
@@ -427,6 +438,26 @@ class TestMessageDisplayCoordination(unittest.TestCase):
             "kollabor.llm.system_prompt.custom_prompt_files": [],
         }
         return config_map.get(key, default)
+
+    def test_call_llm_refreshes_native_tools_through_streaming_handler(self):
+        """Provide a live tool lookup for the post-discovery streaming call."""
+        initial_tools = [{"name": "local_tool"}]
+        discovered_tools = [{"name": "list_tasks"}]
+        self.service.native_tools = initial_tools
+
+        with patch.object(
+            self.service._streaming,
+            "call_llm",
+            new=AsyncMock(return_value="Test response"),
+        ) as mock_call:
+            result = asyncio.run(self.service._call_llm())
+
+        self.assertEqual(result, "Test response")
+        call_kwargs = mock_call.call_args.kwargs
+        self.assertEqual(call_kwargs["native_tools"], initial_tools)
+
+        self.service.native_tools = discovered_tools
+        self.assertIs(call_kwargs["native_tools_provider"](), discovered_tools)
 
     def test_thinking_display_integration(self):
         """Test that _execute_llm_turn passes thinking_duration to display_complete_response.

@@ -1,7 +1,7 @@
 ---
 title: "Agents and Skills"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-08-06
 status: active
 ---
 # Agents and Skills
@@ -33,8 +33,10 @@ bundles/skills/             # Bundled Agent Skills (agentskills.io layout)
 Agents are resolved from:
 1. **Local project** - `.kollab/agents/` (highest priority)
 2. **Global** - `~/.kollab/agents/` (fallback)
+3. **Bundled defaults** - `bundles/agents/`
 
-Bundled agents in `bundles/agents/` provide defaults.
+When the same agent name exists at multiple tiers, the higher-priority definition
+wins. The bundled copy remains the install-safe fallback.
 
 ## Agent Configuration
 
@@ -44,6 +46,7 @@ Bundled agents in `bundles/agents/` provide defaults.
 {
   "description": "Brief description of this agent",
   "profile": "default",
+  "tools": ["*"],
   "skills": ["debugging", "readme-writing"],
   "default_skills": ["debugging"]
 }
@@ -52,8 +55,70 @@ Bundled agents in `bundles/agents/` provide defaults.
 fields:
   - description: human-readable description (optional)
   - profile: default llm profile to use (optional, overrides via --profile)
+  - tools: registry tool names allowed for the agent; `["*"]` allows all tools
   - skills: names of Agent Skills from the library (optional); use `["*"]` to attach every discovered skill
   - default_skills: subset of skills to load into context automatically (optional)
+
+`tools` controls the agent's tool registry view. `"*"` grants every registered
+tool; a list grants only the named tools. This is independent of the runtime
+permission mode: an allowed tool can still require approval, and a tool absent
+from the bundle cannot be called by that agent.
+
+## Identity, Bundle, and Provider Profile
+
+These names describe different layers and should not be substituted for one
+another:
+
+- **Hub identity** — a stable project-scoped name or mailbox such as `lapis`.
+  It is used by `/hub status`, `/hub msg`, `/hub capture`, vaults, and durable
+  inboxes.
+- **Agent bundle** — the behavior definition selected by `--agent`, such as
+  `coder`, `research`, or `technical-writer`. It combines `system_prompt.md`,
+  optional `sections/`, the `tools` allowlist, and declared skills.
+- **Provider profile** — the provider/model connection selected by `--profile`.
+  A profile owns endpoint and credential settings. A loadout can layer a model
+  and parameters such as effort or output budget on top of that connection.
+
+For example:
+
+```bash
+kollab --agent coder --as lapis --profile openai-oauth
+```
+
+This means: run the `coder` bundle, use `lapis` as the hub identity, and use
+the `openai-oauth` provider profile. `lapis` is not an agent bundle, and
+`research` is not automatically a live hub identity just because a `research`
+bundle exists.
+
+## Hub Pool and Organization Bundles
+
+Hub gem identities and organization roles are separate configuration layers:
+
+- The bundled identity pool is `plugins/hub/organizations/pool.json`; each
+  `gems[]` entry has a `name` and may declare an `agent_type` bundle.
+- A project can override the pool at `.kollab/hub/pool.json`; user-global
+  overrides live under `~/.kollab/hub/`.
+- Bundled organization charts are `plugins/hub/organizations/*.json`.
+  User overrides live under `~/.kollab/hub/organizations/<name>.json`.
+- Organization roles use `agent_bundle` to select the bundle and `identity` to
+  select the hub name. Their `prompt` is an organization-specific instruction
+  layered into the launched process.
+
+Minimal role example:
+
+```json
+{
+  "identity": "qa-eng",
+  "role": "QA Engineer",
+  "agent_bundle": "research",
+  "prompt": "Test the requested change and report reproducible failures.",
+  "reports_to": "apps-lead"
+}
+```
+
+Launch a bundled chart with `/hub org engineering` or `kollab --org
+engineering`. The launcher passes the role identity as `--as` and the role's
+`agent_bundle` as `--agent`.
 
 ### system_prompt.md
 

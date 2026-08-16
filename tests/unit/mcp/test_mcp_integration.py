@@ -114,6 +114,23 @@ class TestMCPServerConnection(unittest.TestCase):
         connection.initialized = True
         self.assertTrue(connection.initialized)
 
+    def test_reader_eof_marks_connection_inactive(self):
+        """EOF must reopen the reconnect gate instead of leaving a zombie session."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_FakeStdout([]))
+
+            connection._ensure_reader_task()
+            assert connection._reader_task is not None
+            await connection._reader_task
+
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._read_buffer, "")
+
+        asyncio.run(run_test())
+
     def test_json_rpc_notifications_do_not_satisfy_pending_request(self):
         """Notifications without ids are ignored while waiting for a response."""
 
@@ -318,6 +335,31 @@ class TestMCPServerConnection(unittest.TestCase):
         asyncio.run(run_test())
 
 
+    def test_concurrent_close_is_race_safe(self):
+        """Concurrent shutdown callers must not dereference a cleared process."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_HangingStdout())
+            request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-close", "method": "tools/call"}
+                )
+            )
+            await asyncio.sleep(0)
+            await asyncio.gather(connection.close(), connection.close())
+            if not request.done():
+                request.cancel()
+            await request
+            self.assertIsNone(connection.process)
+            self.assertEqual(connection._pending_requests, {})
+            self.assertIsNone(connection._reader_task)
+
+        asyncio.run(run_test())
+
+
+
 class TestMCPIntegration(unittest.TestCase):
     """Test MCP integration functionality."""
 
@@ -358,6 +400,88 @@ class TestMCPIntegration(unittest.TestCase):
 
         self.assertIn("test_tool", mcp.tool_registry)
         self.assertEqual(mcp.tool_registry["test_tool"]["server"], "test-server")
+
+    def test_get_tool_definitions_skips_malformed_input_schema(self):
+        """Malformed MCP schemas must not reach an API request."""
+        mcp = MCPIntegration(event_bus=self.event_bus)
+        mcp.tool_registry["bad_tool"] = {
+            "server": "test-server",
+            "definition": {
+                "name": "bad_tool",
+                "description": "Bad schema",
+                "parameters": {"type": "array", "items": {}},
+            },
+            "enabled": True,
+        }
+
+        tools = mcp.get_tool_definitions_for_api()
+
+        self.assertNotIn("bad_tool", {tool["name"] for tool in tools})
+
+    @patch("kollabor_agent.mcp_integration.MCPServerConnection")
+    def test_connect_and_list_tools_filters_malformed_schemas(self, mock_connection):
+        """Discovery should expose only provider-safe MCP schemas."""
+        connection = mock_connection.return_value
+        connection.connect = AsyncMock(return_value=True)
+        connection.initialize = AsyncMock(return_value=True)
+        connection.list_tools = AsyncMock(
+            return_value=[
+                {
+                    "name": "good_tool",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                },
+                {
+                    "name": "bad_tool",
+                    "inputSchema": {"type": "object", "required": ["missing"]},
+                },
+            ]
+        )
+
+        mcp = MCPIntegration(event_bus=self.event_bus)
+        tools = asyncio.run(mcp._connect_and_list_tools("test-server", "echo test"))
+
+        self.assertEqual([tool["name"] for tool in tools], ["good_tool"])
+        self.assertIn("good_tool", mcp.tool_registry)
+        self.assertNotIn("bad_tool", mcp.tool_registry)
+
+    @patch("kollabor_agent.mcp_integration.MCPServerConnection")
+    def test_connect_and_list_tools_passes_server_environment(self, mock_connection):
+        """Configured MCP env reaches the stdio child while auth is preserved."""
+        connection = mock_connection.return_value
+        connection.connect = AsyncMock(return_value=True)
+        connection.initialize = AsyncMock(return_value=True)
+        connection.list_tools = AsyncMock(return_value=[])
+
+        mcp = MCPIntegration(
+            event_bus=self.event_bus,
+            user_token="explicit-session-token",
+            session_id="engine-session",
+        )
+        mcp.mcp_servers["mentiko"] = {
+            "type": "stdio",
+            "command": "/path/to/mentiko-mcp",
+            "env": {
+                "MENTIKO_WEB_URL": "http://localhost:3200",
+                "KOLLABOR_ENGINE_URL": "http://127.0.0.1:7433",
+                "MENTIKO_INBOX_KEY": "test-inbox-key",
+                "MENTIKO_SESSION_TOKEN": "configured-token",
+            },
+        }
+
+        asyncio.run(mcp._connect_and_list_tools("mentiko", "/path/to/mentiko-mcp"))
+
+        extra_env = mock_connection.call_args.kwargs["extra_env"]
+        self.assertEqual(extra_env["MENTIKO_WEB_URL"], "http://localhost:3200")
+        self.assertEqual(
+            extra_env["KOLLABOR_ENGINE_URL"], "http://127.0.0.1:7433"
+        )
+        self.assertEqual(extra_env["MENTIKO_INBOX_KEY"], "test-inbox-key")
+        self.assertEqual(extra_env["MENTIKO_SESSION_TOKEN"], "explicit-session-token")
+        self.assertEqual(extra_env["MENTIKO_SESSION_ID"], "engine-session")
 
     def test_get_tool_definitions_for_api(self):
         """Test getting tool definitions in API format."""

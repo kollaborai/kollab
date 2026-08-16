@@ -27,7 +27,7 @@ def generate_openai_tools(
     result = []
     for name in tool_names:
         tool = registry.get(name)
-        if tool is None:
+        if tool is None or not tool.expose_native:
             continue
         schema = tool.to_json_schema()
         result.append({
@@ -58,7 +58,7 @@ def generate_anthropic_tools(
     result = []
     for name in tool_names:
         tool = registry.get(name)
-        if tool is None:
+        if tool is None or not tool.expose_native:
             continue
         schema = tool.to_json_schema()
         result.append({

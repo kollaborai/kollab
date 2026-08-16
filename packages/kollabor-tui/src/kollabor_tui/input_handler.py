@@ -305,6 +305,11 @@ class InputHandler:
         - Exiting raw mode
         """
         self.running = False
+        key_press_handler = getattr(self, "_key_press_handler", None)
+        if key_press_handler is not None:
+            cleanup = getattr(key_press_handler, "cleanup", None)
+            if cleanup is not None:
+                await cleanup()
         await self._input_loop_manager.stop()
 
     # ==================== RENDERING CONTROL ====================

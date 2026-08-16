@@ -15,7 +15,6 @@ This comprehensive plugin showcases:
 - Resources and documentation
 """
 
-import asyncio
 import math
 import random
 import time
@@ -30,14 +29,6 @@ from kollabor_tui.fullscreen.components.drawing import DrawingPrimitives
 from kollabor_tui.fullscreen.plugin import PluginMetadata
 from kollabor_tui.key_parser import KeyPress
 from kollabor_tui.visual_effects import ColorPalette, GradientRenderer
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
 
 
 @dataclass
@@ -242,7 +233,7 @@ class EnhancedExamplePlugin(FullScreenPlugin):
             return False
 
         # Setup initial animations
-        current_time = _get_loop().time()
+        current_time = time.monotonic()
         self.demo_animations["title_fade"] = self.animation_framework.fade_in(
             1.5, current_time
         )
@@ -356,9 +347,7 @@ class EnhancedExamplePlugin(FullScreenPlugin):
         )
 
         # Calculate stats
-        runtime = (
-            _get_loop().time() - self.start_time if self.running else 0
-        )
+        runtime = time.monotonic() - self.start_time if self.running else 0
         avg_fps = (
             sum(self.perf_fps_history[-30:]) / len(self.perf_fps_history[-30:])
             if self.perf_fps_history
@@ -613,7 +602,7 @@ class EnhancedExamplePlugin(FullScreenPlugin):
             self.renderer, 2, "✨ ANIMATION SHOWCASE", ColorPalette.BRIGHT_YELLOW
         )
 
-        current_time = _get_loop().time()
+        current_time = time.monotonic()
         center_x, center_y = width // 2, height // 2
 
         # Pulsing circle (sine wave)

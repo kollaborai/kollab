@@ -6,6 +6,7 @@ llm_service.py decomposition (Phase A).
 """
 
 import asyncio
+import inspect
 import logging
 import time
 from datetime import datetime
@@ -61,13 +62,29 @@ class BackgroundTaskManager:
         if self.enable_metrics:
             self._task_metrics: Dict[str, Dict[str, Any]] = {}
 
-    def create_background_task(self, coro, name: Optional[str] = None) -> asyncio.Task:
-        """Create and track a background task with proper error handling and circuit breaker."""
+    def create_background_task(
+        self,
+        coro_or_factory,
+        name: Optional[str] = None,
+        *,
+        _retry_count: int = 0,
+    ) -> asyncio.Task:
+        """Create and track a background task with retry-safe ownership.
+
+        ``coro_or_factory`` may be an awaitable for one-shot work or a
+        zero-argument callable returning an awaitable when retries are needed.
+        """
 
         def _close_coro_and_raise(exc):
-            """Helper to properly close coroutine before raising exception."""
-            coro.close()
+            """Close an unstarted coroutine before rejecting its task."""
+            if inspect.iscoroutine(coro_or_factory):
+                coro_or_factory.close()
             raise exc
+
+        # A callable is a zero-argument coroutine factory. Keeping the factory
+        # instead of a coroutine object is what makes retries safe: coroutine
+        # objects cannot be awaited a second time after they fail or finish.
+        task_factory = coro_or_factory if callable(coro_or_factory) else None
 
         # Check circuit breaker state
         if self.task_config.background_tasks.enable_task_circuit_breaker:
@@ -178,7 +195,7 @@ class BackgroundTaskManager:
 
                 # Create a task that will wait for space and then run the actual task
                 blocking_task = asyncio.create_task(
-                    self._create_task_with_blocking(coro, name),
+                    self._create_task_with_blocking(coro_or_factory, name),
                     name=f"blocking_wrapper_{name or 'unnamed'}",
                 )
                 return blocking_task
@@ -197,8 +214,15 @@ class BackgroundTaskManager:
         task_name = name or f"bg_task_{datetime.now().timestamp()}"
         start_time = time.time()
 
-        # Store original coroutine before timeout wrapping for retry purposes
-        original_coro = coro
+        # Materialize a fresh coroutine only after rejection/overflow checks.
+        coro = task_factory() if task_factory is not None else coro_or_factory
+        if not inspect.isawaitable(coro):
+            _close_coro_and_raise(
+                TypeError(
+                    "create_background_task expects an awaitable or a "
+                    "zero-argument coroutine factory"
+                )
+            )
 
         # Add timeout wrapping if default_timeout is set (0 = disabled for autonomous LLM work)
         default_timeout = getattr(
@@ -217,9 +241,25 @@ class BackgroundTaskManager:
             self._circuit_breaker_test_task_running = True
             logger.info(f"Circuit breaker HALF_OPEN - allowing test task '{task_name}'")
 
-        task = asyncio.create_task(
-            self._safe_task_wrapper(wrapped_coro, task_name), name=task_name
-        )
+        # Track whether the wrapper started. If cancellation happens before
+        # the event loop schedules it, close both coroutine objects explicitly;
+        # otherwise Python reports them as never awaited during GC.
+        wrapper_started = False
+
+        async def tracked_wrapper():
+            nonlocal wrapper_started
+            wrapper_started = True
+            return await self._safe_task_wrapper(wrapped_coro, task_name)
+
+        task = asyncio.create_task(tracked_wrapper(), name=task_name)
+
+        def _close_unstarted_coroutines(completed_task):
+            if completed_task.cancelled() and not wrapper_started:
+                for awaitable in (wrapped_coro, coro):
+                    if inspect.iscoroutine(awaitable):
+                        awaitable.close()
+
+        task.add_done_callback(_close_unstarted_coroutines)
 
         # Add to set and register callback before any await so the done_callback
         # always sees the task in _background_tasks even if the task finishes
@@ -230,10 +270,14 @@ class BackgroundTaskManager:
         # Track the task with retry information
         self._task_metadata[task_name] = {
             "created_at": datetime.now(),
-            "coro_name": coro.__name__ if hasattr(coro, "__name__") else str(coro),
+            "coro_name": getattr(
+                coro_or_factory,
+                "__name__",
+                getattr(coro, "__name__", str(coro)),
+            ),
             "start_time": start_time,
-            "retry_count": 0,
-            "original_coro": original_coro,  # Store original coroutine for retries
+            "retry_count": _retry_count,
+            "task_factory": task_factory,
         }
 
         return task
@@ -243,27 +287,35 @@ class BackgroundTaskManager:
         start_time = time.time()
         poll_interval = 0.01  # 10ms polling
 
-        while len(self._background_tasks) >= self._max_concurrent_tasks:
-            # Check timeout
-            elapsed = time.time() - start_time
-            if (
-                self.task_config.queue.block_timeout is not None
-                and elapsed >= self.task_config.queue.block_timeout
-            ):
-                self._queue_metrics["block_timeout_count"] += 1
-                if self.task_config.queue.log_queue_events:
-                    logger.warning(
-                        f"Background task block timeout after {elapsed:.2f}s"
+        try:
+            while len(self._background_tasks) >= self._max_concurrent_tasks:
+                # Check timeout
+                elapsed = time.time() - start_time
+                if (
+                    self.task_config.queue.block_timeout is not None
+                    and elapsed >= self.task_config.queue.block_timeout
+                ):
+                    self._queue_metrics["block_timeout_count"] += 1
+                    if self.task_config.queue.log_queue_events:
+                        logger.warning(
+                            f"Background task block timeout after {elapsed:.2f}s"
+                        )
+                    raise RuntimeError(
+                        f"Timeout waiting for available task slot (timeout: {self.task_config.queue.block_timeout}s)"
                     )
-                raise RuntimeError(
-                    f"Timeout waiting for available task slot (timeout: {self.task_config.queue.block_timeout}s)"
-                )
 
-            # Brief sleep before next poll
-            await asyncio.sleep(poll_interval)
+                # Brief sleep before next poll
+                await asyncio.sleep(poll_interval)
 
-        # Space is available, create the actual task using the normal path
-        return self.create_background_task(coro, name)
+            # Space is available, create the actual task using the normal path
+            return self.create_background_task(coro, name)
+        except BaseException:
+            # A blocking wrapper may be cancelled before it hands the awaitable
+            # to create_background_task. Close coroutine objects to prevent
+            # unawaited-coroutine warnings; factories need no cleanup.
+            if inspect.iscoroutine(coro):
+                coro.close()
+            raise
 
     async def _safe_task_wrapper(self, coro, task_name: str):
         """Wrapper that safely executes task and handles exceptions."""
@@ -381,16 +433,13 @@ class BackgroundTaskManager:
         # Retry logic implementation
         task_metadata = self._task_metadata.get(task_name, {})
         retry_count = task_metadata.get("retry_count", 0)
-        original_coro = task_metadata.get("original_coro")
+        task_factory = task_metadata.get("task_factory")
 
         # Check if we should retry this task
         max_retries = self.task_config.background_tasks.task_retry_attempts
         retry_delay = self.task_config.background_tasks.task_retry_delay
 
-        if retry_count < max_retries and original_coro is not None:
-            # Increment retry count
-            self._task_metadata[task_name]["retry_count"] = retry_count + 1
-
+        if retry_count < max_retries and task_factory is not None:
             logger.warning(
                 f"Retrying task {task_name} (attempt {retry_count + 1}/{max_retries}) "
                 f"after {retry_delay}s delay due to {type(error).__name__}: {error}"
@@ -399,17 +448,28 @@ class BackgroundTaskManager:
             # Wait for retry delay
             await asyncio.sleep(retry_delay)
 
-            # Create new task with original coroutine
+            # Create a new task from the factory. Never reuse the failed
+            # coroutine object; it is already exhausted or closed.
             new_task_name = f"{task_name}_retry_{retry_count + 1}"
-            self.create_background_task(original_coro, new_task_name)
+            self.create_background_task(
+                task_factory,
+                new_task_name,
+                _retry_count=retry_count + 1,
+            )
 
             logger.info(f"Created retry task: {new_task_name}")
         else:
-            # No more retries or no original coroutine available
+            # No more retries or no retry-safe factory was provided.
             if retry_count >= max_retries:
                 logger.error(
                     f"Task {task_name} failed after {max_retries} retry attempts. "
                     f"Final error: {type(error).__name__}: {error}"
+                )
+            elif task_factory is None:
+                logger.error(
+                    f"Task {task_name} failed and cannot be retried because it "
+                    "was created from an awaitable object; pass a zero-argument "
+                    "coroutine factory to enable retries"
                 )
             else:
                 logger.error(f"Task {task_name} failed (no retry possible): {error}")

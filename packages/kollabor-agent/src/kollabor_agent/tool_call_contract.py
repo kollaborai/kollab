@@ -6,6 +6,12 @@ from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
+# ``git`` is a legacy registry alias used for bundle documentation and native
+# schemas. Its actual executor is the terminal command runner.
+_NATIVE_DISPATCH_ALIASES = {
+    "git": "terminal",
+}
+
 
 def _get_tool_call_field(tool_call: Any, key: str, default: Any = None) -> Any:
     if isinstance(tool_call, Mapping):
@@ -81,7 +87,7 @@ def normalize_native_tool_call(
     elif plugin_key in plugin_handler_names:
         resolved_type = plugin_key
     elif tool_name in registry_names:
-        resolved_type = tool_name
+        resolved_type = _NATIVE_DISPATCH_ALIASES.get(tool_name, tool_name)
     elif raw_type not in ("tool_use", "function"):
         resolved_type = raw_type
     else:
@@ -95,7 +101,18 @@ def normalize_native_tool_call(
         "arguments": input_value,
     }
     if resolved_type != "mcp_tool":
-        normalized.update(input_value)
+        # ``type`` and ``name`` are the executor's canonical dispatch fields.
+        # Some provider envelopes use those same keys inside the arguments
+        # (hub_spawn uses ``name`` for the requested identity and ``type`` for
+        # the agent bundle), so merging them over the canonical fields routes
+        # the call to the wrong executor and loses the plugin name.
+        normalized.update(
+            {
+                key: value
+                for key, value in input_value.items()
+                if key not in {"type", "name"}
+            }
+        )
     if isinstance(tool_call, Mapping):
         return {**dict(tool_call), **normalized}
     return normalized

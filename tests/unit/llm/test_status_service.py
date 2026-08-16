@@ -115,12 +115,37 @@ class TestStatusService(unittest.TestCase):
         self.assertIn("Processing: 42 tokens", a_joined)
 
     def test_get_status_line_with_session_stats(self):
-        """Test status line includes session stats."""
+        """Test status line includes session stats and cache counters."""
+        self.coordinator.session_stats.update(
+            {
+                "messages": 1,
+                "cache_read_tokens": 11,
+                "cache_creation_tokens": 7,
+                "total_cache_read_tokens": 111,
+                "total_cache_creation_tokens": 77,
+            }
+        )
         status = self.service.get_status_line()
 
         c_joined = " ".join(status["C"])
         self.assertIn("Queue:", c_joined)
         self.assertIn("History:", c_joined)
+        self.assertIn("Messages: 1", c_joined)
+        self.assertIn("Cache Read: 11", c_joined)
+        self.assertIn("Cache Creation: 7", c_joined)
+        self.assertIn("Total Cache Read: 111", c_joined)
+        self.assertIn("Total Cache Creation: 77", c_joined)
+
+    def test_get_status_line_cache_counters_default_to_zero(self):
+        """Missing cache fields use zero-safe defaults."""
+        self.coordinator.session_stats["messages"] = 1
+        status = self.service.get_status_line()
+
+        c_joined = " ".join(status["C"])
+        self.assertIn("Cache Read: 0", c_joined)
+        self.assertIn("Cache Creation: 0", c_joined)
+        self.assertIn("Total Cache Read: 0", c_joined)
+        self.assertIn("Total Cache Creation: 0", c_joined)
 
     def test_get_status_line_with_tool_stats(self):
         """Test status line includes tool execution stats."""

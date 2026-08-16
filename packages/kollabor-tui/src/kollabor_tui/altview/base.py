@@ -215,17 +215,24 @@ class AltView(ABC):
         state to COMPLETE after this returns. Implementations should
         release any resources here.
         """
-        # cancel any remaining background tasks
-        for task in self._background_tasks:
+        # Snapshot the tasks before cancelling them. The done callback removes
+        # completed tasks from the tracking list, so iterating the live list
+        # can skip tasks during teardown.
+        tasks = tuple(self._background_tasks)
+        for task in tasks:
             if not task.done():
                 task.cancel()
 
-        if self._background_tasks:
+        if tasks:
             logger.debug(
                 "AltView %s: cancelled %d background tasks on complete",
                 self.metadata.plugin_type,
-                len(self._background_tasks),
+                len(tasks),
             )
+            # Await cancellation so task cleanup finishes before the view is
+            # torn down. This also prevents pending-task warnings and resource
+            # leaks when a background task owns I/O or other async resources.
+            await asyncio.gather(*tasks, return_exceptions=True)
             self._background_tasks.clear()
 
         self._renderer = None

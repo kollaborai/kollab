@@ -4,18 +4,18 @@ Covers: initialization, agent loading, feed refresh, input handling,
 attach/detach, and rendering edge cases.
 """
 
+import asyncio
 import json
+import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from plugins.altview.hub_console_altview import HubConsoleAltView, _ANSI_RE
 from kollabor_tui.key_parser import KeyPress
-
+from plugins.altview.hub_console_altview import _ANSI_RE, HubConsoleAltView
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -241,8 +241,24 @@ class TestRefreshFeed:
         vault_dir.mkdir(parents=True)
         stream = vault_dir / "stream.jsonl"
         entries = [
-            json.dumps({"ts": time.time(), "type": "sent", "content": "hello", "from": "lapis", "to": "sapphire"}),
-            json.dumps({"ts": time.time(), "type": "received", "content": "hi back", "from": "sapphire", "to": "lapis"}),
+            json.dumps(
+                {
+                    "ts": time.time(),
+                    "type": "sent",
+                    "content": "hello",
+                    "from": "lapis",
+                    "to": "sapphire",
+                }
+            ),
+            json.dumps(
+                {
+                    "ts": time.time(),
+                    "type": "received",
+                    "content": "hi back",
+                    "from": "sapphire",
+                    "to": "lapis",
+                }
+            ),
         ]
         stream.write_text("\n".join(entries) + "\n")
 
@@ -542,6 +558,51 @@ class TestLifecycle:
         assert altview._attached_socket is None
         assert altview._input_buffer == ""
 
+    @pytest.mark.asyncio
+    async def test_refresh_feed_observes_fetch_failure(
+        self, altview: HubConsoleAltView, caplog
+    ):
+        async def fail_fetch(_ident: str, _socket_path: str) -> None:
+            raise RuntimeError("feed failed")
+
+        altview._fetch_feed_from_socket = fail_fetch
+        altview.agents = [{"identity": "lapis", "socket_path": "/tmp/lapis.sock"}]
+        altview._my_identity = "koordinator"
+
+        with caplog.at_level(logging.ERROR, logger="kollabor_tui.altview.base"):
+            altview._refresh_feed()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        assert not altview.background_tasks
+        assert "background task" in caplog.text
+        assert "feed failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_attached_feed_is_cancelled_on_complete(
+        self, altview: HubConsoleAltView
+    ):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def wait_for_feed(_ident: str, _socket_path: str) -> None:
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        altview._fetch_feed_from_socket = wait_for_feed
+        altview._attach_to_agent("lapis", "/tmp/lapis.sock")
+        await started.wait()
+        assert len(altview.background_tasks) == 1
+
+        await altview.on_complete()
+
+        assert cancelled.is_set()
+        assert not altview.background_tasks
+
 
 # ---------------------------------------------------------------------------
 # Background fill tests (regression: raw feed padding left unpainted)
@@ -574,8 +635,6 @@ class TestFeedPanelBackgroundFill:
 
     def test_raw_feed_padding_includes_dark_bg(self, altview: HubConsoleAltView):
         """Padding after ANSI feed lines must carry the dark background colour."""
-        from kollabor_tui.design_system import T
-
         altview._feed_is_raw = True
         # A short coloured line: 5 visible chars, right_width = 20 → 15 padding chars
         altview.feed_lines = ["\033[32mhello\033[0m"]
@@ -590,8 +649,6 @@ class TestFeedPanelBackgroundFill:
 
     def test_raw_feed_exact_width_no_padding_needed(self, altview: HubConsoleAltView):
         """Lines that fill the full width should not emit any padding."""
-        from kollabor_tui.design_system import T
-
         right_width = 5
         altview._feed_is_raw = True
         altview.feed_lines = ["\033[32mhello\033[0m"]  # exactly 5 visible chars

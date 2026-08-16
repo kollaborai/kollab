@@ -2,9 +2,10 @@
 
 import asyncio
 import json
+import logging
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -169,6 +170,37 @@ class TestLoadHooksConfig:
 
 
 class TestBuildHookCallback:
+    @pytest.mark.asyncio
+    async def test_async_failure_is_retrieved_and_logged(self, loader, caplog):
+        loader._run_command = AsyncMock(side_effect=RuntimeError("hook boom"))
+        callback = loader._build_hook_callback(
+            command="broken-hook",
+            event_type=EventType.SYSTEM_STARTUP,
+            event_name="SessionStart",
+            matcher="",
+            timeout=5,
+            is_async=True,
+            failure_filter=False,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="kollabor.config_hooks"):
+            assert (
+                await callback(
+                    {},
+                    Event(
+                        type=EventType.SYSTEM_STARTUP,
+                        data={},
+                        source="test",
+                    ),
+                )
+                is None
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        assert not loader._pending_tasks
+        assert "Async config hook failed: hook boom" in caplog.text
+
     @pytest.mark.asyncio
     async def test_matcher_filters_non_matching(self, loader):
         callback = loader._build_hook_callback(

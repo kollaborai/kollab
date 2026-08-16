@@ -14,6 +14,8 @@ from kollabor_agent.file_operations_executor import (
     FileOperationsExecutor,
     PathAccessMode,
 )
+from kollabor_agent.tool_output_budget import ToolOutputArtifactStore
+from kollabor_ai.context_service.hash_utils import compute_hash
 
 TRUNCATION_MARKER = "truncated — showing"
 
@@ -53,6 +55,39 @@ class TestFileReadCap(unittest.TestCase):
 
             self.assertNotIn(TRUNCATION_MARKER, out)
             self.assertIn("gamma", out)
+
+    def test_large_read_with_store_preserves_complete_returned_slice(self):
+        with TemporaryDirectory() as d, TemporaryDirectory() as artifacts:
+            ex = _executor()
+            ex.configure_tool_output_store(
+                ToolOutputArtifactStore(Path(artifacts)),
+                preview_chars=120,
+            )
+            f = Path(d) / "big.py"
+            original = "\n".join(f"line {i}" for i in range(5000))
+            f.write_text(original, "utf-8")
+
+            result = ex.execute_operation(
+                {"type": "file_read", "id": "read-1", "file": str(f)}
+            )
+
+            artifact = Path(result["tool_output_path"])
+            self.assertEqual(artifact.read_text("utf-8"), original)
+            self.assertIn(str(artifact), result["output"])
+            self.assertNotIn("line 4999", result["output"])
+
+    def test_large_read_exposes_raw_hash_for_context_dedup(self):
+        with TemporaryDirectory() as d:
+            f = Path(d) / "large.py"
+            original = "\n".join(f"line {i}" for i in range(5000))
+            raw = original.encode("utf-8")
+            f.write_bytes(raw)
+
+            result = _executor().execute_operation(
+                {"type": "file_read", "file": str(f)}
+            )
+
+            self.assertEqual(result["file_content_hash"], compute_hash(raw))
 
     def test_bounded_offset_limit_not_capped(self):
         ex = _executor()

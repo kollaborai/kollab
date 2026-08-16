@@ -1,7 +1,7 @@
 ---
 title: "Getting Started"
 created: 2026-02-24
-modified: 2026-04-09
+modified: 2026-08-06
 status: active
 ---
 # Getting Started
@@ -9,14 +9,6 @@ status: active
 ## Installation
 
 Kollab can be installed via several methods. Choose the one that fits your workflow.
-
-### Homebrew (macOS)
-
-```bash
-brew install kollaborai/tap/kollab
-```
-
-This installs the `kollab` command system-wide. Use `brew upgrade kollaborai/tap/kollab` to update.
 
 ### Curl Installer (Cross-platform)
 
@@ -185,8 +177,12 @@ Common flags:
 
 | Flag | Description |
 |------|-------------|
-| `--profile <name>` | Use specific LLM profile |
-| `--agent <name>` | Use specific agent |
+| `--profile <name>` | Use a configured profile or loadout |
+| `--agent <bundle>` | Use a specific behavior bundle |
+| `--as <identity>` | Run the selected bundle under a stable hub identity |
+| `--attach <identity>` | Attach interactively to a running agent |
+| `--hub <command>` | Inspect or control the hub without opening the TUI |
+| `--web-ui` | Start the local engine and browser UI |
 | `--login <provider>` | OAuth login (currently `openai`) |
 | `--save` | Save auto-created profile |
 | `--local` | Save profile to local config |
@@ -201,6 +197,9 @@ Run `kollab --help` for the complete list including plugin-registered flags.
 
 - [Configuration Guide](configuration.md) - Profiles, config files, directories
 - [Providers Guide](providers.md) - All supported providers and their setup
+- [Models and Loadouts](features/loadouts.md) - Browse models and save parameter presets
+- [Reasoning Effort](features/reasoning-effort.md) - Set provider-aware thinking effort
+- [Agent and Hub Guide](features/agents.md) - Bundles, identities, skills, and org roles
 - `/llm` command - Browse and switch model loadouts (provider + model + params)
 - `/permissions` command - Configure tool approval modes
 - `/save` command - Export conversations

@@ -58,6 +58,23 @@ def merge_widget_state_snapshot(
     return result
 
 
+def _should_apply_agent_preferred_profile(
+    agent_profile: str | None, active_profile: str | None
+) -> bool:
+    """Decide whether an agent profile should override the current profile.
+
+    ``default`` in bundled agent metadata means "use the normal profile
+    resolution", not "discard a project/global profile selected by the
+    user". Explicit non-default agent profiles still override the persisted
+    default when no CLI profile was supplied.
+    """
+    if not agent_profile:
+        return False
+    if agent_profile == "default" and active_profile not in (None, "", "default"):
+        return False
+    return True
+
+
 class TerminalLLMChat:
     """Main Kollab application.
 
@@ -204,6 +221,16 @@ class TerminalLLMChat:
             self.config_dir / "config.json", self.plugin_registry, fast_mode=True
         )
 
+        # Runtime-only safety override for bounded/headless agents.  Keep the
+        # saved config untouched: the flag is intentionally scoped to this
+        # process and is inherited by the event bus/MCP integration through
+        # the in-memory configuration dictionary.
+        if getattr(args, "no_mcp", False):
+            if self.config.set("plugins.mcp.enabled", False):
+                logger.info("MCP disabled for this process by --no-mcp")
+            else:
+                logger.warning("Could not apply process-local --no-mcp override")
+
         # Note: plugin configs are already merged in _initialize_config() via
         # load_complete_config(). No need to call update_from_plugins() again -
         # it would re-read all configs, re-discover plugins, and write to disk
@@ -332,11 +359,19 @@ class TerminalLLMChat:
         # Don't persist agent's profile - it's automatic based on agent selection
         if not profile_name:
             agent_profile = self.agent_manager.get_preferred_profile()
-            if agent_profile:
+            if _should_apply_agent_preferred_profile(
+                agent_profile, self.profile_manager.active_profile_name
+            ):
                 if self.profile_manager.set_active_profile(
                     agent_profile, persist=False
                 ):
                     logger.info(f"Using agent's preferred profile: {agent_profile}")
+            elif agent_profile == "default":
+                logger.debug(
+                    "Keeping configured profile '%s'; agent profile is the "
+                    "default placeholder",
+                    self.profile_manager.active_profile_name,
+                )
 
         # Load skills if specified (requires an active agent)
         # Store for later injection into conversation after llm_service is initialized
@@ -1155,10 +1190,22 @@ class TerminalLLMChat:
             logger.info("Deferred startup cancelled")
             raise
         except Exception as e:
-            logger.error(f"Error during deferred startup: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logger.exception("Error during deferred startup: %s", e)
+            self._startup_complete = False
+            self.running = False
+            input_handler = getattr(self, "input_handler", None)
+            if input_handler is not None:
+                input_handler.running = False
+            render_loop = getattr(self, "render_loop", None)
+            if render_loop is not None:
+                try:
+                    render_loop.stop()
+                except Exception:
+                    logger.debug(
+                        "Could not stop render loop after startup failure",
+                        exc_info=True,
+                    )
+            raise
         finally:
             # Always set startup_ready to prevent deadlocks on waiting input
             if not self._startup_ready.is_set():
@@ -1882,7 +1929,9 @@ class TerminalLLMChat:
                 )
                 self.running = False
                 try:
-                    asyncio.ensure_future(self.shutdown())
+                    self.create_background_task(
+                        self.shutdown(), "attach_client_shutdown"
+                    )
                 except Exception as e:
                     logger.debug(f"attach client shutdown schedule failed: {e}")
 
@@ -1912,7 +1961,9 @@ class TerminalLLMChat:
                     os._exit(0)
 
                 try:
-                    asyncio.ensure_future(_attach_exit_watchdog())
+                    self.create_background_task(
+                        _attach_exit_watchdog(), "attach_exit_watchdog"
+                    )
                 except Exception:
                     pass
 
@@ -2342,6 +2393,7 @@ class TerminalLLMChat:
                     "input_handler": self.input_handler,
                     "renderer": self.renderer,
                     "llm_service": self.llm_service,
+                    "profile_manager": self.profile_manager,
                     # Use llm_service's conversation_logger (the one actively logging)
                     "conversation_logger": getattr(
                         self.llm_service,
@@ -2759,9 +2811,33 @@ class TerminalLLMChat:
         def remove_task(t):
             try:
                 self._background_tasks.remove(t)
-                logger.debug(f"Background task completed: {name}")
             except ValueError:
                 pass  # Task already removed
+
+            # Fire-and-forget startup tasks are not awaited by the main loop.
+            # Retrieve their terminal state here so asyncio does not emit the
+            # unhelpful "Task exception was never retrieved" warning, and so
+            # a failed startup task is not falsely reported as completed.
+            if t.cancelled():
+                logger.debug(f"Background task cancelled: {name}")
+                return
+
+            try:
+                error = t.exception()
+            except asyncio.CancelledError:
+                logger.debug(f"Background task cancelled: {name}")
+                return
+
+            if error is not None:
+                logger.error(
+                    "Background task failed: %s - %s: %s",
+                    name,
+                    type(error).__name__,
+                    error,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            else:
+                logger.debug(f"Background task completed: {name}")
 
         task.add_done_callback(remove_task)
         return task
@@ -2890,6 +2966,19 @@ class TerminalLLMChat:
             print(f"Error: {message}", file=sys.stderr)
 
     async def cleanup(self) -> None:
+        """Run cleanup at most once, serializing concurrent callers."""
+        lock = getattr(self, "_cleanup_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._cleanup_lock = lock
+        async with lock:
+            if getattr(self, "_cleanup_complete", False):
+                logger.debug("Application cleanup already complete")
+                return
+            await self._cleanup_impl()
+            self._cleanup_complete = True
+
+    async def _cleanup_impl(self) -> None:
         """Clean up all resources and cancel background tasks.
 
         This method is guaranteed to run on all exit paths via finally block.
@@ -2941,8 +3030,11 @@ class TerminalLLMChat:
                 except Exception as e:
                     logger.error(f"Error during task cleanup: {e}")
 
-        # Clear task list
-        self._background_tasks.clear()
+        # Keep ownership of tasks that ignored cancellation past the timeout.
+        # Their done callbacks will remove them once they eventually terminate.
+        self._background_tasks[:] = [
+            task for task in self._background_tasks if not task.done()
+        ]
 
         # Mark startup as incomplete
         self._startup_complete = False

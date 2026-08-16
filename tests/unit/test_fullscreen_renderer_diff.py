@@ -103,20 +103,25 @@ class SetupWizardIdleRepaintTest(unittest.TestCase):
         view = SetupAltView()
         r = _renderer()
         r.terminal_width, r.terminal_height = 120, 40
-        asyncio.run(view.on_enter(r))  # sets renderer + STAGE_PROVIDER
+        loop = asyncio.new_event_loop()
 
         def render_once():
             buf = io.StringIO()
             r.begin_frame()
-            asyncio.run(view.render_frame(0.0))
+            loop.run_until_complete(view.render_frame(0.0))
             with contextlib.redirect_stdout(buf):
                 r.end_frame()
             return buf.getvalue()
 
-        first = render_once()
-        second = render_once()
-        third = render_once()
+        try:
+            loop.run_until_complete(view.on_enter(r))  # sets renderer + STAGE_PROVIDER
+            first = render_once()
+            second = render_once()
+            third = render_once()
+        finally:
+            loop.close()
 
+        self.assertTrue(loop.is_closed())
         self.assertNotEqual(first, "")  # first frame paints the wizard
         self.assertIn(CLEAR_ALL, first)  # ...in full (whole-screen clear)
         self.assertEqual(second, "")  # idle -> nothing repainted (no flicker)

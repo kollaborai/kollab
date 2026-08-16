@@ -870,10 +870,20 @@ class LoggingRedactor:
         (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), "[REDACTED-ANTHROPIC-KEY]"),
         # Bearer tokens
         (re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]{20,}"), "Bearer [REDACTED]"),
-        # Authorization headers
+        # Authorization and provider-specific API key headers
         (
-            re.compile(r"Authorization:\s*[^\s]+", re.IGNORECASE),
+            re.compile(
+                r"Authorization:\s*(?:(?:Bearer|Basic)\s+)?[^\s,;]+",
+                re.IGNORECASE,
+            ),
             "Authorization: [REDACTED]",
+        ),
+        (
+            re.compile(
+                r"\b(x-goog-api-key|x-api-key|api-key)\s*:\s*[^\s,;]+",
+                re.IGNORECASE,
+            ),
+            r"\1: [REDACTED]",
         ),
         (
             re.compile(r'"authorization":\s*"[^"]+"', re.IGNORECASE),
@@ -884,27 +894,44 @@ class LoggingRedactor:
             re.compile(r'"api[_-]?key":\s*"[^"]+"', re.IGNORECASE),
             '"api_key": "[REDACTED]"',
         ),
-        # Tokens and secrets (any value 8+ chars)
+        # Tokens and secrets (any non-empty value)
         (
-            re.compile(r'"access[_-]?token":\s*"[^"]{8,}"', re.IGNORECASE),
+            re.compile(r'"access[_-]?token":\s*"[^"]+"', re.IGNORECASE),
             '"access_token": "[REDACTED]"',
         ),
         (
-            re.compile(r'"refresh[_-]?token":\s*"[^"]{8,}"', re.IGNORECASE),
+            re.compile(r'"refresh[_-]?token":\s*"[^"]+"', re.IGNORECASE),
             '"refresh_token": "[REDACTED]"',
         ),
-        (re.compile(r'"token":\s*"[^"]{8,}"', re.IGNORECASE), '"token": "[REDACTED]"'),
+        (re.compile(r'"token":\s*"[^"]+"', re.IGNORECASE), '"token": "[REDACTED]"'),
         (
-            re.compile(r'"client[_-]?secret":\s*"[^"]{8,}"', re.IGNORECASE),
+            re.compile(r'"client[_-]?secret":\s*"[^"]+"', re.IGNORECASE),
             '"client_secret": "[REDACTED]"',
         ),
         (
-            re.compile(r'"secret":\s*"[^"]{8,}"', re.IGNORECASE),
+            re.compile(r'"secret":\s*"[^"]+"', re.IGNORECASE),
             '"secret": "[REDACTED]"',
         ),
         (
             re.compile(r'"password":\s*"[^"]+"', re.IGNORECASE),
             '"password": "[REDACTED]"',
+        ),
+        (
+            re.compile(r'"credentials?":\s*"[^"]+"', re.IGNORECASE),
+            '"credential": "[REDACTED]"',
+        ),
+        (
+            re.compile(r'"private[_-]?key":\s*"[^"]+"', re.IGNORECASE),
+            '"private_key": "[REDACTED]"',
+        ),
+        # URL query credentials (Gemini uses ``key``; profiles may use api_key)
+        (
+            re.compile(
+                r"([?&](?:api[_-]?key|key|access[_-]?token|refresh[_-]?token|"
+                r"client[_-]?secret|token|credentials?)=)[^&#\s]+",
+                re.IGNORECASE,
+            ),
+            r"\1[REDACTED]",
         ),
         # URLs with embedded keys
         (re.compile(r"(https?://[^/]+/)sk-[a-zA-Z0-9_-]{20,}"), r"\1[REDACTED-KEY]"),
@@ -917,6 +944,42 @@ class LoggingRedactor:
             r"\1[REDACTED-KEY]",
         ),
     ]
+
+    # Structured log data must be redacted by field name as well as by value
+    # pattern. Credentials can be short, opaque, or provider-specific and may
+    # therefore match none of the string patterns above.
+    SENSITIVE_FIELD_NAMES = {
+        "apikey",
+        "apitoken",
+        "xapikey",
+        "xgoogapikey",
+        "authorization",
+        "accesstoken",
+        "refreshtoken",
+        "token",
+        "clientsecret",
+        "secret",
+        "password",
+        "credential",
+        "credentials",
+        "privatekey",
+    }
+
+    @classmethod
+    def _is_sensitive_field(cls, key: Any) -> bool:
+        """Return whether a structured-data key denotes credential material."""
+        if not isinstance(key, str):
+            return False
+        normalized = re.sub(r"[_-]", "", key.lower())
+        return normalized in cls.SENSITIVE_FIELD_NAMES
+
+    @classmethod
+    def _redact_mapping(cls, mapping: Dict[Any, Any]) -> Dict[Any, Any]:
+        """Redact mapping values using both field names and value patterns."""
+        return {
+            key: "[REDACTED]" if cls._is_sensitive_field(key) else cls.redact(value)
+            for key, value in mapping.items()
+        }
 
     @classmethod
     def redact(cls, obj: Any) -> Any:
@@ -933,7 +996,7 @@ class LoggingRedactor:
             return cls._redact_string(obj)
 
         elif isinstance(obj, dict):
-            return {key: cls.redact(value) for key, value in obj.items()}
+            return cls._redact_mapping(obj)
 
         elif isinstance(obj, list):
             return [cls.redact(item) for item in obj]
@@ -1014,10 +1077,9 @@ class LoggingRedactor:
         Returns:
             Dictionary with redacted attributes
         """
-        # Don't modify original object
-        redacted_dict = {}
-        for key, value in obj.__dict__.items():
-            redacted_dict[key] = cls.redact(value)
+        # Don't modify original object. Apply field-name redaction here too so
+        # short or provider-specific credentials cannot bypass value patterns.
+        redacted_dict = cls._redact_mapping(obj.__dict__)
 
         # Return dict representation (safer than modifying object)
         return {"__type__": type(obj).__name__, "__dict__": redacted_dict}

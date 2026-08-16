@@ -103,6 +103,10 @@ class AttachPermissionBridge:
         task = asyncio.create_task(response_call)
 
         def _log_response_error(done_task: asyncio.Task[Any]) -> None:
+            # Cancellation is expected during attach shutdown; do not surface it
+            # as an unhandled callback exception (CancelledError is BaseException).
+            if done_task.cancelled():
+                return
             try:
                 done_task.result()
             except Exception as exc:

@@ -17,6 +17,9 @@ class TestFromFlatDict:
             "total_input_tokens": 5000,
             "total_output_tokens": 2000,
             "cache_read_tokens": 100,
+            "cache_creation_tokens": 20,
+            "total_cache_read_tokens": 1000,
+            "total_cache_creation_tokens": 200,
             "cost_usd": 0.05,
             "total_cost_usd": 1.23,
             "session": "sess-abc",
@@ -47,6 +50,9 @@ class TestFromFlatDict:
         assert state.input_tokens == 500
         assert state.total_input_tokens == 5000
         assert state.total_output_tokens == 2000
+        assert state.cache_creation_tokens == 20
+        assert state.total_cache_read_tokens == 1000
+        assert state.total_cache_creation_tokens == 200
         assert state.profile_name == "openai-oauth"
         assert state.model == "gpt-5.4"
         assert state.agent == "coder"
@@ -73,7 +79,7 @@ class TestFromFlatDict:
         d = {"messages": 3, "input_tokens": 100}
         state = WidgetState.from_flat_dict(d)
 
-        assert len(WidgetState.state_fields()) == 29
+        assert len(WidgetState.state_fields()) == 32
         assert state.messages == 3
         assert state.input_tokens == 100
         assert state.output_tokens == 0  # default

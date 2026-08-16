@@ -498,6 +498,7 @@ class ConfigLoader:
                     "thinking_phase_delay": 0.5,
                     "log_message_truncate": 50,
                     "enable_streaming": True,
+                    "max_retries": 5,
                     "processing_delay": 0.1,
                     "thinking_delay": 0.3,
                     "api_poll_delay": 0.01,

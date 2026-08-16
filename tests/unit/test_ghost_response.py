@@ -33,6 +33,20 @@ class EmptyThenTextProvider:
         )
 
 
+class ForwardingProvider:
+    provider_name = "openai_responses"
+
+    def __init__(self) -> None:
+        self.stream_kwargs = None
+
+    async def stream(self, messages, tools=None, **kwargs):
+        self.stream_kwargs = kwargs
+        yield StreamingResponse(
+            delta=TextDelta(content="forwarded"),
+            raw_chunk={"type": "content_block_delta"},
+        )
+
+
 def make_service() -> APICommunicationService:
     config = MagicMock()
     config.get = lambda key, default=None: {
@@ -92,6 +106,29 @@ class TestGhostResponseHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content, "ok")
         self.assertEqual(provider.calls, 2)
         on_rate_limit.assert_not_awaited()
+
+    async def test_call_llm_forwards_provider_state_and_cache_options(self) -> None:
+        service = make_service()
+        provider = ForwardingProvider()
+        service._provider = provider
+
+        content = await service.call_llm(
+            [{"role": "user", "content": "continue"}],
+            tools=[],
+            previous_response_id="resp_previous",
+            prompt_cache_key="harness-context-v1",
+            prompt_cache_retention="24h",
+        )
+
+        self.assertEqual(content, "forwarded")
+        self.assertEqual(
+            provider.stream_kwargs,
+            {
+                "previous_response_id": "resp_previous",
+                "prompt_cache_key": "harness-context-v1",
+                "prompt_cache_retention": "24h",
+            },
+        )
 
 
 if __name__ == "__main__":

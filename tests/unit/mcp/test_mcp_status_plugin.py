@@ -7,7 +7,7 @@ from kollabor_events.models import Event, EventType
 from plugins.mcp_status_plugin import MCPStatusPlugin
 
 
-class TestMCPStatusPlugin(unittest.TestCase):
+class TestMCPStatusPlugin(unittest.IsolatedAsyncioTestCase):
     """Test MCP Status Plugin functionality."""
 
     def setUp(self):
@@ -102,7 +102,7 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = await self.plugin._on_server_connect({}, event)
+        result = await self.plugin._on_server_connect(event.data, event)
 
         self.assertEqual(self.plugin.connecting_count, 1)
         self.assertEqual(result["status"], "monitored")
@@ -119,7 +119,7 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = await self.plugin._on_server_connected({}, event)
+        result = await self.plugin._on_server_connected(event.data, event)
 
         self.assertEqual(self.plugin.connected_servers, 1)
         self.assertEqual(self.plugin.total_tools, 3)
@@ -136,7 +136,7 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = await self.plugin._on_server_error({}, event)
+        result = await self.plugin._on_server_error(event.data, event)
 
         self.assertEqual(self.plugin.error_count, 1)
         self.assertEqual(self.plugin.connecting_count, 0)
@@ -157,7 +157,7 @@ class TestMCPStatusPlugin(unittest.TestCase):
             source="test",
         )
 
-        result = await self.plugin._on_tool_register({}, event)
+        result = await self.plugin._on_tool_register(event.data, event)
 
         self.assertEqual(self.plugin.total_tools, 1)
         self.assertIn("new_tool", self.plugin.mcp_servers["test_server"]["tools"])

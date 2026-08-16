@@ -112,6 +112,9 @@ class OpenAIProvider(LLMProvider):
             client_kwargs: Dict[str, Any] = {
                 "api_key": self.config.api_key,
                 "timeout": self.config.timeout,
+                # APICommunicationService owns retries so status handling,
+                # cancellation, and backoff remain consistent across providers.
+                "max_retries": 0,
             }
 
             # Add optional parameters

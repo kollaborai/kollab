@@ -23,6 +23,7 @@ sent — providers answer a bad level with a 400.
 ```bash
 /model effort              # show the current level + what this model accepts
 /model effort xhigh        # set it (persisted to the active profile)
+/model effort max          # maximum reasoning, when the model advertises it
 /model effort default      # clear it -- back to the model's own default
 ```
 

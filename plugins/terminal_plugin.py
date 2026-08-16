@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from kollabor_tui.visual_effects import AgnosterSegment
 from plugins.agent_orchestrator.ring_buffer import RingBuffer
@@ -102,6 +102,7 @@ class TmuxPlugin:
         self.input_handler = None
         self._current_session: Optional[str] = None
         self._active_executor = None  # Track for ESC cancellation
+        self._timeout_tasks: Dict[str, asyncio.Task] = {}
 
         self.logger = logger
 
@@ -146,6 +147,14 @@ class TmuxPlugin:
 
     async def shutdown(self) -> None:
         try:
+            timeout_tasks = tuple(self._timeout_tasks.values())
+            for task in timeout_tasks:
+                if not task.done():
+                    task.cancel()
+            if timeout_tasks:
+                await asyncio.gather(*timeout_tasks, return_exceptions=True)
+            self._timeout_tasks.clear()
+
             # Kill all managed sessions
             for name in list(self.sessions.keys()):
                 session = self.sessions[name]
@@ -398,6 +407,7 @@ Aliases: /t, /term, /tmux"""
         # Clean up dead sessions
         dead = [n for n, s in self.sessions.items() if not s.is_alive()]
         for n in dead:
+            self._cancel_timeout_task(n)
             del self.sessions[n]
 
         if not self.sessions:
@@ -436,6 +446,7 @@ Aliases: /t, /term, /tmux"""
             )
 
         session = self.sessions[session_name]
+        self._cancel_timeout_task(session_name)
         self._kill_process(session)
         del self.sessions[session_name]
 
@@ -450,7 +461,12 @@ Aliases: /t, /term, /tmux"""
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _pump_output(proc: subprocess.Popen, ring_buf: RingBuffer, label: str) -> None:
+    def _pump_output(
+        proc: subprocess.Popen,
+        ring_buf: RingBuffer,
+        label: str,
+        on_exit: Optional[Callable[[], None]] = None,
+    ) -> None:
         """Read proc.stdout line-by-line into ring buffer (daemon thread)."""
         stdout = proc.stdout
         assert stdout is not None  # ensured by caller
@@ -465,6 +481,49 @@ Aliases: /t, /term, /tmux"""
             logger.debug(f"[pump] {label} pump ended: {e}")
         finally:
             logger.debug(f"[pump] {label} stdout closed")
+            # Ensure all Popen pipes are released when the reader exits
+            # naturally; otherwise they linger until garbage collection and
+            # trigger ResourceWarning under -X dev.
+            self_proc = proc
+            seen = set()
+            for stream in (self_proc.stdin, self_proc.stdout, self_proc.stderr):
+                if stream is None or id(stream) in seen:
+                    continue
+                seen.add(id(stream))
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            if on_exit is not None:
+                try:
+                    on_exit()
+                except Exception as e:
+                    logger.debug(f"[pump] {label} exit cleanup failed: {e}")
+
+    def _notify_session_exit(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        session_name: str,
+        session: TerminalSession,
+    ) -> None:
+        """Schedule natural-exit cleanup back on the plugin's event loop."""
+        try:
+            loop.call_soon_threadsafe(
+                self._handle_session_exit, session_name, session
+            )
+        except RuntimeError:
+            self.logger.debug(
+                "Skipping terminal session cleanup after event loop shutdown: %s",
+                session_name,
+            )
+
+    def _handle_session_exit(
+        self, session_name: str, session: TerminalSession
+    ) -> None:
+        """Cancel a dead session's timer while retaining its captured output."""
+        if self.sessions.get(session_name) is not session or session.is_alive():
+            return
+        self._cancel_timeout_task(session_name)
 
     def _capture_output(
         self, session_name: Optional[str], max_lines: Optional[int] = None
@@ -694,6 +753,12 @@ Aliases: /t, /term, /tmux"""
                 "message": f"Session '{name}' already exists",
             }
 
+        # A dead session may retain a timeout task. Remove both before reusing
+        # its name so an old timer cannot kill the replacement session.
+        if name in self.sessions:
+            self._cancel_timeout_task(name)
+            self.sessions.pop(name, None)
+
         try:
             effective_cwd = cwd if cwd and cwd.strip() else str(Path.cwd())
 
@@ -718,26 +783,41 @@ Aliases: /t, /term, /tmux"""
             )
 
             ring_buf = RingBuffer()
-            pump = threading.Thread(
-                target=self._pump_output,
-                args=(proc, ring_buf, name),
-                daemon=True,
-                name=f"pump-bg-{name}",
-            )
-            pump.start()
-
-            self.sessions[name] = TerminalSession(
+            session = TerminalSession(
                 name=name,
                 command=command,
                 proc=proc,
                 ring_buffer=ring_buf,
                 pid=proc.pid,
             )
+            self.sessions[name] = session
+            loop = asyncio.get_running_loop()
+            pump = threading.Thread(
+                target=self._pump_output,
+                args=(proc, ring_buf, name),
+                kwargs={
+                    "on_exit": lambda: self._notify_session_exit(
+                        loop, name, session
+                    )
+                },
+                daemon=True,
+                name=f"pump-bg-{name}",
+            )
+            pump.start()
 
             if timeout:
                 timeout_seconds = self._parse_timeout(timeout)
                 if timeout_seconds > 0:
-                    asyncio.create_task(self._auto_kill_after(name, timeout_seconds))
+                    task = asyncio.create_task(
+                        self._auto_kill_after(name, timeout_seconds),
+                        name=f"terminal-timeout-{name}",
+                    )
+                    self._timeout_tasks[name] = task
+                    task.add_done_callback(
+                        lambda done, session_name=name: self._on_timeout_task_done(
+                            session_name, done
+                        )
+                    )
 
             return {
                 "success": True,
@@ -800,6 +880,7 @@ Aliases: /t, /term, /tmux"""
             failed = []
             for session_name in list(self.sessions.keys()):
                 session = self.sessions[session_name]
+                self._cancel_timeout_task(session_name)
                 if self._kill_process(session):
                     killed.append(session_name)
                     del self.sessions[session_name]
@@ -815,8 +896,10 @@ Aliases: /t, /term, /tmux"""
         else:
             found: Optional[TerminalSession] = self.sessions.get(name)
             if found is None:
+                self._cancel_timeout_task(name)
                 return {"success": False, "message": f"Session '{name}' not found"}
 
+            self._cancel_timeout_task(name)
             if self._kill_process(found):
                 del self.sessions[name]
                 return {"success": True, "message": f"Killed session '{name}'"}
@@ -888,6 +971,28 @@ Aliases: /t, /term, /tmux"""
             pass
         except Exception as e:
             self.logger.error(f"Error in auto-kill task for {session_name}: {e}")
+
+    def _cancel_timeout_task(self, session_name: str) -> None:
+        """Cancel and forget a session timeout unless it is the current task."""
+        task = self._timeout_tasks.pop(session_name, None)
+        if task is None or task is asyncio.current_task() or task.done():
+            return
+        task.cancel()
+
+    def _on_timeout_task_done(
+        self, session_name: str, task: asyncio.Task
+    ) -> None:
+        """Forget a timeout task and consume unexpected task failures."""
+        if self._timeout_tasks.get(session_name) is task:
+            self._timeout_tasks.pop(session_name, None)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            self.logger.exception(
+                "Terminal timeout task failed for session '%s'", session_name
+            )
 
     @staticmethod
     def get_config_widgets() -> Optional[Dict[str, Any]]:

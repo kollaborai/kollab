@@ -289,6 +289,86 @@ class TestOpenAIResponsesTransformer:
         assert response.usage.prompt_tokens == 10
         assert response.usage.completion_tokens == 5
 
+    def test_response_usage_preserves_cache_reads_and_writes(self):
+        """Responses cache telemetry survives normalization."""
+        response_dict = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "text", "text": "cached"}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 2600,
+                "output_tokens": 20,
+                "input_tokens_details": {
+                    "cached_tokens": 2000,
+                    "cache_write_tokens": 400,
+                },
+            },
+        }
+
+        response = OpenAIResponsesTransformer.transform_response(
+            response_dict, "gpt-5.6-luna"
+        )
+
+        assert response.usage.cache_read_tokens == 2000
+        assert response.usage.cache_creation_tokens == 400
+
+    def test_streaming_response_usage_preserves_cache_reads_and_writes(self):
+        """Streaming response.done preserves Responses cache telemetry."""
+        chunk = {
+            "event": "response.done",
+            "response": {
+                "usage": {
+                    "input_tokens": 2600,
+                    "output_tokens": 20,
+                    "input_tokens_details": {
+                        "cached_tokens": 2000,
+                        "cache_write_tokens": 400,
+                    },
+                }
+            },
+        }
+
+        response = OpenAIResponsesTransformer.transform_streaming_chunk(
+            chunk, "gpt-5.6-luna"
+        )
+
+        assert response is not None
+        assert response.usage is not None
+        assert response.usage.cache_read_tokens == 2000
+        assert response.usage.cache_creation_tokens == 400
+
+    def test_codex_prompt_usage_aliases_are_supported(self):
+        """Private transports may expose the Chat Completions usage shape."""
+        response_dict = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "text", "text": "cached"}],
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 2600,
+                "completion_tokens": 20,
+                "prompt_tokens_details": {
+                    "cached_tokens": 2000,
+                    "cache_write_tokens": 400,
+                },
+            },
+        }
+
+        response = OpenAIResponsesTransformer.transform_response(
+            response_dict, "gpt-5.6-luna"
+        )
+
+        assert response.usage.prompt_tokens == 2600
+        assert response.usage.completion_tokens == 20
+        assert response.usage.total_tokens == 2620
+        assert response.usage.cache_read_tokens == 2000
+        assert response.usage.cache_creation_tokens == 400
+
     def test_streaming_unknown_event_returns_none(self):
         """Test that unknown event types return None."""
         chunk = {"event": "unknown.event", "data": {}}

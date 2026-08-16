@@ -415,7 +415,7 @@ Telegram bridge setup (run inside interactive mode):
         type=str,
         default=None,
         metavar="AGENT",
-        help="Use a specific agent (e.g., --agent lint-editor)",
+        help="Use a specific agent bundle (e.g., --agent coder)",
     )
 
     parser.add_argument(
@@ -433,10 +433,10 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="NAME",
         help=(
-            "Hub designation for this agent (e.g., --as lapis). "
+            "Hub identity for this agent (e.g., --as lapis). "
             "Pairs with --agent to run a bundle under a gem identity: "
             "'kollab --agent coder --as lapis'. Without --as, the hub "
-            "picks a designation automatically."
+            "picks an identity automatically."
         ),
     )
 
@@ -456,7 +456,7 @@ Telegram bridge setup (run inside interactive mode):
         type=str,
         default=None,
         metavar="IDENTITY",
-        help="Attach to a running agent and stream its output (read-only)",
+        help="Attach to a running agent through the interactive TUI proxy",
     )
 
     parser.add_argument(
@@ -529,6 +529,16 @@ Telegram bridge setup (run inside interactive mode):
         action="store_true",
         default=False,
         help="Use simple text output (no fancy boxes or colors)",
+    )
+
+    parser.add_argument(
+        "--no-mcp",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable MCP discovery and external MCP tool calls for this "
+            "process (does not modify saved config)"
+        ),
     )
 
     parser.add_argument(
@@ -1519,28 +1529,19 @@ async def _handle_cli_hub(hub_args: list) -> None:
         socket_path = agent.get("socket_path", "")
         from plugins.hub.models import HubMessage, MessageScope
 
-        # Send to ALL agents (open channel) so everyone sees the operator message
-        all_agents = _get_live_agents()
-        sent_count = 0
-        for a in all_agents:
-            a_socket = a.get("socket_path", "")
-            if not a_socket:
-                continue
-            msg = HubMessage(
-                action="message",
-                from_agent="cli",
-                from_identity=os.environ.get("USER", "user"),
-                to=target,
-                content=content,
-                scope=MessageScope.BROADCAST.value,
-            )
-            ok = await AgentMessenger.send_to_agent(a_socket, msg)
-            if ok:
-                sent_count += 1
-        if sent_count > 0:
-            print(
-                f"sent to {target} (broadcast to {sent_count} agent{'s' if sent_count != 1 else ''})"
-            )
+        # `msg <identity>` is the direct operator path. Keep broadcast as an
+        # explicit separate command so a targeted message cannot wake every
+        # agent in the project.
+        msg = HubMessage(
+            action="message",
+            from_agent="cli",
+            from_identity=os.environ.get("USER", "user"),
+            to=target,
+            content=content,
+            scope=MessageScope.DIRECT.value,
+        )
+        if await AgentMessenger.send_to_agent(socket_path, msg):
+            print(f"sent to {target}")
             # Show conversation file location for the target agent
             from kollabor_config.config_utils import get_conversations_dir
 
@@ -1901,6 +1902,7 @@ def _should_use_daemon() -> bool:
         "--skill",
         "-s",
         "--timeout",
+        "--no-mcp",
     }
     daemon_launch_switches = {
         "--daemon",

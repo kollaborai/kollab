@@ -132,6 +132,9 @@ class ToolDefinition:
     """Explicit override for native_name. Used when native name differs
     from the hyphen-to-underscore conversion. E.g. directory -> file_mkdir."""
 
+    expose_native: bool = True
+    """Whether this definition should be advertised as a native API tool."""
+
     @property
     def native_name(self) -> str:
         """Convert canonical name to native tool name (underscore).

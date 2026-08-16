@@ -11,7 +11,6 @@ Controls:
   escape: detach / exit back to main session
 """
 
-import asyncio
 import json
 import logging
 import re
@@ -162,7 +161,10 @@ class HubConsoleAltView(AltView):
         is_self = ident == self._my_identity
 
         if socket_path and not is_self:
-            asyncio.ensure_future(self._fetch_feed_from_socket(ident, socket_path))
+            self.spawn_background_task(
+                self._fetch_feed_from_socket(ident, socket_path),
+                name="feed_refresh",
+            )
         else:
             self._load_vault_stream(ident)
 
@@ -599,7 +601,10 @@ class HubConsoleAltView(AltView):
         self.feed_lines = [f"attaching to {ident}..."]
 
         # Kick off initial fetch via the unified refresh path
-        asyncio.ensure_future(self._fetch_feed_from_socket(ident, socket_path))
+        self.spawn_background_task(
+            self._fetch_feed_from_socket(ident, socket_path),
+            name="attached_feed_refresh",
+        )
 
     def _detach(self) -> None:
         """Detach from the currently attached agent."""
@@ -615,3 +620,4 @@ class HubConsoleAltView(AltView):
         self.attached_to = None
         self._attached_socket = None
         self._input_buffer = ""
+        await super().on_complete()

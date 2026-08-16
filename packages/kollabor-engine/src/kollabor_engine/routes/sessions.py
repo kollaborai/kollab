@@ -236,14 +236,35 @@ async def create_session(body: CreateSessionRequest, request: Request):
     return session.to_dict()
 
 
+async def _reap_dead_sessions() -> None:
+    """Drop sessions whose daemon is gone.
+
+    Nothing noticed daemons exiting, so the registry kept serving rows for
+    processes that had been dead for hours. A client that reused one got
+    HTTP 409 "Session daemon is not running" on its first turn. A session
+    whose daemon is dead is not a session — stop reporting it as one.
+    """
+    registry = get_session_registry()
+    for session_id in [sid for sid, s in registry.items() if not s.alive]:
+        session = registry.pop(session_id, None)
+        if session is None:
+            continue
+        try:
+            await session.shutdown()
+        except Exception as e:
+            logger.warning("reaping dead session %s: %s", session_id, e)
+
+
 @router.get("")
 async def list_sessions():
+    await _reap_dead_sessions()
     registry = get_session_registry()
     return {"sessions": [s.to_dict() for s in registry.values()]}
 
 
 @router.get("/{session_id}")
 async def get_session(session_id: str):
+    await _reap_dead_sessions()
     registry = get_session_registry()
     session = registry.get(session_id)
     if not session:

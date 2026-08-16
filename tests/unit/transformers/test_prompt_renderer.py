@@ -1,6 +1,7 @@
 """Tests for the system prompt dynamic command renderer."""
 
 import unittest
+from pathlib import Path
 
 from kollabor_ai import PromptRenderer, render_system_prompt
 
@@ -183,6 +184,21 @@ Recent commits:
         self.assertNotIn("<trender>", result)
         # Should have some output (either git info or fallback message)
         self.assertTrue(len(result) > len(prompt) - 100)  # Accounting for tag removal
+
+    def test_session_context_uses_cache_stable_date(self):
+        """The base prompt must not churn its cache prefix every second."""
+        section = (
+            Path(__file__).parents[3]
+            / "bundles"
+            / "agents"
+            / "_base"
+            / "sections"
+            / "01-session-context.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("date '+%Y-%m-%d %Z'", section)
+        self.assertNotIn("%H:%M:%S", section)
+        self.assertNotIn("%ar", section)
 
     def test_directory_structure_in_prompt(self):
         """Test including directory structure in system prompt."""

@@ -437,21 +437,7 @@ class MessageDisplayCoordinator:
                 self.terminal_renderer.invalidate_render_cache()
                 self.terminal_renderer.terminal_state.write_raw("\r\033[?25h")
 
-                if hasattr(self.terminal_renderer, "render_active_area"):
-                    try:
-                        import asyncio
-
-                        try:
-                            loop = asyncio.get_running_loop()
-                        except RuntimeError:
-                            loop = None
-                        if loop and loop.is_running():
-                            asyncio.create_task(
-                                self.terminal_renderer.render_active_area()
-                            )
-                        logger.debug("Triggered immediate render after message display")
-                    except Exception as e:
-                        logger.warning(f"Failed to trigger immediate render: {e}")
+                self._request_render_after_display("message display")
 
             logger.debug("Completed atomic message display")
 
@@ -551,23 +537,7 @@ class MessageDisplayCoordinator:
                 self.terminal_renderer.terminal_state.write_raw("\r\033[?25h")
 
                 # Trigger immediate render to show input box after display
-                if hasattr(self.terminal_renderer, "render_active_area"):
-                    try:
-                        import asyncio
-
-                        try:
-                            loop = asyncio.get_running_loop()
-                        except RuntimeError:
-                            loop = None
-                        if loop and loop.is_running():
-                            asyncio.create_task(
-                                self.terminal_renderer.render_active_area()
-                            )
-                        logger.debug(
-                            "Triggered immediate render after raw text display"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to trigger immediate render: {e}")
+                self._request_render_after_display("raw text display")
 
             logger.debug("Completed raw text display")
 
@@ -917,6 +887,41 @@ class MessageDisplayCoordinator:
         if not active and self.message_queue:
             logger.debug(f"Navigation exited, flushing {len(self.message_queue)} queued messages")
             self.display_queued_messages()
+
+    def _request_render_after_display(self, reason: str) -> None:
+        """Request a render without leaking background task failures."""
+        render_loop = self._render_loop
+        if render_loop is not None and hasattr(render_loop, "request_render"):
+            try:
+                render_loop.request_render()
+            except Exception:
+                logger.exception("Failed to request render after %s", reason)
+            return
+
+        if not hasattr(self.terminal_renderer, "render_active_area"):
+            return
+
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self.terminal_renderer.render_active_area())
+        except RuntimeError:
+            return
+        except Exception:
+            logger.exception("Failed to schedule render after %s", reason)
+            return
+
+        def _observe_failure(completed_task) -> None:
+            try:
+                completed_task.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Render task failed after %s", reason)
+
+        task.add_done_callback(_observe_failure)
+        logger.debug("Scheduled fallback render after %s", reason)
 
     def set_render_loop(self, render_loop) -> None:
         """Set the render loop for triggering renders after message display.

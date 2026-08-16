@@ -30,9 +30,11 @@ crashes unconditionally on construction (``get_value()`` reads
 ``self.current_value`` before ``__init__`` has set it -- verified empirically).
 That widget class is out of scope for this change (do not touch
 ``packages/kollabor-tui/src/kollabor_tui/widgets/spin_box.py``), so "Max
-Tokens" is a ``TextInputWidget`` with ``validation="integer"`` instead of a
+Output Tokens" is a ``TextInputWidget`` with ``validation="integer"`` instead of a
 ``SpinBoxWidget`` -- functionally equivalent (direct numeric entry, empty
-means "use the model default"), just not literally that class.
+means "use the provider default"), just not literally that class. The
+ChatGPT OAuth/Codex endpoint gets a read-only "backend default" label because
+it rejects output-token overrides entirely.
 """
 
 from __future__ import annotations
@@ -85,6 +87,18 @@ def _resolve_provider_type(profile_manager: Any, provider_profile: str) -> str:
         except Exception:
             return provider_profile
     return provider_profile
+
+
+def _is_chatgpt_codex_profile(profile_manager: Any, provider_profile: str) -> bool:
+    """Whether a profile targets the ChatGPT OAuth/Codex transport."""
+    if not profile_manager or not provider_profile:
+        return False
+    try:
+        profile = profile_manager.get_profile(provider_profile)
+        endpoint = profile.get_endpoint() if profile is not None else ""
+    except Exception:
+        return False
+    return "chatgpt.com" in str(endpoint or "").lower()
 
 
 def _resolve_profile_entry(profile_manager: Any, entry: Any) -> Tuple[str, str]:
@@ -168,8 +182,12 @@ def _default_max_tokens(model: str) -> int:
     info = _model_registry_info(model)
     value = info.get("default_output") or info.get("max_output")
     if isinstance(value, int) and value > 0:
-        return value
-    return 4096
+        # The registry value is a model hint/ceiling. Kollab's provider config
+        # intentionally reserves 16K by default so a large output allowance
+        # does not consume the context budget on every turn. Users can still
+        # enter the registry ceiling explicitly for long generation.
+        return min(value, 16384)
+    return 16384
 
 
 def _suggest_name(model: str, existing: set, style: str) -> str:
@@ -783,6 +801,7 @@ class LoadoutFormAltView(AltView):
         self._temperature_widget: Any = None
         self._effort_widget: Any = None
         self._max_tokens_widget: Any = None
+        self._max_tokens_supported: bool = True
         self._description_widget: Any = None
         self._fields: List[Any] = []
         self._focus_index: int = 0
@@ -952,18 +971,31 @@ class LoadoutFormAltView(AltView):
         self._effort_widget = DropdownWidget(
             {"label": "Effort", "options": list(_EFFORT_OPTIONS), "value": effort}, ""
         )
-        # SpinBoxWidget is unusable here -- see module docstring. A validated
-        # integer TextInputWidget gives the same "type an exact number"
-        # behavior; empty means "use the model default" (max_tokens=None).
-        self._max_tokens_widget = TextInputWidget(
-            {
-                "label": "Max Tokens",
-                "value": str(int(max_tokens)),
-                "validation": "integer",
-                "placeholder": "model default",
-            },
-            "",
+        self._max_tokens_supported = not _is_chatgpt_codex_profile(
+            self._profile_manager, provider_profile
         )
+        if self._max_tokens_supported:
+            # SpinBoxWidget is unusable here -- see module docstring. A
+            # validated integer TextInputWidget gives the same "type an exact
+            # number" behavior; empty means "use the provider default".
+            self._max_tokens_widget = TextInputWidget(
+                {
+                    "label": "Max Output Tokens",
+                    "value": str(int(max_tokens)),
+                    "validation": "integer",
+                    "placeholder": "model default",
+                },
+                "",
+            )
+        else:
+            # The ChatGPT OAuth/Codex endpoint rejects both max_tokens and
+            # max_output_tokens. Make that capability boundary visible instead
+            # of presenting an editable value that the wire layer must ignore.
+            self._max_tokens_widget = LabelWidget(
+                label="Max Output Tokens",
+                value="backend default (ChatGPT OAuth)",
+                help_text="This endpoint does not accept an output-token override.",
+            )
         self._description_widget = TextInputWidget(
             {"label": "Description", "value": description, "placeholder": "optional"},
             "",
@@ -1061,30 +1093,36 @@ class LoadoutFormAltView(AltView):
                 "" if (not effort_raw or effort_raw == "default") else str(effort_raw)
             )
 
-            max_tokens_raw = str(
-                self._max_tokens_widget.get_pending_value() or ""
-            ).strip()
-            try:
-                max_tokens = int(max_tokens_raw) if max_tokens_raw else None
-            except ValueError:
-                max_tokens = None
+            max_tokens = None
+            if self._max_tokens_supported:
+                max_tokens_raw = str(
+                    self._max_tokens_widget.get_pending_value() or ""
+                ).strip()
+                try:
+                    max_tokens = int(max_tokens_raw) if max_tokens_raw else None
+                except ValueError:
+                    max_tokens = None
 
-            # Validate against the model's known output ceiling -- saving
-            # 320000 for a 128K-output model would just 400 at request time.
-            if max_tokens is not None:
-                if max_tokens < 1:
-                    self._error = "Max Tokens must be at least 1."
-                    self._stage = "edit"
-                    return
-                model_name = self._base.model if self._base else ""
-                ceiling = _model_registry_info(model_name).get("max_output")
-                if isinstance(ceiling, int) and ceiling > 0 and max_tokens > ceiling:
-                    self._error = (
-                        f"Max Tokens {max_tokens:,} exceeds the model limit "
-                        f"({ceiling:,})."
-                    )
-                    self._stage = "edit"
-                    return
+                # Validate against the model's known output ceiling -- saving
+                # 320000 for a 128K-output model would just 400 at request time.
+                if max_tokens is not None:
+                    if max_tokens < 1:
+                        self._error = "Max Output Tokens must be at least 1."
+                        self._stage = "edit"
+                        return
+                    model_name = self._base.model if self._base else ""
+                    ceiling = _model_registry_info(model_name).get("max_output")
+                    if (
+                        isinstance(ceiling, int)
+                        and ceiling > 0
+                        and max_tokens > ceiling
+                    ):
+                        self._error = (
+                            f"Max Output Tokens {max_tokens:,} exceeds the model limit "
+                            f"({ceiling:,})."
+                        )
+                        self._stage = "edit"
+                        return
 
             description = str(
                 self._description_widget.get_pending_value() or ""

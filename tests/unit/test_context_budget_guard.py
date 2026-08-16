@@ -76,7 +76,7 @@ class TestContextBudgetGuard(unittest.TestCase):
         self.assertNotEqual(kept[0].get("role"), "tool")
         self.assertNotIn("tool_call_id", kept[0])
 
-    def test_sole_orphan_tool_result_is_dropped(self):
+    def test_sole_orphan_tool_result_becomes_recovery_input(self):
         """Never send a Responses function output without its function call."""
         svc = _service()
         # This is the exact failure shape after trimming the call owner.
@@ -84,7 +84,10 @@ class TestContextBudgetGuard(unittest.TestCase):
 
         kept = svc._enforce_token_budget(list(history))
 
-        self.assertEqual(kept, [])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["role"], "user")
+        self.assertIn("context recovery", kept[0]["content"])
+        self.assertNotIn("tool_call_id", kept[0])
 
     def test_orphan_tool_result_is_dropped_when_it_is_last_message(self):
         """A current tool result is invalid if its owner was trimmed away."""
@@ -99,7 +102,19 @@ class TestContextBudgetGuard(unittest.TestCase):
         svc._provider.config.context_window = 200000
         kept = svc._enforce_token_budget(list(history))
 
-        self.assertEqual(kept, [])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["role"], "user")
+        self.assertIn("context recovery", kept[0]["content"])
+
+    def test_empty_input_becomes_recovery_input(self):
+        """The provider must never receive an empty input array."""
+        svc = _service()
+
+        kept = svc._enforce_token_budget([])
+
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["role"], "user")
+        self.assertIn("context recovery", kept[0]["content"])
 
     def test_overhead_is_configurable(self):
         # A huge configured overhead shrinks the budget and forces more trimming.

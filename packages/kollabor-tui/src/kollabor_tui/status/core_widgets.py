@@ -5,7 +5,6 @@ current directory, profile, model, status, stats, agent, and skills.
 """
 
 import logging
-import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -299,23 +298,19 @@ def render_endpoint(width: int, ctx: Optional[WidgetContext]) -> str:
 def render_status(
     width: int,
     ctx: Optional[WidgetContext],
-    *,
-    now: float | None = None,
 ) -> str:
     """Render status indicator widget (Ready/Working).
 
     Width-aware formats:
-    - Full (7+ chars): "* Ready" or "* Working"
+    - Full enough to fit: "* Ready" or "* Working"
     - Compact (<7 chars): "*R" or "*W"
     """
-    return _render_status(width, ctx, now=now)
+    return _render_status(width, ctx)
 
 
 def _render_status(
     width: int,
     ctx: Optional[WidgetContext],
-    *,
-    now: float | None = None,
 ) -> str:
     try:
         is_processing = False
@@ -324,19 +319,13 @@ def _render_status(
         if not is_processing and ctx and ctx.remote_state:
             is_processing = ctx.remote_state.get("is_processing", False) is True
 
-        health = _state_health_label(ctx, now=now)
-
         status = "Working" if is_processing else "Ready"
         color = T().warning[0] if is_processing else T().ai_tag
         status_color = T().warning[0] if is_processing else (255, 255, 255)
         icon = _fg("*", color)
         text = _fg(status, status_color)
-        text_with_health = text + _fg(f" {health}", color)
-        full_plain = f"* {status} {health}"
         status_plain = f"* {status}"
 
-        if width >= len(full_plain):
-            return f"{icon} {text_with_health}"
         if width >= len(status_plain):
             return f"{icon} {text}"
         if width >= 2:
@@ -347,33 +336,6 @@ def _render_status(
     except Exception as e:
         logger.error(f"status widget error: {e}")
         return _fg("*?", T().text_dim)
-
-
-def _state_health_label(ctx: Optional[WidgetContext], *, now: float | None = None) -> str:
-    """Render widget-state source/freshness so daemon truth is inspectable."""
-    rs = ctx.remote_state if ctx and ctx.remote_state else {}
-    if not rs:
-        return "local"
-
-    now = time.monotonic() if now is None else now
-    source = str(rs.get("_source") or "remote")
-    updated_at = float(rs.get("_updated_at") or 0.0)
-    age = max(0.0, now - updated_at) if updated_at else 0.0
-    stale = bool(rs.get("_stale")) or (updated_at > 0 and age > 10.0)
-    degraded = bool(rs.get("_degraded"))
-
-    if getattr(ctx, "is_attach_mode", False) is True:
-        mode = "attach"
-    elif int(rs.get("daemon_pid") or 0):
-        mode = "daemon"
-    else:
-        mode = str(rs.get("runtime_mode") or "local")
-
-    parts = [mode, "stale" if stale else "fresh"]
-    if degraded:
-        parts.append("degraded")
-    parts.append(source)
-    return " ".join(parts)
 
 
 def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:

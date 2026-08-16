@@ -42,6 +42,27 @@ def test_xml_native_and_mcp_normalize_to_executor_shape():
         "state": "ok",
     }
 
+    native_hub_spawn = normalize_native_tool_call(
+        SimpleNamespace(
+            id="call_spawn",
+            name="hub_spawn",
+            type="function",
+            input={"name": "lapis", "type": "research", "task": "audit"},
+        ),
+        plugin_handler_names={"hub_spawn"},
+    )
+    assert native_hub_spawn["type"] == "hub_spawn"
+    assert native_hub_spawn["name"] == "hub_spawn"
+    assert native_hub_spawn["input"] == {
+        "name": "lapis",
+        "type": "research",
+        "task": "audit",
+    }
+    assert native_hub_spawn["task"] == "audit"
+    assert "name" not in {
+        key for key in native_hub_spawn if key not in {"name", "input", "arguments"}
+    }
+
     native_mcp = normalize_native_tool_call(
         SimpleNamespace(id="call_mcp", name="browser_get_page", input={"tab": "active"}),
         mcp_tool_names={"browser_get_page"},
@@ -53,6 +74,17 @@ def test_xml_native_and_mcp_normalize_to_executor_shape():
         "input": {"tab": "active"},
         "arguments": {"tab": "active"},
     }
+
+    native_git = normalize_native_tool_call(
+        SimpleNamespace(
+            id="call_git",
+            name="git",
+            input={"command": "git status --short"},
+        )
+    )
+    assert native_git["type"] == "terminal"
+    assert native_git["name"] == "git"
+    assert native_git["command"] == "git status --short"
 
 
 def test_doctor_contract_probe_reports_stable_proof_labels():

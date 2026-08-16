@@ -326,3 +326,28 @@ async def test_call_after_close_raises_immediately() -> None:
     # Writer must be untouched -- no bytes emitted post-close.
     assert writer.buffer == []
     assert writer.drained == 0
+
+
+@pytest.mark.asyncio
+async def test_close_then_cancel_call_does_not_leave_unretrieved_future_error() -> None:
+    """Closing and immediately cancelling a caller must not leak a Future error."""
+    import gc
+
+    writer = FakeStreamWriter()
+    client = RpcClient(writer)
+    loop = asyncio.get_running_loop()
+    contexts: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    try:
+        task = asyncio.create_task(client.call("slow", timeout=30.0))
+        await _wait_for_write(writer, expected=1)
+        client.close()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gc.collect()
+        await asyncio.sleep(0)
+        assert not [c for c in contexts if "Future exception was never retrieved" in c.get("message", "")]
+    finally:
+        loop.set_exception_handler(previous_handler)

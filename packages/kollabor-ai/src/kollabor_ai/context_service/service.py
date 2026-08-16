@@ -62,6 +62,9 @@ class ContextService:
         # Divergent-hash warnings pending inline injection (fallback
         # path until the agent notification system lands)
         self._divergence_warnings_pending: List[Dict[str, Any]] = []
+        # Compatibility rail for legacy keyword-trigger context. These
+        # blocks are request-local and must never enter the ledger/history.
+        self._ephemeral_injections: List[str] = []
 
     def set_event_bus(self, event_bus: Any) -> None:
         """Set the event bus reference.
@@ -126,6 +129,17 @@ class ContextService:
         """Return the attached HubBridge, or None if disabled."""
         return self._hub_bridge
 
+    def queue_ephemeral_injection(self, content: str) -> None:
+        """Queue request-local context without persisting it in history."""
+        if content:
+            self._ephemeral_injections.append(content)
+
+    def drain_ephemeral_injections(self) -> List[str]:
+        """Drain legacy request-local context blocks for the next API call."""
+        injections = self._ephemeral_injections
+        self._ephemeral_injections = []
+        return injections
+
     def queue_divergence_warning(self, warning: Dict[str, Any]) -> None:
         """Queue a divergent-file warning for inline injection.
 
@@ -170,6 +184,7 @@ class ContextService:
         file_path: Optional[str] = None,
         file_lines: Optional[tuple] = None,
         file_version: Optional[int] = None,
+        content_hash: Optional[str] = None,
     ) -> Optional[LedgerEntry]:
         """Add a heavy item to the ledger.
 
@@ -185,6 +200,7 @@ class ContextService:
             file_path: For file reads, the on-disk path.
             file_lines: For partial file reads, (start, end).
             file_version: For file reads, the monotonic version.
+            content_hash: Optional producer-supplied hash of the raw content.
 
         Returns:
             The new LedgerEntry, or None if the item is under the
@@ -195,14 +211,14 @@ class ContextService:
 
         now = datetime.now()
         ctx_id = self._ledger.next_ctx_id()
-        content_hash = compute_hash(content)
+        stored_content_hash = content_hash or compute_hash(content)
 
         entry = LedgerEntry(
             ctx_id=ctx_id,
             kind=kind,
             tool=tool,
             label=label,
-            content_hash=content_hash,
+            content_hash=stored_content_hash,
             size_bytes=len(content),
             message_uuid=message_uuid,
             added_at=now,

@@ -15,6 +15,18 @@ from kollabor_ai.session_naming import generate_branch_name, generate_session_na
 
 logger = logging.getLogger(__name__)
 
+SESSION_STAT_KEYS = (
+    "messages",
+    "input_tokens",
+    "output_tokens",
+    "total_input_tokens",
+    "total_output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "total_cache_read_tokens",
+    "total_cache_creation_tokens",
+)
+
 
 class ConversationManager:
     """Manage conversation state and history.
@@ -73,9 +85,34 @@ class ConversationManager:
             "model_used": None,
         }
 
+        # Bound by LLMService after its live stats dictionary is initialized.
+        # Keeping the same mutable mapping lets loads restore counters in place.
+        self._session_stats: Optional[Dict[str, Any]] = None
+
         logger.info(
             f"Conversation manager initialized with session: {self.current_session_id}"
         )
+
+    def bind_session_stats(self, session_stats: Dict[str, Any]) -> None:
+        """Bind the live LLM statistics mapping used for persistence and restore."""
+        self._session_stats = session_stats
+
+    def _session_stats_snapshot(self) -> Dict[str, Any]:
+        """Return the stable persisted subset of the live session statistics."""
+        source = self._session_stats or {}
+        return {key: source.get(key, 0) for key in SESSION_STAT_KEYS}
+
+    def _restore_session_stats(self, saved_stats: Optional[Dict[str, Any]]) -> None:
+        """Restore valid known counters, defaulting unsafe values to zero."""
+        if self._session_stats is None:
+            return
+        source = saved_stats if isinstance(saved_stats, dict) else {}
+        for key in SESSION_STAT_KEYS:
+            value = source.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                logger.warning("Ignoring invalid persisted session counter: %s", key)
+                value = 0
+            self._session_stats[key] = value
 
     def add_message(
         self,
@@ -367,6 +404,7 @@ class ConversationManager:
             "metadata": self.conversation_metadata,
             "summary": self.get_conversation_summary(),
             "messages": self.messages,
+            "session_stats": self._session_stats_snapshot(),
         }
 
         with open(filepath, "w") as f:
@@ -410,8 +448,9 @@ class ConversationManager:
             # Rebuild message index
             self.message_index = {m["uuid"]: m for m in self.messages}
 
-            # Update context window
+            # Update context window and restore persisted usage counters.
             self._update_context_window()
+            self._restore_session_stats(data.get("session_stats"))
 
             logger.info(f"Loaded conversation from: {filepath}")
             return True
@@ -442,6 +481,7 @@ class ConversationManager:
                 "message_index": self.message_index,
                 "context_window": self.context_window,
                 "current_parent_uuid": self.current_parent_uuid,
+                "session_stats": self._session_stats_snapshot(),
                 "saved_at": datetime.now().isoformat(),
             }
 
@@ -455,6 +495,22 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Failed to save session: {e}")
             return False
+
+    def _load_snapshot_session_stats(
+        self, session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Load persisted counters from the sidecar used by streaming sessions."""
+        snapshot_file = self.snapshots_dir / f"{session_id}_snapshot.json"
+        if not snapshot_file.exists():
+            return None
+        try:
+            with open(snapshot_file, "r") as f:
+                snapshot = json.load(f)
+            saved_stats = snapshot.get("session_stats")
+            return saved_stats if isinstance(saved_stats, dict) else None
+        except Exception as e:
+            logger.warning(f"Failed to load session stats from {snapshot_file}: {e}")
+            return None
 
     def load_session(self, session_id: str) -> bool:
         """Load session from storage.
@@ -506,8 +562,13 @@ class ConversationManager:
             if not self.message_index:
                 self.message_index = {m["uuid"]: m for m in self.messages}
 
-            # Update context window
+            # Update context window and restore persisted usage counters. Streaming
+            # JSONL sessions store their counters in the matching saved snapshot.
             self._update_context_window()
+            saved_stats = data.get("session_stats")
+            if saved_stats is None:
+                saved_stats = self._load_snapshot_session_stats(session_id)
+            self._restore_session_stats(saved_stats)
 
             logger.info(f"Loaded session: {session_id} from: {session_file}")
             return True
@@ -672,6 +733,7 @@ class ConversationManager:
             "turn_count": 0,
             "topics": [],
         }
+        recognized_record = False
 
         try:
             with open(session_file, "r") as f:
@@ -680,27 +742,68 @@ class ConversationManager:
                         data = json.loads(line.strip())
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(data, dict):
+                        continue
 
                     # Handle save_session format (complete session object)
                     if "messages" in data and isinstance(data["messages"], list):
+                        saved_messages = data["messages"]
+                        saved_metadata = data.get("metadata", metadata)
+                        saved_index = data.get("message_index", {})
+                        saved_context = data.get("context_window", [])
+                        valid_messages = all(
+                            isinstance(message, dict)
+                            and isinstance(message.get("uuid"), str)
+                            and bool(message["uuid"])
+                            for message in saved_messages
+                        )
+                        valid_index = isinstance(saved_index, dict) and all(
+                            isinstance(message_uuid, str)
+                            and isinstance(message, dict)
+                            for message_uuid, message in saved_index.items()
+                        )
+                        valid_context = isinstance(saved_context, list) and all(
+                            isinstance(message, dict) for message in saved_context
+                        )
+                        if not (
+                            valid_messages
+                            and isinstance(saved_metadata, dict)
+                            and valid_index
+                            and valid_context
+                        ):
+                            logger.warning(
+                                "save_session format validation failed for %s: "
+                                "valid_messages=%s valid_index=%s valid_context=%s "
+                                "metadata_is_dict=%s",
+                                session_file,
+                                valid_messages,
+                                valid_index,
+                                valid_context,
+                                isinstance(saved_metadata, dict),
+                            )
+                            continue
                         return {
-                            "messages": data["messages"],
-                            "metadata": data.get("metadata", metadata),
-                            "message_index": data.get("message_index", {}),
-                            "context_window": data.get("context_window", []),
+                            "messages": saved_messages,
+                            "metadata": saved_metadata,
+                            "message_index": saved_index,
+                            "context_window": saved_context,
                             "current_parent_uuid": data.get("current_parent_uuid"),
+                            "session_stats": data.get("session_stats"),
                         }
 
                     # Handle conversation logger streaming format
                     msg_type = data.get("type")
                     if msg_type == "conversation_metadata":
+                        recognized_record = True
                         metadata["started_at"] = data.get("startTime")
                         metadata["working_directory"] = data.get("cwd", "unknown")
                         metadata["git_branch"] = data.get("gitBranch", "unknown")
                     elif msg_type == "conversation_end":
+                        recognized_record = True
                         summary = data.get("summary", {})
                         metadata["topics"] = summary.get("themes", [])
                     elif msg_type in ("user", "assistant"):
+                        recognized_record = True
                         content = data.get("message", {}).get("content", "")
                         if isinstance(content, list) and content:
                             content = content[0].get("text", "")
@@ -718,6 +821,9 @@ class ConversationManager:
                         )
                         if msg_type == "user":
                             metadata["turn_count"] = metadata.get("turn_count", 0) + 1
+
+            if not recognized_record:
+                return {}
 
             # Build summary-like shape to keep interface stable
             return {

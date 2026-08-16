@@ -26,6 +26,15 @@ from .xml_parser import XMLCommandParser
 
 logger = logging.getLogger(__name__)
 
+
+def _coerce_capture_lines(value: Any, default: int = 50) -> int:
+    """Normalize optional capture counts before slicing or ring-buffer access."""
+    try:
+        lines = int(value)
+    except (TypeError, ValueError, OverflowError):
+        lines = default
+    return max(1, lines)
+
 # Pre-compiled regex patterns for performance (used in display filter)
 _ORCH_QUICK_CHECK = re.compile(
     r"</?(?:agent|status|capture|stop|message|clone|team|broadcast|sys_msg|context_inject)|<task>",
@@ -674,7 +683,7 @@ class AgentOrchestratorPlugin(BasePlugin):
         from kollabor_agent.tool_executor import ToolExecutionResult
 
         target = tool_data.get("target", "")
-        lines = tool_data.get("lines", 50)
+        lines = _coerce_capture_lines(tool_data.get("lines"), 50)
         if not target:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -1113,6 +1122,7 @@ Aliases: /sub, /sa"""
                     message=f"Invalid line count: {args[1]}",
                     display_type="error",
                 )
+        lines = _coerce_capture_lines(lines)
 
         # Handle "all" - capture from all agents
         if agent_name.lower() == "all":
@@ -2344,6 +2354,8 @@ You can spawn parallel sub-agents to work on tasks concurrently. Each agent runs
         """
         if not self.orchestrator:
             return "[error: orchestrator not initialized]"
+
+        lines = _coerce_capture_lines(lines)
 
         output = self.orchestrator.capture_output(target, lines)
         agent = self.orchestrator.get_agent(target)

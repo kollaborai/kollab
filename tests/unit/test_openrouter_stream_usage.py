@@ -100,6 +100,53 @@ def test_openrouter_usage_with_cached_tokens():
     assert response.usage.prompt_tokens == 100
 
 
+def test_streaming_cache_creation_alias_and_zero_total_usage():
+    """Cache creation aliases surface even when total_tokens is zero."""
+    chunk = {
+        "choices": [],
+        "usage": {
+            "total_tokens": 0,
+            "prompt_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 9},
+        },
+    }
+    response = OpenAIResponseTransformer.transform_openai_chunk(chunk, "gpt-4")
+    assert response is not None
+    assert response.usage.cache_read_tokens == 3
+    assert response.usage.cache_creation_tokens == 9
+
+
+def test_streaming_without_usage_fields_returns_none():
+    """Empty chunks without accounting fields remain suppressed."""
+    assert OpenAIResponseTransformer.transform_openai_chunk(
+        {"choices": [], "usage": {"total_tokens": 0}}, "gpt-4"
+    ) is None
+
+
+
+def test_nonstreaming_cache_creation_aliases_are_extracted():
+    """Non-streaming OpenAI-compatible usage exposes cache creation tokens."""
+    response = OpenAIResponseTransformer.transform_openai_response(
+        {
+            "choices": [
+                {
+                    "message": {"content": "ok"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 1,
+                "total_tokens": 5,
+                "cache_creation_input_tokens": 12,
+                "cache_read_input_tokens": 8,
+            },
+        },
+        "gpt-4",
+    )
+    assert response.usage.cache_creation_tokens == 12
+    assert response.usage.cache_read_tokens == 8
+
+
 def test_chunk_with_content_and_usage_streams_content():
     """Verify that chunks with BOTH real content and usage stream content normally.
 

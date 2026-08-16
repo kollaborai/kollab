@@ -87,7 +87,55 @@ class TestStreamingHandler(unittest.TestCase):
         )
 
         self.assertEqual(result, "test response")
+
+    def test_call_llm_refreshes_native_tools_after_mcp_discovery(self):
+        """Use tools discovered while the first request was waiting."""
+        mcp_complete = asyncio.Event()
+        discovered_tools = [{"name": "list_tasks"}]
+        native_tools_provider = MagicMock(return_value=discovered_tools)
+
+        async def complete_discovery():
+            await asyncio.sleep(0)
+            mcp_complete.set()
+
+        self.loop.create_task(complete_discovery())
+        self.loop.run_until_complete(
+            self.handler.call_llm(
+                conversation_history=[],
+                max_history=90,
+                native_tools=None,
+                mcp_discovery_complete=mcp_complete,
+                is_cancelled_fn=lambda: False,
+                native_tools_provider=native_tools_provider,
+            )
+        )
+
+        native_tools_provider.assert_called_once_with()
+        self.assertEqual(
+            self.api_service.call_llm.call_args.kwargs["tools"], discovered_tools
+        )
         self.api_service.call_llm.assert_called_once()
+
+    def test_call_llm_forwards_provider_options(self):
+        """Provider-native options survive the streaming-handler boundary."""
+        mcp_complete = asyncio.Event()
+        mcp_complete.set()
+
+        self.loop.run_until_complete(
+            self.handler.call_llm(
+                conversation_history=[],
+                max_history=90,
+                native_tools=None,
+                mcp_discovery_complete=mcp_complete,
+                is_cancelled_fn=lambda: False,
+                prompt_cache_key="stable-key",
+                previous_response_id="response-123",
+            )
+        )
+
+        call_kwargs = self.api_service.call_llm.call_args.kwargs
+        self.assertEqual(call_kwargs["prompt_cache_key"], "stable-key")
+        self.assertEqual(call_kwargs["previous_response_id"], "response-123")
 
     def test_call_llm_cancelled_before_start(self):
         """Test LLM call cancelled before starting."""
@@ -110,15 +158,19 @@ class TestStreamingHandler(unittest.TestCase):
                 )
             )
 
-    @patch(
-        "kollabor.llm.streaming_handler.asyncio.wait_for",
-        side_effect=asyncio.TimeoutError,
-    )
+    @patch("kollabor.llm.streaming_handler.asyncio.wait_for")
     def test_call_llm_waits_for_mcp_discovery(self, mock_wait):
         """Test LLM call waits for MCP discovery."""
         conversation_history = []
         native_tools = None
         mcp_complete = asyncio.Event()
+
+        # Consume the awaitable passed to wait_for before forcing its timeout.
+        async def _wait_and_timeout(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError
+
+        mock_wait.side_effect = _wait_and_timeout
 
         def is_cancelled_fn():
             return False

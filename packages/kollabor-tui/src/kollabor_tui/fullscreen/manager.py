@@ -9,15 +9,6 @@ from kollabor_events.models import EventType
 from .plugin import FullScreenPlugin, PluginMetadata
 from .session import FullScreenSession
 
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -294,7 +285,7 @@ class FullScreenManager:
             "plugin_name": plugin.name,
             "success": success,
             "stats": self.current_session.get_stats() if self.current_session else None,
-            "timestamp": _get_loop().time(),
+            "timestamp": asyncio.get_running_loop().time(),
         }
         self.session_history.append(session_record)
 

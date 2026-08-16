@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -66,18 +67,28 @@ def get_socket_dir() -> Path:
 
 
 def _atomic_write(path: Path, data: dict) -> None:
-    """Write JSON atomically via temp file + rename."""
-    tmp = path.with_suffix(".tmp")
+    """Write JSON atomically via a unique temp file and rename."""
+    tmp_name = ""
     try:
-        with open(tmp, "w") as f:
+        # A fixed ``.tmp`` path lets concurrent heartbeats unlink each
+        # other's temporary file.  Create a per-writer file in the same
+        # directory so os.replace remains atomic on the target filesystem.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        tmp.rename(path)
+        os.replace(tmp_name, path)
+        tmp_name = ""
     except Exception as e:
         logger.error(f"Atomic write failed for {path}: {e}")
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
 
 class PresenceManager:

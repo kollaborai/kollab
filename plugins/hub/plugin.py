@@ -42,7 +42,12 @@ from .messaging_bridge import (
     IncomingMessage,
     MessagingBridge,
 )
-from .messenger import AgentMessenger, AgentSocketServer
+from .messenger import (
+    AgentMessenger,
+    AgentSocketServer,
+    _coerce_line_count,
+    _is_durable_control,
+)
 from .models import (
     COORDINATOR_IDENTITY,
     POOL_BY_NAME,
@@ -58,7 +63,7 @@ from .presence import PresenceManager, get_messages_dir
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .task_ledger import TaskLedger
-from .vault import AgentVault
+from .vault import AgentVault, sanitize_rebirth_text
 
 # Agent DNS (discovery, identity, trust) — guarded: PyNaCl is optional
 try:
@@ -94,6 +99,22 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
+_TASK_CRON_ID_RE = re.compile(
+    r"\[\s*task\s+reminder\s*:\s*([^\]\s]+)\s*\]",
+    re.IGNORECASE,
+)
+_TASK_CRON_REPORT_TO_RE = re.compile(
+    r"^\s*report\s+to\s*:\s*([^\s]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_HUB_MSG_EMBEDDED_ATTRS_RE = re.compile(
+    r'^\s*(?:<hub_msg\s+)?to\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))'
+    r'(?:\s+wait\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
+    r'(?:\s+force\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
+    r"(?:\s*>\s*(.*?)(?:</hub_msg>)?)?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 @dataclass
 class HubWakeDecision:
@@ -102,14 +123,6 @@ class HubWakeDecision:
     mode: str
     should_trigger: bool
     reason: str = ""
-
-
-def _get_loop():
-    """Return the running event loop, or create one if none is running."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.new_event_loop()
 
 
 @dataclass
@@ -273,6 +286,7 @@ class HubPlugin(BasePlugin):
 
         # State
         self._roster: List[Dict] = []
+        self._startup_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
         self._dreaming_task: Optional[asyncio.Task] = None
@@ -283,6 +297,10 @@ class HubPlugin(BasePlugin):
         self._presence_sweep_task: Optional[asyncio.Task] = None
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
+        # Self-restart coordination: retain the timeout watchdog and ensure
+        # graceful and forced paths can execute the replacement only once.
+        self._self_restart_watchdog_task: Optional[asyncio.Task] = None
+        self._self_restart_exec_started: bool = False
         # True when this session owns the inbound poll; False on standby
         # (another session polls the shared token). See _messaging_bridge_loop.
         self._bridge_polling: bool = False
@@ -315,8 +333,6 @@ class HubPlugin(BasePlugin):
         self._last_activity_at: float = time.time()
         self._last_dream_at: float = 0.0
         self._last_autosave_at: float = 0.0
-        self._last_scratchpad_inject_at: float = 0.0
-        self._cached_scratchpad: str = ""  # cached scratchpad content (refreshed on timer)
 
         # Loop prevention metrics (phase 3 observability)
         self._loop_metrics: Dict[str, int] = {
@@ -2414,6 +2430,31 @@ class HubPlugin(BasePlugin):
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
         content = tool_data.get("message", tool_data.get("content", ""))
 
+        # Some native-tool calls incorrectly put the XML attribute text in the
+        # target value (for example ``to=\"sapphire\" wait=\"true\"``).
+        # Normalize that shape before routing so it cannot create literal
+        # identities such as ``to=\"sapphire\"`` or silently lose ``wait``.
+        target = str(target or "").strip()
+        content = str(content or "").strip()
+        embedded_attrs = _HUB_MSG_EMBEDDED_ATTRS_RE.match(target)
+        if embedded_attrs:
+            target = next(
+                value for value in embedded_attrs.groups()[0:3] if value is not None
+            ).strip()
+            embedded_wait = next(
+                (value for value in embedded_attrs.groups()[3:6] if value is not None),
+                "",
+            )
+            embedded_force = next(
+                (value for value in embedded_attrs.groups()[6:9] if value is not None),
+                "",
+            )
+            embedded_content = embedded_attrs.group(10)
+            wait_attr = str(wait_attr or embedded_wait or "").lower()
+            force_attr = str(force_attr or embedded_force or "").lower()
+            if not content and embedded_content:
+                content = embedded_content.strip()
+
         # Salvage: LLMs sometimes emit hub_msg as a native tool call with
         # the entire message body jammed inside the `to` param after an
         # escaped quote (e.g. to='lapis">actual message here'). When this
@@ -2422,6 +2463,7 @@ class HubPlugin(BasePlugin):
         if not content and target:
             # Look for patterns like: identity">message  or  identity" >message
             import re as _re
+
             _salvage = _re.match(
                 r'^([a-zA-Z0-9_-]+)["\']\s*>\s*(.+)',
                 target.strip(),
@@ -2445,7 +2487,7 @@ class HubPlugin(BasePlugin):
                 output="",
                 error=(
                     f"hub_msg to {target!r} has empty message. "
-                    f"Use: <hub_msg to=\"{target}\">your message here</hub_msg>"
+                    f'Use: <hub_msg to="{target}">your message here</hub_msg>'
                 ),
             )
 
@@ -2519,11 +2561,25 @@ class HubPlugin(BasePlugin):
                 sender_has_task = False
 
         metadata = {"wait": any_wait}
+        task_id = str(tool_data.get("task_id", "") or "").strip()
+        if task_id:
+            metadata["task_id"] = task_id
         if self._is_ack_only_content(content, sender_has_active_task=sender_has_task):
             metadata["ack"] = True
-        elif self._has_report_evidence(content, sender_has_active_task=sender_has_task):
+        elif self._has_report_evidence(
+            content,
+            sender_has_active_task=sender_has_task,
+            # A task id identifies the thread, but does not by itself prove
+            # that this outbound message is a report.  Otherwise every
+            # coordinator assignment carrying a task id is misclassified as
+            # a report and never records the expected reply.
+            metadata={"wait": any_wait},
+        ):
             metadata["task_report"] = True
-        elif self._has_request_evidence(content):
+        elif self._is_explicit_task_assignment(
+            content,
+            task_id=task_id,
+        ):
             metadata["task_assignment"] = True
 
         # Route the message
@@ -2702,22 +2758,9 @@ class HubPlugin(BasePlugin):
         self._self_stop_requested = True  # triggers existing shutdown path
         asyncio.ensure_future(self._perform_self_restart())
 
-        async def _self_restart_watchdog() -> None:
-            try:
-                await asyncio.sleep(8.0)
-            except asyncio.CancelledError:
-                return
-            logger.warning(
-                f"{identity.identity}: self-restart watchdog fired, "
-                f"forcing execvp after graceful shutdown timeout"
-            )
-            try:
-                os.execvp(exec_argv[0], exec_argv)
-            except Exception as e:
-                logger.error(f"execvp failed: {e}, falling back to exit")
-                os._exit(0)
-
-        asyncio.ensure_future(_self_restart_watchdog())
+        self._self_restart_watchdog_task = asyncio.create_task(
+            self._self_restart_watchdog(exec_argv, identity.identity)
+        )
 
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -2726,12 +2769,49 @@ class HubPlugin(BasePlugin):
             output=f"{self._identity.identity} restarting...",
         )
 
+    async def _self_restart_watchdog(self, exec_argv, identity: str) -> None:
+        try:
+            await asyncio.sleep(8.0)
+        except asyncio.CancelledError:
+            return
+        logger.warning(
+            f"{identity}: self-restart watchdog fired, "
+            f"forcing execvp after graceful shutdown timeout"
+        )
+        if not self._claim_self_restart_exec():
+            return
+        try:
+            os.execvp(exec_argv[0], exec_argv)
+        except Exception as e:
+            logger.error(f"execvp failed: {e}, falling back to exit")
+            os._exit(0)
+
+    def _claim_self_restart_exec(self) -> bool:
+        """Claim the one-shot self-restart replacement path."""
+        if getattr(self, "_self_restart_exec_started", False):
+            return False
+        self._self_restart_exec_started = True
+        return True
+
+    def _cancel_self_restart_watchdog(self) -> None:
+        """Cancel a pending forced restart after graceful shutdown wins."""
+        watchdog = getattr(self, "_self_restart_watchdog_task", None)
+        if watchdog is not None and not watchdog.done():
+            watchdog.cancel()
+
     async def _perform_self_restart(self) -> None:
         """Run graceful shutdown, then os.execvp to replace this process."""
         try:
-            await self.shutdown()
+            # The normal self-stop path exits from shutdown after cleanup.
+            # Restart must preserve that cleanup but return so execvp can
+            # replace the process image instead of terminating it.
+            await self.shutdown(exit_process=False)
         except Exception as e:
             logger.error(f"Self-restart: shutdown error (continuing to exec): {e}")
+
+        self._cancel_self_restart_watchdog()
+        if not self._claim_self_restart_exec():
+            return
 
         exec_argv = getattr(self, "_self_restart_cmd", None)
         if not exec_argv:
@@ -2860,7 +2940,10 @@ class HubPlugin(BasePlugin):
                 error="scratchpad not initialized",
             )
 
-        content = self._scratchpad.get()
+        # Scratchpad files survive longer than their intended session scope.
+        # Treat old reminder/task prose as archived evidence on read so a
+        # fresh agent cannot revive it through the tool path.
+        content = sanitize_rebirth_text(self._scratchpad.get())
         preview = content[:200] if content else "(empty)"
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -2917,7 +3000,13 @@ class HubPlugin(BasePlugin):
 
         task_id = _safe_semantic_id(tool_data, ["task_id"])
         note = tool_data.get("progress", tool_data.get("note", ""))
-        self._task_ledger.checkpoint(task_id, note)
+        if not self._task_ledger.checkpoint(task_id, note):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="task_checkpoint",
+                success=False,
+                error=f"task {task_id} not found or terminal",
+            )
         logger.info(f"Task {task_id} checkpoint: {note[:60]}")
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -2950,7 +3039,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="task_snooze",
                 success=False,
-                error=f"task {task_id} not found",
+                error=f"task {task_id} not found or terminal",
             )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -3392,12 +3481,28 @@ class HubPlugin(BasePlugin):
             )
 
         my_ident = self._identity.identity or ""
-        raw_name = tool_data.get("name", "")
-        requested_identity = (tool_data.get("identity", "") or "").strip()
-        agent_type_override = (
-            tool_data.get("agent_type_override", "") or tool_data.get("type", "")
+        # Native normalization keeps the executor's canonical ``name`` and
+        # ``type`` as ``hub_spawn``. Read provider arguments from the nested
+        # input/arguments payload first, while retaining compatibility with
+        # legacy flat tool data.
+        request = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(request, dict):
+            request = {}
+        raw_name = request.get("name", tool_data.get("name", ""))
+        requested_identity = (
+            request.get("identity", tool_data.get("identity", "")) or ""
         ).strip()
-        task = tool_data.get("task", "")
+        agent_type_override = (
+            request.get("agent_type_override")
+            or request.get("type")
+            or tool_data.get("agent_type_override", "")
+            or (
+                tool_data.get("type", "")
+                if tool_data.get("type") != "hub_spawn"
+                else ""
+            )
+        ).strip()
+        task = request.get("task", tool_data.get("task", ""))
 
         if raw_name == my_ident or requested_identity == my_ident:
             return ToolExecutionResult(
@@ -3480,7 +3585,13 @@ class HubPlugin(BasePlugin):
         """Execute a hub_vault tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        vault_name = tool_data.get("vault_name", "") or tool_data.get("name", "")
+        # Native normalization keeps the executor's canonical ``name`` as
+        # ``hub_vault``. Read the provider argument from the nested payload
+        # first, while retaining the legacy XML extractor key.
+        request = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(request, dict):
+            request = {}
+        vault_name = tool_data.get("vault_name", "") or request.get("name", "")
         result = self._format_vault(vault_name.strip())
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -3570,9 +3681,18 @@ class HubPlugin(BasePlugin):
         """Execute a hub_capture tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        cap_name = tool_data.get("cap_name", "") or tool_data.get("name", "")
-        cap_lines = tool_data.get("cap_lines", "50") or str(
-            tool_data.get("lines", "50")
+        # Native normalization keeps the executor's canonical ``name`` as
+        # ``hub_capture``. Read provider arguments from the nested payload
+        # first, while retaining the legacy XML extractor keys.
+        request = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(request, dict):
+            request = {}
+        cap_name = tool_data.get("cap_name", "") or request.get("name", "")
+        cap_lines = (
+            tool_data.get("cap_lines", "")
+            or request.get("lines", "")
+            or tool_data.get("lines", "")
+            or "50"
         )
         args = cap_name.strip()
         if cap_lines:
@@ -3666,7 +3786,8 @@ class HubPlugin(BasePlugin):
                 except Exception as e:
                     logger.error(f"Hub _start_hub failed: {e}", exc_info=True)
 
-            _get_loop().call_soon(lambda: asyncio.ensure_future(_safe_start()))
+            loop = asyncio.get_running_loop()
+            self._startup_task = loop.create_task(_safe_start())
 
     async def _reconcile_agent_bundle(self, bundle: str) -> None:
         """Switch the active agent bundle to match this agent's hub role.
@@ -4188,30 +4309,16 @@ class HubPlugin(BasePlugin):
             if self._vault:
                 self._scratchpad = Scratchpad(self._vault._vault_dir)
 
-            # Build rebirth context (vault + session state + scratchpad)
+            # Build rebirth context from the vault audit/memory layers. Do not
+            # append scratchpad or session-state text here: both are mutable
+            # operational notes and can carry stale ownership or task prose.
+            # They remain available through explicit tools; the TaskLedger is
+            # the only automatic source of actionable work after a restart.
             if self._vault and self._vault.exists():
                 rebirth_context = self._vault.get_rebirth_context(
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
                 )
-
-                # Append scratchpad to rebirth context
-                if self._scratchpad:
-                    pad = self._scratchpad.get()
-                    if pad:
-                        rebirth_context += (
-                            "\n\n--- scratchpad ---\n"
-                            f"{pad}\n"
-                            "--- end scratchpad ---"
-                        )
-
-                # Append session state to rebirth context
-                if self._vault:
-                    state_prompt = self._session_state_mgr.get_injection_prompt(
-                        self._vault._vault_dir
-                    )
-                    if state_prompt:
-                        rebirth_context += f"\n\n{state_prompt}"
 
                 # Release stale lane claims from previous session
                 if self._change_feed and self._identity:
@@ -4607,9 +4714,8 @@ class HubPlugin(BasePlugin):
         with a summary header prepended — never the full uncontrolled flood.
 
         When a bounded replay batch is detected (inbox_summary present as
-        the first message), the entire batch is coalesced into ONE
-        system-message injection via _deliver_inbox_batch instead of
-        calling _on_message_received per message.
+        the first message), ordinary messages are coalesced into one system
+        injection. Task-cron controls keep the normal receive path.
         """
         poll_interval = 5
         if self.config:
@@ -4634,9 +4740,9 @@ class HubPlugin(BasePlugin):
     async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
         """Deliver a batch of offline inbox messages.
 
-        When the batch starts with an inbox_summary (bounded replay), the
-        whole batch is coalesced into a single system-message injection so
-        the LLM receives one clean block instead of N separate injections.
+        When the batch starts with an inbox_summary (bounded replay), ordinary
+        messages are coalesced into a single system-message injection. Control
+        messages keep the normal receive path and are excluded from that block.
 
         Single messages and small batches without a summary go through the
         normal per-message _on_message_received path so existing live-delivery
@@ -4652,17 +4758,32 @@ class HubPlugin(BasePlugin):
         """Coalesce a bounded inbox replay into a single injected block.
 
         messages[0] must be the inbox_summary; messages[1:] are the replayed
-        messages (newest INBOX_MAX_REPLAY at most).
+        messages (newest INBOX_MAX_REPLAY at most). Task-cron controls use the
+        normal receive path before ordinary replay messages are coalesced.
 
-        Falls back to per-message _on_message_received delivery if
-        inject_system_message is unavailable (e.g. during tests or when the
-        LLM service hasn't initialised yet).
+        Falls back to per-message _on_message_received delivery for ordinary
+        messages if inject_system_message is unavailable (e.g. during tests or
+        when the LLM service hasn't initialised yet).
         """
         summary = messages[0]
         replay_msgs = messages[1:]
 
+        # Durable task controls are not replay prose. Route them through the
+        # normal receive path first so task assignments are classified and
+        # task-cron reminders are explicitly acknowledged when stale. Do not
+        # duplicate controls in the coalesced HUD block or fallback delivery.
+        control_msgs = [
+            msg for msg in replay_msgs if _is_durable_control(msg.to_dict())
+        ]
+        ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
+        for msg in control_msgs:
+            await self._on_message_received(msg)
+
+        if not ordinary_msgs:
+            return
+
         lines: List[str] = [summary.content, ""]
-        for msg in replay_msgs:
+        for msg in ordinary_msgs:
             sender = msg.from_identity or msg.from_agent or "?"
             if msg.timestamp:
                 ts = time.strftime("%H:%M", time.localtime(msg.timestamp))
@@ -4686,7 +4807,7 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     "Injected inbox replay block: %d message(s) shown "
                     "(%s total queued)",
-                    len(replay_msgs),
+                    len(ordinary_msgs),
                     summary.metadata.get("total", "?"),
                 )
                 return
@@ -4694,7 +4815,7 @@ class HubPlugin(BasePlugin):
                 logger.debug("inbox replay injection failed: %s", exc)
 
         # Fallback: individual delivery (no inject_system_message)
-        for msg in replay_msgs:
+        for msg in ordinary_msgs:
             await self._on_message_received(msg)
 
     async def _dreaming_loop(self) -> None:
@@ -4950,9 +5071,7 @@ class HubPlugin(BasePlugin):
                 removed = 0
 
                 if projects_root.exists():
-                    for presence_dir in projects_root.glob(
-                        "*/hub/presence/*.json"
-                    ):
+                    for presence_dir in projects_root.glob("*/hub/presence/*.json"):
                         try:
                             with open(presence_dir) as f:
                                 data = json.load(f)
@@ -5022,9 +5141,7 @@ class HubPlugin(BasePlugin):
                 inboxes_removed = 0
 
                 if projects_root.exists():
-                    for messages_root in projects_root.glob(
-                        "*/hub/messages"
-                    ):
+                    for messages_root in projects_root.glob("*/hub/messages"):
                         if not messages_root.is_dir():
                             continue
                         for inbox_dir in messages_root.iterdir():
@@ -5043,12 +5160,8 @@ class HubPlugin(BasePlugin):
                                     try:
                                         with open(mf) as f:
                                             data = json.load(f)
-                                        ts = float(
-                                            data.get("timestamp", 0) or 0
-                                        )
-                                        if ts and (
-                                            now - ts
-                                        ) < INBOX_TTL_SECS:
+                                        ts = float(data.get("timestamp", 0) or 0)
+                                        if ts and (now - ts) < INBOX_TTL_SECS:
                                             all_stale = False
                                             break
                                     except Exception:
@@ -5058,9 +5171,7 @@ class HubPlugin(BasePlugin):
                                     shutil.rmtree(inbox_dir)
                                     inboxes_removed += 1
                             except Exception as e:
-                                logger.debug(
-                                    f"inbox sweep: error on {inbox_dir}: {e}"
-                                )
+                                logger.debug(f"inbox sweep: error on {inbox_dir}: {e}")
 
                 if inboxes_removed:
                     logger.info(
@@ -5267,6 +5378,19 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.debug(f"bridge forward failed: {e}")
 
+    async def _deliver_task_cron_reminder(
+        self, task: Any, reminder_msg: HubMessage
+    ) -> bool:
+        """Deliver a task reminder only when the assignee is discoverable."""
+        if self._presence is None:
+            return False
+
+        agents = await self._presence.discover_agents_async()
+        for agent in agents:
+            if agent.identity == task.assignee:
+                return await self._deliver_to_agent(agent, reminder_msg)
+        return False
+
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
         while True:
@@ -5356,14 +5480,19 @@ class HubPlugin(BasePlugin):
                                     " when done."
                                 ),
                                 scope=MessageScope.DIRECT.value,
+                                metadata={
+                                    "task_cron": True,
+                                    "task_id": task.id,
+                                    "source_identity": self._identity.identity,
+                                },
                             )
-                            agents = await self._presence.discover_agents_async()
-                            for a in agents:
-                                if a.identity == task.assignee:
-                                    await self._deliver_to_agent(a, reminder_msg)
-                            task.updated_at = time.time()
-                            if self._task_ledger is not None:
-                                self._task_ledger._save(task)
+                            delivered = await self._deliver_task_cron_reminder(
+                                task, reminder_msg
+                            )
+                            if delivered:
+                                task.updated_at = time.time()
+                                if self._task_ledger is not None:
+                                    self._task_ledger._save(task)
 
             except asyncio.CancelledError:
                 break
@@ -5629,6 +5758,20 @@ class HubPlugin(BasePlugin):
         "qa needed",
         "manual wake",
     )
+    # Only these markers are strong enough to mint a durable TaskCard from a
+    # free-form hub message.  Ordinary requests ("please check...", "report
+    # back", etc.) still wake the recipient, but they are not assignments and
+    # must not create pending-reply debt or duplicate cards.
+    _TASK_ASSIGNMENT_MARKERS = (
+        "[work assignment",
+        "task:",
+        "directive:",
+        "assigned task",
+        "you are assigned",
+        "take ownership",
+        "new assignment",
+        "qa needed",
+    )
     _REPORT_MARKERS = (
         "task complete",
         "task completed",
@@ -5644,6 +5787,7 @@ class HubPlugin(BasePlugin):
     )
 
     _request_marker_re = _compile_marker_pattern(_REQUEST_MARKERS)
+    _task_assignment_marker_re = _compile_marker_pattern(_TASK_ASSIGNMENT_MARKERS)
 
     def _normalize_hub_wake_content(self, content: str) -> str:
         text = (content or "").strip().lower()
@@ -5734,6 +5878,25 @@ class HubPlugin(BasePlugin):
             return True
         text = self._normalize_hub_wake_content(content)
         return bool(self._request_marker_re.search(text))
+
+    def _is_explicit_task_assignment(
+        self,
+        content: str,
+        *,
+        task_id: str = "",
+    ) -> bool:
+        """Return whether a hub message is an assignment, not a request.
+
+        Free-form requests are actionable wake signals, but they are not
+        durable task assignments.  A task id makes a request an assignment;
+        otherwise require an explicit assignment marker.  Reports are checked
+        before this helper by the caller, so a worker can report against a
+        task id without creating a new card.
+        """
+        text = self._normalize_hub_wake_content(content)
+        if self._task_assignment_marker_re.search(text):
+            return True
+        return bool(task_id and self._has_request_evidence(text))
 
     @staticmethod
     def _touch_wake_cache(
@@ -5832,6 +5995,8 @@ class HubPlugin(BasePlugin):
             return HubWakeDecision("observe", False, "departure")
 
         metadata = message.metadata or {}
+        if metadata.get("task_cron_ack"):
+            return HubWakeDecision("observe", False, "task-cron acknowledgement")
         sender_has_task = self._sender_has_active_task(message)
         if metadata.get("ack") or self._is_ack_only_content(
             message.content, sender_has_active_task=sender_has_task
@@ -5875,6 +6040,168 @@ class HubPlugin(BasePlugin):
             return HubWakeDecision("buffer", False, "retry already queued")
         self._hub_buffer_retry_queued = True
         return HubWakeDecision("buffer", True, "busy, queue one retry")
+
+    @staticmethod
+    def _task_cron_id(message: HubMessage) -> str:
+        metadata = message.metadata or {}
+        task_id = str(metadata.get("task_id") or "").strip()
+        if task_id:
+            return task_id
+        match = _TASK_CRON_ID_RE.search(message.content or "")
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _task_cron_ack_target(message: HubMessage, card: Any = None) -> str:
+        metadata = message.metadata or {}
+        candidates = [
+            metadata.get("source_identity"),
+            metadata.get("source_agent"),
+            getattr(card, "report_to", "") if card else "",
+            getattr(card, "assigner", "") if card else "",
+        ]
+        report_match = _TASK_CRON_REPORT_TO_RE.search(message.content or "")
+        if report_match:
+            candidates.append(report_match.group(1))
+        for candidate in candidates:
+            target = str(candidate or "").strip()
+            if target and target not in {"task-cron", "hub-cron"}:
+                return target
+        return ""
+
+    async def _handle_stale_task_cron(self, message: HubMessage) -> bool:
+        """Acknowledge a task reminder that is no longer actionable.
+
+        Task-cron is a synthetic sender, so a stale reminder cannot be left
+        as an implicit "ignore" instruction. The receiver reports the exact
+        disposition to the cron source and returns before the reminder is
+        displayed or injected as fresh work.
+        """
+        metadata = message.metadata or {}
+        if message.from_identity != "task-cron" and not metadata.get("task_cron"):
+            return False
+
+        task_id = self._task_cron_id(message)
+        card = self._task_ledger.get(task_id) if self._task_ledger and task_id else None
+        reason = ""
+        task_status = "missing"
+
+        if not task_id:
+            reason = "reminder has no task id"
+        elif card is None:
+            reason = "task card not found"
+        else:
+            task_status = str(getattr(card, "status", "unknown") or "unknown")
+            if task_status != "active":
+                reason = f"task status is {task_status}"
+            elif not getattr(card, "cron_active", False):
+                reason = "task cron is disabled"
+            elif getattr(card, "snoozed_until", 0) > time.time():
+                reason = "task reminder is snoozed"
+            else:
+                ttl = getattr(card, "cron_ttl_seconds", 0) or 0
+                updated_at = getattr(card, "updated_at", 0) or 0
+                try:
+                    expired = ttl > 0 and (time.time() - updated_at) > ttl
+                except TypeError:
+                    expired = False
+                if expired:
+                    terminal = self._task_ledger.terminalize(
+                        card.id,
+                        status="obsolete",
+                        reason=(
+                            f"task-cron expired after {int(ttl / 3600)}h "
+                            "without a checkpoint"
+                        ),
+                        actor="task-cron",
+                        message_id=message.id,
+                    )
+                    if terminal is not None:
+                        card = terminal
+                    task_status = "obsolete"
+                    reason = "task-cron reminder expired without a checkpoint"
+
+        if not reason:
+            return False
+
+        ack_target = self._task_cron_ack_target(message, card)
+        ack_metadata = {
+            "task_cron_ack": True,
+            "acknowledged": True,
+            "task_id": task_id,
+            "task_status": task_status,
+            "disposition": "stale",
+            "reason": reason,
+            "reminder_id": message.id,
+            # Serialized before routing so durable filesystem ACKs carry the
+            # same transport receipt later recorded in the local vault.
+            "ack_transport": "direct",
+            # Preserve the original routing identity in both direct ACKs and
+            # local receipts so consumers can correlate stale reminders even
+            # when delivery to the target is unavailable.
+            "reply_to": message.id,
+        }
+
+        if ack_target and ack_target != (
+            self._identity.identity if self._identity else ""
+        ):
+            ack_metadata["ack_target"] = ack_target
+            ack = HubMessage(
+                action="message",
+                from_agent=self._identity.agent_id if self._identity else "",
+                from_identity=self._identity.identity if self._identity else "",
+                to=ack_target,
+                content=(
+                    f"[task-cron ack: {task_id or 'unknown'}] stale reminder "
+                    f"acknowledged; no work resumed ({reason})."
+                ),
+                scope=MessageScope.DIRECT.value,
+                force=True,
+                thread_id=message.thread_id,
+                reply_to=message.id,
+                metadata=ack_metadata,
+            )
+            try:
+                rejections = await self._route_message(ack)
+                if rejections:
+                    ack_metadata["ack_transport"] = "direct_failed"
+                    logger.warning(
+                        "Stale task-cron acknowledgement for %s was rejected: %s",
+                        task_id or "unknown",
+                        rejections,
+                    )
+                else:
+                    ack_metadata["ack_transport"] = "direct"
+            except Exception as e:
+                ack_metadata["ack_transport"] = "direct_failed"
+                logger.warning(
+                    "Failed to send stale task-cron acknowledgement for %s to %s: %s",
+                    task_id or "unknown",
+                    ack_target,
+                    e,
+                )
+        else:
+            ack_metadata["ack_target"] = ack_target
+            ack_metadata["ack_transport"] = "local_receipt"
+            logger.warning(
+                "Stale task-cron reminder %s acknowledged locally; no routable acknowledgement target",
+                task_id or "unknown",
+            )
+
+        if self._vault:
+            self._vault.append_stream(
+                "received",
+                message.content,
+                from_agent=message.from_identity,
+                to_agent=self._identity.identity if self._identity else "",
+                metadata=ack_metadata,
+            )
+
+        logger.info(
+            "Acknowledged stale task-cron reminder %s: %s",
+            task_id or "unknown",
+            reason,
+        )
+        return True
 
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
@@ -5957,6 +6284,9 @@ class HubPlugin(BasePlugin):
             return
         self._seen_content_hashes[_content_hash] = _now
 
+        if await self._handle_stale_task_cron(message):
+            return
+
         # NOTE: _exit_waiting_state() is NOT called here anymore.
         # It moves to the TRIGGER_LLM_CONTINUE decision block below,
         # so only messages that actually trigger the LLM will wake us.
@@ -5995,16 +6325,33 @@ class HubPlugin(BasePlugin):
             )
             if is_task:
                 # Extract directive from the message content
-                directive = message.content[:500]
-                card = self._task_ledger.create(
-                    assigner=message.from_identity,
-                    assignee=self._identity.identity,
-                    directive=directive,
-                    report_to=message.from_identity,
-                )
-                logger.info(
-                    f"Auto-created task {card.id} from" f" {message.from_identity}"
-                )
+                assigner = str(message.from_identity or "").strip()
+                assignee = str(self._identity.identity or "").strip()
+                directive = str(message.content or "").strip()
+                if not assigner or not assignee or not directive:
+                    logger.warning(
+                        "Skipping malformed task assignment: "
+                        "assigner=%r assignee=%r directive_empty=%s",
+                        assigner,
+                        assignee,
+                        not bool(directive),
+                    )
+                else:
+                    task_id = str(message.metadata.get("task_id", "") or "").strip()
+                    existing = self._task_ledger.get(task_id) if task_id else None
+                    if existing:
+                        logger.info(
+                            "Task assignment %s already exists; not minting duplicate card",
+                            task_id,
+                        )
+                    else:
+                        card = self._task_ledger.create(
+                            assigner=assigner,
+                            assignee=assignee,
+                            directive=directive[:500],
+                            report_to=assigner,
+                        )
+                        logger.info(f"Auto-created task {card.id} from" f" {assigner}")
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the
@@ -6029,8 +6376,7 @@ class HubPlugin(BasePlugin):
                         notes="auto-approved on receipt",
                     )
                     logger.info(
-                        f"Auto-approved task {task_id} from "
-                        f"{message.from_identity}"
+                        f"Auto-approved task {task_id} from " f"{message.from_identity}"
                     )
 
         # Track active thread so <hub_reply> can auto-fill thread_id/reply_to
@@ -6156,6 +6502,9 @@ class HubPlugin(BasePlugin):
                         assignee=message.from_identity,
                         evidence=message.content,
                         message_id=message.id,
+                        task_id=str(
+                            (message.metadata or {}).get("task_id") or ""
+                        ).strip(),
                     )
                 except Exception as e:
                     logger.debug("failed to resolve expected hub reply: %s", e)
@@ -6594,29 +6943,10 @@ class HubPlugin(BasePlugin):
                 task_lines.append("--- end tasks ---")
                 roster_block += "\n" + "\n".join(task_lines)
 
-        # Inject scratchpad (timer-gated: read from disk every 3 min,
-        # but always include the cached content so it persists between
-        # refreshes — the roster block is stripped and rebuilt each call).
-        SCRATCHPAD_INJECT_INTERVAL = 180  # 3 minutes
-        if self._scratchpad:
-            now_sp = time.time()
-            if now_sp - self._last_scratchpad_inject_at >= SCRATCHPAD_INJECT_INTERVAL:
-                self._last_scratchpad_inject_at = now_sp
-                self._cached_scratchpad = self._scratchpad.get()
-            if self._cached_scratchpad:
-                roster_block += (
-                    "\n\n--- scratchpad ---\n"
-                    f"{self._cached_scratchpad}\n"
-                    "--- end scratchpad ---"
-                )
-
-        # Inject session state (working context from previous session)
-        if self._vault:
-            state_prompt = self._session_state_mgr.get_injection_prompt(
-                self._vault._vault_dir
-            )
-            if state_prompt:
-                roster_block += f"\n\n{state_prompt}"
+        # Scratchpad and session state are intentionally not injected here.
+        # They are mutable operational notes that can outlive their task and
+        # reintroduce stale ownership/reminder prose. Agents can request them
+        # explicitly; active TaskLedger cards remain injected above.
 
         # Inject active lane claims for this agent
         if self._change_feed and self._identity:
@@ -7186,11 +7516,13 @@ class HubPlugin(BasePlugin):
             logger.debug("hub delivery trace failed: %s", e)
 
     async def _route_message(self, message: HubMessage) -> List[Tuple[str, str]]:
-        """Route a message to all agents (open channel).
+        """Route a message according to its explicit scope.
 
-        Every agent sees every message - like a Slack channel.
-        The intended recipient is marked so others know they don't
-        have to respond unless the topic is relevant to them.
+        Direct messages go only to ``message.to``. Project/team/broadcast
+        messages retain the open-channel behavior. The old implementation
+        broadcast every message, even though ``HubMessage`` defaults to the
+        direct scope, which made coordinator follow-ups fan out to the whole
+        swarm and created duplicate task directives.
 
         Returns:
             A list of (recipient_identity, rejection_reason) tuples.
@@ -7209,9 +7541,10 @@ class HubPlugin(BasePlugin):
                 to_agent=message.to,
             )
 
-        # Broadcast to ALL agents except self (open channel model)
-        # Self already sees the message via _display_outgoing_message
         agents = await self._presence.discover_agents_async()
+        if message.scope == MessageScope.DIRECT.value:
+            agents = [agent for agent in agents if agent.identity == message.to]
+        discovered_identities = {agent.identity for agent in agents}
         my_id = self._identity.agent_id if self._identity else ""
         delivered_identities: set[str] = set()
 
@@ -7252,7 +7585,10 @@ class HubPlugin(BasePlugin):
             else:
                 delivered_identities.add(agent.identity)
 
-        if self._should_queue_offline_direct_target(message, delivered_identities):
+        queue_offline = self._should_queue_offline_direct_target(
+            message, delivered_identities
+        )
+        if queue_offline:
             queued_for = list((message.metadata or {}).get("_queued_for", []))
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
@@ -7262,6 +7598,20 @@ class HubPlugin(BasePlugin):
                 "queued_identity_mailbox",
                 target=message.to,
                 detail="offline direct target",
+            )
+        elif (
+            message.scope == MessageScope.DIRECT.value
+            and (message.metadata or {}).get("task_cron_ack")
+            and message.to not in discovered_identities
+            and not (self._identity and message.to == self._identity.identity)
+        ):
+            reason = "target is not a routable hub identity"
+            rejections.append((message.to, reason))
+            self._trace_delivery(
+                message,
+                "rejected",
+                target=message.to,
+                detail=reason,
             )
 
         return rejections
@@ -7844,7 +8194,11 @@ class HubPlugin(BasePlugin):
             if len(ep) < 2:
                 return "usage: /hub dns endorse <designation> <capability>"
             target, cap = ep[0], ep[1]
-            if not self._dns_reputation or not self._identity or not self._identity.identity:
+            if (
+                not self._dns_reputation
+                or not self._identity
+                or not self._identity.identity
+            ):
                 return "dns: not running as named agent"
             from .dns.models import Endorsement
 
@@ -8013,12 +8367,14 @@ class HubPlugin(BasePlugin):
         dial_target, dial_auth = self._resolve_dial_target(
             peer.identity, peer.socket_path
         )
-        output_lines = await AgentMessenger.request_output(
+        output_lines, capture_error = await AgentMessenger.request_output_diagnostic(
             dial_target,
             lines=lines,
             timeout=5.0,
             auth=dial_auth,
         )
+        if capture_error:
+            return f"capture failed for '{peer.identity}': {capture_error}"
         if not output_lines:
             return f"no recent output from '{peer.identity}'"
 
@@ -8209,6 +8565,25 @@ class HubPlugin(BasePlugin):
 
         if not resolved_profile and self._identity and self._identity.profile:
             resolved_profile = self._identity.profile
+
+        # HubPlugin is initialized through the generic plugin loader, which
+        # historically did not pass profile_manager in its kwargs.  Recover
+        # the live profile from the service registry so children spawned from
+        # an agent launched with --profile inherit the same provider instead
+        # of falling back to auto-detection.
+        if not resolved_profile and self.event_bus:
+            try:
+                profile_mgr = self.event_bus.get_service("profile_manager")
+                active_name = getattr(profile_mgr, "active_profile_name", "")
+                if isinstance(active_name, str):
+                    resolved_profile = active_name.strip()
+                if not resolved_profile and profile_mgr:
+                    active_profile = profile_mgr.get_active_profile()
+                    active_name = getattr(active_profile, "name", "")
+                    if isinstance(active_name, str):
+                        resolved_profile = active_name.strip()
+            except Exception:
+                resolved_profile = ""
 
         # --- Spawn ---
         result = await orch.orchestrator.spawn(
@@ -8776,15 +9151,18 @@ class HubPlugin(BasePlugin):
             return self._tasks_assign(rest)
         elif action == "cancel":
             return self._tasks_cancel(rest.strip())
+        elif action in ("obsolete", "stale"):
+            return self._tasks_terminalize(rest.strip(), status="obsolete")
         elif action == "status":
             return self._tasks_status(rest.strip())
         else:
             return (
-                "usage: /hub tasks list|mine|assign|cancel|status\n"
+                "usage: /hub tasks list|mine|assign|cancel|obsolete|status\n"
                 "  list                        all tasks\n"
                 "  mine                        my active tasks\n"
                 "  assign <agent> <directive>  assign task\n"
-                "  cancel <id>                 cancel a task\n"
+                "  cancel <id> [reason]        cancel a task\n"
+                "  obsolete <id> <reason>      mark stale task obsolete\n"
                 "  status <id>                 task details"
             )
 
@@ -8805,6 +9183,8 @@ class HubPlugin(BasePlugin):
                 "failed": "!!",
                 "qa_review": "QA",
                 "closed": "--",
+                "cancelled": "--",
+                "obsolete": "xx",
             }.get(card.status, "??")
             lines.append(
                 f"  [{status_icon}] {card.id}"
@@ -8865,15 +9245,38 @@ class HubPlugin(BasePlugin):
         return f"task {card.id} assigned to {assignee}:" f" {directive[:60]}"
 
     def _tasks_cancel(self, task_id: str) -> str:
-        """Cancel a task by id."""
-        if not task_id:
-            return "usage: /hub tasks cancel <id>"
+        """Cancel a task by id with a durable reason."""
+        return self._tasks_terminalize(task_id, status="cancelled")
 
+    def _tasks_terminalize(self, args: str, *, status: str) -> str:
+        if not args:
+            if status == "obsolete":
+                return "usage: /hub tasks obsolete <id> <reason>"
+            return "usage: /hub tasks cancel <id> [reason]"
+
+        parts = args.split(maxsplit=1)
+        task_id = parts[0]
+        reason = (
+            parts[1].strip()
+            if len(parts) > 1 and parts[1].strip()
+            else f"{status} via /hub tasks {status}"
+        )
+        if status == "obsolete" and len(parts) < 2:
+            return "usage: /hub tasks obsolete <id> <reason>"
         if self._task_ledger is None:
             return "task system not available"
-        if self._task_ledger.cancel(task_id):
-            return f"task {task_id} cancelled"
-        return f"task {task_id} not found"
+        try:
+            card = self._task_ledger.terminalize(
+                task_id,
+                status=status,
+                reason=reason,
+                actor=self._identity.identity if self._identity else "",
+            )
+        except ValueError as exc:
+            return str(exc)
+        if not card:
+            return f"task {task_id} not found"
+        return f"task {task_id} {status}: {card.terminal_reason}"
 
     def _tasks_status(self, task_id: str) -> str:
         """Show detailed task status."""
@@ -8912,6 +9315,8 @@ class HubPlugin(BasePlugin):
             lines.append(f"  result:      {card.result[:100]}")
         if card.error:
             lines.append(f"  error:       {card.error[:100]}")
+        if card.terminal_reason:
+            lines.append(f"  terminal:    {card.terminal_reason[:100]}")
         if card.qa_reviewer:
             passed = "PASSED" if card.qa_passed else "REJECTED"
             lines.append(f"  qa:          {passed} by {card.qa_reviewer}")
@@ -9943,6 +10348,7 @@ class HubPlugin(BasePlugin):
         Each event's ``rendered`` payload is already multi-line, so
         callers join with "\\n" cleanly.
         """
+        limit = _coerce_line_count(limit, 50)
         if not self._display_tap:
             return ["(no display tap)"]
 
@@ -10017,7 +10423,7 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"Failed to trigger shutdown: {e}")
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, exit_process: bool = True) -> None:
         """Clean shutdown - save vault, remove presence, close socket, release lock."""
         # Guard against re-entry (SIGINT can fire multiple times during shutdown)
         if getattr(self, "_shutdown_in_progress", False):
@@ -10086,6 +10492,14 @@ class HubPlugin(BasePlugin):
                 self._change_feed.release_all(self._identity.identity)
             except Exception as e:
                 logger.debug(f"Lane release on shutdown failed: {e}")
+
+        if self._startup_task:
+            self._startup_task.cancel()
+            try:
+                await self._startup_task
+            except asyncio.CancelledError:
+                pass
+
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             try:
@@ -10209,7 +10623,7 @@ class HubPlugin(BasePlugin):
         logger.info("Hub plugin shut down")
 
         # If this was a self-stop request, exit the process after clean teardown
-        if getattr(self, "_self_stop_requested", False):
+        if getattr(self, "_self_stop_requested", False) and exit_process:
             logger.info(
                 f"{self._identity.identity}: self-stop complete, exiting process"
             )

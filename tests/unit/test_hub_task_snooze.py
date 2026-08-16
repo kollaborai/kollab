@@ -5,6 +5,7 @@ Before this existed, an agent holding a task had two options: checkpoint
 every 5 minutes). Snooze is the honest third option.
 """
 
+import json
 import re
 import time
 
@@ -69,10 +70,135 @@ def test_snooze_does_not_reset_cron_ttl(ledger):
     assert ledger.get(card.id).updated_at == pytest.approx(original)
 
 
+def test_qa_review_stays_visible_until_review_ttl(ledger):
+    card = _card(ledger)
+    qa_card = ledger.request_qa(card.id, "ready for review")
+
+    assert qa_card.qa_requested_at is not None
+    assert card.id in [item.id for item in ledger.get_active_for("lapis")]
+
+
+def test_expired_qa_review_is_terminalized_before_prompt_injection(ledger):
+    card = _card(ledger)
+    qa_card = ledger.request_qa(card.id, "old QA result")
+    qa_card.qa_requested_at = time.time() - 10
+    qa_card.updated_at = qa_card.qa_requested_at
+    qa_card.cron_ttl_seconds = 1
+    ledger._save_preserve(qa_card)
+
+    assert ledger.get_active_for("lapis") == []
+    stale = ledger.get(card.id)
+    assert stale.status == "obsolete"
+    assert stale.cron_active is False
+    assert stale.terminal_actor == "task-ledger"
+    assert stale.terminal_reason == "QA review expired without reviewer action"
+
+
+def test_active_task_rejects_qa_rejection_without_mutation(ledger):
+    card = _card(ledger)
+    before = card.to_dict()
+
+    assert ledger.qa_reject(card.id, "reviewer", "not in QA") is None
+
+    assert ledger.get(card.id).to_dict() == before
+
+
+@pytest.mark.parametrize("status", ["cancelled", "obsolete"])
+def test_terminal_task_rejects_late_lifecycle_mutations(ledger, status):
+    card = _card(ledger)
+    terminal = ledger.terminalize(
+        card.id,
+        status=status,
+        reason="stale directive superseded by the current harness task",
+        actor="koordinator",
+    )
+    before = terminal.to_dict()
+
+    assert ledger.checkpoint(card.id, "late progress") is False
+    assert ledger.snooze(card.id, minutes=30) is None
+    assert ledger.complete(card.id, "late result") is None
+    assert ledger.request_qa(card.id, "late QA result") is None
+    assert ledger.qa_approve(card.id, "late reviewer", "late notes") is None
+    assert ledger.qa_reject(card.id, "late reviewer", "late rejection") is None
+
+    assert ledger.get(card.id).to_dict() == before
+
+
 def test_snooze_survives_roundtrip(ledger):
     card = _card(ledger)
     ledger.snooze(card.id, minutes=30)
     assert ledger.get(card.id).snoozed_until > time.time()
+
+
+def test_create_rejects_blank_assignment_fields(tmp_path):
+    ledger = TaskLedger(tasks_dir=str(tmp_path))
+
+    with pytest.raises(ValueError, match="non-empty assignee"):
+        ledger.create(assigner="koordinator", assignee="", directive="inspect")
+
+    ledger.expect_reply(
+        task_id="task-1",
+        assignee="lapis",
+        requested_by="koordinator",
+        message_id="message-1",
+        deadline_seconds=120,
+    )
+    assert ledger.get_all() == []
+
+
+def test_cron_ttl_terminalizes_stale_active_task(ledger):
+    card = _card(ledger)
+    card.updated_at = time.time() - 10
+    card.cron_ttl_seconds = 1
+    card.cron_active = False
+    ledger._save_preserve(card)
+
+    assert ledger.get_cron_due() == []
+    stale = ledger.get(card.id)
+    assert stale.status == "obsolete"
+    assert stale.cron_active is False
+    assert "task-cron expired" in stale.terminal_reason
+
+
+def test_malformed_persisted_cron_numbers_do_not_abort_cron_pass(ledger):
+    card = _card(ledger)
+    payload = card.to_dict()
+    payload.update(
+        {
+            "updated_at": "not-a-timestamp",
+            "cron_interval": "not-a-duration",
+            "cron_ttl_seconds": "not-a-ttl",
+            "snoozed_until": "not-a-snooze",
+        }
+    )
+    ledger._task_path(card.id).write_text(json.dumps(payload))
+
+    reloaded = ledger.get(card.id)
+    assert reloaded.updated_at == pytest.approx(time.time(), abs=2)
+    assert reloaded.cron_interval == 300.0
+    assert reloaded.cron_ttl_seconds == 7200.0
+    assert reloaded.snoozed_until == 0.0
+    assert ledger.get_cron_due() == []
+
+
+def test_valid_persisted_cron_numbers_are_preserved(ledger):
+    card = _card(ledger)
+    payload = card.to_dict()
+    payload.update(
+        {
+            "updated_at": 123.5,
+            "cron_interval": 12,
+            "cron_ttl_seconds": 90,
+            "snoozed_until": 45.25,
+        }
+    )
+    ledger._task_path(card.id).write_text(json.dumps(payload))
+
+    reloaded = ledger.get(card.id)
+    assert reloaded.updated_at == 123.5
+    assert reloaded.cron_interval == 12.0
+    assert reloaded.cron_ttl_seconds == 90.0
+    assert reloaded.snoozed_until == 45.25
 
 
 def test_nudge_quotes_real_task_id_and_offers_snooze():

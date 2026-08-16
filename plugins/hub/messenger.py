@@ -15,13 +15,18 @@ from .models import HubMessage
 from .presence import _atomic_write, get_messages_dir, get_socket_dir
 
 # --- Durable inbox bounds ---
-# Max messages kept on disk per inbox. Oldest are evicted at write time.
+# Max ordinary messages kept on disk per inbox. Durable task controls are
+# preserved until normal receive can classify them; oldest ordinary entries
+# are evicted first at write time.
 INBOX_MAX_SIZE: int = 50
+# Hard cap on durable controls per inbox. Controls bypass ordinary replay
+# limits but must not grow without bound. Oldest controls are evicted
+# (with loud logging) when this cap is exceeded.
+INBOX_MAX_CONTROLS: int = 200
 # Messages older than this (seconds) are silently discarded on read.
 INBOX_TTL_SECS: int = 7 * 86400  # 7 days
-# Max messages replayed to a reconnecting agent per mailbox poll cycle.
-# When the inbox exceeds this, a summary is prepended and only the newest
-# INBOX_MAX_REPLAY messages are returned.
+# Max ordinary messages replayed to a reconnecting agent per mailbox poll.
+# Durable task controls bypass this cap and retain normal receive semantics.
 INBOX_MAX_REPLAY: int = 20
 
 # Idle timeout (seconds) for the off-box read loop. An authenticated remote
@@ -31,29 +36,121 @@ INBOX_MAX_REPLAY: int = 20
 # `attach` live-stream path, which exits the read loop before streaming.
 REMOTE_IDLE_TIMEOUT: float = 30.0
 
+
+def _coerce_line_count(value: Any, default: int) -> int:
+    """Normalize optional line counts received from native tools or sockets."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        count = default
+    return max(1, count)
+
 logger = logging.getLogger(__name__)
 
 
-def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
-    """Evict the oldest messages from an inbox directory if it exceeds max_size.
+def _is_durable_control(data: Any) -> bool:
+    """Return whether a mailbox payload must bypass ordinary replay limits.
 
-    Called by send_to_file after each write so inboxes can never grow
-    unboundedly even when an agent is offline for a long time.
+    Task assignments require normal receive classification, and task-cron
+    reminders require an explicit stale/active decision plus correlated ACK.
+    They therefore have priority over ordinary chatter at every inbox bound.
+    Valid JSON scalars and arrays are malformed mailbox records, not controls.
+    """
+    if not isinstance(data, dict):
+        return False
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return bool(
+        metadata.get("task_cron")
+        or metadata.get("task_assignment")
+        or data.get("from_identity") == "task-cron"
+    )
+
+
+# Simple cache for control classification: filename -> (is_control, mtime)
+# Invalidated on file modification to avoid stale reads.
+_control_classification_cache: Dict[str, tuple[bool, float]] = {}
+
+
+def _is_control_cached(path: Path) -> bool:
+    """Check if a message file is a durable control, with mtime-based caching."""
+    try:
+        stat = path.stat()
+        mtime = stat.st_mtime
+        key = str(path)
+        cached = _control_classification_cache.get(key)
+        if cached and cached[1] == mtime:
+            return cached[0]
+        # Need to read and classify
+        with open(path) as fh:
+            data = json.load(fh)
+        is_control = _is_durable_control(data)
+        _control_classification_cache[key] = (is_control, mtime)
+        return is_control
+    except Exception:
+        # On any error, treat as ordinary (safe default)
+        return False
+
+
+def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
+    """Evict oldest ordinary messages while preserving durable controls.
+
+    ``max_size`` bounds ordinary chatter, not task controls that still require
+    normal receive classification or an explicit stale ACK. Malformed files
+    are treated as ordinary and remain eligible for eviction.
+
+    Durable controls are also capped at INBOX_MAX_CONTROLS to prevent
+    unbounded growth. Oldest controls are evicted with loud logging when
+    this cap is exceeded.
+
+    Classification uses an mtime-based cache to avoid re-reading files
+    on every prune call.
     """
     try:
         files = sorted(msg_dir.glob("*.json"))
-        excess = len(files) - max_size
-        if excess <= 0:
-            return
-        for f in files[:excess]:
-            try:
-                f.unlink(missing_ok=True)
-            except Exception:
-                pass
-        logger.info(
-            f"Inbox prune: evicted {excess} oldest message(s) from "
-            f"{msg_dir.name!r} (limit={max_size})"
-        )
+        ordinary_files: List[Path] = []
+        control_files: List[Path] = []
+        for path in files:
+            if _is_control_cached(path):
+                control_files.append(path)
+            else:
+                ordinary_files.append(path)
+
+        # Evict oldest ordinary messages first
+        excess_ordinary = len(ordinary_files) - max_size
+        if excess_ordinary > 0:
+            for path in ordinary_files[:excess_ordinary]:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            logger.info(
+                "Inbox prune: evicted %d oldest ordinary message(s) from %r "
+                "(ordinary_limit=%d, controls_preserved=%d)",
+                excess_ordinary,
+                msg_dir.name,
+                max_size,
+                len(control_files),
+            )
+
+        # Evict oldest controls if they exceed the hard cap
+        excess_controls = len(control_files) - INBOX_MAX_CONTROLS
+        if excess_controls > 0:
+            for path in control_files[:excess_controls]:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            logger.warning(
+                "Inbox prune: EVICTED %d oldest durable control(s) from %r "
+                "(control_cap=%d, controls_remaining=%d) — "
+                "controls overflow indicates delivery or classification failure",
+                excess_controls,
+                msg_dir.name,
+                INBOX_MAX_CONTROLS,
+                len(control_files) - excess_controls,
+            )
     except Exception as e:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
 
@@ -107,6 +204,12 @@ class AgentSocketServer:
         # Idle read timeout for off-box connections (overridable for tests).
         self._remote_idle_timeout: float = REMOTE_IDLE_TIMEOUT
 
+        # Listening-server shutdown does not close already accepted streams.
+        # Own both sides explicitly so stop() can drain connection handlers
+        # before their event loop is torn down.
+        self._connection_tasks: set[asyncio.Task[None]] = set()
+        self._connection_writers: set[asyncio.StreamWriter] = set()
+
     async def start(self) -> str:
         """Start the socket server. Returns the socket path."""
         # Clean stale socket
@@ -116,7 +219,7 @@ class AgentSocketServer:
         try:
             self._server = await asyncio.wait_for(
                 asyncio.start_unix_server(
-                    self._handle_connection, path=str(self.socket_path)
+                    self._accept_connection, path=str(self.socket_path)
                 ),
                 timeout=10.0,
             )
@@ -135,7 +238,7 @@ class AgentSocketServer:
             try:
                 self._tcp_server = await asyncio.wait_for(
                     asyncio.start_server(
-                        lambda r, w: self._handle_connection(r, w, require_auth=True),
+                        lambda r, w: self._accept_connection(r, w, require_auth=True),
                         host=self._tcp_host,
                         port=self._tcp_port,
                         ssl=self._tcp_ssl,
@@ -415,6 +518,39 @@ class AgentSocketServer:
         logger.info(f"socket auth succeeded for '{designation}'")
         return designation
 
+    def _accept_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        require_auth: bool = False,
+    ) -> None:
+        """Own an accepted stream until its connection handler is drained."""
+        self._connection_writers.add(writer)
+        task = asyncio.create_task(
+            self._own_connection(reader, writer, require_auth=require_auth)
+        )
+        self._connection_tasks.add(task)
+
+    async def _own_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        require_auth: bool = False,
+    ) -> None:
+        """Run and clean up one accepted connection owned by this server."""
+        task = asyncio.current_task()
+        try:
+            await self._handle_connection(reader, writer, require_auth=require_auth)
+        finally:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except (Exception, asyncio.CancelledError):
+                pass
+            self._connection_writers.discard(writer)
+            if task is not None:
+                self._connection_tasks.discard(task)
+
     async def _handle_connection(
         self,
         reader: asyncio.StreamReader,
@@ -553,7 +689,7 @@ class AgentSocketServer:
 
                 elif action == "get_context":
                     # Return recent conversation context for social awareness
-                    lines_requested = msg_data.get("lines", 200)
+                    lines_requested = _coerce_line_count(msg_data.get("lines"), 200)
                     context = await self._get_context(lines_requested)
                     resp = (
                         json.dumps(
@@ -581,7 +717,7 @@ class AgentSocketServer:
                     await writer.drain()
 
                 elif action == "get_output":
-                    lines_requested = msg_data.get("lines", 100)
+                    lines_requested = _coerce_line_count(msg_data.get("lines"), 100)
                     output_lines: List[str] = []
                     if self._on_get_output:
                         try:
@@ -727,12 +863,6 @@ class AgentSocketServer:
 
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
 
     async def _get_context(self, lines: int) -> str:
         """Get recent context - override in plugin integration."""
@@ -916,17 +1046,19 @@ class AgentSocketServer:
         recv_task = asyncio.create_task(_recv_input())
 
         try:
-            done, pending = await asyncio.wait(
+            await asyncio.wait(
                 [send_task, recv_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
         finally:
+            # Always stop both child loops, including when this stream task is
+            # cancelled externally (for example during server shutdown). A
+            # normal detach cancels the still-running sender; cancellation of
+            # this coroutine must do the same or the sender leaks indefinitely.
+            for task in (send_task, recv_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(send_task, recv_task, return_exceptions=True)
             if self._display_tap is not None:
                 self._display_tap.unsubscribe(client_id)
             try:
@@ -938,17 +1070,38 @@ class AgentSocketServer:
 
     async def stop(self) -> None:
         """Stop the socket server."""
+        listeners: list[asyncio.AbstractServer] = []
         if self._tcp_server:
             self._tcp_server.close()
-            try:
-                await self._tcp_server.wait_closed()
-            except Exception:
-                pass
+            listeners.append(self._tcp_server)
             self._tcp_server = None
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            listeners.append(self._server)
             self._server = None
+
+        # Closing a listening server leaves accepted connections alive. Close
+        # their transports, give handlers a short chance to finish naturally,
+        # then cancel anything still blocked before callers tear down the loop.
+        writers = tuple(self._connection_writers)
+        for writer in writers:
+            writer.close()
+        tasks = tuple(self._connection_tasks)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=1.0)
+            if pending:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        self._connection_tasks.difference_update(tasks)
+        self._connection_writers.difference_update(writers)
+
+        for listener in listeners:
+            try:
+                await asyncio.wait_for(listener.wait_closed(), timeout=1.0)
+            except Exception:
+                pass
+
         if self.socket_path.exists():
             try:
                 self.socket_path.unlink()
@@ -1206,6 +1359,7 @@ class AgentMessenger:
         ssl_ctx: Any = None,
     ) -> str:
         """Request recent context from an agent (unix socket or endpoint)."""
+        lines = _coerce_line_count(lines, 200)
         writer = None
         try:
             reader, writer = await AgentMessenger._open(
@@ -1243,6 +1397,26 @@ class AgentMessenger:
         ssl_ctx: Any = None,
     ) -> List[str]:
         """Request recent output lines from an agent (unix socket or endpoint)."""
+        result, _error = await AgentMessenger.request_output_diagnostic(
+            socket_path,
+            lines=lines,
+            timeout=timeout,
+            auth=auth,
+            ssl_ctx=ssl_ctx,
+        )
+        return result
+
+    @staticmethod
+    async def request_output_diagnostic(
+        socket_path: str,
+        lines: int = 100,
+        timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> tuple[List[str], Optional[str]]:
+        """Request output while distinguishing transport failure from empty output."""
+        lines = _coerce_line_count(lines, 100)
         writer = None
         try:
             reader, writer = await AgentMessenger._open(
@@ -1254,14 +1428,31 @@ class AgentMessenger:
 
             resp_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
 
-            if resp_line:
+            if not resp_line:
+                return [], "empty response"
+
+            try:
                 resp = json.loads(resp_line.decode().strip())
-                if isinstance(resp, dict) and resp.get("type") == "output":
-                    result = resp.get("lines", [])
-                    return result if isinstance(result, list) else []
-            return []
-        except Exception:
-            return []
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return [], "invalid JSON response"
+
+            if not isinstance(resp, dict):
+                return [], "invalid response envelope"
+            if resp.get("type") != "output":
+                return [], f"unexpected response type: {resp.get('type')!r}"
+
+            result = resp.get("lines", [])
+            if not isinstance(result, list):
+                return [], "output lines were not a list"
+            return result, None
+        except asyncio.TimeoutError:
+            return [], f"timeout after {timeout:g}s"
+        except Exception as exc:
+            logger.debug("Output request failed for %s: %s", socket_path, exc)
+            detail = str(exc).strip()
+            if detail:
+                return [], f"{type(exc).__name__}: {detail}"
+            return [], type(exc).__name__
         finally:
             if writer:
                 writer.close()
@@ -1374,8 +1565,8 @@ class AgentMessenger:
     async def send_to_file(target_agent_id: str, message: HubMessage) -> None:
         """Fallback: write message to agent's filesystem mailbox.
 
-        After writing, prunes the inbox to INBOX_MAX_SIZE entries (oldest
-        first) so a flood of messages can never grow an inbox unboundedly.
+        After writing, prunes ordinary traffic to INBOX_MAX_SIZE entries
+        (oldest first). Durable task controls are preserved until classified.
         """
         msg_dir = get_messages_dir() / target_agent_id
         msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1395,12 +1586,11 @@ class AgentMessenger:
 
         Args:
             agent_id: Agent identity or agent_id to read from.
-            max_replay: If > 0, cap the number of messages returned to this
-                many (newest first). When the inbox exceeds ``max_replay`` a
-                synthetic ``inbox_summary`` message is prepended so the
-                recipient knows how many they missed without being flooded.
-                Expired messages (older than INBOX_TTL_SECS) are silently
-                discarded regardless of this limit.
+            max_replay: If > 0, cap ordinary messages returned to this many
+                (newest first). Durable task controls bypass the cap so normal
+                receive can classify them exactly once. A synthetic
+                ``inbox_summary`` reports dropped ordinary traffic. TTL also
+                applies only to ordinary traffic; controls must be classified.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
@@ -1423,9 +1613,27 @@ class AgentMessenger:
                     pass
                 continue
 
-            # Silently discard TTL-expired messages
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Bad mailbox message %s: expected JSON object, got %s",
+                    f,
+                    type(data).__name__,
+                )
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+                continue
+
+            # TTL bounds ordinary chatter only. Durable task controls must
+            # reach normal receive so stale cron reminders are explicitly
+            # ACKed and assignments are classified instead of disappearing.
             ts = data.get("timestamp", 0) or 0
-            if ts and (now - float(ts)) > INBOX_TTL_SECS:
+            if (
+                not _is_durable_control(data)
+                and ts
+                and (now - float(ts)) > INBOX_TTL_SECS
+            ):
                 expired_count += 1
                 try:
                     f.unlink()
@@ -1456,9 +1664,18 @@ class AgentMessenger:
             )
 
         total = len(messages)
+        controls = [
+            message for message in messages if _is_durable_control(message.to_dict())
+        ]
+        ordinary = [message for message in messages if message not in controls]
 
-        if max_replay > 0 and total > max_replay:
-            # Collect unique senders from the full set for the summary
+        if max_replay > 0 and len(ordinary) > max_replay:
+            replayed_ordinary = ordinary[-max_replay:]
+            dropped = len(ordinary) - len(replayed_ordinary)
+            replayed_ids = {message.id for message in controls + replayed_ordinary}
+            replayed = [message for message in messages if message.id in replayed_ids]
+
+            # Collect unique senders from the full set for the summary.
             senders: List[str] = list(
                 dict.fromkeys(
                     m.from_identity or m.from_agent
@@ -1473,8 +1690,9 @@ class AgentMessenger:
             summary_content = (
                 f"[offline inbox] {total} message(s) arrived while offline"
                 f" (senders: {sender_str or 'unknown'}). "
-                f"Showing most recent {max_replay}. "
-                f"Older messages have been dropped to prevent flooding."
+                f"Showing most recent {max_replay} ordinary message(s) and "
+                f"{len(controls)} preserved task control(s). "
+                f"Older ordinary messages have been dropped to prevent flooding."
             )
             summary = HubMessage(
                 action="inbox_summary",
@@ -1485,16 +1703,21 @@ class AgentMessenger:
                 timestamp=0.0,
                 metadata={
                     "total": total,
-                    "showing": max_replay,
+                    "showing": len(replayed_ordinary),
+                    "controls_preserved": len(controls),
                     "senders": senders,
-                    "dropped": total - max_replay,
+                    "dropped": dropped,
                 },
             )
             logger.info(
-                f"Inbox replay bounded for {agent_id}: {total} total, "
-                f"replaying last {max_replay}"
+                "Inbox replay bounded for %s: %d total, replaying %d ordinary "
+                "and preserving %d control(s)",
+                agent_id,
+                total,
+                len(replayed_ordinary),
+                len(controls),
             )
-            return [summary] + messages[-max_replay:]
+            return [summary] + replayed
 
         return messages
 

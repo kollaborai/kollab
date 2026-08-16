@@ -18,7 +18,37 @@ from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
 
+from .tool_output_budget import (
+    build_tool_output_store,
+    pack_tool_history_and_results,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _config_int(config: Any, key: str, default: int) -> int:
+    """Read an integer setting without letting test doubles leak into policy."""
+    if config is None:
+        return default
+    if hasattr(config, "get"):
+        try:
+            value = config.get(key, default)
+        except Exception:
+            return default
+    else:
+        value = getattr(config, key, default)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
 
 # Hard ceiling on continuation turns in one LOOP 2 pass. Runaway backstop,
 # NOT a work limit — sits far above any healthy investigation depth. Stops a
@@ -148,6 +178,36 @@ class QueueProcessor:
         self._add_message_fn = add_message_fn
         self._max_history = max_history
         self.question_gate_enabled = question_gate_enabled
+
+        # Tool output has a producer-level spill boundary and a batch-level
+        # packing boundary. The artifact root is session/project scoped so the
+        # model can reopen the exact output after this turn.
+        self._tool_output_store = build_tool_output_store(
+            config,
+            conversation_logger,
+        )
+        self._tool_output_max_chars = _config_int(
+            config,
+            "kollabor.llm.max_tool_output_chars",
+            80000,
+        )
+        self._tool_output_preview_chars = _config_int(
+            config,
+            "kollabor.llm.tool_output_preview_chars",
+            12000,
+        )
+        self._tool_output_batch_override = _config_int(
+            config,
+            "kollabor.llm.max_tool_batch_output_chars",
+            0,
+        )
+        configure_output = getattr(tool_executor, "configure_tool_output_store", None)
+        if callable(configure_output):
+            configure_output(
+                self._tool_output_store,
+                max_result_chars=self._tool_output_max_chars,
+                preview_chars=self._tool_output_preview_chars,
+            )
 
         # Queue state (owned by QueueProcessor, accessed via properties)
         self.processing_queue: asyncio.Queue[Any] = asyncio.Queue(
@@ -618,6 +678,8 @@ class QueueProcessor:
 
         response = None
         parent_uuid = current_parent_uuid
+        ephemeral_user_message = None
+        ephemeral_user_content = None
 
         try:
             # Context service: inject ephemeral prompts (curator,
@@ -652,6 +714,26 @@ class QueueProcessor:
                         if divergence:
                             injections.append(divergence)
 
+                if hasattr(context_svc, "drain_ephemeral_injections"):
+                    injections.extend(context_svc.drain_ephemeral_injections())
+
+                # The legacy keyword service is owned by LLMService rather
+                # than registered under the ledger's service name. Drain its
+                # fallback only when the ledger rail was unavailable.
+                if self.event_bus:
+                    _llm = self.event_bus.get_service("llm_service")
+                    if (
+                        _llm is not None
+                        and type(_llm).__module__ != "unittest.mock"
+                    ):
+                        legacy = getattr(_llm, "context_service", None)
+                        if (
+                            legacy is not None
+                            and legacy is not context_svc
+                            and hasattr(legacy, "drain_pending_injections")
+                        ):
+                            injections.extend(legacy.drain_pending_injections())
+
                 # Env notification queue drains regardless of curator state —
                 # capability / peer events shouldn't wait for the curator.
                 env_block = self._drain_env_block()
@@ -664,6 +746,8 @@ class QueueProcessor:
                     for i in range(len(self.conversation_history) - 1, -1, -1):
                         msg = self.conversation_history[i]
                         if getattr(msg, "role", "") == "user":
+                            ephemeral_user_message = msg
+                            ephemeral_user_content = msg.content
                             msg.content = combined + "\n\n---\n\n" + msg.content
                             break
 
@@ -688,6 +772,7 @@ class QueueProcessor:
                 native_tools=self._native_tools_handler.tools,
                 mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                 is_cancelled_fn=lambda: self.cancel_processing,
+                native_tools_provider=lambda: self._native_tools_handler.tools,
                 turn_id=root_turn_id,
             )
 
@@ -746,6 +831,7 @@ class QueueProcessor:
                     native_tools=self._native_tools_handler.tools,
                     mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                     is_cancelled_fn=lambda: self.cancel_processing,
+                    native_tools_provider=lambda: self._native_tools_handler.tools,
                     parent_turn_id=root_turn_id,
                 )
 
@@ -924,9 +1010,29 @@ class QueueProcessor:
                 logger.debug("Plugin requested turn completion")
 
             # Step 5: Display clean text (before tool results)
+            # Pipe mode must emit only the terminal response for a logical
+            # turn.  A tool-bearing response is an intermediate model turn;
+            # displaying it here and then displaying the continuation emits
+            # the same user-facing text twice on stdout.  Question-gated XML
+            # tools are the exception because they are intentionally paused
+            # for user input rather than continued automatically.
+            pipe_mode = getattr(self.renderer, "pipe_mode", False) is True
+            tools_suspended = (
+                self.question_gate_enabled and question_gate_active
+            )
+            tool_execution_pending = bool(has_native_tools) or (
+                bool(all_tools) and not tools_suspended
+            )
+            intermediate_pipe_response = pipe_mode and (
+                tool_execution_pending or not self.turn_completed
+            )
             if suppress_display:
                 logger.info("Hub consumed response, display suppressed")
-            if not suppress_display:
+            if intermediate_pipe_response:
+                logger.debug(
+                    "Pipe mode suppressed intermediate response before tool continuation"
+                )
+            if not suppress_display and not intermediate_pipe_response:
                 self.message_display_service.display_complete_response(
                     thinking_duration=thinking_duration,
                     response=clean_response,
@@ -1053,18 +1159,31 @@ class QueueProcessor:
             # Step 8: Bridge relay
             await self._bridge_relay(clean_response)
 
-            # Cap each tool result before it enters history so one oversized
-            # result (shell output, grep, find, MCP, ...) can't blow the context
-            # window. file_read is already capped at the source; this is the
-            # universal net. Display above already showed the full output.
-            _output_cap = int(
-                self.config.get("kollabor.llm.max_tool_output_chars", 80000)
+            # First apply the per-result spill boundary, then pack the whole
+            # native/XML batch against the remaining request budget. This is
+            # deliberately before history append: once oversized content has
+            # entered history, the provider guard can only trim whole messages
+            # and may lose the native call owner.
+            all_tool_results = [*native_results, *xml_tool_results]
+            history_limit = self._tool_history_limit_chars(
+                response=response,
+                raw_tool_calls=raw_tool_calls,
+                xml_tool_calls=all_tools,
             )
-            for _result in (*native_results, *xml_tool_results):
-                if getattr(_result, "success", False) and getattr(
-                    _result, "output", ""
-                ):
-                    _result.output = _cap_tool_output(_result.output, _output_cap)
+            history_stats, output_stats = pack_tool_history_and_results(
+                self.conversation_history,
+                all_tool_results,
+                self._tool_output_store,
+                max_chars=history_limit,
+                max_result_chars=self._tool_output_max_chars,
+                preview_chars=self._tool_output_preview_chars,
+            )
+            if output_stats.result_count or history_stats.result_count:
+                logger.info(
+                    "Tool output budget: history=%s batch=%s",
+                    history_stats.as_dict(),
+                    output_stats.as_dict(),
+                )
 
             # Step 9: Conversation logging + history
             # Build tool call entries for JSONL logging
@@ -1156,7 +1275,14 @@ class QueueProcessor:
                                 ConversationMessage(
                                     role=msg.get("role", "tool"),
                                     content=str(msg.get("content", result.output)),
-                                    metadata={"tool_call_id": tc.id},
+                                    metadata={
+                                        "tool_call_id": tc.id,
+                                        **{
+                                            key: value
+                                            for key, value in (result.metadata or {}).items()
+                                            if key.startswith("tool_output_")
+                                        },
+                                    },
                                 )
                             )
                             break
@@ -1185,6 +1311,7 @@ class QueueProcessor:
                         tool_msg = ConversationMessage(
                             role="user",
                             content="\n".join(batched),
+                            metadata={"tool_output_batch": True},
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(
@@ -1220,6 +1347,7 @@ class QueueProcessor:
                         tool_msg = ConversationMessage(
                             role="user",
                             content="\n".join(batched_tool_results),
+                            metadata={"tool_output_batch": True},
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(
@@ -1269,6 +1397,13 @@ class QueueProcessor:
             self.message_display_service.display_error_message(error_msg)
             self.turn_completed = True
 
+        finally:
+            # Context-service blocks are request-local. Restore the persisted
+            # history object after the initial call and any continuations so
+            # ephemeral context cannot become part of the next cached prefix.
+            if ephemeral_user_message is not None:
+                ephemeral_user_message.content = ephemeral_user_content
+
         # A turn is only done once no tool results need to go back to the model.
         # Publishing earlier would tell remote clients the turn ended while its
         # tools were still running, and they would stop reading the stream.
@@ -1288,6 +1423,76 @@ class QueueProcessor:
     # ------------------------------------------------------------------
     # Shared helpers (used by both native and XML tool paths)
     # ------------------------------------------------------------------
+
+    def _tool_history_limit_chars(
+        self,
+        *,
+        response: str,
+        raw_tool_calls: list[Any],
+        xml_tool_calls: list[Any],
+    ) -> Optional[int]:
+        """Calculate one shared budget for retained and current tool output."""
+        explicit = self._tool_output_batch_override
+        provider_config = getattr(
+            getattr(self.api_service, "_provider", None),
+            "config",
+            None,
+        )
+        context_window = _config_int(
+            provider_config,
+            "context_window",
+            0,
+        ) if provider_config is not None else 0
+
+        derived: Optional[int] = None
+        if context_window > 0:
+            reserve_output = _config_int(provider_config, "max_tokens", 16384)
+            overhead = _config_int(
+                self.config,
+                "kollabor.llm.context_overhead_tokens",
+                60000,
+            )
+            margin = 4000
+            effective_budget = context_window - reserve_output - overhead - margin
+            non_tool_tokens = 0
+            for message in self.conversation_history:
+                role = getattr(message, "role", "")
+                metadata = getattr(message, "metadata", {}) or {}
+                is_tool_history = bool(
+                    (role == "tool" and metadata.get("tool_call_id"))
+                    or metadata.get("tool_output_batch")
+                )
+                if not is_tool_history:
+                    non_tool_tokens += (
+                        len(str(getattr(message, "content", "") or "")) // 3 + 1
+                    )
+            current_response_tokens = len(str(response or "")) // 3 + 1
+            call_tokens = len(
+                str(raw_tool_calls or xml_tool_calls or "")
+            ) // 3 + 1
+            remaining_tokens = (
+                effective_budget
+                - non_tool_tokens
+                - current_response_tokens
+                - call_tokens
+                - 512
+            )
+            derived = max(0, remaining_tokens * 3)
+
+        if explicit > 0:
+            return min(explicit, derived) if derived is not None else explicit
+        if derived is not None:
+            # Keep the recent tool-history aggregate bounded by the existing
+            # per-result ceiling by default. This catches a chain of five
+            # individually-valid reads before the provider has to trim owners.
+            return (
+                min(derived, self._tool_output_max_chars)
+                if self._tool_output_max_chars > 0
+                else derived
+            )
+        # Unknown provider window: still protect the aggregate batch. A zero
+        # per-result setting explicitly disables this fallback.
+        return self._tool_output_max_chars or None
 
     def _track_file_interaction(self, result: ToolExecutionResult) -> None:
         """Record a successful file operation in the conversation logger.
@@ -1342,6 +1547,7 @@ class QueueProcessor:
             content_bytes = output.encode("utf-8", errors="replace")
 
             tool_type = result.tool_type or "unknown"
+            file_content_hash = None
             if tool_type in ("read", "file_read"):
                 kind = "file_read"
                 label = "file read"
@@ -1349,12 +1555,16 @@ class QueueProcessor:
                 if hasattr(result, "metadata") and result.metadata:
                     label = result.metadata.get("file_path", label)
                     file_path = result.metadata.get("file_path")
+                    file_content_hash = result.metadata.get("file_content_hash")
             else:
                 kind = "tool_result"
                 label = tool_type
                 file_path = None
 
             try:
+                ingest_kwargs = {}
+                if file_content_hash:
+                    ingest_kwargs["content_hash"] = file_content_hash
                 entry = context_svc.ingest_heavy_item(
                     kind=kind,
                     tool=tool_type,
@@ -1362,6 +1572,7 @@ class QueueProcessor:
                     content=content_bytes,
                     message_uuid=message_uuid,
                     file_path=file_path,
+                    **ingest_kwargs,
                 )
                 if entry and message is not None:
                     ctx_ids = message.metadata.setdefault("ctx_ids", [])

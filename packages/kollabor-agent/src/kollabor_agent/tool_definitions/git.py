@@ -33,6 +33,7 @@ git_tool = ToolDefinition(
         "<terminal>git diff</terminal>",
         "<terminal>git add -A && git commit -m 'descriptive message'</terminal>",
     ],
+    expose_native=False,
     result_format="Standard git command output via terminal.",
     notes=(
         "Git operations use the terminal tool. This is a doc-only "

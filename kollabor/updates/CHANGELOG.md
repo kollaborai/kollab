@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Added aggregate tool-output budgeting with lossless managed `.output` artifacts,
+  bounded previews, history packing, and non-empty request recovery.
+- Normalized legacy `git` tool requests to the supported `terminal` execution
+  path and documented wildcard tool access for bundled agent profiles.
+- Corrected ChatGPT OAuth Responses handling so unsupported output-token
+  overrides are omitted while reasoning effort remains available.
+
+## [0.6.1] - 2026-08-02
+
+### Added
+
+- Added `kollab --web-ui`, which launches or reuses the local engine and serves
+  the assistant-ui browser client on port 8080.
+- Added the assistant transport, session-owned engine state, profile/MCP/hub
+  routes, and browser permission flow for the local web runtime.
+- Added the model registry with context, pricing, capability, sampling, and
+  reasoning-effort metadata, plus `/llm` loadouts.
+- Added on-demand `tool-search` and `tool-load` discovery for built-in and MCP
+  tools, web search/fetch tools, and workspace/MCP reload tools.
+- Added actionable task checkpoint nudges and `task_snooze` for quieting
+  reminders without hiding active work.
+
+### Changed
+
+- Attach mode now routes state through the daemon-owned state service and supports
+  the current multi-context/engine workflow.
+- Bundled hub coder identities expose the full registered tool set by default.
+
+### Fixed
+
+- Preserved assistant transport state across web UI turns and cleaned up child
+  engine/UI processes on exit.
+- Fixed profile timeout units, orphaned tool results, retry cancellation, and hub
+  wake-cache ordering.
+
 ## [0.5.22] - 2026-07-21
 
 ### Added

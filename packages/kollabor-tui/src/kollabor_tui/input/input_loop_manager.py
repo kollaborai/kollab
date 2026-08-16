@@ -112,6 +112,9 @@ class InputLoopManager:
         # Reference to buffer_manager for cleanup error context
         self._buffer_manager: Optional[Any] = None
 
+        # Event tasks must be observed and cancelled during shutdown.
+        self._paste_event_tasks: set[asyncio.Task[Any]] = set()
+
     def set_callbacks(
         self,
         process_character: Callable,
@@ -346,12 +349,14 @@ class InputLoopManager:
             # Create placeholder immediately
             await self.paste_processor.create_paste_placeholder(paste_id)
 
-        # Emit PASTE_DETECTED event (fire-and-forget)
+        # Emit PASTE_DETECTED event without blocking input processing. Keep the
+        # task owned by this manager so failures are observed and shutdown can
+        # cancel in-flight emissions.
         try:
             from kollabor_events.models import EventType
 
             if hasattr(self, "event_bus") and self.event_bus:
-                asyncio.create_task(
+                task = asyncio.create_task(
                     self.event_bus.emit_with_hooks(
                         EventType.PASTE_DETECTED,
                         {
@@ -362,8 +367,10 @@ class InputLoopManager:
                         "input_loop_manager",
                     )
                 )
+                self._paste_event_tasks.add(task)
+                task.add_done_callback(self._observe_paste_event_task)
         except Exception:
-            pass
+            logger.exception("Failed to schedule PASTE_DETECTED event")
 
     def _is_escape_sequence(self, text: str) -> bool:
         """Check if input is an escape sequence that should bypass paste detection.
@@ -485,9 +492,30 @@ class InputLoopManager:
 
         return chunk.decode("utf-8", errors="ignore") if chunk else ""
 
+    def _observe_paste_event_task(self, task: asyncio.Task[Any]) -> None:
+        """Observe completion of a background paste event task."""
+        self._paste_event_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("PASTE_DETECTED event task failed")
+
+    async def _cancel_paste_event_tasks(self) -> None:
+        """Cancel and drain outstanding paste event tasks."""
+        tasks = tuple(self._paste_event_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._paste_event_tasks.clear()
+
     async def cleanup(self) -> None:
         """Perform cleanup operations."""
         try:
+            await self._cancel_paste_event_tasks()
+
             # Clear old errors
             cleared_errors = self.error_handler.clear_old_errors()
             if cleared_errors > 0:

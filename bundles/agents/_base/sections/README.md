@@ -69,6 +69,10 @@ The `tools` field in `agent.json` declares which tools an agent has access to:
 }
 ```
 
+Use `"tools": ["*"]` to expose every registered tool. This is equivalent to
+omitting the field and applies consistently to the prompt reference, native
+tool schemas, and execution scope.
+
 This makes tool permissions inspectable from config without reading the full prompt.
 
 ## Modifying Base Sections

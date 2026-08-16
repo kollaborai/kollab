@@ -38,6 +38,41 @@ def _wait_for_ready(proc: subprocess.Popen[str], port: int) -> None:
     raise AssertionError(f"engine did not report READY on port {port}")
 
 
+def _stop_server(proc: subprocess.Popen[str]) -> None:
+    """Stop the server and close the parent-owned output pipe."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+
+def test_stop_server_closes_stdout_after_wait():
+    """Subprocess cleanup must release the stdout pipe owned by the parent."""
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = tempfile.TemporaryFile(mode="w+")
+            self.terminated = False
+            self.wait_timeout = None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: int) -> int:
+            self.wait_timeout = timeout
+            return 0
+
+    proc = FakeProcess()
+
+    _stop_server(proc)  # type: ignore[arg-type]
+
+    assert proc.terminated
+    assert proc.wait_timeout == 5
+    assert proc.stdout.closed
+
+
 def test_endpoints():
     """Test all health endpoints."""
     port = _free_port()
@@ -117,11 +152,9 @@ def test_endpoints():
             print("  protected endpoint OK")
 
             print("\nAll tests passed!")
-            return 0
 
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            _stop_server(proc)
 
 
 if __name__ == "__main__":

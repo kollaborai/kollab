@@ -8,6 +8,9 @@ import asyncio
 import copy
 import json
 import logging
+import math
+import random
+import re
 import time
 import uuid
 from datetime import datetime
@@ -15,7 +18,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from kollabor_ai.profile_manager import LLMProfile
-from kollabor_ai.providers.errors import EmptyResponseError
+from kollabor_ai.providers.errors import (
+    APIConnectionError,
+    APITimeoutError,
+    EmptyResponseError,
+    ProviderError,
+    RateLimitError,
+    ServerError,
+    TransientHTTPError,
+)
 from kollabor_ai.providers.models import (
     TextDelta,
     ThinkingDelta,
@@ -32,6 +43,11 @@ from kollabor_ai.raw_log import (
     RawRequest,
     RawResponse,
 )
+
+RETRY_BASE_DELAY_SECONDS = 5.0
+RETRY_MAX_DELAY_SECONDS = 120.0
+RETRY_JITTER_MIN = 0.75
+RETRY_JITTER_MAX = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +389,7 @@ class APICommunicationService:
         on_rate_limit=None,
         turn_id: Optional[str] = None,
         parent_turn_id: Optional[str] = None,
+        **provider_kwargs: Any,
     ) -> str:
         """Make API call to LLM with conversation history and robust error handling.
 
@@ -390,6 +407,8 @@ class APICommunicationService:
                 call records ``continuation_of=<parent_turn_id>`` so a
                 truncated-and-resumed response can be stitched back to the
                 turn that started it.
+            **provider_kwargs: Provider-native request options such as
+                ``previous_response_id`` and Responses API cache controls.
 
         Returns:
             LLM response content
@@ -412,12 +431,30 @@ class APICommunicationService:
         self.last_turn_id = turn_id or str(uuid.uuid4())
         self._current_parent_turn_id = parent_turn_id
 
+        # Once visible streaming output has reached the caller, retrying the
+        # same request would replay tokens and duplicate the user's response.
+        # Keep this state across attempts so the outer retry loop can stop at
+        # that boundary.
+        stream_has_emitted = False
+
+        async def tracked_streaming_callback(chunk):
+            nonlocal stream_has_emitted
+            if chunk:
+                stream_has_emitted = True
+            if streaming_callback:
+                await streaming_callback(chunk)
+
+        provider_streaming_callback = (
+            tracked_streaming_callback if streaming_callback else None
+        )
+
         # Update activity tracking
         self._connection_stats["total_requests"] += 1
         self._connection_stats["last_activity"] = time.time()
 
         # Prepare messages for API
         messages = self._prepare_messages(conversation_history, max_history)
+        self._provider_kwargs = dict(provider_kwargs)
 
         # Use provider system (always enabled)
         if not self._provider:
@@ -431,8 +468,13 @@ class APICommunicationService:
             else:
                 raise RuntimeError("Provider not initialized. Call initialize() first.")
 
-        max_retries = 5
-        base_delay = 5.0  # seconds
+        try:
+            max_retries = max(
+                0, int(self.config.get("kollabor.llm.max_retries", 5))
+            )
+        except (TypeError, ValueError):
+            max_retries = 5
+        base_delay = RETRY_BASE_DELAY_SECONDS
 
         for attempt in range(max_retries + 1):
             request_start = time.time()
@@ -441,7 +483,11 @@ class APICommunicationService:
                 # can actually cancel the in-flight HTTP request
                 if self.enable_streaming:
                     self.current_request_task = asyncio.ensure_future(
-                        self._call_provider_stream(messages, tools, streaming_callback)
+                        self._call_provider_stream(
+                            messages,
+                            tools,
+                            provider_streaming_callback,
+                        )
                     )
                 else:
                     self.current_request_task = asyncio.ensure_future(
@@ -469,36 +515,127 @@ class APICommunicationService:
                 raise asyncio.CancelledError("API request cancelled by user")
             except Exception as e:
                 # Check if this is a retryable error
-                from kollabor_ai.providers.errors import RateLimitError
-
                 error_str = str(e)
-                is_rate_limit = isinstance(e, RateLimitError) or "429" in error_str
+                status_code = getattr(e, "status_code", None)
+                error_code = getattr(e, "error_code", "")
+                is_typed_provider_error = isinstance(e, ProviderError)
+                is_rate_limit = (
+                    isinstance(e, RateLimitError)
+                    or error_code == "rate_limit_error"
+                    or status_code == 429
+                    or (
+                        not is_typed_provider_error
+                        and bool(re.search(r"\b429\b", error_str))
+                    )
+                )
                 is_empty_response = isinstance(e, EmptyResponseError)
                 is_context_overflow = is_empty_response and (
                     getattr(e, "error_code", "") == "context_window_exceeded"
                 )
 
-                # Server errors (500, 502, 503, 504) and network errors are transient
-                is_server_error = any(
-                    code in error_str
-                    for code in ("500", "502", "503", "504", "Network error")
+                # Server, connection, timeout, and network errors are transient.
+                is_server_error = (
+                    isinstance(e, ServerError)
+                    or (
+                        isinstance(error_code, str)
+                        and error_code.startswith("server_error")
+                    )
+                    or (
+                        isinstance(status_code, int)
+                        and 500 <= status_code < 600
+                    )
+                    or (
+                        not is_typed_provider_error
+                        and bool(re.search(r"\b5\d{2}\b", error_str))
+                    )
+                    or (not is_typed_provider_error and "Network error" in error_str)
                 )
+                is_transport_error = isinstance(
+                    e, (APIConnectionError, APITimeoutError)
+                ) or error_code in {"connection_error", "timeout"}
+                is_transient_http = isinstance(e, TransientHTTPError) or status_code in {
+                    408,
+                    409,
+                }
 
                 # A context overflow won't fix itself on retry — the request is
                 # the same size each time. Surface it at once so the user can
                 # /compact instead of spinning through five identical failures.
                 is_retryable = (
-                    is_rate_limit or is_server_error or is_empty_response
+                    is_rate_limit
+                    or is_server_error
+                    or is_transport_error
+                    or is_transient_http
+                    or is_empty_response
                 ) and not is_context_overflow
 
+                if is_retryable and stream_has_emitted:
+                    logger.warning(
+                        "Streaming provider failed after visible output; "
+                        "not retrying to avoid replaying partial content: %s",
+                        error_str[:120],
+                    )
+                    is_retryable = False
+
                 if is_retryable and attempt < max_retries:
-                    # Use retry_after from headers if available, else exponential backoff
+                    # Honor bounded server-directed delays. Fall back to bounded
+                    # exponential backoff with jitter to avoid synchronized retries.
                     retry_after = getattr(e, "retry_after", None)
-                    delay = retry_after if retry_after else base_delay * (2**attempt)
-                    delay = min(delay, 120.0)  # cap at 2 minutes
+                    parsed_retry_after = None
+                    if retry_after is not None:
+                        try:
+                            candidate = float(retry_after)
+                        except (TypeError, ValueError):
+                            candidate = None
+                        if (
+                            candidate is not None
+                            and math.isfinite(candidate)
+                            and candidate >= 0
+                        ):
+                            parsed_retry_after = candidate
+
+                    if (
+                        parsed_retry_after is not None
+                        and parsed_retry_after > RETRY_MAX_DELAY_SECONDS
+                    ):
+                        logger.warning(
+                            "Provider requested retry after %.1fs, above local cap %.1fs; "
+                            "not retrying: %s",
+                            parsed_retry_after,
+                            RETRY_MAX_DELAY_SECONDS,
+                            error_str[:120],
+                        )
+                        self._connection_stats["failed_requests"] += 1
+                        self._log_raw_interaction(
+                            messages=messages,
+                            tools=tools,
+                            error=error_str,
+                            duration=time.time() - request_start,
+                        )
+                        raise
+
+                    if parsed_retry_after is not None:
+                        delay = parsed_retry_after
+                    else:
+                        exponential_delay = min(
+                            base_delay * (2 ** min(attempt, 10)),
+                            RETRY_MAX_DELAY_SECONDS,
+                        )
+                        delay = min(
+                            exponential_delay
+                            * random.uniform(RETRY_JITTER_MIN, RETRY_JITTER_MAX),
+                            RETRY_MAX_DELAY_SECONDS,
+                        )
 
                     if is_rate_limit:
                         error_type = "Rate limited"
+                    elif is_transport_error:
+                        error_type = (
+                            "Timeout"
+                            if isinstance(e, APITimeoutError)
+                            or getattr(e, "error_code", "") == "timeout"
+                            else "Transport error"
+                        )
                     elif is_empty_response:
                         error_type = "Empty response"
                     else:
@@ -577,6 +714,7 @@ class APICommunicationService:
         response: UnifiedResponse = await self._provider.call(
             messages=messages,
             tools=tools,
+            **getattr(self, "_provider_kwargs", {}),
         )
 
         # Extract token usage
@@ -596,9 +734,7 @@ class APICommunicationService:
         self.last_thinking_content = response.get_thinking_content()
 
         # Capture raw upstream response for raw log
-        self.last_raw_chunks = (
-            [response.raw_response] if response.raw_response else []
-        )
+        self.last_raw_chunks = [response.raw_response] if response.raw_response else []
 
         # Extract text content
         content = response.get_text_content()
@@ -653,6 +789,7 @@ class APICommunicationService:
             async for streaming_response in self._provider.stream(
                 messages=messages,
                 tools=tools,
+                **getattr(self, "_provider_kwargs", {}),
             ):
                 # Check for cancellation
                 if self.cancel_requested:
@@ -849,7 +986,9 @@ class APICommunicationService:
         # later request inherits the same too-large history and fails the same
         # way. The budget guard should keep us from ever getting here; this is
         # the backstop that makes the failure loud instead of silent.
-        if (getattr(self, "last_stop_reason", None) or "") == "model_context_window_exceeded":
+        if (
+            getattr(self, "last_stop_reason", None) or ""
+        ) == "model_context_window_exceeded":
             raise EmptyResponseError(
                 "context window exceeded — the conversation is larger than the "
                 "model accepts. Older history must be compacted or cleared "
@@ -955,9 +1094,11 @@ class APICommunicationService:
         turn: a leading assistant/tool message, or a tool result whose
         originating tool call was trimmed away, would be rejected (a
         tool_result must follow its tool_use). Drop such leading messages.
-        If the entire bounded window is orphaned tool state, return an empty
-        list rather than send an invalid function_call_output-only request.
+        If the entire bounded window is orphaned tool state, replace it with a
+        recoverable user message rather than send an invalid
+        function_call_output-only request.
         """
+        original = list(messages)
         while messages:
             head = messages[0]
             content = head.get("content")
@@ -976,7 +1117,28 @@ class APICommunicationService:
                 messages.pop(0)
             else:
                 break
-        return messages
+        if messages:
+            return messages
+        if not original:
+            return [
+                {
+                    "role": "user",
+                    "content": (
+                        "[context recovery] No valid conversation input remained "
+                        "after context preparation. Continue from the current turn."
+                    ),
+                }
+            ]
+        return [
+            {
+                "role": "user",
+                "content": (
+                    "[context recovery] Earlier tool state was trimmed before its "
+                    "call owner. The previous tool result is unavailable in this "
+                    "request; continue from the current turn."
+                ),
+            }
+        ]
 
     def _enforce_token_budget(
         self, messages: List[Dict[str, Any]]
@@ -994,8 +1156,8 @@ class APICommunicationService:
         """
         cfg = getattr(getattr(self, "_provider", None), "config", None)
         window = int(getattr(cfg, "context_window", 0) or 0)
-        if window <= 0 or not messages:
-            return messages
+        if window <= 0:
+            return self._strip_leading_orphans(list(messages))
 
         reserve_output = int(getattr(cfg, "max_tokens", 0) or 16384)
         # The system prompt and tool schemas are added by the provider and are
@@ -1178,9 +1340,7 @@ class APICommunicationService:
                     role=str(m.get("role", "")),
                     content=m.get("content", ""),
                     metadata={
-                        k: v
-                        for k, v in m.items()
-                        if k not in ("role", "content")
+                        k: v for k, v in m.items() if k not in ("role", "content")
                     },
                 )
                 for m in messages
@@ -1197,9 +1357,9 @@ class APICommunicationService:
                         wire_request = copy.deepcopy(payload)
                     except Exception:
                         wire_request = None
-                wire_provider = getattr(
-                    self._provider, "_provider_name", ""
-                ) or str(getattr(self._provider, "provider_type", ""))
+                wire_provider = getattr(self._provider, "_provider_name", "") or str(
+                    getattr(self._provider, "provider_type", "")
+                )
 
             interaction = RawInteraction(
                 turn_id=self.last_turn_id or str(uuid.uuid4()),

@@ -1,7 +1,7 @@
 ---
 title: "Profiles"
 created: 2026-02-24
-modified: 2026-04-10
+modified: 2026-08-06
 status: active
 ---
 # Profiles
@@ -127,7 +127,7 @@ KOLLAB_{NAME}_{FIELD}=value
 | `BASE_URL` | Custom endpoint | `http://localhost:11434/v1` |
 | `TEMPERATURE` | Sampling randomness | `0.7` (0.0-2.0; ignored on models that reject sampling params) |
 | `MAX_TOKENS` | Response length limit | `4096` |
-| `TIMEOUT` | Request timeout | `30000` (milliseconds, 0 = none) |
+| `TIMEOUT` | Request timeout in seconds | `30` (0 = provider default) |
 | `TOP_P` | Nucleus sampling | `0.9` (0.0-1.0) |
 | `EFFORT` | Reasoning effort | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (unset = model default) |
 | `STREAMING` | Stream responses | `true` / `false` |
@@ -302,7 +302,7 @@ kollab --profile openai-oauth
 /llm openai-oauth
 
 # Save to config for auto-activation on startup
-kollab --profile openai-oauth --save openai-oauth
+kollab --profile openai-oauth --save
 ```
 
 important: The profile is registered from stored tokens on every
@@ -356,7 +356,7 @@ kollab --profile cheap   # Quick, low-cost
 Select a profile at startup:
 
 ```bash
-kollab --profile my-profile     # Use a profile created via /setup or /profile
+kollab --profile my-profile     # Use a profile created via /setup or /llm
 kollab --profile openai-oauth   # Use OAuth profile (requires --login first)
 ```
 
@@ -375,18 +375,18 @@ kollab --profile work --default --local   # set project-local default profile
 Combine `--profile` with `--save` to persist an auto-detected profile:
 
 ```bash
-# Auto-detects from ANTHROPIC_API_KEY, saves as "work" profile
+# Auto-detects from ANTHROPIC_API_KEY, saves as "anthropic-auto" profile
 export ANTHROPIC_API_KEY="<your-anthropic-api-key>"
-kollab --profile anthropic-auto --save work
+kollab --profile anthropic-auto --save
 
 # Future runs use the saved profile
-kollab --profile work
+kollab --profile anthropic-auto
 ```
 
 Use `--local` with `--save` to save to project config instead of global:
 
 ```bash
-kollab --profile openai-auto --save team --local
+kollab --profile openai-auto --save --local
 # Saved to .kollab/config.json (project-specific)
 ```
 
