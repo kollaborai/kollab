@@ -13,12 +13,11 @@ import asyncio
 import os
 import sys
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Ensure we can import kollabor_agent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from kollabor_agent.tool_definition import ToolDefinition, ToolParameter
 from kollabor_agent.tool_registry import ToolRegistry
 
 
@@ -557,7 +556,6 @@ class TestOnDemandIntegration(unittest.TestCase):
 
     def test_bundle_scope_blocks_unloaded_then_allows_loaded(self):
         """Tool not in bundle scope is blocked; after loading, it's allowed."""
-        from kollabor_agent.tool_executor import ToolExecutionResult
 
         self.executor.set_bundle_scope(["terminal"])
 

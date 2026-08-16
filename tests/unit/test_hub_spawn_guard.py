@@ -21,19 +21,14 @@ by:
      assigned (TOCTOU guard).
 """
 
-import asyncio
 import os
-import sys
-import types
 import unittest
 from argparse import Namespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.messenger import AgentMessenger
-from plugins.hub.models import AgentState
 from plugins.hub.plugin import HubPlugin
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -156,7 +151,7 @@ class TestSpawnGuardExplicitAs(unittest.IsolatedAsyncioTestCase):
             patch("plugins.hub.presence.get_presence_dir", return_value=MagicMock()),
         ):
             try:
-                identity = await _run_start_hub_early(plugin, existing)
+                await _run_start_hub_early(plugin, existing)
             except SystemExit:
                 self.fail("Should not exit when holder is dead (force-claim path)")
 
@@ -169,7 +164,7 @@ class TestSpawnGuardExplicitAs(unittest.IsolatedAsyncioTestCase):
         plugin = _minimal_plugin(as_identity="sapphire")
 
         with patch("os._exit") as mock_exit:
-            identity = await _run_start_hub_early(plugin, existing_agents=[])
+            await _run_start_hub_early(plugin, existing_agents=[])
 
         mock_exit.assert_not_called()
         self.assertEqual(plugin._identity.identity, "sapphire")
@@ -190,7 +185,7 @@ class TestSpawnGuardExplicitAs(unittest.IsolatedAsyncioTestCase):
             patch.object(AgentMessenger, "ping_agent", new=AsyncMock(return_value=True)),
             patch("os._exit") as mock_exit,
         ):
-            identity = await _run_start_hub_early(plugin, existing)
+            await _run_start_hub_early(plugin, existing)
 
         mock_exit.assert_not_called()
         # Should have picked a different identity (not sapphire)
@@ -206,9 +201,6 @@ class TestSpawnGuardTOCTOU(unittest.IsolatedAsyncioTestCase):
         plugin = _minimal_plugin(as_identity=None)
 
         publish_calls: list[str] = []
-        socket_server_started = []
-
-        real_publish_side = None
 
         def _track_publish():
             # Record that publish was called
@@ -254,7 +246,7 @@ class TestSpawnGuardTOCTOU(unittest.IsolatedAsyncioTestCase):
 
         with patch("os._exit") as mock_exit:
             # Agent B sees Agent A's preliminary presence
-            identity_b = await _run_start_hub_early(
+            await _run_start_hub_early(
                 plugin_b, existing_agents=[agent_a_presence]
             )
 
@@ -289,8 +281,6 @@ class TestSpawnGuardPresenceScan(unittest.IsolatedAsyncioTestCase):
         startup_scan() — it represents a process mid-startup."""
         import json
         import time
-        from pathlib import Path
-        from unittest.mock import patch
 
         from plugins.hub.presence import PresenceManager
 

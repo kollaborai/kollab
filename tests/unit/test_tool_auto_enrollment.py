@@ -25,8 +25,8 @@ from unittest.mock import AsyncMock, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from kollabor_agent.tool_definition import ToolDefinition, ToolParameter
-from kollabor_agent.tool_registry import ToolRegistry
 from kollabor_agent.tool_generators.xml_regex import build_regex_for_tool
+from kollabor_agent.tool_registry import ToolRegistry
 
 
 def _run(coro):
@@ -40,7 +40,7 @@ def _run(coro):
 
 def _register_tool_tags(parser, registry):
     """Simulate llm_coordinator._register_registry_tool_tags().
-    
+
     This is the EXACT logic from llm_coordinator.py that auto-enrolls
     all ToolRegistry tools with the response parser. We replicate it
     here so the test doesn't need the full llm_coordinator stack.
@@ -264,7 +264,7 @@ class TestAutoEnrollmentFullPath(unittest.TestCase):
         from kollabor_ai.response_parser import ResponseParser
 
         parser = ResponseParser()
-        count1 = _register_tool_tags(parser, self.registry)
+        _register_tool_tags(parser, self.registry)
         count2 = _register_tool_tags(parser, self.registry)
 
         # Second call should register 0 new tags
@@ -319,8 +319,8 @@ class TestAutoEnrollmentFullPath(unittest.TestCase):
 
     def test_full_cycle_define_register_parse_load(self):
         """Full cycle: define tool → register → parse XML → tool-search finds it → tool-load loads it."""
-        from kollabor_ai.response_parser import ResponseParser
         from kollabor_agent.tool_executor import ToolExecutor
+        from kollabor_ai.response_parser import ResponseParser
 
         # Step 1: Define and register a new tool
         test_tool = ToolDefinition(

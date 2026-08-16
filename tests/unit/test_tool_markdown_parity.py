@@ -1,10 +1,9 @@
 """Verify registry generates correct markdown matching tool-reference files."""
 
-import os
 from pathlib import Path
 
-from kollabor_agent.tool_registry import ToolRegistry, get_registry
 from kollabor_agent.tool_generators.markdown import render_tool_markdown
+from kollabor_agent.tool_registry import ToolRegistry, get_registry
 
 
 class TestMarkdownParity:

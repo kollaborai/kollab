@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 
 from kollabor_tui.message_coordinator import MessageDisplayCoordinator
 
-
 # ---------------------------------------------------------------------------
 # Fix 1: is_displaying threading.Lock (36a6dbb)
 # ---------------------------------------------------------------------------

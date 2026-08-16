@@ -7,10 +7,9 @@ required fields.
 Updated after phases B-D expanded from 16 to 58+ tools.
 """
 
-import json
 
-from kollabor_agent.tool_registry import ToolRegistry, get_registry
 from kollabor_agent.tool_generators.native_json import generate_openai_tools
+from kollabor_agent.tool_registry import ToolRegistry, get_registry
 
 
 class TestParity:
@@ -78,7 +77,7 @@ class TestParity:
     def test_all_tools_have_required_fields(self):
         """Every tool has name, description, xml_tag, and category."""
         for tool in self.registry.list():
-            assert tool.name, f"Tool missing name"
+            assert tool.name, "Tool missing name"
             assert tool.description, f"Tool {tool.name} missing description"
             assert tool.xml_tag_name, f"Tool {tool.name} missing xml_tag"
             assert tool.category, f"Tool {tool.name} missing category"

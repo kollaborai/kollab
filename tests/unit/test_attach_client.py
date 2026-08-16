@@ -1,11 +1,8 @@
 """Tests for attach_client.py fixes: signal handlers and detach logging."""
 
 import json
-import os
 import signal
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 class TestDetachLogging:
@@ -20,7 +17,7 @@ class TestDetachLogging:
         client._writer.write.side_effect = OSError("broken pipe")
         client._writer.drain.side_effect = OSError("broken pipe")
 
-        with patch("kollabor.attach_client.logger") as mock_logger:
+        with patch("kollabor.attach_client.logger") as _mock_logger:
             try:
                 detach_msg = json.dumps({"type": "detach"}) + "\n"
                 client._writer.write(detach_msg.encode())
@@ -37,8 +34,8 @@ class TestSignalHandlers:
 
     def test_signal_cleanup_calls_exit_raw_mode(self):
         """_signal_cleanup should call _exit_raw_mode on the current client."""
-        from kollabor.attach_client import _signal_cleanup
         import kollabor.attach_client as mod
+        from kollabor.attach_client import _signal_cleanup
 
         mock_client = MagicMock()
         mod._current_client = mock_client
@@ -46,14 +43,15 @@ class TestSignalHandlers:
         with patch("os.kill") as mock_kill:
             _signal_cleanup(signal.SIGTERM, None)
             mock_client._exit_raw_mode.assert_called_once()
+            import os
             mock_kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
 
         mod._current_client = None
 
     def test_signal_cleanup_no_client_no_crash(self):
         """_signal_cleanup should not crash if no client is set."""
-        from kollabor.attach_client import _signal_cleanup
         import kollabor.attach_client as mod
+        from kollabor.attach_client import _signal_cleanup
 
         mod._current_client = None
 
@@ -62,8 +60,8 @@ class TestSignalHandlers:
 
     def test_signal_cleanup_with_sighup(self):
         """_signal_cleanup should handle SIGHUP too."""
-        from kollabor.attach_client import _signal_cleanup
         import kollabor.attach_client as mod
+        from kollabor.attach_client import _signal_cleanup
 
         mock_client = MagicMock()
         mod._current_client = mock_client

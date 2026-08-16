@@ -21,8 +21,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from kollabor_agent.tool_registry import ToolRegistry
 from kollabor_agent.tool_generators.xml_regex import build_regex_for_tool
+from kollabor_agent.tool_registry import ToolRegistry
 
 
 class TestToolTagParserCoverage(unittest.TestCase):
@@ -73,7 +73,6 @@ class TestToolTagParserCoverage(unittest.TestCase):
 
         failures = []
         for tool in self.all_tools:
-            tag = tool.xml_tag_name
             form = tool.xml_form
 
             # Build a sample XML string for this tool
