@@ -950,7 +950,7 @@ class SetupAltView(AltView):
         self._write(
             2,
             y + 1,
-            "you can now send a message. manage profiles with /profile.",
+            "you can now send a message. switch provider or model with /llm.",
             width,
         )
 

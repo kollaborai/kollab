@@ -1,5 +1,3 @@
-import pytest; pytest.skip("standalone script — run with python, not pytest", allow_module_level=True)  # noqa: E702
-
 """
 Smoke tests for kollab 0.5.5 release.
 
@@ -16,6 +14,15 @@ Run: python tests/test_0.5.5.py
 import json
 import sys
 from pathlib import Path
+
+import pytest
+
+# Standalone script, not a pytest module: it runs assertions at import time
+# and reports via its own counters. Skipping at module level keeps it out of
+# the suite while `python tests/test_0_5_5.py` still works.
+pytest.skip(
+    "standalone script — run with python, not pytest", allow_module_level=True
+)
 
 # Ensure repo root is on path
 ROOT = Path(__file__).resolve().parent.parent
@@ -85,8 +92,8 @@ print("\n=== Pool Identity Loading ===")
 
 try:
     from plugins.hub.models import (
-        POOL_IDENTITIES,
         POOL_BY_NAME,
+        POOL_IDENTITIES,
         PoolIdentity,
     )
 
@@ -140,7 +147,7 @@ except Exception as e:
 print("\n=== Spawn Identity Resolution ===")
 
 try:
-    from plugins.hub.models import POOL_IDENTITIES, POOL_BY_NAME
+    from plugins.hub.models import POOL_BY_NAME, POOL_IDENTITIES
 
     # MODE 1: name matches a pool identity
     name = "lapis"

@@ -173,14 +173,14 @@ class TestParseArgumentsWithPlugins(unittest.TestCase):
                 "value",
                 "-a",
                 "test-agent",
-                "--profile",
+                "--llm",
                 "test-profile",
             ],
         )
 
         self.assertEqual(args.test_arg, "value")
         self.assertEqual(args.agent, "test-agent")
-        self.assertEqual(args.profile, "test-profile")
+        self.assertEqual(args.llm, "test-profile")
 
     def test_parse_arguments_supports_process_local_no_mcp(self):
         """The MCP safety switch is a core argument and defaults off."""

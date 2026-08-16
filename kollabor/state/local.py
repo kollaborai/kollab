@@ -795,6 +795,8 @@ class LocalStateService(StateService):
         persist: bool = False,
         persist_local: bool = False,
         reload_profile: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> ProfileSnapshot:
         """Switch the active LLM profile and trigger a provider reinitialize.
 
@@ -811,6 +813,9 @@ class LocalStateService(StateService):
             persist_local: If True with persist, save to local project
                 config instead of global (mirrors --save --local).
                 Default False. Ignored when persist is False.
+            model: Optional model id from `--model`, applied to the profile
+                before activation.
+            effort: Optional reasoning effort from `--effort`, same.
 
         Raises ValueError if the profile name is not registered.
         Returns a ProfileSnapshot of the new active profile on success.
@@ -866,6 +871,24 @@ class LocalStateService(StateService):
                 f"profile not found: {name!r}"
                 + (f" (available: {', '.join(available)})" if available else "")
             )
+
+        # --model / --effort ride on top of the selected profile. Applied
+        # before the provider reinitialize below so the next turn uses them,
+        # and never written to config -- a launch flag must not rewrite the
+        # user's saved profile (spec R3 / invariant I5).
+        if model or effort:
+            overrides: dict[str, Any] = {"save_to_config": False}
+            if model:
+                overrides["model"] = model
+            if effort:
+                overrides["effort"] = effort
+            try:
+                if not self._profile_manager.update_profile(name, **overrides):
+                    logger.warning(
+                        "failed to apply overrides to profile %r: %s", name, overrides
+                    )
+            except Exception as e:
+                logger.warning("failed to apply overrides to profile %r: %s", name, e)
 
         profile = self._profile_manager.get_active_profile()
 

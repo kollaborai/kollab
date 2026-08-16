@@ -718,7 +718,7 @@ class SystemCommandHandler(BaseCommandHandler):
             elif name:
                 add("warn", "profile", f"{name} has no model", "set a model/profile")
             else:
-                add("block", "profile", "no active profile", "run /profile list")
+                add("block", "profile", "no active profile", "run /setup or /llm")
         except Exception as e:
             add("block", "profile", f"unreadable: {e}", "check profile config")
 

@@ -514,9 +514,18 @@ def map_http_status_error(
     *,
     authentication_safe_message: Optional[str] = None,
     not_found_safe_message: Optional[str] = None,
+    detail: str = "",
 ) -> ProviderError:
-    """Map an HTTP status while preserving response headers for retry policy."""
+    """Map an HTTP status while preserving response headers for retry policy.
+
+    ``detail`` is the provider's own explanation from the response body. It is
+    appended to the message so the error says what was actually wrong, and so
+    the body-text checks below (context length) can match on real content
+    instead of on httpx's generic status line.
+    """
     error_message = str(error)
+    if detail:
+        error_message = f"{error_message}: {detail}"
     response_headers = headers or {}
     retry_after = parse_retry_after_headers(response_headers)
 
@@ -641,9 +650,44 @@ def map_httpx_error(
             response.headers,
             authentication_safe_message=authentication_safe_message,
             not_found_safe_message=not_found_safe_message,
+            detail=_response_detail(response),
         )
 
     return ProviderError(error_message, provider, original_error=error)
+
+
+def _response_detail(response: Any) -> str:
+    """Provider-supplied explanation from an error response body.
+
+    ``str(httpx.HTTPStatusError)`` is only ``"Client error '400 Bad Request'
+    for url ..."`` -- it never says *why*. Every provider states the actual
+    reason in the response body (Google's ``error.message``, OpenAI's
+    ``error.message``, plain text elsewhere), and discarding it turns every
+    4xx into an unactionable status line. Messages are redacted downstream by
+    ``ProviderError._sanitize_message``.
+    """
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 -- not JSON, fall back to text
+        try:
+            text = (response.text or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+        return text[:500]
+
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("status") or ""
+            if message:
+                return str(message)[:500]
+        if isinstance(error, str) and error:
+            return error[:500]
+        for key in ("message", "detail", "error_description"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value[:500]
+    return str(body)[:500] if body else ""
 
 
 def map_openai_error(error: Exception, provider: str = "openai") -> ProviderError:

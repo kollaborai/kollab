@@ -135,6 +135,8 @@ class StateService(Protocol):
         persist: bool = False,
         persist_local: bool = False,
         reload_profile: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> ProfileSnapshot:
         """Switch to a different LLM profile by name.
 
@@ -147,6 +149,10 @@ class StateService(Protocol):
             reload_profile: If True, reload profile config before activation.
                 Use this after a profile was created or edited by another
                 process (for example the attached client).
+            model: Optional model id applied to the profile before it is
+                activated (`--model`). In-memory only regardless of persist.
+            effort: Optional reasoning effort applied the same way
+                (`--effort`), validated against EFFORT_LEVELS by the caller.
 
         Returns:
             ProfileSnapshot of the newly-active profile.

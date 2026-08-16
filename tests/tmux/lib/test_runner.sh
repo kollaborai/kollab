@@ -301,6 +301,14 @@ def _run_shell_step(step: dict[str, Any]) -> None:
         FAILURES += 1
         print(f"[FAIL] shell command exited {result.returncode}")
         print(_tail(LAST_OUTPUT))
+    # Inline assertions on the command's own output. Without these the keys
+    # were accepted and silently ignored, so a spec could assert nothing while
+    # reporting PASS. A following assert_contains step still works too -- both
+    # read LAST_OUTPUT.
+    if step.get("assert_contains"):
+        _assert_contains(str(step["assert_contains"]), desc)
+    if step.get("assert_not_contains"):
+        _assert_not_contains(str(step["assert_not_contains"]), desc)
 
 
 def _execute_step(step: dict[str, Any]) -> None:

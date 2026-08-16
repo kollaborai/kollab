@@ -185,7 +185,7 @@ class ThoughtOrchestrator:
 
         # Inherit parent's LLM profile
         if profile_name:
-            cmd_args.extend(["--profile", profile_name])
+            cmd_args.extend(["--llm", profile_name])
 
         try:
             process = await asyncio.create_subprocess_exec(

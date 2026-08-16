@@ -81,21 +81,21 @@ For more control than the default auto-detection, create named profiles using th
 KOLLAB_OLLAMA_PROVIDER=custom
 KOLLAB_OLLAMA_BASE_URL=http://localhost:11434/v1
 KOLLAB_OLLAMA_MODEL=llama3.3
-kollab --profile ollama
+kollab --llm ollama
 
 # Azure OpenAI
 KOLLAB_AZURE_PROVIDER=azure_openai
 KOLLAB_AZURE_API_KEY="<your-azure-api-key>"
 KOLLAB_AZURE_MODEL=gpt-5.4
 KOLLAB_AZURE_AZURE_ENDPOINT=https://your-resource.openai.azure.com
-kollab --profile azure
+kollab --llm azure
 
 # Custom endpoint with auth
 KOLLAB_CUSTOM_PROVIDER=custom
 KOLLAB_CUSTOM_BASE_URL=https://api.example.com/v1
 KOLLAB_CUSTOM_API_KEY="<your-api-key>"
 KOLLAB_CUSTOM_MODEL=custom-model-name
-kollab --profile custom
+kollab --llm custom
 ```
 
 ### Profile Fields
@@ -115,13 +115,34 @@ After creating a profile via env vars, save it to your config:
 
 ```bash
 # Save to global config (~/.kollab/config.json)
-kollab --profile myprofile --save
+kollab --llm myprofile --save
 
 # Save to local project config (.kollab/config.json)
-kollab --profile myprofile --save --local
+kollab --llm myprofile --save --local
 ```
 
-Once saved, you can use `kollab --profile myprofile` without setting env vars each time.
+Once saved, you can use `kollab --llm myprofile` without setting env vars each time.
+
+### Overriding model and effort at launch
+
+`--llm` picks the connection; `--model` and `--effort` layer on top of it.
+Neither writes to config — they apply to this run only.
+
+```bash
+# Profile plus an explicit model and reasoning effort
+kollab --llm openai --model gpt-5.6-luna --effort max
+
+# A saved loadout, with one field overridden
+kollab --llm fable-slim --effort ultra
+
+# No --llm: both apply to whatever profile is already active
+kollab --model gpt-5.6-terra --effort high
+```
+
+`--effort` is validated at parse time and rejected with the valid list, because
+providers return a 400 for anything else. `--model` is deliberately *not*
+validated against the catalog — a model id the registry has never heard of
+still launches, matching what `/model` allows you to type.
 
 ## Pipe Mode
 
@@ -177,7 +198,9 @@ Common flags:
 
 | Flag | Description |
 |------|-------------|
-| `--profile <name>` | Use a configured profile or loadout |
+| `--llm <name>` | Use a configured profile or loadout |
+| `--model <id>` | Model id, applied over whatever `--llm` selected |
+| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `--agent <bundle>` | Use a specific behavior bundle |
 | `--as <identity>` | Run the selected bundle under a stable hub identity |
 | `--attach <identity>` | Attach interactively to a running agent |

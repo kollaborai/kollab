@@ -263,7 +263,7 @@ widget = TextAreaWidget(
                 "label": "Select Command",
                 "options": [
                     "/save",
-                    "/profile",
+                    "/llm",
                     "/terminal",
                     "/matrix",
                     "/version",
@@ -278,7 +278,7 @@ widget = TextAreaWidget(
 widget = SearchableDropdownWidget(
     config={
         "label": "Select Command",
-        "options": ["/save", "/profile", "/terminal", ...],
+        "options": ["/save", "/llm", "/terminal", ...],
         "case_sensitive": False
     },
     config_path="kollabor.default_command"

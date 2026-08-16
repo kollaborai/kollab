@@ -309,6 +309,15 @@ class LoadoutListAltView(AltView):
         self._activating: bool = False
         self._activate_error: str = ""
 
+        # live catalog merge
+        self._catalogs_loading: bool = False
+        self._catalogs_done: bool = False
+        self._catalog_counts: dict = {}
+        self._catalog_failures: List[str] = []
+        self._catalog_error: str = ""
+        self._total_rows: int = 0
+        self._unfiltered_rows: int = 0
+
         # spinner
         self._spinner = ["|", "/", "-", "\\"]
         self._spinner_idx = 0
@@ -340,7 +349,29 @@ class LoadoutListAltView(AltView):
     async def on_enter(self, renderer: Any) -> None:
         self._renderer = renderer
         self._refresh()
+        # Registry rows are on screen already; merge each provider's live
+        # catalog as it lands. Proxy providers (OpenRouter) have no bundled
+        # registry entries, so this is the only thing that makes them appear.
+        if self._manager is not None and not self._catalogs_done:
+            self._catalogs_loading = True
+            self.spawn_background_task(self._fetch_catalogs(), name="loadout-catalogs")
         logger.info("LoadoutListAltView: entered with %d rows", len(self._items))
+
+    async def _fetch_catalogs(self) -> None:
+        """Warm every provider's catalog, then re-render with the merged list."""
+        try:
+            counts = await self._manager.refresh_catalogs()
+            self._catalog_counts = counts or {}
+            self._catalog_failures = [
+                name for name, count in self._catalog_counts.items() if count == 0
+            ]
+        except Exception as exc:  # noqa: BLE001 - never break the view
+            logger.warning("loadout: catalog refresh failed: %s", exc)
+            self._catalog_error = "catalog refresh failed — showing bundled models"
+        finally:
+            self._catalogs_loading = False
+            self._catalogs_done = True
+            self._refresh()
 
     async def render_frame(self, delta_time: float) -> bool:
         if not self._renderer:
@@ -392,8 +423,10 @@ class LoadoutListAltView(AltView):
                 continue
             claimed.add(name)
             rows = [m for m in implicit if m.provider_profile == name]
-            if not rows:
-                continue
+            # A configured provider always gets a section, even with zero rows.
+            # Skipping it made a provider serving no models look identical to a
+            # provider that was never configured -- the failure that hid
+            # OpenRouter's empty registry for an entire release.
             sections.append((f"Models — {_provider_display(provider or name)}", rows))
 
         # Defensive: keep any implicit loadout visible even if its
@@ -415,13 +448,18 @@ class LoadoutListAltView(AltView):
         q = self._query.lower().strip()
         view_sections: List[Tuple[str, List[Any], bool]] = []
         items: List[Any] = []
+        total = 0
         for idx, (title, rows) in enumerate(self._sections):
+            total += len(rows)
             visible = rows
             if q:
                 visible = [
                     r for r in rows if q in r.name.lower() or q in r.model.lower()
                 ]
-            truly_empty = idx == 0 and not rows
+            # Unfiltered, an empty section still renders with a placeholder so
+            # a provider that serves nothing is visibly distinct from one that
+            # was never configured. Under a filter, empty sections are noise.
+            truly_empty = not rows and not q
             title_matches = bool(q) and q in title.lower()
             if not visible and not truly_empty and not title_matches:
                 continue
@@ -430,6 +468,8 @@ class LoadoutListAltView(AltView):
 
         self._view_sections = view_sections
         self._items = items
+        self._unfiltered_rows = total
+        self._total_rows = len(items)
         if self._selected >= len(items):
             self._selected = max(0, len(items) - 1)
         if self._selected < 0:
@@ -644,8 +684,18 @@ class LoadoutListAltView(AltView):
         elif self._activate_error:
             text = f"  ! {self._activate_error}"
             fg = theme.error[0]
+        elif self._catalog_error:
+            text = f"  ! {self._catalog_error}"
+            fg = theme.error[0]
         elif self._note:
             text = f"  {self._note}"
+            fg = theme.text_dim
+        elif self._catalogs_loading:
+            now = time.monotonic()
+            if now - self._last_spin > 0.12:
+                self._spinner_idx = (self._spinner_idx + 1) % len(self._spinner)
+                self._last_spin = now
+            text = f"  {self._spinner[self._spinner_idx]} loading catalogs…"
             fg = theme.text_dim
         elif self._query:
             text = f"  filter: {self._query}█  (Esc clears)"
@@ -653,9 +703,24 @@ class LoadoutListAltView(AltView):
         else:
             text = "  type to filter  |  ↑↓ navigate"
             fg = theme.text_dim
+
+        # Right-aligned row counter, so a 400-model catalog is legible.
+        count = self._row_counter()
+        if count:
+            pad = width - len(text) - len(count) - 2
+            if pad > 1:
+                text = f"{text}{' ' * pad}{count} "
         self._renderer.write_at(
             0, top, solid(text.ljust(width), theme.dark[0], fg, width), ""
         )
+
+    def _row_counter(self) -> str:
+        """`(N models)`, or `(n of N)` while a filter is narrowing them."""
+        if not self._unfiltered_rows:
+            return ""
+        if self._query and self._total_rows != self._unfiltered_rows:
+            return f"({self._total_rows} of {self._unfiltered_rows})"
+        return f"({self._unfiltered_rows} models)"
 
     def _render_rows(self, width: int, top: int, height: int, theme: Any) -> None:
         lines = self._flat_lines()
@@ -698,18 +763,21 @@ class LoadoutListAltView(AltView):
                 self._render_item_row(y, width, loadout, idx == self._selected, theme)
             y += 1
 
+    def _empty_note(self, title: str) -> str:
+        """Placeholder line for a section with no rows."""
+        if not title.startswith("Models"):
+            return "No saved loadouts — press N to create one from any model."
+        if self._catalogs_loading:
+            return "fetching catalog…"
+        return "no models — catalog unavailable, /llm again to retry"
+
     def _flat_lines(self) -> List[Tuple]:
         lines: List[Tuple] = []
         item_idx = 0
         for title, rows, truly_empty in self._view_sections:
             lines.append(("header", title))
             if truly_empty:
-                lines.append(
-                    (
-                        "empty",
-                        "No saved loadouts — press N to create one from any model.",
-                    )
-                )
+                lines.append(("empty", self._empty_note(title)))
             for loadout in rows:
                 lines.append(("item", loadout, item_idx))
                 item_idx += 1

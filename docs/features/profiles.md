@@ -12,14 +12,14 @@ Profiles are named LLM configurations that define how you connect to AI provider
 
 Profile activation follows this priority (highest to lowest):
 
-1. CLI `--profile` flag (e.g., `kollab --profile openai-oauth`)
+1. CLI `--llm` flag (e.g., `kollab --llm openai-oauth`)
 2. Persisted `active_profile` from config.json (set by `/llm` or `/config`)
 3. OAuth profile auto-registration (openai-oauth from stored tokens)
 4. Environment variable auto-detection (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
 5. Fallback to `default` profile
 
 important: OAuth profiles are registered BEFORE env detection, so
-`--profile openai-oauth` works even when no env vars are set.
+`--llm openai-oauth` works even when no env vars are set.
 
 ### Persisted Active Profile
 
@@ -38,9 +38,9 @@ log example when persisted profile is missing:
 Profiles let you switch between different AI setups without editing config files:
 
 ```bash
-kollab --profile work    # Enterprise Azure OpenAI
-kollab --profile local   # Ollama on your machine
-kollab --profile cheap   # Gemini Flash for quick tasks
+kollab --llm work    # Enterprise Azure OpenAI
+kollab --llm local   # Ollama on your machine
+kollab --llm cheap   # Gemini Flash for quick tasks
 ```
 
 ## Environment Variable Pattern
@@ -55,7 +55,7 @@ When an env var like `OPENAI_API_KEY` is set, you can reference it with:
 ```bash
 export KOLLAB_WORK_PROVIDER=openai
 export KOLLAB_WORK_API_KEY=$OPENAI_API_KEY
-kollab --profile work
+kollab --llm work
 ```
 
 ### Disabling Auto-Detection
@@ -142,7 +142,7 @@ export KOLLAB_WORK_API_KEY="<your-anthropic-api-key>"
 export KOLLAB_WORK_MODEL=claude-sonnet-4-6   # accepts temperature
 export KOLLAB_WORK_TEMPERATURE=0.5
 
-kollab --profile work
+kollab --llm work
 ```
 
 #### Local Ollama
@@ -152,7 +152,7 @@ export KOLLAB_LOCAL_BASE_URL=http://localhost:11434/v1
 export KOLLAB_LOCAL_MODEL=llama3.3
 export KOLLAB_LOCAL_API_KEY=  # Empty for local
 
-kollab --profile local
+kollab --llm local
 ```
 
 #### Azure OpenAI (enterprise)
@@ -163,7 +163,7 @@ export KOLLAB_ENTERPRISE_MODEL=gpt-5.6-terra
 export KOLLAB_ENTERPRISE_BASE_URL=https://your-resource.openai.azure.com
 export KOLLAB_ENTERPRISE_API_VERSION=2025-01-01-preview
 
-kollab --profile enterprise
+kollab --llm enterprise
 ```
 
 ### Global Overrides
@@ -196,7 +196,7 @@ Example for model field with profile named `work`:
 ```bash
 /setup
 # ... walk the wizard ...
-kollab --profile work    # Profile saved to ~/.kollab/config.json
+kollab --llm work    # Profile saved to ~/.kollab/config.json
 ```
 
 ### Save to Project Config
@@ -231,7 +231,7 @@ environment variables override keys loaded from config (see resolution order in
 
 ### API keys: environment vs saved profile (`--save` / `--default`)
 
-When you run `kollab --profile <name> --save` or `--default`, Kollab writes the
+When you run `kollab --llm <name> --save` or `--default`, Kollab writes the
 profile into `config.json`. **API keys are not stored as cleartext in that file
 when the OS keyring is available:** the secret is saved to your OS keychain
 (service `kollab`, account = profile name), and config stores a sentinel value
@@ -296,13 +296,13 @@ Once logged in, the profile is available immediately:
 
 ```bash
 # Explicit selection (works now, was broken before phase 4.5)
-kollab --profile openai-oauth
+kollab --llm openai-oauth
 
 # Set as active profile
 /llm openai-oauth
 
 # Save to config for auto-activation on startup
-kollab --profile openai-oauth --save
+kollab --llm openai-oauth --save
 ```
 
 important: The profile is registered from stored tokens on every
@@ -346,47 +346,47 @@ export KOLLAB_CHEAP_MAX_TOKENS=1024
 
 Usage:
 ```bash
-kollab --profile work    # Deep reasoning
-kollab --profile local   # Private, offline
-kollab --profile cheap   # Quick, low-cost
+kollab --llm work    # Deep reasoning
+kollab --llm local   # Private, offline
+kollab --llm cheap   # Quick, low-cost
 ```
 
-## CLI --profile Flag
+## CLI --llm Flag
 
 Select a profile at startup:
 
 ```bash
-kollab --profile my-profile     # Use a profile created via /setup or /llm
-kollab --profile openai-oauth   # Use OAuth profile (requires --login first)
+kollab --llm my-profile     # Use a profile created via /setup or /llm
+kollab --llm openai-oauth   # Use OAuth profile (requires --login first)
 ```
 
-The `--profile` flag takes highest priority in the resolution order,
+The `--llm` flag takes highest priority in the resolution order,
 overriding persisted active_profile and all auto-detection.
 
-Use `--default` with `--profile` to set startup default in config:
+Use `--default` with `--llm` to set startup default in config:
 
 ```bash
-kollab --profile work --default           # set global default profile
-kollab --profile work --default --local   # set project-local default profile
+kollab --llm work --default           # set global default profile
+kollab --llm work --default --local   # set project-local default profile
 ```
 
 ### Saving Auto-Detected Profiles
 
-Combine `--profile` with `--save` to persist an auto-detected profile:
+Combine `--llm` with `--save` to persist an auto-detected profile:
 
 ```bash
 # Auto-detects from ANTHROPIC_API_KEY, saves as "anthropic-auto" profile
 export ANTHROPIC_API_KEY="<your-anthropic-api-key>"
-kollab --profile anthropic-auto --save
+kollab --llm anthropic-auto --save
 
 # Future runs use the saved profile
-kollab --profile anthropic-auto
+kollab --llm anthropic-auto
 ```
 
 Use `--local` with `--save` to save to project config instead of global:
 
 ```bash
-kollab --profile openai-auto --save --local
+kollab --llm openai-auto --save --local
 # Saved to .kollab/config.json (project-specific)
 ```
 

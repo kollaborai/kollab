@@ -379,7 +379,7 @@ class DaemonPool:
             if agent:
                 argv += ["--agent", agent]
             if profile:
-                argv += ["--profile", profile]
+                argv += ["--llm", profile]
 
             env = dict(os.environ)
             if system_prompt:

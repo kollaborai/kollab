@@ -36,8 +36,8 @@ attach to a running agent:
   ctrl+z to detach. ruby keeps running.
 
   in attach mode, launch flags cross the client-daemon boundary via
-  state_service rpc: --profile, --agent, --skill, --system-prompt,
-  --context, --save all work on the daemon state.
+  state_service rpc: --llm, --model, --effort, --agent, --skill,
+  --system-prompt, --context, --save all work on the daemon state.
 
 manage agents from CLI (no TUI needed):
   kollab --hub                           prints hub help (new in 4.5)
@@ -67,12 +67,14 @@ core:
 agent and profile (cross attach boundary):
   -a, --agent BUNDLE              use specific agent bundle (e.g. coder)
   -s, --skill SKILL               load skill (repeatable: -s foo -s bar)
-  --profile PROFILE               use a configured profile or loadout
+  --llm NAME                      use a configured profile or loadout
+  --model MODEL                   model id, applied over whatever --llm picked
+  --effort LEVEL                  low|medium|high|xhigh|max|ultra
   --as NAME                       choose a stable hub identity
   --project PATH                  override project root for hub siloing
   --system-prompt FILE            custom system prompt file
   --save                          save auto-created profile to global config
-  --default                       set --profile as startup default profile
+  --default                       set --llm as startup default profile
   --local                         with --save, save to local project config
   --context NAME                  conversation context (new in 4.5)
 
@@ -153,7 +155,7 @@ per named context. each context has its own conversation_history, profile,
 agent, skills, and system prompt. contexts persist across attach sessions.
 
   kollab --attach lapis --context bug-fix
-  kollab --attach lapis --context code-review --profile claude
+  kollab --attach lapis --context code-review --llm claude
 
 contexts are stored at:
   ~/.kollab/hub/contexts/<gem-name>.json
