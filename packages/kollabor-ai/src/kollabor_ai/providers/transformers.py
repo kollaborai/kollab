@@ -75,6 +75,58 @@ def _has_openai_usage_fields(usage: Dict[str, Any]) -> bool:
     return isinstance(details, dict) and bool(details)
 
 
+# Gemini's function_declarations take a restricted OpenAPI 3.0 Schema subset,
+# not full JSON Schema. Anything outside this set is rejected outright with
+# `Unknown name "<field>" ... Cannot find field` -- one stray key fails the
+# whole request, so unknown keys are dropped rather than passed through.
+_GEMINI_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "format",
+        "title",
+        "description",
+        "nullable",
+        "enum",
+        "items",
+        "properties",
+        "required",
+        "minItems",
+        "maxItems",
+        "minimum",
+        "maximum",
+        "anyOf",
+    }
+)
+
+
+def _gemini_schema(schema: Any) -> Any:
+    """Strip a JSON Schema down to the subset Gemini accepts.
+
+    Recurses through ``properties``/``items``/``anyOf`` so nested objects are
+    cleaned too -- the observed failure was at
+    ``parameters.properties[1].value``, two levels down. Non-dict input is
+    returned untouched.
+    """
+    if isinstance(schema, list):
+        return [_gemini_schema(entry) for entry in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    cleaned: Dict[str, Any] = {}
+    for key, value in schema.items():
+        if key not in _GEMINI_SCHEMA_KEYS:
+            continue
+        if key == "properties" and isinstance(value, dict):
+            cleaned[key] = {
+                name: _gemini_schema(prop) for name, prop in value.items()
+            }
+        elif key in ("items", "anyOf"):
+            cleaned[key] = _gemini_schema(value)
+        else:
+            cleaned[key] = value
+    return cleaned
+
+
 class ToolCallAccumulator:
     """
     Accumulates incremental tool call deltas from streaming responses.
@@ -1031,7 +1083,7 @@ class ToolSchemaTransformer:
 
                 # Add parameters if present
                 if "parameters" in func:
-                    declaration["parameters"] = func["parameters"]
+                    declaration["parameters"] = _gemini_schema(func["parameters"])
 
                 declarations.append(declaration)
 
@@ -1046,7 +1098,7 @@ class ToolSchemaTransformer:
                 }
 
                 if "parameters" in tool:
-                    declaration["parameters"] = tool["parameters"]
+                    declaration["parameters"] = _gemini_schema(tool["parameters"])
 
                 declarations.append(declaration)
 

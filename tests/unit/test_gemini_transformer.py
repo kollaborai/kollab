@@ -94,7 +94,13 @@ class TestGeminiToolSchemaTransformer:
         assert gemini_tools == []
 
     def test_to_gemini_format_preserves_parameters(self):
-        """Test that all JSON Schema parameters are preserved."""
+        """Supported JSON Schema is preserved; unsupported keys are dropped.
+
+        Gemini validates against a restricted OpenAPI 3.0 subset, not full
+        JSON Schema. Passing `additionalProperties` through -- which this test
+        used to require -- made the live API reject every request with
+        `Unknown name "additionalProperties" ... Cannot find field`.
+        """
         openai_tools = [
             {
                 "type": "function",
@@ -120,8 +126,9 @@ class TestGeminiToolSchemaTransformer:
 
         assert params["type"] == "object"
         assert params["required"] == ["required_field"]
-        assert params["additionalProperties"] is False
+        assert "additionalProperties" not in params
         assert "enum_field" in params["properties"]
+        assert params["properties"]["enum_field"]["enum"] == ["a", "b"]
 
     def test_to_gemini_format_no_parameters(self):
         """Test tool with no parameters field."""

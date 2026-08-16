@@ -232,6 +232,14 @@ class GeminiProvider(LLMProvider):
                 json=request_payload,
                 headers=self._build_headers(),
             ) as response:
+                # A streaming response has no body loaded yet, so the error
+                # path must pull it in before raising -- otherwise reading
+                # .text/.json() raises ResponseNotRead and the provider's own
+                # explanation is lost, leaving only httpx's bare status line.
+                # anthropic_provider and openai_responses_provider already do
+                # this; Gemini was the outlier.
+                if response.status_code >= 400:
+                    await response.aread()
                 response.raise_for_status()
 
                 # Parse SSE stream

@@ -7,7 +7,9 @@ Converts Gemini API responses to unified format:
 - Extracts usage metadata
 """
 
+import json
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 from .models import (
@@ -85,12 +87,19 @@ class GeminiResponseTransformer:
         # Check if final chunk
         is_final = finish_reason is not None
 
+        # Gemini puts usageMetadata on the same chunk that carries the last
+        # text or functionCall part, so it has to ride along with whatever we
+        # return below -- reading it only after the loop meant every early
+        # return threw the token counts away and cost tracking read $0.00.
+        usage = GeminiResponseTransformer._chunk_usage(chunk)
+
         # Process parts
         for part in parts:
             # Text content
             if "text" in part:
                 return StreamingResponse(
                     delta=TextDelta(content=part["text"]),
+                    usage=usage,
                     is_final=is_final,
                     finish_reason=finish_reason,
                     raw_chunk=chunk,
@@ -101,33 +110,49 @@ class GeminiResponseTransformer:
                 func_call = part["functionCall"]
                 return StreamingResponse(
                     delta=ToolCallDelta(
-                        tool_call_id=None,  # Gemini doesn't provide IDs
+                        # Gemini provides no id and sends each call complete in
+                        # one part, so synthesize a unique one -- a None id is
+                        # dropped by ToolCallAccumulator (no prior tool is ever
+                        # open to route it to), and a per-chunk index would
+                        # collide across chunks and concatenate two calls into
+                        # one unparseable buffer.
+                        tool_call_id=f"gemini_{uuid.uuid4().hex[:8]}",
                         tool_name=func_call.get("name"),
-                        tool_arguments_delta=str(func_call.get("args", {})),
+                        # The accumulator json.loads() this buffer; str() of a
+                        # dict is a Python repr with single quotes and never
+                        # parses, so the tool silently never completes.
+                        tool_arguments_delta=json.dumps(func_call.get("args", {})),
                     ),
+                    usage=usage,
                     is_final=is_final,
                     finish_reason=finish_reason,
                     raw_chunk=chunk,
                 )
 
-        # Final chunk with usage
-        if is_final:
-            usage_metadata = chunk.get("usageMetadata")
-            if usage_metadata:
-                return StreamingResponse(
-                    delta=TextDelta(content=""),
-                    usage=UsageInfo(
-                        prompt_tokens=usage_metadata.get("promptTokenCount", 0),
-                        completion_tokens=usage_metadata.get("candidatesTokenCount", 0),
-                        total_tokens=usage_metadata.get("totalTokenCount", 0),
-                    ),
-                    is_final=True,
-                    finish_reason=finish_reason,
-                    raw_chunk=chunk,
-                )
+        # Final chunk carrying only usage (no parts)
+        if is_final and usage:
+            return StreamingResponse(
+                delta=TextDelta(content=""),
+                usage=usage,
+                is_final=True,
+                finish_reason=finish_reason,
+                raw_chunk=chunk,
+            )
 
         # Empty chunk (keepalive)
         return None
+
+    @staticmethod
+    def _chunk_usage(chunk: Dict[str, Any]) -> Optional[UsageInfo]:
+        """Extract usage from a chunk, or None when it carries no counts."""
+        usage_metadata = chunk.get("usageMetadata")
+        if not usage_metadata:
+            return None
+        return UsageInfo(
+            prompt_tokens=usage_metadata.get("promptTokenCount", 0),
+            completion_tokens=usage_metadata.get("candidatesTokenCount", 0),
+            total_tokens=usage_metadata.get("totalTokenCount", 0),
+        )
 
     @staticmethod
     def transform_response(response: Dict[str, Any], model: str) -> UnifiedResponse:

@@ -333,6 +333,7 @@ class TestGeminiProviderStream:
                     yield chunk
 
             mock_response.aiter_lines = mock_aiter_lines
+            mock_response.status_code = 200
             mock_response.raise_for_status = Mock()
 
             # Create async context manager mock
@@ -381,6 +382,7 @@ class TestGeminiProviderStream:
                     yield chunk
 
             mock_response.aiter_lines = mock_aiter_lines
+            mock_response.status_code = 200
             mock_response.raise_for_status = Mock()
 
             # Create async context manager mock
