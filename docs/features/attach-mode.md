@@ -22,7 +22,7 @@ Three-command happy path:
 
 ```bash
 # 1. Start a detached daemon
-kollab --detached --agent tech-dude --llm openai-oauth
+kollab --detached --agent tech-dude --provider openai-oauth
 
 # 2. Check daemon status from any terminal
 kollab --hub status
@@ -38,7 +38,7 @@ Detach with Ctrl+Z (daemon keeps running). Reattach anytime with --attach.
 These flags cross the attach-client -> daemon boundary via RPC (kollabor/application.py:173-209):
 
 ```
---llm <name>      Switch profile or loadout on daemon
+--provider <name>      Switch profile or loadout on daemon
 --agent <bundle>      Switch active agent bundle on daemon
 --skill <name>        Load a skill onto active agent
 --system-prompt <path> Install custom system prompt
@@ -52,7 +52,7 @@ In attach mode, these flags are stashed in _attach_pending_flags during init, th
 Example:
 
 ```bash
-kollab --attach koordinator --llm openai-oauth --skill code-review
+kollab --attach koordinator --provider openai-oauth --skill code-review
 # daemon switches profile + loads skill, client reflects the change
 ```
 

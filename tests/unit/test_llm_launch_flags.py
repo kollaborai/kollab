@@ -1,8 +1,9 @@
-"""`--llm` / `--model` / `--effort` replace `--profile`.
+"""`--provider` / `--model` / `--effort` replace `--profile`.
 
 `--profile` conflated a provider profile name with a loadout name and offered
 no way to override just the model or just the reasoning effort at launch. It is
-removed outright, not aliased.
+removed outright, not aliased. A short-lived intermediate name `--llm` is also
+removed, since "llm" is a meaningless bucket label (every model is an LLM).
 
 Spec: docs/specs/llm-loadout-live-catalog.md (CLI surface, rules R1-R5).
 """
@@ -13,13 +14,20 @@ from kollabor.cli import parse_arguments
 from kollabor_ai.profile_manager import EFFORT_LEVELS
 
 
-class TestLlmLaunchFlags(unittest.TestCase):
-    def test_llm_model_and_effort_parse_together(self):
+class TestProviderLaunchFlags(unittest.TestCase):
+    def test_provider_model_and_effort_parse_together(self):
         args = parse_arguments(
             plugin_classes=[],
-            argv=["--llm", "openai", "--model", "gpt-5.6-luna", "--effort", "max"],
+            argv=[
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5.6-luna",
+                "--effort",
+                "max",
+            ],
         )
-        self.assertEqual(args.llm, "openai")
+        self.assertEqual(args.provider, "openai")
         self.assertEqual(args.model, "gpt-5.6-luna")
         self.assertEqual(args.effort, "max")
 
@@ -28,24 +36,29 @@ class TestLlmLaunchFlags(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parse_arguments(plugin_classes=[], argv=["--profile", "openai"])
 
+    def test_llm_flag_is_gone(self):
+        """The interim --llm name is also removed."""
+        with self.assertRaises(SystemExit):
+            parse_arguments(plugin_classes=[], argv=["--llm", "openai"])
+
     def test_all_three_default_to_none(self):
         args = parse_arguments(plugin_classes=[], argv=[])
-        self.assertIsNone(args.llm)
+        self.assertIsNone(args.provider)
         self.assertIsNone(args.model)
         self.assertIsNone(args.effort)
 
     # -- R1: model/effort stand alone -------------------------------------
 
     def test_model_alone_is_accepted(self):
-        """Applies to the already-active profile; no --llm required."""
+        """Applies to the already-active profile; no --provider required."""
         args = parse_arguments(plugin_classes=[], argv=["--model", "gpt-5.6-terra"])
         self.assertEqual(args.model, "gpt-5.6-terra")
-        self.assertIsNone(args.llm)
+        self.assertIsNone(args.provider)
 
     def test_effort_alone_is_accepted(self):
         args = parse_arguments(plugin_classes=[], argv=["--effort", "high"])
         self.assertEqual(args.effort, "high")
-        self.assertIsNone(args.llm)
+        self.assertIsNone(args.provider)
 
     # -- R4: effort is validated at parse time ----------------------------
 
@@ -53,7 +66,8 @@ class TestLlmLaunchFlags(unittest.TestCase):
         for level in EFFORT_LEVELS:
             with self.subTest(level=level):
                 args = parse_arguments(
-                    plugin_classes=[], argv=["--llm", "openai", "--effort", level]
+                    plugin_classes=[],
+                    argv=["--provider", "openai", "--effort", level],
                 )
                 self.assertEqual(args.effort, level)
 
@@ -74,20 +88,22 @@ class TestLlmLaunchFlags(unittest.TestCase):
     def test_provider_prefixed_model_ids_survive_intact(self):
         args = parse_arguments(
             plugin_classes=[],
-            argv=["--llm", "openrouter", "--model", "anthropic/claude-opus-4.5"],
+            argv=["--provider", "openrouter", "--model", "anthropic/claude-opus-4.5"],
         )
         self.assertEqual(args.model, "anthropic/claude-opus-4.5")
 
-    # -- --default now hangs off --llm ------------------------------------
+    # -- --default now hangs off --provider -------------------------------
 
-    def test_default_requires_llm(self):
+    def test_default_requires_provider(self):
         with self.assertRaises(SystemExit):
             parse_arguments(plugin_classes=[], argv=["--default"])
 
-    def test_default_with_llm_is_accepted(self):
-        args = parse_arguments(plugin_classes=[], argv=["--llm", "work", "--default"])
+    def test_default_with_provider_is_accepted(self):
+        args = parse_arguments(
+            plugin_classes=[], argv=["--provider", "work", "--default"]
+        )
         self.assertTrue(args.make_default_profile)
-        self.assertEqual(args.llm, "work")
+        self.assertEqual(args.provider, "work")
 
     # -- attach forwarding -------------------------------------------------
 
@@ -100,9 +116,10 @@ class TestLlmLaunchFlags(unittest.TestCase):
         source = inspect.getsource(cli)
         start = source.index("daemon_launch_flags = {")
         block = source[start : source.index("}", start)]
-        for flag in ('"--llm"', '"--model"', '"--effort"'):
+        for flag in ('"--provider"', '"--model"', '"--effort"'):
             self.assertIn(flag, block)
-        self.assertNotIn('"--profile"', block)
+        for stale in ('"--profile"', '"--llm"'):
+            self.assertNotIn(stale, block)
 
 
 class TestAttachFlagPlumbing(unittest.TestCase):

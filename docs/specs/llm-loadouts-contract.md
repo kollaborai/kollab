@@ -7,6 +7,11 @@ contract that should have preceded it.
 Every statement below was read from the code or run. Line references are to the
 tree at the time of writing.
 
+> **SUPERSEDED naming:** `--profile` below is the flag name as-built at
+> `fbe46e2`. It was later replaced by `--llm`, then by `--provider` (current).
+> Read every `--profile` example as `--provider` — the contract's structure
+> and IDs are otherwise still accurate.
+
 ---
 
 ## 1. Concepts

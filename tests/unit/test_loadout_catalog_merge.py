@@ -99,7 +99,7 @@ def test_catalog_loadout_carries_its_provider_profile():
 
 
 def test_catalog_model_is_resolvable_by_name():
-    """`/llm <name>` and `kollab --llm <name>` both route through resolve()."""
+    """`/llm <name>` and `kollab --provider <name>` both route through resolve()."""
     profile = _Profile()
     manager = LoadoutManager(_ProfileManager([profile]))
     _seed(profile, ["anthropic/claude-opus-4.5", "x-ai/grok-4.5"])

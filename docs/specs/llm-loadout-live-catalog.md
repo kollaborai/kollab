@@ -3,6 +3,11 @@
 Status: **ready to implement** — all decisions closed (see [Decisions](#decisions))
 Date: 2026-08-15
 
+> **SUPERSEDED naming:** this spec designed `--llm` as the replacement for
+> `--profile`. `--llm` was itself later replaced by `--provider` (current).
+> Read every `--llm` example below as `--provider` — the CLI surface and
+> rules described here are otherwise still accurate.
+
 ## Problem
 
 `/llm` cannot switch to OpenRouter. The picker renders only the OpenAI group,

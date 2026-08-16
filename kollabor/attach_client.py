@@ -11,7 +11,7 @@
     - RPC client for RemoteStateService (profile/agent/skill switching)
     - Permission prompt routing via `AttachPermissionBridge`
     - Widget state refresh from daemon
-    - Pending launch flag drain (--llm, --agent, --skill, etc.)
+    - Pending launch flag drain (--provider, --agent, --skill, etc.)
     - Daemon death watchdog with graceful shutdown
     - Hub info registration for status bar display
     - Ctrl+Z detach (daemon survives) vs Ctrl+C (daemon dies)

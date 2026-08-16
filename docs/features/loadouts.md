@@ -79,22 +79,22 @@ A miss lists suggestions instead of guessing.
 ## Launching with a loadout
 
 ```bash
-kollab --llm fable-slim   # explicit loadout
-kollab --llm terra        # implicit (unique match against the catalog)
+kollab --provider fable-slim   # explicit loadout
+kollab --provider terra        # implicit (unique match against the catalog)
 ```
 
-`--llm` resolves in order: existing profile name → loadout (exact, then
+`--provider` resolves in order: existing profile name → loadout (exact, then
 unique substring). At launch the loadout's fields are applied to its provider
 profile **in memory only** — a launch flag never rewrites your saved config.
 Activating from inside the app (`/llm`, picker) does persist, matching how
 `/model` behaves.
 
-`--model` and `--effort` override individual fields on top of whatever `--llm`
+`--model` and `--effort` override individual fields on top of whatever `--provider`
 resolved to, and work on their own against the already-active profile:
 
 ```bash
-kollab --llm fable-slim --effort ultra        # loadout's model, ultra effort
-kollab --llm openrouter --model x-ai/grok-4.5 # profile's connection, this model
+kollab --provider fable-slim --effort ultra        # loadout's model, ultra effort
+kollab --provider openrouter --model x-ai/grok-4.5 # profile's connection, this model
 kollab --model gpt-5.6-terra                  # active profile, this model
 ```
 

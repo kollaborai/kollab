@@ -8569,7 +8569,7 @@ class HubPlugin(BasePlugin):
         # HubPlugin is initialized through the generic plugin loader, which
         # historically did not pass profile_manager in its kwargs.  Recover
         # the live profile from the service registry so children spawned from
-        # an agent launched with --llm inherit the same provider instead
+        # an agent launched with --provider inherit the same provider instead
         # of falling back to auto-detection.
         if not resolved_profile and self.event_bus:
             try:

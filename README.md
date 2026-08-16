@@ -117,7 +117,7 @@ This launch runs the `coder` bundle under the `lapis` identity with the
 `openai-oauth` provider profile:
 
 ```bash
-kollab --agent coder --as lapis --llm openai-oauth
+kollab --agent coder --as lapis --provider openai-oauth
 ```
 
 ```bash
@@ -328,15 +328,15 @@ export KOLLAB_WORK_SUPPORTS_TOOLS=true
 export KOLLAB_WORK_DESCRIPTION="Claude profile for work tasks"
 # EXTRA_HEADERS must be valid JSON
 export KOLLAB_WORK_EXTRA_HEADERS='{"x-trace-id":"work-session"}'
-kollab --llm work
+kollab --provider work
 # Persist this env-defined profile to config
-kollab --llm work --save
+kollab --provider work --save
 # Persist and set as startup default profile
-kollab --llm work --default
+kollab --provider work --default
 # Persist to project-local config instead of global
-kollab --llm work --save --local
+kollab --provider work --save --local
 # Set project-local default profile
-kollab --llm work --default --local
+kollab --provider work --default --local
 ```
 
 Common profile fields:
