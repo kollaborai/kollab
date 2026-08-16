@@ -35,6 +35,8 @@ if sys.platform == "win32":
         pass  # Ignore if this fails
 
 # Import from the same directory
+from kollabor_ai.profile_manager import EFFORT_LEVELS
+
 from .application import TerminalLLMChat
 from .hub_env import hub_disabled_by_env
 from .logging import setup_bootstrap_logging
@@ -335,7 +337,8 @@ Examples:
   kollab --system-prompt my-prompt.md       # Use custom system prompt
   kollab --agent lint-editor               # Use specific agent
   kollab -a lint-editor                    # Short form for agent
-  kollab --profile my-profile              # Use a configured LLM profile
+  kollab --llm my-profile                  # Use a configured LLM profile
+  kollab --llm openai --model gpt-5.6-luna --effort max
   kollab -a myagent -s coding -s review    # Agent with multiple skills
   kollab --agent myagent --skill coding    # Agent with skill (long form)
   kollab --agent coder --as lapis          # Run coder bundle under hub identity 'lapis'
@@ -419,11 +422,35 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
-        "--profile",
+        "--llm",
         type=str,
         default=None,
-        metavar="PROFILE",
+        metavar="LLM",
         help="Use a configured LLM profile or loadout name (see /setup, /llm)",
+    )
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        metavar="MODEL",
+        help=(
+            "Model id to use, applied over whatever --llm selected "
+            "(e.g. --model gpt-5.6-luna). Not validated against the "
+            "catalog -- an unlisted id still launches."
+        ),
+    )
+
+    parser.add_argument(
+        "--effort",
+        type=str,
+        default=None,
+        metavar="LEVEL",
+        choices=EFFORT_LEVELS,
+        help=(
+            "Reasoning effort for this run: " + ", ".join(EFFORT_LEVELS) + ". "
+            "Providers 400 on anything else, so it is rejected here."
+        ),
     )
 
     parser.add_argument(
@@ -503,7 +530,7 @@ Telegram bridge setup (run inside interactive mode):
         "--save",
         action="store_true",
         default=False,
-        help="Save auto-created profile to global config (use with --profile for env-var profiles)",
+        help="Save auto-created profile to global config (use with --llm for env-var profiles)",
     )
 
     parser.add_argument(
@@ -519,7 +546,7 @@ Telegram bridge setup (run inside interactive mode):
         action="store_true",
         default=False,
         help=(
-            "Set --profile as default for next startups "
+            "Set --llm as default for next startups "
             "(use --local to set project default instead of global)"
         ),
     )
@@ -633,11 +660,21 @@ Telegram bridge setup (run inside interactive mode):
     # Parse known args, capture unknown as potential CLI commands
     args, unknown = parser.parse_known_args(argv)
 
-    # Validate profile persistence flags
-    if getattr(args, "make_default_profile", False) and not getattr(
-        args, "profile", None
+    # --profile was replaced by --llm. Unknown "--x" flags are otherwise
+    # treated as CLI commands, so the old flag would resolve to a nonexistent
+    # "/profile" command and fail obscurely well into startup. Name the
+    # replacement instead. Not an alias -- the flag does not work.
+    if any(
+        arg == "--profile" or arg.startswith("--profile=") for arg in (unknown or [])
     ):
-        parser.error("--default requires --profile")
+        parser.error(
+            "--profile was replaced by --llm. Use: --llm <profile-or-loadout> "
+            "[--model <id>] [--effort <level>]"
+        )
+
+    # Validate profile persistence flags
+    if getattr(args, "make_default_profile", False) and not getattr(args, "llm", None):
+        parser.error("--default requires --llm")
 
     # --project override: propagate to env BEFORE any hub code boots
     # (project_scope.resolve_project_root reads KOLLAB_PROJECT_ROOT).
@@ -1039,7 +1076,9 @@ async def async_main() -> None:
             args=args,
             system_prompt_file=args.system_prompt,
             agent_name=args.agent,
-            profile_name=args.profile,
+            profile_name=args.llm,
+            model_override=args.model,
+            effort_override=args.effort,
             save_profile=args.save,
             save_local=args.local,
             make_default_profile=args.make_default_profile,
@@ -1895,7 +1934,9 @@ def _should_use_daemon() -> bool:
         "--agent",
         "-a",
         "--as",
-        "--profile",
+        "--llm",
+        "--model",
+        "--effort",
         "--project",
         "--context",
         "--system-prompt",
@@ -1976,7 +2017,7 @@ def cli_main() -> None:
         else:
             # Parent: re-enter the CLI as a lightweight attach client.
             # Client only needs --attach <identity>. All other args
-            # (--agent, --profile, query text) already went to the daemon.
+            # (--agent, --llm, query text) already went to the daemon.
             identity = os.path.basename(socket_path).replace(".sock", "")
             sys.argv = [sys.argv[0], "--attach", identity]
 

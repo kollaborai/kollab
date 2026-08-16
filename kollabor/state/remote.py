@@ -209,6 +209,8 @@ class RemoteStateService(StateService):
         persist: bool = False,
         persist_local: bool = False,
         reload_profile: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> ProfileSnapshot:
         """Ask the daemon to switch profiles and return the new snapshot.
 
@@ -222,22 +224,35 @@ class RemoteStateService(StateService):
         config (global or local).
         reload_profile asks the daemon to reload profile config before
         activation, which is required after client-side profile edits.
+        model/effort carry the --model / --effort launch overrides; the
+        daemon applies them in memory before activating.
         """
         logger.debug(
-            "state rpc: set_active_profile name=%s persist=%s local=%s reload=%s",
+            "state rpc: set_active_profile name=%s persist=%s local=%s reload=%s "
+            "model=%s effort=%s",
             name,
             persist,
             persist_local,
             reload_profile,
+            model,
+            effort,
         )
+        payload: dict[str, Any] = {
+            "name": name,
+            "persist": bool(persist),
+            "persist_local": bool(persist_local),
+            "reload_profile": bool(reload_profile),
+        }
+        # Omit rather than send null: an older daemon rejects unknown keys but
+        # tolerates their absence, so a mixed-version attach still switches
+        # profiles instead of failing outright.
+        if model:
+            payload["model"] = model
+        if effort:
+            payload["effort"] = effort
         result = await self._rpc.call(
             "state.set_active_profile",
-            {
-                "name": name,
-                "persist": bool(persist),
-                "persist_local": bool(persist_local),
-                "reload_profile": bool(reload_profile),
-            },
+            payload,
             timeout=self._timeout,
         )
         if not isinstance(result, dict):

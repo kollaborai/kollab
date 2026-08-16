@@ -183,7 +183,7 @@ Before phase 4.5, status widgets and command handlers read state directly from
 in-process services (profile_manager, agent_manager, llm_service). In attach
 mode those references pointed at the client's shadow managers, not the daemon's
 live state. The status bar showed stale data and launch flags like
---profile openai-oauth silently failed.
+--llm openai-oauth silently failed.
 
 ### The Solution: StateService Protocol
 
@@ -266,7 +266,7 @@ Loaded on startup, saved after every write operation.
 
 ### Launch Flag Drain
 
-CLI launch flags (--profile, --agent, --skill, --system-prompt, --context)
+CLI launch flags (--llm, --agent, --skill, --system-prompt, --context)
 must cross the attach-client -> daemon boundary. They're stashed in
 _attach_pending_flags during init and drained AFTER _read_remote_events task
 is scheduled. Drain order matters: before the reader loop exists, RPC replies

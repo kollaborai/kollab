@@ -88,6 +88,8 @@ class TerminalLLMChat:
         system_prompt_file: str | None = None,
         agent_name: str | None = None,
         profile_name: str | None = None,
+        model_override: str | None = None,
+        effort_override: str | None = None,
         save_profile: bool = False,
         save_local: bool = False,
         make_default_profile: bool = False,
@@ -103,10 +105,13 @@ class TerminalLLMChat:
             system_prompt_file: Optional path to a custom system prompt file
                                (overrides all other system prompt sources)
             agent_name: Optional agent name to use (e.g., "lint-editor")
-            profile_name: Optional LLM profile name to use (e.g., "claude")
+            profile_name: Optional LLM profile or loadout name (`--llm`)
+            model_override: Optional model id from `--model`, applied over
+                whatever profile_name selected. In-memory only.
+            effort_override: Optional reasoning effort from `--effort`, same.
             save_profile: If True, save auto-created profile to config
             save_local: If True with save_profile, save to local project config
-            make_default_profile: If True with --profile, set it as startup default
+            make_default_profile: If True with --llm, set it as startup default
             skill_names: Optional list of skill names to load for the agent
             plugin_registry: Pre-initialized plugin registry (for startup optimization)
         """
@@ -240,7 +245,7 @@ class TerminalLLMChat:
         # agent, skill, system_prompt, save, local) are NOT applied to the
         # client's shadow state. They're stashed here and drained as RPC
         # calls after RemoteStateService is wired up in start(). This
-        # prevents the bug where --profile X would update the client's
+        # prevents the bug where --llm X would update the client's
         # profile_manager while the daemon never hears about it.
         #
         # Note: system_prompt_file was ALREADY installed above via
@@ -254,6 +259,8 @@ class TerminalLLMChat:
         if attach_to:
             self._attach_pending_flags = {
                 "profile": profile_name,
+                "model": model_override,
+                "effort": effort_override,
                 "save_profile": save_profile,
                 "save_local": save_local,
                 "make_default_profile": make_default_profile,
@@ -266,6 +273,8 @@ class TerminalLLMChat:
             # profile_manager/agent_manager/skill loader will initialize
             # to defaults. The daemon still holds the real state.
             profile_name = None
+            model_override = None
+            effort_override = None
             agent_name = None
             skill_names = None
             save_profile = False
@@ -277,7 +286,7 @@ class TerminalLLMChat:
             )
 
         # Initialize profile manager (for LLM endpoint profiles)
-        # Pass cli_profile so auto-detection is skipped when --profile is used
+        # Pass cli_profile so auto-detection is skipped when --llm is used
         self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
 
         # Log auto-detection result
@@ -288,7 +297,7 @@ class TerminalLLMChat:
             )
 
         if profile_name:
-            # CLI --profile is a one-time override, don't persist active selection
+            # CLI --llm is a one-time override, don't persist active selection
             if not self.profile_manager.set_active_profile(profile_name, persist=False):
                 # Not an existing profile -- try resolving it as a loadout (a
                 # named preset of provider profile + model + params that
@@ -346,6 +355,29 @@ class TerminalLLMChat:
                         logger.warning(
                             f"Failed to set default profile '{profile_name}' at {level} level"
                         )
+
+        # --model / --effort layer on top of whatever --llm resolved to, and
+        # work on their own against the already-active profile. Applied last so
+        # an explicit flag beats the loadout field it would otherwise inherit
+        # (spec R1/R2). save_to_config=False keeps a launch flag from rewriting
+        # the user's saved profile (R3).
+        if model_override or effort_override:
+            target = self.profile_manager.active_profile_name
+            overrides: dict[str, Any] = {"save_to_config": False}
+            if model_override:
+                overrides["model"] = model_override
+            if effort_override:
+                overrides["effort"] = effort_override
+            if self.profile_manager.update_profile(target, **overrides):
+                logger.info(
+                    "Applied launch overrides to profile '%s': %s",
+                    target,
+                    {k: v for k, v in overrides.items() if k != "save_to_config"},
+                )
+            else:
+                logger.warning(
+                    "Failed to apply launch overrides to profile '%s'", target
+                )
 
         # Initialize agent manager (for agent/skill system)
         self.agent_manager = AgentManager(self.config)
@@ -1971,7 +2003,7 @@ class TerminalLLMChat:
 
         # === Phase 4.5: drain pending launch flags via RPC ===
         #
-        # In attach mode, DAEMON_OWNED launch flags (--profile, --agent,
+        # In attach mode, DAEMON_OWNED launch flags (--llm, --agent,
         # --skill, --system-prompt, --save, --local) were stashed on
         # self._attach_pending_flags in __init__ instead of being applied
         # to the client's shadow state. Now that both RemoteStateService
@@ -2042,7 +2074,7 @@ class TerminalLLMChat:
         """Apply launch flags to the daemon via RPC in attach mode.
 
         Phase 4.5 fix for the "launch flags don't cross the process
-        boundary" bug. In attach mode, --profile / --agent / --skill /
+        boundary" bug. In attach mode, --llm / --agent / --skill /
         --system-prompt were stashed on self._attach_pending_flags in
         __init__ instead of being applied to the client's shadow state.
         This method drains that queue via RPC calls on the newly-wired
@@ -2134,13 +2166,31 @@ class TerminalLLMChat:
 
         # --- 1. Profile ---
         profile_name = flags.get("profile")
+        model_override = flags.get("model")
+        effort_override = flags.get("effort")
+        # --model / --effort without --llm still have a target: the profile the
+        # daemon is already on. Without this they would be silently dropped in
+        # attach mode, which is the default whenever a daemon is running.
+        if not profile_name and (model_override or effort_override):
+            try:
+                profile_name = (await state.get_active_profile()).name
+            except Exception as e:
+                logger.warning(
+                    "attach drain: cannot resolve active profile for "
+                    "--model/--effort: %s",
+                    e,
+                )
         if profile_name:
             make_default_profile = bool(flags.get("make_default_profile", False))
             persist = bool(flags.get("save_profile", False)) or make_default_profile
             persist_local = bool(flags.get("save_local", False))
             try:
                 profile_snap = await state.set_active_profile(
-                    profile_name, persist=persist, persist_local=persist_local
+                    profile_name,
+                    persist=persist,
+                    persist_local=persist_local,
+                    model=model_override,
+                    effort=effort_override,
                 )
                 save_hint = (
                     " (saved"
@@ -2164,7 +2214,7 @@ class TerminalLLMChat:
             except Exception as e:
                 _display(
                     "error",
-                    f"--profile {profile_name!r} failed on daemon: {e}",
+                    f"--llm {profile_name!r} failed on daemon: {e}",
                     {"display_type": "error"},
                 )
                 logger.warning(

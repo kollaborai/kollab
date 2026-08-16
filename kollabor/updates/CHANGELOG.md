@@ -7,14 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `--model` and `--effort` launch flags, which layer over whatever `--llm`
+  selected and also work on their own against the already-active profile. Both
+  apply in memory only and cross the client-daemon boundary in attach mode.
+
 ### Changed
 
+- **Breaking:** replaced `--profile` with `--llm`. The old flag is removed, not
+  aliased; using it now names its replacement instead of failing obscurely as an
+  unknown CLI command.
+- Merged live provider catalogs into `/llm`, so models a provider only reports
+  at runtime (OpenRouter, any OpenAI-compatible endpoint) appear in the picker.
+  Providers with no rows now say why instead of vanishing from the list.
 - Added aggregate tool-output budgeting with lossless managed `.output` artifacts,
   bounded previews, history packing, and non-empty request recovery.
 - Normalized legacy `git` tool requests to the supported `terminal` execution
   path and documented wildcard tool access for bundled agent profiles.
 - Corrected ChatGPT OAuth Responses handling so unsupported output-token
   overrides are omitted while reasoning effort remains available.
+
+### Fixed
+
+- Fixed the Gemini provider rejecting every tool-calling request. Tool schemas
+  were sent as raw JSON Schema; Gemini validates a restricted OpenAPI 3.0
+  subset and 400'd on `additionalProperties`.
+- Fixed streamed Gemini tool calls being dropped before execution — they were
+  emitted without an id and with a Python dict repr in place of JSON arguments.
+- Fixed Gemini token counts and cost always reading zero, caused by usage being
+  read only after the branch that returns on the chunk carrying it.
+- Fixed provider error bodies being discarded, which reduced every 4xx to a
+  bare status line and left the context-length check unreachable.
 
 ## [0.6.1] - 2026-08-02
 

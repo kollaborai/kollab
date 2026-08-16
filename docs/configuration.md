@@ -35,7 +35,7 @@ KOLLAB_WORK_API_KEY="<your-anthropic-api-key>"
 KOLLAB_WORK_MODEL=claude-sonnet-5
 KOLLAB_WORK_TEMPERATURE=0.5
 
-kollab --profile work
+kollab --llm work
 ```
 
 Profile names are case-insensitive but typically use uppercase for consistency.

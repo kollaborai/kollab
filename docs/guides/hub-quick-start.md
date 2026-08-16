@@ -36,7 +36,7 @@ with `*` in status).
 For a stable identity and an explicit bundle, use both flags:
 
 ```bash
-kollab --agent coder --as lapis --profile openai-oauth
+kollab --agent coder --as lapis --llm openai-oauth
 ```
 
 Here `coder` is the bundle, `lapis` is the hub identity, and `openai-oauth` is

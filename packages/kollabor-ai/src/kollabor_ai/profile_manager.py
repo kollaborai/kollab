@@ -662,12 +662,12 @@ class ProfileManager:
 
         Args:
             config: Configuration object with get() method
-            cli_profile: CLI --profile override (skips auto-detection when set)
+            cli_profile: CLI --llm override (skips auto-detection when set)
         """
         self.config = config
         self._profiles: Dict[str, LLMProfile] = {}
         self._active_profile_name: str = "default"
-        # Treat a CLI --profile selection as "explicitly set" so the
+        # Treat a CLI --llm selection as "explicitly set" so the
         # oauth auto-activation path below won't override it. The actual
         # activation happens later via set_active_profile(cli_profile)
         # in application.py __init__.
@@ -686,7 +686,7 @@ class ProfileManager:
         # the user explicitly asked for a profile by name.
         #
         # Bug history: previously both detections were gated behind
-        # `not cli_profile`, which meant `--profile openai-oauth` would
+        # `not cli_profile`, which meant `--llm openai-oauth` would
         # skip the oauth registration step -- the profile would not exist
         # in the registry, set_active_profile would fall back to "default",
         # and the user would see their explicit flag silently ignored.

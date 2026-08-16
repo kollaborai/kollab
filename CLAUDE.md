@@ -934,7 +934,9 @@ set_color_support(ColorSupport.EXTENDED)
 - `/setup` (aliases: `/onboard`, `/wizard`) - Guided fullscreen wizard to configure a new LLM provider (pick provider → API key → endpoint → model → optional live test → save + activate). New-user entry point; ChatGPT OAuth delegates to `/login`, Azure/advanced is configured manually in `config.json` (see `docs/providers.md`).
 - `/save` - Save conversation (transcript|markdown|jsonl|clipboard|both|local)
 - `/model` (aliases: `/mod`, `/m`) - Fullscreen model picker for the active provider (list|search|set|effort). The list is seeded from `bundles/data/models.json` (retired entries filtered) and merged with the provider's live catalog when one exists. `/model effort [level]` shows or sets reasoning effort — see `docs/features/reasoning-effort.md`.
-- `/llm` (aliases: `/loadout`, `/ld`) - Fullscreen loadout picker: provider + model + param presets. Every `models.json` model for a configured provider is an implicit loadout; `/llm <name>` activates one directly, `/llm new` opens a pre-filled create form, and `kollab --profile <loadout>` resolves loadouts at launch — see `docs/features/loadouts.md`.
+- `/llm` (aliases: `/loadout`, `/ld`) - Fullscreen loadout picker: provider + model + param presets. Every `models.json` model for a configured provider is an implicit loadout; `/llm <name>` activates one directly, `/llm new` opens a pre-filled create form, and `kollab --llm <loadout>` resolves loadouts at launch, with `--model` / `--effort` overriding individual fields on top — see `docs/features/loadouts.md`.
+
+The `/llm` list merges `models.json` with the provider's **live** catalog (`model_catalog.py`, TTL + versioned disk cache). A provider contributing zero rows still renders a section explaining why — never silently omit it, that was the original bug.
 - `/permissions` (aliases: `/perms`, `/security`) - Manage permissions (show|default|strict|trust|stats|clear)
 - `/terminal` (aliases: `/tmux`, `/term`, `/t`) - Manage tmux sessions (new|view|list|kill)
 - `/hub` (aliases: `/mesh`) - Agent hub (status|msg|broadcast|feed|console|org|vault|whoami)

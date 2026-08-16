@@ -5,7 +5,7 @@
 #
 # Proves the fix for "launch flags don't cross the process boundary into
 # the daemon" bug. Starts a fresh daemon with the DEFAULT profile, then
-# attaches a client with --profile openai-oauth. After the attach settles,
+# attaches a client with --llm openai-oauth. After the attach settles,
 # captures the attach client's pane and asserts:
 #
 #   1. The banner/status bar shows "openai-oauth" (not "default")
@@ -161,12 +161,12 @@ fi
 pass "daemon spawned, discovered identity=$IDENTITY pid=$DAEMON_PID"
 
 # ---------------------------------------------------------------------------
-# Step 2: Attach with --profile openai-oauth (THE critical test)
+# Step 2: Attach with --llm openai-oauth (THE critical test)
 # ---------------------------------------------------------------------------
-log "step 2: attaching client with --profile openai-oauth"
+log "step 2: attaching client with --llm openai-oauth"
 
 tmux -L "$TMUX_SOCKET" new-session -d -s "$ATTACH_SESSION" -x 140 -y 40 \
-    "python main.py --attach $IDENTITY --profile openai-oauth"
+    "python main.py --attach $IDENTITY --llm openai-oauth"
 
 # Wait for attach to settle (drain flags, render first frame).
 # We need long enough for:
@@ -215,7 +215,7 @@ else
     pass "no 'Profile not found' error"
 fi
 
-# Assertion 4: No "--profile openai-oauth failed on daemon" error
+# Assertion 4: No "--llm openai-oauth failed on daemon" error
 if echo "$ATTACH_CAPTURE" | grep -qi "profile.*failed on daemon"; then
     fail "drain produced 'failed on daemon' error"
 else

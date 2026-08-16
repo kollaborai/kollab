@@ -104,7 +104,7 @@ class AgentOrchestrator:
                 spawned agent processes it as initial_message on startup.
                 Required for --detached spawns since their stdin is
                 redirected to /dev/null (writes to proc.stdin go nowhere).
-            profile: Optional LLM profile to use (passed as --profile flag)
+            profile: Optional LLM profile to use (passed as --llm flag)
 
         Returns:
             Full session name on success, None on failure
@@ -585,7 +585,7 @@ class AgentOrchestrator:
             identity: Optional hub identity to request via --as flag
             initial_task: Optional task passed as positional arg so the
                 spawned agent picks it up as initial_message.
-            profile: Optional LLM profile to use (passed as --profile flag)
+            profile: Optional LLM profile to use (passed as --llm flag)
 
         Returns:
             Tuple of (Popen process, RingBuffer) on success, (None, None) on failure
@@ -611,7 +611,7 @@ class AgentOrchestrator:
         # to the "default" profile (usually Anthropic) instead of the
         # parent's active profile or the agent's preferred profile.
         if profile:
-            cmd.extend(["--profile", profile])
+            cmd.extend(["--llm", profile])
 
         for skill in skills or []:
             cmd.extend(["--skill", skill])

@@ -649,7 +649,7 @@ test_oauth_cache() {
     fi
     session="${PREFIX}-oauth"
     container="${PREFIX}-oauth"
-    start_session "$session" "$container" "$volume" none kollab --profile openai-oauth --no-daemon || return
+    start_session "$session" "$container" "$volume" none kollab --llm openai-oauth --no-daemon || return
 
     send_slash "$session" "login status"
     if wait_for_capture "$session" "openai: authenticated" 30; then
@@ -671,7 +671,7 @@ test_oauth_cache() {
     stop_session "$session"
     session="${PREFIX}-oauth-restart"
     container="${PREFIX}-oauth-restart"
-    start_session "$session" "$container" "$volume" none kollab --profile openai-oauth --no-daemon || return
+    start_session "$session" "$container" "$volume" none kollab --llm openai-oauth --no-daemon || return
     send_slash "$session" "login status"
     if wait_for_capture "$session" "openai: authenticated" 30; then
         pass "cached OAuth token survives runtime restart"
@@ -710,7 +710,7 @@ test_zai_profile() {
     fi
     session="${PREFIX}-zai"
     container="${PREFIX}-zai"
-    start_session "$session" "$container" "$volume" none kollab --profile default --no-daemon || return
+    start_session "$session" "$container" "$volume" none kollab --llm default --no-daemon || return
 
     send_slash "$session" "profile zai-anthropic"
     if wait_for_capture "$session" "Switched to profile: zai-anthropic|zai-anthropic.*${model}" 35; then
@@ -745,7 +745,7 @@ test_tools() {
 
     session="${PREFIX}-tools"
     container="${PREFIX}-tools"
-    start_session "$session" "$container" "$volume" none kollab --profile "$WORKING_PROFILE" --no-daemon || return
+    start_session "$session" "$container" "$volume" none kollab --llm "$WORKING_PROFILE" --no-daemon || return
 
     send_prompt "$session" "Use a native API tool call, not XML text, to read README.md. Then answer exactly: NATIVE_READ_OK: followed by the first markdown heading."
     if wait_for_capture "$session" "PERMISSION REQUIRED|Read\\(README.md\\)|file_read\\(README.md\\)" 120; then
@@ -828,8 +828,8 @@ test_hub() {
     primary_container="${PREFIX}-hub-primary"
     peer_container="${PREFIX}-hub-peer"
 
-    start_session "$primary" "$primary_container" "$volume" none kollab --profile "$WORKING_PROFILE" --no-daemon || return
-    start_session "$peer" "$peer_container" "$volume" none kollab --agent coder --as lapis --profile "$WORKING_PROFILE" --no-daemon || return
+    start_session "$primary" "$primary_container" "$volume" none kollab --llm "$WORKING_PROFILE" --no-daemon || return
+    start_session "$peer" "$peer_container" "$volume" none kollab --agent coder --as lapis --llm "$WORKING_PROFILE" --no-daemon || return
 
     send_slash "$primary" "hub status"
     if wait_for_capture "$primary" "2 agent\\(s\\) online|lapis" 45; then

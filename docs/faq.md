@@ -54,7 +54,7 @@ Use env vars to create a profile:
 KOLLAB_OLLAMA_PROVIDER=custom
 KOLLAB_OLLAMA_BASE_URL=http://localhost:11434/v1
 KOLLAB_OLLAMA_MODEL=llama3.3
-kollab --profile ollama
+kollab --llm ollama
 
 Common local endpoints:
   Ollama:     http://localhost:11434/v1
@@ -75,7 +75,7 @@ Use the loadout picker interactively:
   /llm
 
 Or specify a configured profile or loadout via flag:
-  kollab --profile my-profile
+  kollab --llm my-profile
 
 Browse and switch loadouts:
   /llm
@@ -89,7 +89,7 @@ See [features/profiles.md](features/profiles.md) for profile management.
 
 `--agent` selects a behavior bundle such as `coder` or `research`. `--as`
 selects the hub identity, such as `lapis`, used for messages, capture, vaults,
-and offline inbox delivery. `--profile` selects the provider connection; a
+and offline inbox delivery. `--llm` selects the provider connection; a
 loadout can add a model and parameter preset. See [features/agents.md](features/agents.md).
 
 ### How do I open the browser UI?
@@ -217,7 +217,7 @@ Yes. Run `/setup` once for each provider, then switch between the profiles it
 creates:
 
   /setup
-  kollab --profile my-anthropic-profile
+  kollab --llm my-anthropic-profile
 
 Profiles are stored in config.json. Switch anytime via /llm.
 

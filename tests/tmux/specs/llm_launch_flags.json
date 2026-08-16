@@ -1,0 +1,66 @@
+{
+  "name": "llm-launch-flags",
+  "description": "--llm/--model/--effort replace --profile: the model override reaches the status bar, an unlisted model id still launches, and the removed flag names its replacement",
+  "config": {
+    "command": "python main.py --no-daemon --llm gemini --model gemini-3.6-flash-lite --effort high",
+    "app_init_sleep": 6,
+    "show_captures": false
+  },
+  "steps": [
+    { "action": "section", "name": "--model reaches the active profile" },
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "Ready", "timeout": 30 },
+    { "action": "capture" },
+    {
+      "action": "assert_contains",
+      "pattern": "gemini-3.6-flash-lite",
+      "description": "R5: an id absent from bundles/data/models.json still launches"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "not found, using default",
+      "description": "--llm gemini resolves to the provider profile, not a fallback"
+    },
+
+    { "action": "section", "name": "--profile names its replacement" },
+    {
+      "action": "shell",
+      "command": "python main.py --profile gemini --no-daemon 2>&1 | tail -3",
+      "description": "run the removed flag"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--profile was replaced by --llm",
+      "description": "removed flag points at --llm instead of failing obscurely"
+    },
+
+    { "action": "section", "name": "--effort is validated at parse time" },
+    {
+      "action": "shell",
+      "command": "python main.py --effort turbo --no-daemon 2>&1 | tail -3",
+      "description": "run an effort level no provider accepts"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "invalid choice: 'turbo'",
+      "description": "R4: rejected at parse time, not silently dropped"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "low, medium, high, xhigh, max, ultra",
+      "description": "R4: the valid list is shown"
+    },
+
+    { "action": "section", "name": "--default now hangs off --llm" },
+    {
+      "action": "shell",
+      "command": "python main.py --default --no-daemon 2>&1 | tail -3",
+      "description": "run --default with no --llm"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--default requires --llm",
+      "description": "error text names the new flag"
+    }
+  ]
+}
