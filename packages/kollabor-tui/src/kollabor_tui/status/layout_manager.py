@@ -306,7 +306,6 @@ class StatusLayoutManager:
                 WidgetConfig(id="profile", width=WidgetWidth.auto()),
                 WidgetConfig(id="model", width=WidgetWidth.auto()),
                 WidgetConfig(id="status", width=WidgetWidth.auto()),
-                WidgetConfig(id="stats", width=WidgetWidth.auto()),
             ],
         )
 
@@ -322,17 +321,14 @@ class StatusLayoutManager:
             ],
         )
 
-        # Default row 4: tasks/activity/system
+        # Default row 4: stats/deep-thought/mcp
         row4 = RowConfig(
             id=4,
             visible=True,
             widgets=[
-                WidgetConfig(id="tasks", width=WidgetWidth.auto()),
-                WidgetConfig(id="bg-tasks", width=WidgetWidth.auto()),
-                WidgetConfig(id="altview", width=WidgetWidth.auto()),
+                WidgetConfig(id="stats", width=WidgetWidth.auto()),
                 WidgetConfig(id="deep-thought", width=WidgetWidth.auto()),
-                WidgetConfig(id="token-io", width=WidgetWidth.auto()),
-                WidgetConfig(id="sysmon", width=WidgetWidth.auto()),
+                WidgetConfig(id="mcp", width=WidgetWidth.auto()),
             ],
         )
 
