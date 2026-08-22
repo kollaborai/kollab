@@ -337,6 +337,7 @@ class LocalStateService(StateService):
         return SessionStats(
             messages=int(stats.get("messages", 0) or 0),
             input_tokens=int(stats.get("input_tokens", 0) or 0),
+            input_tokens_estimated=bool(stats.get("input_tokens_estimated", False)),
             output_tokens=int(stats.get("output_tokens", 0) or 0),
             total_input_tokens=int(stats.get("total_input_tokens", 0) or 0),
             total_output_tokens=int(stats.get("total_output_tokens", 0) or 0),
@@ -666,6 +667,9 @@ class LocalStateService(StateService):
 
             return ProcessingSnapshot(
                 is_processing=is_processing,
+                current_processing_tokens=int(
+                    getattr(self._llm_service, "current_processing_tokens", 0) or 0
+                ),
                 queue_size=queue_size,
                 queue_max=queue_max,
                 dropped_messages=dropped_messages,

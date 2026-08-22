@@ -174,10 +174,10 @@ class TestSessionManager(unittest.TestCase):
                 self.manager.restart_session(conversation_history, add_message_fn)
             )
 
-        self.assertEqual(
-            self.session_stats,
-            {key: 0 for key in self.session_stats},
-        )
+        expected = {key: 0 for key in self.session_stats}
+        self.assertEqual(self.session_stats, expected)
+        if "input_tokens_estimated" in self.session_stats:
+            self.assertIs(self.session_stats["input_tokens_estimated"], False)
 
     def test_restart_session_resets_logger(self):
         """Test restart calls reset_session on conversation logger."""

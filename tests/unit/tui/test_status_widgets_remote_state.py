@@ -27,9 +27,11 @@ sys.path.insert(
 )
 
 from kollabor_tui.status.core_widgets import (  # noqa: E402
+    render_agent,
     render_endpoint,
     render_model,
     render_profile,
+    render_skills,
     render_stats,
     render_status,
 )
@@ -215,6 +217,53 @@ class TestRenderStatsRemoteStatePreference(unittest.TestCase):
         out = _strip_ansi(render_stats(80, ctx))
 
         self.assertIn("⟳ 46.8K", out)
+
+    def test_inflight_processing_estimate_is_visible(self) -> None:
+        ctx = _make_ctx(
+            remote_state={
+                "messages": 1,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "is_processing": True,
+                "current_processing_tokens": 42,
+            }
+        )
+
+        out = _strip_ansi(render_stats(80, ctx))
+
+        self.assertIn("~42 tok", out)
+
+
+class TestRenderAgentAndSkillsRemoteStatePreference(unittest.TestCase):
+    """Attach widgets must not display the local default-agent shadow."""
+
+    def _ctx_with_local_default(self, remote_state: dict) -> MagicMock:
+        ctx = _make_ctx(remote_state=remote_state)
+        local_agent = MagicMock()
+        local_agent.name = "default"
+        local_agent.active_skills = ["local-skill"]
+        local_skill = MagicMock()
+        local_skill.name = "local-skill"
+        local_agent.list_skills.return_value = [local_skill]
+        ctx.agent_manager = MagicMock()
+        ctx.agent_manager.get_active_agent.return_value = local_agent
+        return ctx
+
+    def test_remote_agent_wins_over_local_default(self) -> None:
+        ctx = self._ctx_with_local_default({"agent": "koordinator"})
+
+        out = _strip_ansi(render_agent(40, ctx))
+
+        self.assertIn("koordinator", out)
+        self.assertNotIn("default", out)
+
+    def test_remote_skills_wins_over_local_default_agent(self) -> None:
+        ctx = self._ctx_with_local_default({"skills": "no-skill"})
+
+        out = _strip_ansi(render_skills(40, ctx))
+
+        self.assertEqual(out, "no-skill")
+        self.assertNotIn("local-skill", out)
 
 
 class TestRenderStatus(unittest.TestCase):

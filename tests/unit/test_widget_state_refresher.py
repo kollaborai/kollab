@@ -24,6 +24,7 @@ class FakeStateService:
         return SessionStats(
             messages=2,
             input_tokens=10,
+            input_tokens_estimated=True,
             output_tokens=5,
             total_input_tokens=100,
             total_output_tokens=50,
@@ -33,7 +34,11 @@ class FakeStateService:
         )
 
     async def get_processing_state(self):
-        return ProcessingSnapshot(is_processing=True, pending_tools_count=1)
+        return ProcessingSnapshot(
+            is_processing=True,
+            current_processing_tokens=42,
+            pending_tools_count=1,
+        )
 
     async def get_system_info(self):
         return SystemInfoSnapshot(cwd="/tmp/project", git_branch="main")
@@ -80,10 +85,12 @@ async def test_refresh_merges_without_erasing_existing_remote_state_keys():
     assert ctx.remote_state["legacy_only"] == "keep-me"
     assert ctx.remote_state["profile_name"] == "openai-oauth"
     assert ctx.remote_state["total_input_tokens"] == 100
+    assert ctx.remote_state["input_tokens_estimated"] is True
     assert ctx.remote_state["total_output_tokens"] == 50
     assert ctx.remote_state["cache_creation_tokens"] == 7
     assert ctx.remote_state["total_cache_read_tokens"] == 1000
     assert ctx.remote_state["total_cache_creation_tokens"] == 70
+    assert ctx.remote_state["current_processing_tokens"] == 42
 
 
 @pytest.mark.asyncio
@@ -95,6 +102,23 @@ async def test_refresh_adds_agent_and_active_skills_from_state_service():
 
     assert ctx.remote_state["agent"] == "coder"
     assert ctx.remote_state["skills"] == "tdd"
+
+
+@pytest.mark.asyncio
+async def test_refresh_clears_skills_when_no_visible_skills():
+    class NoVisibleSkills(FakeStateService):
+        async def list_skills(self, agent_name: str = ""):
+            return SkillListSnapshot(
+                agent_name="coder",
+                skills=[SkillInfo(name="system_prompt", active=True)],
+            )
+
+    ctx = SimpleNamespace(remote_state={"skills": "old-skill"})
+    refresher = WidgetStateRefresher(ctx, NoVisibleSkills())
+
+    await refresher.refresh_once()
+
+    assert ctx.remote_state["skills"] == ""
 
 
 @pytest.mark.asyncio

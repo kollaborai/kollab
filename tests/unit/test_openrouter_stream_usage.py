@@ -170,11 +170,12 @@ def test_chunk_with_content_and_usage_streams_content():
 
     response = OpenAIResponseTransformer.transform_openai_chunk(chunk, "deepseek/deepseek-v4-flash")
 
-    # Should stream the content, NOT yield usage (usage comes on final empty chunk)
+    # Content and usage can legally share a final chunk. Preserve both.
     assert response is not None
     assert isinstance(response.delta, TextDelta)
     assert response.delta.content == "Hello world"
-    assert response.usage is None  # Usage comes on a separate final chunk
+    assert response.usage is not None
+    assert response.usage.total_tokens == 7
 
 
 def test_streaming_usage_sequence_deepseek():

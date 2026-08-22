@@ -197,6 +197,7 @@ class WidgetStateRefresher:
             stats = await self._state.get_session_stats()
             flat["messages"] = stats.messages
             flat["input_tokens"] = stats.input_tokens
+            flat["input_tokens_estimated"] = stats.input_tokens_estimated
             flat["output_tokens"] = stats.output_tokens
             flat["total_input_tokens"] = stats.total_input_tokens
             flat["total_output_tokens"] = stats.total_output_tokens
@@ -215,6 +216,7 @@ class WidgetStateRefresher:
         try:
             proc = await self._state.get_processing_state()
             flat["is_processing"] = proc.is_processing
+            flat["current_processing_tokens"] = proc.current_processing_tokens
             flat["bg_tasks"] = proc.bg_tasks_count
             flat["pending_tools"] = proc.pending_tools_count
         except Exception as e:
@@ -289,10 +291,9 @@ class WidgetStateRefresher:
                 for skill in skills.skills
                 if skill.active and skill.name != "system_prompt"
             ]
-            if visible:
-                flat["skills"] = ", ".join(visible)
-            elif skills.skills:
-                flat["skills"] = "no-skill"
+            # Always publish the field so removed/hidden skills clear the
+            # previous value in the merged remote widget state.
+            flat["skills"] = ", ".join(visible) if visible else ""
         except Exception as e:
             degraded = True
             logger.debug("refresher list_skills failed: %s", e)

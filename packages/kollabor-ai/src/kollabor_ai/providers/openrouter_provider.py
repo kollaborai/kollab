@@ -368,10 +368,17 @@ class OpenRouterProvider(LLMProvider):
                     # every streamed tool call silently lost.
                     yield streaming_response
 
-                # Check if stream is finished
+                # OpenAI-compatible streams may send the finish-reason chunk
+                # before a separate trailing usage-only chunk. Only stop after
+                # a final response that actually carries usage; otherwise the
+                # usage chunk is left unread and session stats stay at zero.
                 if streaming_response and streaming_response.is_final:
-                    logger.debug("OpenRouter stream finished")
-                    break
+                    if streaming_response.usage is not None:
+                        logger.debug("OpenRouter stream finished with usage")
+                        break
+                    logger.debug(
+                        "OpenRouter finish chunk received; waiting for trailing usage"
+                    )
 
         except Exception as e:
             logger.error(f"OpenRouter stream failed: {e}")

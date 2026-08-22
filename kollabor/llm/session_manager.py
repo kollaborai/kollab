@@ -141,7 +141,7 @@ class SessionManager:
             # 5. Reset conversation_manager and usage counters for a fresh session
             self.conversation_manager.reset_session(new_session_id)
             for key in self.session_stats:
-                self.session_stats[key] = 0
+                self.session_stats[key] = False if key == "input_tokens_estimated" else 0
 
             # 6. Update api_service session
             self.api_service.set_session_id(new_session_id)
