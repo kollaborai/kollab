@@ -1,11 +1,11 @@
 {
     "schema_version": 1,
-    "commit": "f1c4c1f41706322375bd570fb343cbf5e53744c6",
-    "indexed_at": "2026-08-16T03:20:42Z",
+    "commit": "5bbc624207ba16a51bce47d4e332709e63325a3c",
+    "indexed_at": "2026-08-22T06:51:02Z",
     "project": "Users-malmazan-dev-kollab",
-    "nodes": 24164,
-    "edges": 89269,
-    "original_size": 70451200,
-    "compressed_size": 12881505,
+    "nodes": 70,
+    "edges": 223,
+    "original_size": 2228224,
+    "compressed_size": 149752,
     "compression_level": 3
 }
