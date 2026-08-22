@@ -167,6 +167,7 @@ cython_debug/
 kollab.log
 *.log
 *.bak
+.codebase-memory/
 
 
 # Demo and test files
