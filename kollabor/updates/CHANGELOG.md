@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-21
+
+### Changed
+
+- Aligned root and workspace package metadata and minimum dependency constraints
+  before tagging the release.
+- Updated the default status layout to show stats, deep-thought, and MCP widgets
+  in the fourth row.
+
 ### Added
 
 - Added `--model` and `--effort` launch flags, which layer over whatever `--llm`
