@@ -745,7 +745,11 @@ class TestQueueProcessor(unittest.TestCase):
             {"prompt_tokens": 10, "completion_tokens": 4, "cache_read_tokens": 3, "cache_creation_tokens": 2},
             {"prompt_tokens": 11, "completion_tokens": 5, "cache_read_tokens": 7, "cache_creation_tokens": 6},
         ])
-        self.api_service.get_last_token_usage = MagicMock(side_effect=lambda: next(usages))
+        def get_usage():
+            usage = next(usages)
+            self.api_service.last_token_usage_is_estimated = usage["prompt_tokens"] == 10
+            return usage
+        self.api_service.get_last_token_usage = MagicMock(side_effect=get_usage)
         async def call_llm(**kwargs):
             if self.streaming_handler.call_llm.call_count == 1:
                 self.api_service.last_stop_reason = "length"
@@ -775,8 +779,12 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.assertEqual(self.session_stats["cache_read_tokens"], 10)
         self.assertEqual(self.session_stats["cache_creation_tokens"], 8)
-        self.assertEqual(self.session_stats["total_cache_read_tokens"], 10)
-        self.assertEqual(self.session_stats["total_cache_creation_tokens"], 8)
+        self.assertEqual(self.session_stats["total_cache_read_tokens"], 7)
+        self.assertEqual(self.session_stats["total_cache_creation_tokens"], 6)
+
+        self.assertEqual(self.session_stats["total_input_tokens"], 11)
+        self.assertEqual(self.session_stats["total_output_tokens"], 5)
+        self.assertTrue(self.session_stats["input_tokens_estimated"])
 
 
 class TestQueueProcessorToolContinuation(unittest.TestCase):

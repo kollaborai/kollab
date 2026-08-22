@@ -759,6 +759,11 @@ class QueueProcessor:
                 "completion": 0,
                 "cache_creation": 0,
                 "cache_read": 0,
+                "authoritative_prompt": 0,
+                "authoritative_completion": 0,
+                "authoritative_cache_creation": 0,
+                "authoritative_cache_read": 0,
+                "estimated": False,
             }
 
             # turn_id binds the initial call and any auto-continuations
@@ -789,6 +794,12 @@ class QueueProcessor:
                 # Accumulate token usage from the truncated call
                 trunc_usage = self.api_service.get_last_token_usage()
                 if trunc_usage:
+                    trunc_estimated = (
+                        getattr(self.api_service, "last_token_usage_is_estimated", False)
+                        is True
+                    )
+                    if trunc_estimated:
+                        accumulated_tokens["estimated"] = True
                     accumulated_tokens["prompt"] += trunc_usage.get("prompt_tokens", 0)
                     accumulated_tokens["completion"] += trunc_usage.get(
                         "completion_tokens", 0
@@ -799,6 +810,19 @@ class QueueProcessor:
                     accumulated_tokens["cache_read"] += trunc_usage.get(
                         "cache_read_tokens", 0
                     )
+                    if not trunc_estimated:
+                        accumulated_tokens["authoritative_prompt"] += trunc_usage.get(
+                            "prompt_tokens", 0
+                        )
+                        accumulated_tokens["authoritative_completion"] += trunc_usage.get(
+                            "completion_tokens", 0
+                        )
+                        accumulated_tokens["authoritative_cache_creation"] += trunc_usage.get(
+                            "cache_creation_tokens", 0
+                        )
+                        accumulated_tokens["authoritative_cache_read"] += trunc_usage.get(
+                            "cache_read_tokens", 0
+                        )
 
                 logger.warning(
                     f"Response truncated (stop_reason=length), "
@@ -852,11 +876,29 @@ class QueueProcessor:
             completion_tokens = accumulated_tokens["completion"]
             cache_creation_tokens = accumulated_tokens["cache_creation"]
             cache_read_tokens = accumulated_tokens["cache_read"]
+            final_usage_estimated = (
+                getattr(self.api_service, "last_token_usage_is_estimated", False)
+                is True
+            )
+            usage_is_estimated = bool(accumulated_tokens["estimated"]) or final_usage_estimated
             if token_usage:
                 prompt_tokens += token_usage.get("prompt_tokens", 0)
                 completion_tokens += token_usage.get("completion_tokens", 0)
                 cache_creation_tokens += token_usage.get("cache_creation_tokens", 0)
                 cache_read_tokens += token_usage.get("cache_read_tokens", 0)
+                if not final_usage_estimated:
+                    accumulated_tokens["authoritative_prompt"] += token_usage.get(
+                        "prompt_tokens", 0
+                    )
+                    accumulated_tokens["authoritative_completion"] += token_usage.get(
+                        "completion_tokens", 0
+                    )
+                    accumulated_tokens["authoritative_cache_creation"] += token_usage.get(
+                        "cache_creation_tokens", 0
+                    )
+                    accumulated_tokens["authoritative_cache_read"] += token_usage.get(
+                        "cache_read_tokens", 0
+                    )
 
                 # Finalize token I/O with actual counts
                 token_io = get_token_io_state()
@@ -867,38 +909,54 @@ class QueueProcessor:
 
                 # Store and accumulate stats
                 self.session_stats["input_tokens"] = prompt_tokens
+                self.session_stats["input_tokens_estimated"] = usage_is_estimated
                 self.session_stats["output_tokens"] = completion_tokens
-                self.session_stats["total_input_tokens"] += prompt_tokens
-                self.session_stats["total_output_tokens"] += completion_tokens
                 # Cache metrics (anthropic + openai)
                 self.session_stats["cache_creation_tokens"] = cache_creation_tokens
                 self.session_stats["cache_read_tokens"] = cache_read_tokens
-                self.session_stats["total_cache_creation_tokens"] = (
-                    self.session_stats.get("total_cache_creation_tokens", 0)
-                    + cache_creation_tokens
-                )
-                self.session_stats["total_cache_read_tokens"] = (
-                    self.session_stats.get("total_cache_read_tokens", 0)
-                    + cache_read_tokens
-                )
 
-                # Cost calculation
-                provider_type = getattr(self.api_service, "provider_type", "")
-                model = getattr(self.api_service, "model", "unknown")
-                turn_cost = calculate_cost(
-                    provider_type,
-                    model,
-                    prompt_tokens,
-                    completion_tokens,
-                    cache_read_tokens,
+                authoritative_prompt = accumulated_tokens["authoritative_prompt"]
+                authoritative_completion = accumulated_tokens["authoritative_completion"]
+                authoritative_cache_creation = accumulated_tokens["authoritative_cache_creation"]
+                authoritative_cache_read = accumulated_tokens["authoritative_cache_read"]
+                has_authoritative_usage = bool(
+                    authoritative_prompt
+                    or authoritative_completion
+                    or authoritative_cache_creation
+                    or authoritative_cache_read
                 )
-                self.session_stats["cost_usd"] = turn_cost
-                self.session_stats["total_cost_usd"] = (
-                    self.session_stats.get("total_cost_usd", 0.0) + turn_cost
-                )
+                if has_authoritative_usage:
+                    self.session_stats["total_input_tokens"] += authoritative_prompt
+                    self.session_stats["total_output_tokens"] += authoritative_completion
+                    self.session_stats["total_cache_creation_tokens"] = (
+                        self.session_stats.get("total_cache_creation_tokens", 0)
+                        + authoritative_cache_creation
+                    )
+                    self.session_stats["total_cache_read_tokens"] = (
+                        self.session_stats.get("total_cache_read_tokens", 0)
+                        + authoritative_cache_read
+                    )
+
+                    # Estimated portions are excluded from billing totals.
+                    provider_type = getattr(self.api_service, "provider_type", "")
+                    model = getattr(self.api_service, "model", "unknown")
+                    turn_cost = calculate_cost(
+                        provider_type,
+                        model,
+                        authoritative_prompt,
+                        authoritative_completion,
+                        authoritative_cache_read,
+                    )
+                    self.session_stats["cost_usd"] = turn_cost
+                    self.session_stats["total_cost_usd"] = (
+                        self.session_stats.get("total_cost_usd", 0.0) + turn_cost
+                    )
+                else:
+                    self.session_stats["cost_usd"] = 0.0
 
                 logger.debug(
-                    f"Token usage: {prompt_tokens} input, {completion_tokens} output, "
+                    f"Token usage{' (estimated)' if usage_is_estimated else ''}: "
+                    f"{prompt_tokens} input, {completion_tokens} output, "
                     f"cache_write={cache_creation_tokens}, cache_read={cache_read_tokens}"
                 )
 
@@ -917,6 +975,8 @@ class QueueProcessor:
                     "cache_read_tokens": cache_read_tokens,
                     "cost_usd": self.session_stats.get("cost_usd", 0.0),
                     "total_cost_usd": self.session_stats.get("total_cost_usd", 0.0),
+                    "input_tokens_estimated": bool(self.session_stats.get("input_tokens_estimated", False)),
+
                 },
                 "llm_service",
             )

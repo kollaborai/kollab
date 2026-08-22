@@ -375,13 +375,37 @@ class ContextCompactionPlugin(BasePlugin):
 
     def _render_widget(self, width: int, context) -> str:
         """Render the context compaction status widget."""
-        prompt_tokens = self._get_prompt_tokens()
-        # Attach mode fallback: client-side LLMService has no stats,
-        # read from daemon state snapshot instead
-        if prompt_tokens == 0 and context and getattr(context, "remote_state", None):
-            prompt_tokens = context.remote_state.get("input_tokens", 0)
+        prompt_tokens = 0
+        tokens_estimated = False
+        remote_state = (
+            getattr(context, "remote_state", None) if context is not None else None
+        ) or {}
+
+        # In attach mode the daemon is authoritative even when the local
+        # shadow service has stale/nonzero counters. During an in-flight turn,
+        # use its explicit estimate until the provider reports final usage.
+        if remote_state and any(
+            key in remote_state
+            for key in ("input_tokens", "current_processing_tokens")
+        ):
+            prompt_tokens = int(remote_state.get("input_tokens", 0) or 0)
+            tokens_estimated = bool(remote_state.get("input_tokens_estimated", False))
+            if prompt_tokens == 0 and remote_state.get("is_processing"):
+                prompt_tokens = int(
+                    remote_state.get("current_processing_tokens", 0) or 0
+                )
+                tokens_estimated = prompt_tokens > 0
+        else:
+            prompt_tokens = self._get_prompt_tokens()
+            tokens_estimated = self._prompt_tokens_are_estimated()
         threshold = self._get_token_threshold()
-        token_k = f"{prompt_tokens / 1000:.0f}K" if prompt_tokens else "0"
+        token_prefix = "~" if tokens_estimated and prompt_tokens > 0 else ""
+        if not prompt_tokens:
+            token_k = "0"
+        elif prompt_tokens < 1000:
+            token_k = f"{token_prefix}{prompt_tokens}"
+        else:
+            token_k = f"{token_prefix}{prompt_tokens / 1000:.0f}K"
         thresh_k = f"{threshold / 1000:.0f}K"
 
         if self._disabled_for_session:
@@ -581,6 +605,20 @@ class ContextCompactionPlugin(BasePlugin):
                 return usage.get("prompt_tokens", 0)
 
         return 0
+
+    def _prompt_tokens_are_estimated(self) -> bool:
+        """Return whether the displayed prompt count is a local estimate."""
+        if not self._llm_service:
+            return False
+
+        session_stats = getattr(self._llm_service, "session_stats", None) or {}
+        if "input_tokens_estimated" in session_stats:
+            return bool(session_stats.get("input_tokens_estimated"))
+
+        api_service = getattr(self._llm_service, "api_service", None)
+        return bool(
+            getattr(api_service, "last_token_usage_is_estimated", False) is True
+        )
 
     def _estimate_history_tokens(
         self, history: List[ConversationMessage]

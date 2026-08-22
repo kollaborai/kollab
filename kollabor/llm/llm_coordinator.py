@@ -618,6 +618,7 @@ class LLMService:
 
         self.session_stats = {
             "input_tokens": 0,  # Last request input tokens (context size)
+            "input_tokens_estimated": False,  # True when provider omitted usage
             "output_tokens": 0,  # Last request output tokens
             "total_input_tokens": 0,  # Cumulative session input
             "total_output_tokens": 0,  # Cumulative session output

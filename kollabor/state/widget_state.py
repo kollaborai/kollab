@@ -26,6 +26,7 @@ class WidgetState:
     # --- Session stats ---
     messages: int = 0
     input_tokens: int = 0
+    input_tokens_estimated: bool = False
     output_tokens: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -39,6 +40,7 @@ class WidgetState:
 
     # --- Processing ---
     is_processing: bool = False
+    current_processing_tokens: int = 0
     bg_tasks: int = 0
     pending_tools: int = 0
 

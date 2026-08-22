@@ -428,26 +428,28 @@ class OpenAIResponseTransformer:
 
         usage = chunk.get("usage")
         choices = chunk.get("choices", [])
+        usage_info: Optional[UsageInfo] = None
 
         # usage can ride a trailing chunk with empty choices (OpenAI) OR a final
         # chunk whose delta content is "" (OpenRouter/deepseek). surface usage
         # before the content / empty-choices early-returns swallow the token
         # accounting.
         if usage and _has_openai_usage_fields(usage):
+            cache_read, cache_creation = _openai_cache_tokens(usage)
+            usage_info = UsageInfo(
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+                cache_read_tokens=cache_read,
+                cache_creation_tokens=cache_creation,
+            )
             first_choice = choices[0] if choices else {}
             delta0 = first_choice.get("delta", {}) or {}
             # Only yield usage-only chunk if there's no real content/tool calls
             if not (delta0.get("content") or delta0.get("tool_calls")):
-                cache_read, cache_creation = _openai_cache_tokens(usage)
                 return StreamingResponse(
                     delta=TextDelta(content=""),
-                    usage=UsageInfo(
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                        total_tokens=usage.get("total_tokens", 0),
-                        cache_read_tokens=cache_read,
-                        cache_creation_tokens=cache_creation,
-                    ),
+                    usage=usage_info,
                     is_final=True,
                     finish_reason=first_choice.get("finish_reason"),
                     raw_chunk=chunk,
@@ -473,6 +475,7 @@ class OpenAIResponseTransformer:
         if content is not None:
             return StreamingResponse(
                 delta=TextDelta(content=content),
+                usage=usage_info,
                 is_final=is_final,
                 finish_reason=finish_reason,
                 raw_chunk=chunk,
@@ -493,6 +496,7 @@ class OpenAIResponseTransformer:
                     tool_name=function.get("name"),
                     tool_arguments_delta=function.get("arguments", ""),
                 ),
+                usage=usage_info,
                 is_final=is_final,
                 finish_reason=finish_reason,
                 raw_chunk=chunk,
@@ -500,20 +504,10 @@ class OpenAIResponseTransformer:
 
         # Final chunk with usage
         if is_final:
-            usage = chunk.get("usage")
-            if usage:
-                # OpenAI reports cached tokens under prompt_tokens_details
-                # cached_tokens is a subset of prompt_tokens (already included)
-                cached, cache_creation = _openai_cache_tokens(usage)
+            if usage_info is not None:
                 return StreamingResponse(
                     delta=TextDelta(content=""),
-                    usage=UsageInfo(
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                        total_tokens=usage.get("total_tokens", 0),
-                        cache_read_tokens=cached,
-                        cache_creation_tokens=cache_creation,
-                    ),
+                    usage=usage_info,
                     is_final=True,
                     finish_reason=finish_reason,
                     raw_chunk=chunk,

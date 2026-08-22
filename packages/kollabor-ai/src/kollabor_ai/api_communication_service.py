@@ -118,6 +118,10 @@ class APICommunicationService:
 
         # Token usage tracking
         self.last_token_usage: Dict[str, int] = {}
+        # True when the provider omitted usage and the streaming path had to
+        # expose a local estimate. Consumers can label that value instead of
+        # presenting it as exact accounting.
+        self.last_token_usage_is_estimated = False
 
         # Native tool calling support
         self.last_tool_calls: List[Any] = []  # Tool calls from last response
@@ -725,6 +729,7 @@ class APICommunicationService:
             "cache_creation_tokens": response.usage.cache_creation_tokens,
             "cache_read_tokens": response.usage.cache_read_tokens,
         }
+        self.last_token_usage_is_estimated = False
 
         # Extract tool calls for backward compatibility
         self.last_tool_calls = response.get_tool_uses()
@@ -768,6 +773,10 @@ class APICommunicationService:
             Exception: If provider stream fails
         """
         logger.debug(f"Provider streaming call (model={self.model})")
+
+        # A failed/missing usage trailer must not inherit the previous turn's
+        # estimate state.
+        self.last_token_usage_is_estimated = False
 
         # Initialize tool accumulator with mode from config
         use_legacy = not self._use_explicit_accumulation
@@ -902,15 +911,40 @@ class APICommunicationService:
                     "cache_creation_tokens": final_usage.cache_creation_tokens,
                     "cache_read_tokens": final_usage.cache_read_tokens,
                 }
+                self.last_token_usage_is_estimated = False
             else:
-                # Fallback to zero usage if not provided
-                self.last_token_usage = {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "cache_creation_tokens": 0,
-                    "cache_read_tokens": 0,
-                }
+                has_response_signal = bool(
+                    content
+                    or accumulated_tools
+                    or thinking_parts
+                    or self.last_raw_chunks
+                )
+                if has_response_signal:
+                    # Some OpenAI-compatible providers omit usage from
+                    # streams. Keep the context/status surfaces useful, but
+                    # mark the fallback explicitly so it cannot be mistaken
+                    # for billing precision.
+                    estimated_prompt = self._estimate_stream_input_tokens(messages)
+                    estimated_completion = len(content) // 4 if content else 0
+                    self.last_token_usage = {
+                        "prompt_tokens": estimated_prompt,
+                        "completion_tokens": estimated_completion,
+                        "total_tokens": estimated_prompt + estimated_completion,
+                        "cache_creation_tokens": 0,
+                        "cache_read_tokens": 0,
+                    }
+                    self.last_token_usage_is_estimated = True
+                    logger.debug(
+                        "Provider stream omitted usage; using estimated tokens "
+                        "(input=%d, output=%d)",
+                        estimated_prompt,
+                        estimated_completion,
+                    )
+                else:
+                    # Preserve the empty-response guard for a provider that
+                    # yielded no chunks at all.
+                    self.last_token_usage = {}
+                    self.last_token_usage_is_estimated = False
 
             # Extract completed tool calls
             if self._use_explicit_accumulation:
@@ -971,6 +1005,27 @@ class APICommunicationService:
             # Reset tool accumulator
             if self._tool_accumulator:
                 self._tool_accumulator.reset()
+
+    def _estimate_stream_input_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        """Estimate stream input tokens when the provider omits usage."""
+        provider_estimator = getattr(self._provider, "_estimate_input_tokens", None)
+        if callable(provider_estimator):
+            try:
+                return max(0, int(provider_estimator(messages)))
+            except (TypeError, ValueError):
+                logger.debug("provider input-token estimator failed", exc_info=True)
+
+        total_chars = 0
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        total_chars += len(str(block.get("text", "") or ""))
+            total_chars += 40
+        return max(total_chars // 4, 1 if messages else 0)
 
     def _raise_if_empty_provider_response(self, content: str) -> None:
         """Reject provider responses with no observable response signal."""

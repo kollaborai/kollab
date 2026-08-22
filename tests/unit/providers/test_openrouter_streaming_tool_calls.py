@@ -45,21 +45,42 @@ _GLM_TOOL_CHUNKS = [
                   "finish_reason": "tool_calls"}]},
 ]
 
+_OPENROUTER_TRAILING_USAGE_CHUNKS = [
+    {"choices": [{"delta": {"content": "ok"}, "finish_reason": None}]},
+    {
+        "choices": [{"delta": {"content": ""}, "finish_reason": "stop"}],
+        "usage": None,
+    },
+    {
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 37,
+            "completion_tokens": 2,
+            "total_tokens": 39,
+        },
+    },
+]
+
 
 class _FakeCompletions:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
     async def create(self, **_kwargs):
         async def _gen():
-            for payload in _GLM_TOOL_CHUNKS:
+            for payload in self._chunks:
                 yield _FakeChunk(payload)
         return _gen()
 
 
 class _FakeChat:
-    completions = _FakeCompletions()
+    def __init__(self, chunks):
+        self.completions = _FakeCompletions(chunks)
 
 
 class _FakeClient:
-    chat = _FakeChat()
+    def __init__(self, chunks):
+        self.chat = _FakeChat(chunks)
 
     async def close(self):
         pass
@@ -73,7 +94,7 @@ class _FakeModelInfo:
         return requested or 1024
 
 
-def _make_provider():
+def _make_provider(chunks=_GLM_TOOL_CHUNKS):
     provider = OpenRouterProvider(
         OpenRouterConfig(
             api_key="sk-or-test",
@@ -82,7 +103,7 @@ def _make_provider():
             max_tokens=800,
         )
     )
-    provider._client = _FakeClient()
+    provider._client = _FakeClient(chunks)
     provider._model_info = _FakeModelInfo()
     provider._initialized = True
     return provider
@@ -120,3 +141,20 @@ async def test_streamed_tool_call_arguments_reach_service_accumulator():
     assert [(t.name, t.input) for t in completed] == [
         ("get_weather", {"city": "Paris"})
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_consumes_usage_after_finish_reason_chunk():
+    """OpenRouter's usage-only chunk can arrive after finish_reason."""
+    provider = _make_provider(_OPENROUTER_TRAILING_USAGE_CHUNKS)
+
+    responses = []
+    async for response in provider.stream(
+        [{"role": "user", "content": "report status"}]
+    ):
+        responses.append(response)
+
+    assert responses[-1].usage is not None
+    assert responses[-1].usage.prompt_tokens == 37
+    assert responses[-1].usage.completion_tokens == 2
+    assert responses[-1].usage.total_tokens == 39

@@ -92,6 +92,7 @@ class SessionStats(Snapshot):
 
     messages: int = 0
     input_tokens: int = 0
+    input_tokens_estimated: bool = False
     output_tokens: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -267,6 +268,7 @@ class ProcessingSnapshot(Snapshot):
     """
 
     is_processing: bool = False
+    current_processing_tokens: int = 0
     queue_size: int = 0
     queue_max: int = 0
     dropped_messages: int = 0

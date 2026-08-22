@@ -352,6 +352,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
         tokens = 0
         cache_read = 0
         cost = 0.0
+        tokens_estimated = False
 
         # Prefer daemon-sourced state when available. In attach mode the
         # local llm_service is only a client-side shadow and can be partially
@@ -369,6 +370,12 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
             rs = ctx.remote_state
             msgs = rs.get("messages", 0)
             tokens = rs.get("input_tokens", 0) + rs.get("output_tokens", 0)
+            tokens_estimated = bool(rs.get("input_tokens_estimated", False))
+            if tokens == 0 and rs.get("is_processing"):
+                processing_tokens = int(rs.get("current_processing_tokens", 0) or 0)
+                if processing_tokens > 0:
+                    tokens = processing_tokens
+                    tokens_estimated = True
             cache_read = rs.get("cache_read_tokens", 0)
             cost = rs.get("total_cost_usd", 0.0)
 
@@ -376,6 +383,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
             stats = ctx.llm_service.session_stats
             msgs = stats.get("messages", 0)
             tokens = stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
+            tokens_estimated = bool(stats.get("input_tokens_estimated", False))
             cache_read = stats.get("cache_read_tokens", 0)
             cost = stats.get("total_cost_usd", 0.0)
 
@@ -407,8 +415,9 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
                 return f"${c:.1f}"
             return f"${c:.0f}"
 
-        token_full = _fmt(tokens)
-        token_short = _fmt_short(tokens)
+        token_prefix = "~" if tokens_estimated and tokens > 0 else ""
+        token_full = token_prefix + _fmt(tokens)
+        token_short = token_prefix + _fmt_short(tokens)
         cache_full = _fmt(cache_read)
         cost_full = _fmt_cost(cost)
         cost_short = _fmt_cost_short(cost)
@@ -466,14 +475,15 @@ def render_agent(width: int, ctx: Optional[WidgetContext]) -> str:
     """
     try:
         agent_name = None
-        if ctx and ctx.agent_manager:
+        # The daemon owns identity in attach mode. The local AgentManager is
+        # only a client-side shadow and commonly contains the bundled default.
+        if ctx and ctx.remote_state:
+            agent_name = ctx.remote_state.get("agent") or None
+
+        if not agent_name and ctx and ctx.agent_manager:
             agent = ctx.agent_manager.get_active_agent()
             if agent:
                 agent_name = agent.name
-
-        # Attach mode fallback
-        if not agent_name and ctx and ctx.remote_state:
-            agent_name = ctx.remote_state.get("agent")
 
         if not agent_name:
             return ""  # Return empty if no agent active
@@ -513,9 +523,11 @@ def render_skills(width: int, ctx: Optional[WidgetContext]) -> str:
                 active_skills = [s for s in all_skills if s in active_set]
                 total_skills = len(all_skills)
 
-        # Attach mode fallback
-        if not active_skills and total_skills == 0 and ctx and ctx.remote_state:
-            skills_str = ctx.remote_state.get("skills", "")
+        # StateService publishes the daemon's already-resolved skills string.
+        # A non-empty remote value is authoritative; an empty value falls back
+        # to the local shadow for standalone mode and test contexts.
+        if ctx and ctx.remote_state and "skills" in ctx.remote_state:
+            skills_str = ctx.remote_state.get("skills", "") or ""
             if skills_str:
                 return _fg(skills_str, T().text_dim)
 

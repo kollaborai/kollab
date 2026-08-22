@@ -89,7 +89,6 @@ class TestDualGate(unittest.TestCase):
         _wire_history(plugin, history, prompt_tokens=150_000)
 
         self.assertTrue(plugin._should_compact(history))
-
     def test_hub_messages_excluded_from_turn_count(self) -> None:
         plugin = _make_plugin(token_threshold_k=100, min_human_turns=3)
         history = [
@@ -118,6 +117,35 @@ class TestDualGate(unittest.TestCase):
         _wire_history(plugin, history, prompt_tokens=250_000)
 
         self.assertTrue(plugin._should_compact(history))
+
+
+class TestContextWidget(unittest.TestCase):
+    def test_remote_state_drives_context_widget_and_labels_estimate(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100)
+        plugin._llm_service = MagicMock()
+        plugin._llm_service.session_stats = {"input_tokens": 0}
+
+        context = MagicMock()
+        context.remote_state = {
+            "input_tokens": 1200,
+            "input_tokens_estimated": True,
+        }
+
+        self.assertEqual(plugin._render_widget(40, context), "ctx: ~1K/100K")
+
+    def test_processing_estimate_populates_context_before_response(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100)
+        plugin._llm_service = MagicMock()
+        plugin._llm_service.session_stats = {"input_tokens": 0}
+
+        context = MagicMock()
+        context.remote_state = {
+            "input_tokens": 0,
+            "is_processing": True,
+            "current_processing_tokens": 42,
+        }
+
+        self.assertEqual(plugin._render_widget(40, context), "ctx: ~42/100K")
 
 
 class TestOnLlmTurnComplete(unittest.IsolatedAsyncioTestCase):

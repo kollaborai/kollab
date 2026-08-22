@@ -47,6 +47,20 @@ class ForwardingProvider:
         )
 
 
+class NoUsageProvider:
+    provider_name = "openrouter"
+
+    @staticmethod
+    def _estimate_input_tokens(messages):
+        return 17
+
+    async def stream(self, messages, tools=None):
+        yield StreamingResponse(
+            delta=TextDelta(content="estimated response"),
+            raw_chunk={"type": "content_block_delta"},
+        )
+
+
 def make_service() -> APICommunicationService:
     config = MagicMock()
     config.get = lambda key, default=None: {
@@ -129,6 +143,19 @@ class TestGhostResponseHandling(unittest.IsolatedAsyncioTestCase):
                 "prompt_cache_retention": "24h",
             },
         )
+
+    async def test_stream_without_usage_exposes_labeled_estimate(self) -> None:
+        service = make_service()
+        service._provider = NoUsageProvider()
+
+        content = await service._call_provider_stream(
+            [{"role": "user", "content": "estimate this"}],
+            tools=[],
+        )
+
+        self.assertEqual(content, "estimated response")
+        self.assertEqual(service.last_token_usage["prompt_tokens"], 17)
+        self.assertTrue(service.last_token_usage_is_estimated)
 
 
 if __name__ == "__main__":
