@@ -30,6 +30,35 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
+      - name: Verify release consistency
+        # Enforce the release invariant on the pristine tagged commit BEFORE any
+        # rewrite: source versions, changelog entry, and the packaged changelog
+        # copy must already agree with the tag. If they don't, the tag was cut
+        # without a prep PR -- fail fast rather than silently repairing in CI.
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          fail=0
+          for pkg in pyproject.toml packages/*/pyproject.toml; do
+            cur=$(grep -m1 '^version = ' "$pkg" | sed 's/version = "\(.*\)"/\1/')
+            if [ "$cur" != "$VERSION" ]; then
+              echo "::error::$pkg version '$cur' != tag '$VERSION'"
+              fail=1
+            fi
+          done
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' entry"
+            fail=1
+          fi
+          if ! cmp -s CHANGELOG.md kollabor/updates/CHANGELOG.md; then
+            echo "::error::CHANGELOG.md and kollabor/updates/CHANGELOG.md differ (must be byte-identical)"
+            fail=1
+          fi
+          if [ "$fail" != 0 ]; then
+            echo "::error::Release consistency check failed. Land a prep PR that bumps all versions + adds the changelog entry, then tag the merged commit."
+            exit 1
+          fi
+          echo "Release consistency verified: versions, changelog entry, and packaged copy all agree with $VERSION."
+
       - name: Update all package versions
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
