@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-22
+
+### Fixed
+
+- Corrected token usage accounting for streamed responses, covering OpenRouter
+  usage chunks, the API communication service tally, and provider transformers.
+- Fixed remote widget state synchronization in attach mode so status widgets
+  reflect the daemon's live state (state refresher, snapshots, and local state).
+
 ## [0.7.1] - 2026-08-21
 
 ### Changed
