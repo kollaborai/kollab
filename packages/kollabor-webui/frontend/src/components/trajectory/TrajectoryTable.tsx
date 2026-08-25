@@ -82,13 +82,14 @@ export function TrajectoryTable({
             </div>
           ) : records.length ? (
             records.map((record) => (
-              <div
+              <button
+                type="button"
                 key={record.id}
                 role="row"
                 aria-selected={selectedId === record.id}
                 data-record-id={record.id}
                 className={cn(
-                  "grid cursor-pointer grid-cols-[3rem_9rem_minmax(0,1fr)] items-center border-b px-3 py-2 text-sm transition-colors md:grid-cols-[4rem_12rem_minmax(0,1fr)]",
+                  "grid w-full cursor-pointer grid-cols-[3rem_9rem_minmax(0,1fr)] items-center border-b px-3 py-2 text-left text-sm transition-colors md:grid-cols-[4rem_12rem_minmax(0,1fr)]",
                   record.opensTurn && "border-t-2 border-t-primary/40",
                   record.kind === "tool" || record.kind === "tool-batch"
                     ? "bg-muted/10"
@@ -143,7 +144,7 @@ export function TrajectoryTable({
                     +{formatDuration(record.durationSeconds)}
                   </span>
                 </span>
-              </div>
+              </button>
             ))
           ) : (
             <div className="text-muted-foreground flex min-h-48 items-center justify-center p-6 text-center text-sm">
