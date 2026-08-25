@@ -85,7 +85,6 @@ export function TrajectoryTable({
               <button
                 type="button"
                 key={record.id}
-                role="row"
                 aria-selected={selectedId === record.id}
                 data-record-id={record.id}
                 className={cn(
