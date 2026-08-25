@@ -179,6 +179,14 @@ class SystemPromptBuilder:
         self._build_count += 1
         utils = self._get_utils()
 
+        # Stable-prefix mode: strip per-session-volatile trenders so the system
+        # message is byte-identical across sessions (oMLX restores its on-disk
+        # KV cache from the shared prefix). Volatiles are re-emitted per turn via
+        # build_volatile_context() on the injection rail.
+        stable = self.config.get(
+            "kollabor.llm.system_prompt.stable_prefix", True
+        )
+
         # Get event_bus from agent_manager for hub trender tags
         event_bus = (
             getattr(self.agent_manager, "event_bus", None)
@@ -188,7 +196,7 @@ class SystemPromptBuilder:
 
         # Check if we have an active agent with a system prompt
         if self.agent_manager:
-            agent_prompt = self.agent_manager.get_system_prompt()
+            agent_prompt = self.agent_manager.get_system_prompt(skip_volatile=stable)
             if agent_prompt:
                 # Render <trender> tags in agent prompt
                 # Get agent's directory for correct section path resolution
@@ -201,6 +209,7 @@ class SystemPromptBuilder:
                     event_bus=event_bus,
                     profile_manager=self.profile_manager,
                     conversation_logger=self.conversation_logger,
+                    skip_volatile=stable,
                 )
                 logger.info(
                     f"System prompt build #{self._build_count} "
@@ -227,6 +236,7 @@ class SystemPromptBuilder:
             event_bus=event_bus,
             profile_manager=self.profile_manager,
             conversation_logger=self.conversation_logger,
+            skip_volatile=stable,
         )
 
         logger.info(
@@ -238,6 +248,72 @@ class SystemPromptBuilder:
 
         prompt_parts = [base_prompt]
         return self._finalize_system_prompt(prompt_parts)
+
+    def build_volatile_context(self) -> str:
+        """Render the per-turn volatile context stripped from the stable prefix.
+
+        Returns the session-context (date/git/cwd/probes), the live hub blocks
+        (identity/roster/vault/work_queue) and active_llm — exactly what build()
+        omits when stable_prefix is on — wrapped as one ``[context]`` block for
+        the user-turn injection rail. Returns "" when stable_prefix is off (that
+        content is already inline) or when nothing renders.
+        """
+        if not self.config.get(
+            "kollabor.llm.system_prompt.stable_prefix", True
+        ):
+            return ""
+
+        utils = self._get_utils()
+        event_bus = (
+            getattr(self.agent_manager, "event_bus", None)
+            if self.agent_manager
+            else None
+        )
+
+        # Re-emit the same installed session-context template the stable build
+        # strips, so date/git/cwd/probes reach the model verbatim (and fresh).
+        parts: List[str] = []
+        base_path = None
+        try:
+            from kollabor_config.config_utils import get_global_agents_dir
+
+            sess = (
+                get_global_agents_dir()
+                / "_base"
+                / "sections"
+                / "01-session-context.md"
+            )
+            if sess.exists():
+                parts.append(
+                    '<trender type="include" path="01-session-context.md" />'
+                )
+                base_path = sess.parent
+        except Exception as e:
+            logger.debug(f"Volatile session-context unavailable: {e}")
+
+        # Live hub state + active model info (also stripped from the prefix).
+        parts += [
+            '<trender type="hub_identity" />',
+            '<trender type="hub_roster" />',
+            '<trender type="hub_vault" />',
+            '<trender type="hub_work_queue" />',
+            '<trender type="active_llm" />',
+        ]
+
+        # ponytail: re-runs the session-context shell probes every turn (5s cap
+        # each). Fine at current turn rates; if latency shows, cache the probe
+        # output per session and re-run only date/git.
+        rendered = utils["render_system_prompt"](
+            "\n".join(parts),
+            timeout=5,
+            base_path=base_path,
+            event_bus=event_bus,
+            profile_manager=self.profile_manager,
+            conversation_logger=self.conversation_logger,
+            skip_volatile=False,
+        ).strip()
+
+        return f"[context]\n{rendered}\n" if rendered else ""
 
     def rebuild(self, conversation_history: List[ConversationMessage]) -> bool:
         """Rebuild the system prompt and update conversation history.

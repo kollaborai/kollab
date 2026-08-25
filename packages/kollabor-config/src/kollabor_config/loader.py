@@ -507,6 +507,14 @@ class ConfigLoader:
                     "system_prompt": {
                         "base_prompt": system_prompt,
                         "include_project_structure": False,
+                        # Strip per-session-volatile trenders (date/git/cwd,
+                        # hub roster/vault/queue/identity, active_llm) out of the
+                        # system message so its byte prefix is identical across
+                        # sessions and oMLX can restore its on-disk KV cache.
+                        # The stripped content is re-emitted each turn on the
+                        # user-turn injection rail (see build_volatile_context).
+                        # Kill-switch: set false to inline everything as before.
+                        "stable_prefix": True,
                         "attachment_files": [],
                         "custom_prompt_files": [],
                     },

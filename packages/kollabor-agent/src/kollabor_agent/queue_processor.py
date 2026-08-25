@@ -733,6 +733,26 @@ class QueueProcessor:
                         ):
                             injections.extend(legacy.drain_pending_injections())
 
+                # Stable-prefix mode: the system message has had its volatile
+                # trenders (session-context, hub roster/vault/queue, active_llm)
+                # stripped so its byte prefix is identical across sessions for
+                # oMLX KV-cache reuse. Re-emit them here on the user turn so
+                # nothing is lost. Returns "" when stable_prefix is off. Rides
+                # and is stripped post-call exactly like the [env] block below.
+                if self.event_bus:
+                    _llm_vol = self.event_bus.get_service("llm_service")
+                    if (
+                        _llm_vol is not None
+                        and type(_llm_vol).__module__ != "unittest.mock"
+                    ):
+                        build_vol = getattr(
+                            _llm_vol, "build_volatile_context", None
+                        )
+                        if callable(build_vol):
+                            vol_block = build_vol()
+                            if vol_block:
+                                injections.append(vol_block)
+
                 # Env notification queue drains regardless of curator state —
                 # capability / peer events shouldn't wait for the curator.
                 env_block = self._drain_env_block()

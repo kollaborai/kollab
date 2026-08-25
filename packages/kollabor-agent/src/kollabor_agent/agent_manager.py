@@ -631,6 +631,7 @@ class Agent:
         self,
         agent_manager: Optional["AgentManager"] = None,
         event_bus=None,
+        skip_volatile: bool = False,
     ) -> str:
         """
         Get system prompt with active skills appended.
@@ -668,6 +669,7 @@ class Agent:
             base_path=self.directory,
             agent_manager=agent_manager,
             event_bus=event_bus,
+            skip_volatile=skip_volatile,
         )
         rendered_prompt = renderer.render(self.system_prompt)
 
@@ -1396,11 +1398,15 @@ class AgentManager:
                 if skill_name in self._agents[agent_name].skills:
                     self._agents[agent_name].load_skill(skill_name)
 
-    def get_system_prompt(self) -> Optional[str]:
+    def get_system_prompt(self, skip_volatile: bool = False) -> Optional[str]:
         """
         Get the full system prompt for the active agent.
 
         Includes base system prompt and active skills.
+
+        Args:
+            skip_volatile: When True, strip per-session-volatile trenders so the
+                prefix is byte-stable across sessions (see PromptRenderer).
 
         Returns:
             System prompt string or None if no agent
@@ -1409,7 +1415,8 @@ class AgentManager:
         if agent:
             # Pass self for agents_list and event_bus for hub trender tags
             return agent.get_full_system_prompt(
-                agent_manager=self, event_bus=self.event_bus
+                agent_manager=self, event_bus=self.event_bus,
+                skip_volatile=skip_volatile,
             )
         return None
 

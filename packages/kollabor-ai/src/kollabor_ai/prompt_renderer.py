@@ -124,6 +124,7 @@ class PromptRenderer:
         event_bus: Optional[Any] = None,
         profile_manager: Optional[Any] = None,
         conversation_logger: Optional[Any] = None,
+        skip_volatile: bool = False,
     ):
         """Initialize the prompt renderer.
 
@@ -148,6 +149,11 @@ class PromptRenderer:
         self.event_bus = event_bus
         self.profile_manager = profile_manager
         self.conversation_logger = conversation_logger
+        # When True, per-session-volatile trenders (session-context include,
+        # hub identity/roster/vault/work_queue/peers, active_llm) are stripped
+        # to empty so the rendered prefix is byte-identical across sessions.
+        # Their content is re-emitted per turn on the injection rail.
+        self.skip_volatile = skip_volatile
 
     def _ensure_alias_utils(self) -> Optional[Dict[str, Any]]:
         """Ensure shell alias utilities are loaded."""
@@ -186,16 +192,31 @@ class PromptRenderer:
             # Step 3: Process agents list
             result = self._process_agents_list(result)
 
-            # Step 4: Process hub tags
-            result = self._process_hub_identity(result)
-            result = self._process_hub_roster(result)
-            result = self._process_hub_vault(result)
-            result = self._process_hub_work_queue(result)
-            result = self._process_hub_peers(result)
-            result = self._process_mcp_tools(result)
+            # Step 4: Process hub tags. In stable-prefix mode the per-session
+            # volatile ones are stripped to empty (re-emitted on the injection
+            # rail) so the system prefix stays byte-identical across sessions.
+            # mcp_tools stays inline (server set is stable once connected).
+            if self.skip_volatile:
+                for _pat in (
+                    self.TRENDER_HUB_IDENTITY_PATTERN,
+                    self.TRENDER_HUB_ROSTER_PATTERN,
+                    self.TRENDER_HUB_VAULT_PATTERN,
+                    self.TRENDER_HUB_WORK_QUEUE_PATTERN,
+                    self.TRENDER_HUB_PEERS_PATTERN,
+                    self.TRENDER_ACTIVE_LLM_PATTERN,
+                ):
+                    result = _pat.sub("", result)
+                result = self._process_mcp_tools(result)
+            else:
+                result = self._process_hub_identity(result)
+                result = self._process_hub_roster(result)
+                result = self._process_hub_vault(result)
+                result = self._process_hub_work_queue(result)
+                result = self._process_hub_peers(result)
+                result = self._process_mcp_tools(result)
 
-            # Step 5: Process active_llm tag
-            result = self._process_active_llm(result)
+                # Step 5: Process active_llm tag
+                result = self._process_active_llm(result)
 
             # Step 6: Process shell commands
             result = self._process_commands(result)
@@ -263,8 +284,14 @@ class PromptRenderer:
             start_pos = match.start()
             end_pos = match.end()
 
-            # Resolve and read file
-            file_content = self._include_file(file_path)
+            # In stable-prefix mode the wholly-volatile session-context block
+            # (date/git/cwd/docker probes) is stripped from the system prefix
+            # and re-emitted per turn on the injection rail.
+            if self.skip_volatile and file_path.endswith("01-session-context.md"):
+                file_content = ""
+            else:
+                # Resolve and read file
+                file_content = self._include_file(file_path)
 
             # Replace the tag with the file content
             result = result[:start_pos] + file_content + result[end_pos:]
@@ -1049,6 +1076,7 @@ def render_system_prompt(
     event_bus: Optional[Any] = None,
     profile_manager: Optional[Any] = None,
     conversation_logger: Optional[Any] = None,
+    skip_volatile: bool = False,
 ) -> str:
     """Convenience function to render a system prompt.
 
@@ -1072,5 +1100,6 @@ def render_system_prompt(
         event_bus=event_bus,
         profile_manager=profile_manager,
         conversation_logger=conversation_logger,
+        skip_volatile=skip_volatile,
     )
     return renderer.render(prompt_content)

@@ -1210,6 +1210,18 @@ class LLMService:
         """Rebuild the system prompt and update conversation history."""
         return cast(bool, self._prompt_builder.rebuild(self.conversation_history))
 
+    def build_volatile_context(self) -> str:
+        """Render per-turn volatile context for the injection rail.
+
+        Empty string when stable_prefix is off or nothing renders. Drained by
+        the queue processor and prepended to the user turn (like the [env] block)
+        so the stable system prefix stays byte-identical across sessions.
+        """
+        try:
+            return cast(str, self._prompt_builder.build_volatile_context())
+        except Exception:
+            return ""
+
     # --- NativeToolsHandler forwarding properties and methods ---
 
     @property
