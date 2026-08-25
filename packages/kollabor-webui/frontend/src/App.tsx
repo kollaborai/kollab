@@ -34,9 +34,17 @@ function hasPendingPermission(state: EngineState): boolean {
   );
 }
 
-function RuntimeShell({ session }: { session: Session }) {
+function RuntimeShell({
+  session,
+  profiles,
+}: {
+  session: Session;
+  profiles: Profile[];
+}) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
+  const profile = profiles.find((item) => item.name === session.profile);
+  const model = profile?.model;
   const [view, setView] = useState<SessionView>("chat");
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
@@ -48,9 +56,17 @@ function RuntimeShell({ session }: { session: Session }) {
         <div className="flex items-center gap-2">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mr-1 h-4" />
-          <span className="truncate font-mono text-sm font-medium">
-            {session.session_id}
-          </span>
+          <div className="flex min-w-0 flex-col">
+            <span className="truncate font-mono text-sm font-medium">
+              {session.session_id}
+            </span>
+            <span
+              className="text-muted-foreground truncate text-xs"
+              title={model || session.profile || "default"}
+            >
+              {model || "model unavailable"} · {session.profile || "default"}
+            </span>
+          </div>
           <div
             className="bg-muted flex rounded-md p-0.5"
             role="group"
@@ -343,7 +359,7 @@ export default function App() {
             sessionId={activeSession.session_id}
             initialState={initialState}
           >
-            <RuntimeShell session={activeSession} />
+            <RuntimeShell session={activeSession} profiles={profiles} />
           </EngineRuntimeProvider>
         ) : (
           <>
