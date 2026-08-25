@@ -12,7 +12,12 @@ import aiohttp
 from pydantic import field_validator
 
 from .base import LLMProvider
-from .errors import APIConnectionError, APITimeoutError, map_http_status_error
+from .errors import (
+    APIConnectionError,
+    APITimeoutError,
+    EmptyResponseError,
+    map_http_status_error,
+)
 from .message_sanitizer import strip_local_message_metadata
 from .models import (
     ProviderConfig,
@@ -188,14 +193,27 @@ class CustomProvider(LLMProvider):
 
         response_data = await self._make_request(messages, tools, stream=False)
 
-        # Parse response (OpenAI-compatible format)
-        choice = response_data["choices"][0]
-        message = choice["message"]
+        # Parse response (OpenAI-compatible format). "choices" can be
+        # present but EMPTY on empty/aborted responses from local servers,
+        # proxies, or gateways — .get(..., [{}]) only covers a MISSING key,
+        # not an empty list, so [0] can still IndexError (same failure class
+        # as the trailing empty-choices SSE chunk in the streaming path).
+        choices = response_data.get("choices") or []
+        if not choices:
+            raise EmptyResponseError(
+                "Custom API returned no choices in response",
+                self.provider_name,
+                error_code="empty_response",
+            )
+        choice = choices[0]
+        message = choice.get("message", {})
 
-        # Parse content
+        # Parse content (some endpoints return "content": null)
         content_blocks = []
-        if "content" in message:
-            content_blocks.append(TextContent(type="text", text=message["content"]))
+        if message.get("content"):
+            content_blocks.append(
+                TextContent(type="text", text=message["content"])
+            )
 
         # Parse tool calls
         tool_uses = []
@@ -216,6 +234,16 @@ class CustomProvider(LLMProvider):
                         input=arguments,
                     )
                 )
+
+        # A choice with neither text nor tool calls is an empty response
+        # (e.g. "content": null). UnifiedResponse rejects zero content blocks
+        # with an opaque ValidationError, so surface it as a clean error.
+        if not content_blocks and not tool_uses:
+            raise EmptyResponseError(
+                "Custom API returned a choice with no content or tool calls",
+                self.provider_name,
+                error_code="empty_response",
+            )
 
         # Parse usage (check both OpenAI and Anthropic cache field formats)
         usage_info = response_data.get("usage", {})
@@ -371,8 +399,14 @@ class CustomProvider(LLMProvider):
                         except json.JSONDecodeError:
                             continue
 
-                        # Parse chunk
-                        delta = data.get("choices", [{}])[0].get("delta", {})
+                        # Parse chunk. "choices" can be present but EMPTY on a
+                        # trailing usage-only chunk (we request stream_options
+                        # include_usage above) or on an empty/partial response
+                        # from a timed-out local server — .get(..., [{}]) only
+                        # covers a MISSING key, not an empty list, so [0] can
+                        # still IndexError.
+                        choices = data.get("choices") or [{}]
+                        delta = choices[0].get("delta", {})
 
                         # Text content
                         if "content" in delta and delta["content"]:
@@ -417,9 +451,7 @@ class CustomProvider(LLMProvider):
                             )
 
                         # Finish reason
-                        finish_reason = data.get("choices", [{}])[0].get(
-                            "finish_reason"
-                        )
+                        finish_reason = choices[0].get("finish_reason")
 
                 # Yield final usage info
                 if usage_info:

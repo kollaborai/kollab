@@ -232,7 +232,7 @@ class APICommunicationService:
 
         Returns:
             True if provider initialized successfully, False if there was
-            an error (app can still run, user can fix via /profile)
+            an error (app can still run, user can fix via /setup)
         """
         if self._initialized:
             return self._provider is not None
@@ -249,7 +249,7 @@ class APICommunicationService:
         else:
             logger.warning(
                 "API service initialized with errors - provider not available. "
-                "Use /profile to fix configuration."
+                "Use /setup to fix configuration."
             )
             return False
 
@@ -257,7 +257,7 @@ class APICommunicationService:
         """Initialize provider from profile configuration.
 
         Handles validation errors gracefully - logs warning and allows app
-        to continue so user can fix the profile via /profile command.
+        to continue so user can fix the profile via /setup command.
         For OAuth profiles, auto-refreshes expired tokens before creating
         the provider.
         """
@@ -286,7 +286,7 @@ class APICommunicationService:
             self._provider_error = str(e)
             logger.warning(
                 f"Profile '{self._profile.name}' has configuration error: {e}. "
-                f"Use /profile to fix the configuration."
+                f"Use /setup to fix the configuration."
             )
 
         except Exception as e:
@@ -295,7 +295,7 @@ class APICommunicationService:
             self._provider_error = str(e)
             logger.warning(
                 f"Failed to initialize provider for profile '{self._profile.name}': {e}. "
-                f"Use /profile to check configuration."
+                f"Use /setup to check configuration."
             )
 
     async def _refresh_oauth_token(self) -> None:
@@ -467,7 +467,7 @@ class APICommunicationService:
                 raise RuntimeError(
                     f"LLM provider not available due to configuration error:\n"
                     f"{self._provider_error}\n\n"
-                    f"Use /profile to fix the configuration."
+                    f"Use /setup to fix the configuration."
                 )
             else:
                 raise RuntimeError("Provider not initialized. Call initialize() first.")
@@ -1313,7 +1313,7 @@ class APICommunicationService:
     async def reinitialize_provider(self, profile: LLMProfile) -> bool:
         """Reinitialize provider with a new profile.
 
-        Used when user changes profile via /profile command.
+        Used when user changes profile via /llm command.
 
         Args:
             profile: New LLM profile configuration

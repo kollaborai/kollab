@@ -170,10 +170,10 @@ class OpenAIAdapter(BaseAPIAdapter):
                     "FORMAT MISMATCH: Got Anthropic response but using OpenAI adapter"
                 )
                 return AdapterResponse(
-                    content="CONFIG ERROR: Your profile has tool_format='openai' but the server "
+                    content="CONFIG ERROR: Your profile is set up for OpenAI but the server "
                     "returned an Anthropic-style response.\n\n"
-                    "FIX: Run /profile, select this profile, press 'e' to edit, "
-                    "change Tool Format to 'anthropic', then Ctrl+S to save.",
+                    "FIX: Reconfigure this provider with /setup (or /llm) so its type "
+                    "matches the endpoint you are calling.",
                     stop_reason="format_error",
                     raw_response=raw_response,
                 )
