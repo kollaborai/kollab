@@ -2605,17 +2605,43 @@ class TerminalLLMChat:
             logger.error(f"[INFO] Traceback: {traceback.format_exc()}")
 
     async def _check_first_run_wizard(self) -> None:
-        """Check if this is first run and launch setup wizard if needed."""
+        """Launch the setup wizard when there is no usable LLM provider.
+
+        Fires on a true first install (no config) AND on a config that exists
+        but has no provider configured. Env-var API keys (ANTHROPIC_API_KEY,
+        OPENAI_API_KEY, ...) auto-activate a profile, so is_provider_available()
+        is True for those users and they are never nagged.
+        """
         try:
-            # Only show wizard on first install (when global config didn't exist before)
-            if not self._is_first_install:
-                logger.info("Not a first install, skipping wizard")
+            # Attach mode connects to a remote agent; skip LLM init, so never
+            # show the local setup wizard here.
+            if getattr(self, "_attach_to", None):
+                logger.info("Attach mode, skipping setup wizard")
                 return
 
-            # Double-check the config flag in case wizard was already run
+            # Respect a prior run/skip so we don't re-nag on every launch.
             setup_completed = self.config.get("application.setup_completed", False)
             if setup_completed:
                 logger.info("Setup already completed, skipping wizard")
+                return
+
+            # The real trigger: is any provider usable? This subsumes both
+            # "first install" and "config reset with no provider", and stays
+            # quiet for env-var users (their key auto-activates a profile).
+            try:
+                provider_available = (
+                    self.llm_service.api_service.is_provider_available()
+                )
+            except Exception as probe_err:
+                # If we can't tell, don't hijack the screen with a modal;
+                # the runtime provider error already points to /setup.
+                logger.warning(f"Provider probe failed, skipping wizard: {probe_err}")
+                return
+            if provider_available:
+                logger.info(
+                    "Provider available (first_install=%s), skipping wizard",
+                    self._is_first_install,
+                )
                 return
 
             # Check if we have the fullscreen integrator
