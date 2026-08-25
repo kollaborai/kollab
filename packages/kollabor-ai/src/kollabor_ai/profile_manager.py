@@ -938,7 +938,7 @@ class ProfileManager:
 
             # Build extra headers for ChatGPT backend API
             extra_headers = {
-                "originator": "kollabor",
+                "originator": "kollab",
             }
             if tokens.account_id:
                 extra_headers["ChatGPT-Account-Id"] = tokens.account_id

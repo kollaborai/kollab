@@ -517,7 +517,7 @@ async def query_codex_model_details(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "User-Agent": "kollab/1.0",
-        "originator": "kollabor",
+        "originator": "kollab",
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id

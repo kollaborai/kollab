@@ -157,7 +157,7 @@ class LoginCommandHandler(BaseCommandHandler):
             # Build extra headers for ChatGPT backend
             from kollabor_ai.oauth.openai_oauth import CODEX_API_BASE_URL
 
-            extra_headers = {"originator": "kollabor"}
+            extra_headers = {"originator": "kollab"}
             if tokens.account_id:
                 extra_headers["ChatGPT-Account-Id"] = tokens.account_id
 
