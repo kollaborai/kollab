@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Thread } from "./components/Thread";
+import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { SessionToolbar } from "@/components/shell/SessionToolbar";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import {
 } from "./runtime";
 
 const api = new EngineApi();
+type SessionView = "chat" | "trajectory";
 
 /** True when the restored state still carries an unanswered permission prompt. */
 function hasPendingPermission(state: EngineState): boolean {
@@ -35,6 +37,7 @@ function hasPendingPermission(state: EngineState): boolean {
 function RuntimeShell({ session }: { session: Session }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
+  const [view, setView] = useState<SessionView>("chat");
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
@@ -48,6 +51,32 @@ function RuntimeShell({ session }: { session: Session }) {
           <span className="truncate font-mono text-sm font-medium">
             {session.session_id}
           </span>
+          <div
+            className="bg-muted flex rounded-md p-0.5"
+            role="group"
+            aria-label="Session view"
+          >
+            <Button
+              type="button"
+              variant={view === "chat" ? "secondary" : "ghost"}
+              size="xs"
+              aria-pressed={view === "chat"}
+              data-testid="chat-tab"
+              onClick={() => setView("chat")}
+            >
+              Chat
+            </Button>
+            <Button
+              type="button"
+              variant={view === "trajectory" ? "secondary" : "ghost"}
+              size="xs"
+              aria-pressed={view === "trajectory"}
+              data-testid="trajectory-tab"
+              onClick={() => setView("trajectory")}
+            >
+              Trajectory
+            </Button>
+          </div>
           <span
             className={
               transportError
@@ -61,7 +90,11 @@ function RuntimeShell({ session }: { session: Session }) {
         <SessionToolbar api={api} session={session} onStatus={setStatus} />
       </header>
       <div className="flex min-h-0 flex-1 flex-col">
-        <Thread />
+        {view === "chat" ? (
+          <Thread />
+        ) : (
+          <TrajectoryView api={api} sessionId={session.session_id} />
+        )}
       </div>
     </>
   );

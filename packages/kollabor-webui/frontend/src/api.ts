@@ -14,7 +14,17 @@ export type Session = {
 export type HistoryMessage = {
   role: "system" | "user" | "assistant" | string;
   content?: string | null;
+  timestamp?: string | null;
+  metadata?: Record<string, unknown>;
+  thinking?: string | null;
 };
+
+export function isToolOutputBatch(
+  message: Pick<HistoryMessage, "metadata">,
+): boolean {
+  const value = message.metadata?.tool_output_batch;
+  return value === true || value === "true";
+}
 
 export type PermissionPrompt = {
   type?: "permission_request";

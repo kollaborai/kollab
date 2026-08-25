@@ -14,6 +14,7 @@ import type {
   PermissionPrompt,
   Session,
 } from "./api";
+import { isToolOutputBatch } from "./api";
 import { PermissionToolUI } from "./components/PermissionTool";
 
 export type EngineState = {
@@ -36,7 +37,11 @@ function historyToMessages(
   pendingPermissions: PermissionPrompt[],
 ): ThreadMessageLike[] {
   const messages: ThreadMessageLike[] = history
-    .filter((message) => message.role === "user" || message.role === "assistant")
+    .filter(
+      (message) =>
+        (message.role === "user" || message.role === "assistant") &&
+        !isToolOutputBatch(message),
+    )
     .map((message, index): ThreadMessageLike => ({
       id: `history-${index}`,
       role: message.role as "user" | "assistant",
