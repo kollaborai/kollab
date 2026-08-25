@@ -7,6 +7,7 @@ import {
   useAui,
   useAuiState,
 } from "@assistant-ui/react";
+import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import type { ReactNode } from "react";
 import type {
   EngineApi,
@@ -36,20 +37,176 @@ function historyToMessages(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[],
 ): ThreadMessageLike[] {
-  const messages: ThreadMessageLike[] = history
-    .filter(
-      (message) =>
-        (message.role === "user" || message.role === "assistant") &&
-        !isToolOutputBatch(message),
-    )
-    .map((message, index): ThreadMessageLike => ({
-      id: `history-${index}`,
-      role: message.role as "user" | "assistant",
-      content: message.content || "",
-      ...(message.role === "assistant"
-        ? { status: { type: "complete", reason: "stop" } }
-        : {}),
-    }));
+  type RestoredToolCall = {
+    type: "tool-call";
+    toolCallId: string;
+    toolName: string;
+    args: ReadonlyJSONObject;
+    argsText: string;
+    result?: unknown;
+    isError?: boolean;
+  };
+
+  const asRecord = (value: unknown): Record<string, unknown> | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    return value as Record<string, unknown>;
+  };
+
+  const asString = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value : null;
+
+  const parseArguments = (
+    value: unknown,
+  ): { args: ReadonlyJSONObject; argsText: string } => {
+    if (typeof value === "string") {
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        return {
+          args: (asRecord(parsed) || {}) as ReadonlyJSONObject,
+          argsText: value,
+        };
+      } catch {
+        return { args: {}, argsText: value };
+      }
+    }
+    const args = (asRecord(value) || {}) as ReadonlyJSONObject;
+    return { args, argsText: JSON.stringify(args) };
+  };
+
+  const restoredCalls = (
+    message: HistoryMessage,
+    sourceIndex: number,
+  ): RestoredToolCall[] => {
+    const metadata = asRecord(message.metadata);
+    const rawCalls = metadata?.tool_calls;
+    if (!Array.isArray(rawCalls)) return [];
+
+    return rawCalls.flatMap((rawCall, callIndex) => {
+      const call = asRecord(rawCall);
+      if (!call) return [];
+      const functionValue = asRecord(call.function);
+      const toolCallId =
+        asString(call.id) ||
+        asString(call.tool_call_id) ||
+        `history-${sourceIndex}-tool-${callIndex}`;
+      const toolName =
+        asString(functionValue?.name) ||
+        asString(call.name) ||
+        asString(call.tool_name) ||
+        "tool";
+      const rawArguments =
+        functionValue?.arguments ?? call.arguments ?? call.input ?? call.args;
+      const { args, argsText } = parseArguments(rawArguments ?? {});
+      return [{
+        type: "tool-call",
+        toolCallId,
+        toolName,
+        args,
+        argsText,
+      }];
+    });
+  };
+
+  const toolResultId = (message: HistoryMessage): string | null => {
+    const metadata = asRecord(message.metadata);
+    return (
+      asString(metadata?.tool_call_id) ||
+      asString(metadata?.toolCallId) ||
+      asString(metadata?.tool_id)
+    );
+  };
+
+  const toolResultIsError = (
+    message: HistoryMessage,
+  ): boolean | undefined => {
+    const metadata = asRecord(message.metadata);
+    for (const key of [
+      "is_error",
+      "isError",
+      "tool_output_is_error",
+    ]) {
+      if (typeof metadata?.[key] === "boolean") return metadata[key] as boolean;
+    }
+    if (metadata?.success === false) return true;
+    return undefined;
+  };
+
+  const messages: ThreadMessageLike[] = [];
+  const callsById = new Map<string, RestoredToolCall>();
+
+  history.forEach((message, sourceIndex) => {
+    if (isToolOutputBatch(message)) return;
+
+    if (message.role === "user") {
+      messages.push({
+        id: `history-${sourceIndex}`,
+        role: "user",
+        content: message.content || "",
+      });
+      return;
+    }
+
+    if (message.role === "assistant") {
+      const calls = restoredCalls(message, sourceIndex);
+      if (!calls.length) {
+        messages.push({
+          id: `history-${sourceIndex}`,
+          role: "assistant",
+          content: message.content || "",
+          status: { type: "complete", reason: "stop" },
+        });
+        return;
+      }
+
+      const content: Array<
+        | { type: "text"; text: string }
+        | RestoredToolCall
+      > = [];
+      if (message.content) content.push({ type: "text", text: message.content });
+      for (const call of calls) {
+        callsById.set(call.toolCallId, call);
+        content.push(call);
+      }
+      messages.push({
+        id: `history-${sourceIndex}`,
+        role: "assistant",
+        content,
+        status: { type: "complete", reason: "stop" },
+      });
+      return;
+    }
+
+    if (message.role === "tool") {
+      const callId = toolResultId(message);
+      const existingCall = callId ? callsById.get(callId) : undefined;
+      if (existingCall) {
+        existingCall.result = message.content || "";
+        existingCall.isError = toolResultIsError(message);
+        return;
+      }
+
+      // Keep an unmatched result visible rather than silently dropping a tool
+      // message from a provider-specific history format.
+      const fallbackCall: RestoredToolCall = {
+        type: "tool-call",
+        toolCallId: callId || `history-${sourceIndex}-tool-result`,
+        toolName:
+          asString(asRecord(message.metadata)?.tool_name) || "tool result",
+        args: {},
+        argsText: "{}",
+        result: message.content || "",
+        isError: toolResultIsError(message),
+      };
+      messages.push({
+        id: `history-${sourceIndex}`,
+        role: "assistant",
+        content: [fallbackCall],
+        status: { type: "complete", reason: "stop" },
+      });
+    }
+  });
 
   // A daemon does not re-emit permission_request after a browser reload. Keep
   // the prompt as a pending tool call so assistant-ui can render it and its

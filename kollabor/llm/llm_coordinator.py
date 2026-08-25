@@ -53,7 +53,7 @@ class LLMService:
     """
 
     def _add_conversation_message(
-        self, message_or_role, content=None, parent_uuid=None
+        self, message_or_role, content=None, parent_uuid=None, metadata=None
     ) -> str:
         """Add a message to both conversation manager and legacy history.
 
@@ -79,12 +79,17 @@ class LLMService:
             role = message_or_role
             if content is None:
                 raise TypeError("Content is required when role is provided as string")
-            message = ConversationMessage(role=role, content=content)
+            message = ConversationMessage(
+                role=role, content=content, metadata=dict(metadata or {})
+            )
 
         # Add to conversation manager if available
         if hasattr(self, "conversation_manager") and self.conversation_manager:
             message_uuid = self.conversation_manager.add_message(
-                role=role, content=content, parent_uuid=parent_uuid
+                role=role,
+                content=content,
+                parent_uuid=parent_uuid,
+                metadata=dict(getattr(message, "metadata", None) or metadata or {}),
             )
         else:
             # Fallback - create a UUID if conversation manager not available

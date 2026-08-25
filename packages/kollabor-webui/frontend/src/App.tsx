@@ -10,13 +10,19 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { EngineApi, type Profile, type Session } from "./api";
+import {
+  EngineApi,
+  type AgentPoolEntry,
+  type Profile,
+  type Session,
+} from "./api";
 import {
   EngineRuntimeProvider,
   buildInitialState,
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
+import { formatSessionName } from "@/utils/session-display";
 
 const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
@@ -37,14 +43,17 @@ function hasPendingPermission(state: EngineState): boolean {
 function RuntimeShell({
   session,
   profiles,
+  onSessionUpdated,
 }: {
   session: Session;
   profiles: Profile[];
+  onSessionUpdated: (session: Session) => void;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   const profile = profiles.find((item) => item.name === session.profile);
   const model = profile?.model;
+  const sessionLabel = formatSessionName(session.name, session.session_id);
   const [view, setView] = useState<SessionView>("chat");
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
@@ -58,7 +67,7 @@ function RuntimeShell({
           <Separator orientation="vertical" className="mr-1 h-4" />
           <div className="flex min-w-0 flex-col">
             <span className="truncate font-mono text-sm font-medium">
-              {session.session_id}
+              {sessionLabel}
             </span>
             <span
               className="text-muted-foreground truncate text-xs"
@@ -100,10 +109,16 @@ function RuntimeShell({
                 : "text-muted-foreground ml-auto truncate text-xs"
             }
           >
-            {status || transportError || "assistant transport"}
+            {status || transportError || null}
           </span>
         </div>
-        <SessionToolbar api={api} session={session} onStatus={setStatus} />
+        <SessionToolbar
+          api={api}
+          session={session}
+          profiles={profiles}
+          onStatus={setStatus}
+          onSessionUpdated={onSessionUpdated}
+        />
       </header>
       <div className="flex min-h-0 flex-1 flex-col">
         {view === "chat" ? (
@@ -119,7 +134,9 @@ function RuntimeShell({
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
+  const [selectedIdentity, setSelectedIdentity] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
@@ -181,6 +198,24 @@ export default function App() {
     return next;
   }, []);
 
+  const refreshAgentPool = useCallback(async () => {
+    try {
+      const result = await api.listAgentPool(true);
+      const next = result.agents || [];
+      setAgents(next);
+      setSelectedIdentity((current) =>
+        next.some((agent) => agent.name === current && agent.available)
+          ? current
+          : next.find((agent) => agent.available)?.name || "",
+      );
+      return next;
+    } catch {
+      setAgents([]);
+      setSelectedIdentity("");
+      return [];
+    }
+  }, []);
+
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
       const [history, permissions] = await Promise.all([
@@ -204,16 +239,20 @@ export default function App() {
       setBusy(true);
       setBusyMessage("Connecting to the engine…");
       await api.loadConfig();
-      const [result, profileResult] = await Promise.all([
+      const [result, profileResult, agentResult] = await Promise.all([
         loadSessions(),
         api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
+        refreshAgentPool(),
       ]);
       if (!mounted || operation !== operationRef.current) return;
       const nextProfiles = profileResult.profiles || [];
       setProfiles(nextProfiles);
+      const nextAgents = agentResult || [];
+      setAgents(nextAgents);
       setSelectedProfile(
         profileResult.active || nextProfiles[0]?.name || "default",
       );
+      setSelectedIdentity(nextAgents.find((agent) => agent.available)?.name || "");
       const first = result.at(-1);
       if (first) {
         setBusyMessage("Restoring session…");
@@ -236,7 +275,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [loadSessions, loadState, recoverPendingTurn]);
+  }, [loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
   const createSession = async () => {
     abortRecovery();
@@ -249,9 +288,11 @@ export default function App() {
     try {
       const session = await api.createSession({
         profile: selectedProfile || "default",
+        identity: selectedIdentity || undefined,
         approval_mode: "confirm_all",
       });
       const result = await loadSessions();
+      await refreshAgentPool();
       if (operation !== operationRef.current) return;
       const nextState = await loadState(session.session_id, result);
       if (operation !== operationRef.current) return;
@@ -278,6 +319,7 @@ export default function App() {
     try {
       await api.deleteSession(sessionId);
       const result = await loadSessions();
+      await refreshAgentPool();
       if (operation !== operationRef.current) return;
       const next = result.at(-1);
       if (!next) {
@@ -343,15 +385,26 @@ export default function App() {
       <AppSidebar
         sessions={sessions}
         profiles={profiles}
+        agents={agents}
         selectedProfile={selectedProfile}
+        selectedIdentity={selectedIdentity}
         activeId={activeId}
         busy={busy}
         onProfileChange={setSelectedProfile}
+        onIdentityChange={setSelectedIdentity}
+        onSettings={() => {
+          // The active toolbar owns the settings dialog. Keep this callback
+          // for the sidebar affordance; dispatching a click lets the same
+          // dialog be opened from either surface without duplicating state.
+          document.querySelector<HTMLButtonElement>(
+            '[aria-label="Session settings trigger"]',
+          )?.click();
+        }}
         onSelectSession={(id) => void selectSession(id)}
         onCreate={() => void createSession()}
         onDelete={(id) => void deleteSession(id)}
       />
-      <SidebarInset className="min-h-svh">
+      <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
         {activeSession && initialState ? (
           <EngineRuntimeProvider
             key={activeId}
@@ -359,7 +412,17 @@ export default function App() {
             sessionId={activeSession.session_id}
             initialState={initialState}
           >
-            <RuntimeShell session={activeSession} profiles={profiles} />
+            <RuntimeShell
+              session={activeSession}
+              profiles={profiles}
+              onSessionUpdated={(updated) => {
+                setSessions((current) =>
+                  current.map((item) =>
+                    item.session_id === updated.session_id ? updated : item,
+                  ),
+                );
+              }}
+            />
           </EngineRuntimeProvider>
         ) : (
           <>

@@ -537,6 +537,18 @@ class TerminalLLMChat:
             shell_command_service=self.shell_command_service,
         )
 
+        # The daemon's LocalStateService uses these same CLI command objects
+        # when a browser submits a slash command. Register the live instances,
+        # rather than constructing a second registry that would miss plugin
+        # commands loaded during startup.
+        self.event_bus.register_service(
+            "command_registry", self.input_handler.command_registry
+        )
+        self.event_bus.register_service(
+            "command_executor", self.input_handler.command_executor
+        )
+        self.event_bus.register_service("slash_parser", self.input_handler.slash_parser)
+
         # Give terminal renderer access to input handler for modal state checking
         self.renderer.input_handler = self.input_handler
 

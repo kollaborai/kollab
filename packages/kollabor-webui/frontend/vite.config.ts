@@ -21,6 +21,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:8080",
       "/sessions": "http://127.0.0.1:7433",
+      "/agents": "http://127.0.0.1:7433",
       "/profiles": "http://127.0.0.1:7433",
       "/mcp": "http://127.0.0.1:7433",
       "/hub": "http://127.0.0.1:7433",

@@ -41,6 +41,27 @@ def test_close_current_event_loop_releases_policy_resource() -> None:
         policy.get_event_loop()
 
 
+def test_web_sessions_use_the_hub_identity_pool() -> None:
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: [
+        {"identity": "lapis"},
+        {"identity": "sapphire"},
+    ]
+
+    identity = pool._assign_identity()
+
+    assert identity not in {"lapis", "sapphire"}
+    assert not identity.startswith("web-")
+
+
+def test_requested_busy_identity_is_rejected() -> None:
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: [{"identity": "lapis"}]
+
+    with pytest.raises(ValueError, match="lapis.*already in use"):
+        pool._assign_identity("lapis")
+
+
 @pytest.mark.asyncio
 async def test_spawn_closes_dead_existing_handle_before_replacement():
     pool = daemon_pool.DaemonPool()

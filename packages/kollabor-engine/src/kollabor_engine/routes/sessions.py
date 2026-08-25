@@ -1,14 +1,16 @@
 """Session lifecycle routes."""
 
+import asyncio
 import logging
 import re
-import uuid
+import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
 from pydantic import BaseModel
 
 from kollabor_ai import LLMProfile
+from kollabor_ai.session_naming import generate_session_name
 
 from ..server import get_session_registry
 from ..session import EngineSession
@@ -16,11 +18,46 @@ from ..session import EngineSession
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
+_session_reservation_lock = threading.Lock()
+_pending_session_ids: set[str] = set()
+
 # Pattern to detect <trender> tags (security: block user-controlled dynamic content)
 # Matches: <trender>...</trender> and <trender type="..." ... />
 TRENDER_PATTERN = re.compile(
     r"<trender\b[^>]*>.*?</trender>|<trender\b[^>]*/?>", re.DOTALL | re.IGNORECASE
 )
+
+
+def _reserve_session_id(
+    registry: Dict[str, EngineSession], requested_id: Optional[str]
+) -> str:
+    """Reserve an ID before any daemon work can begin."""
+    session_id = requested_id or generate_session_name()
+    with _session_reservation_lock:
+        if session_id in registry or session_id in _pending_session_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Session '{session_id}' is already in use",
+            )
+        _pending_session_ids.add(session_id)
+    return session_id
+
+
+def _release_session_id(session_id: str) -> None:
+    with _session_reservation_lock:
+        _pending_session_ids.discard(session_id)
+
+
+async def _shutdown_failed_session(
+    session: EngineSession, session_id: str
+) -> None:
+    """Best-effort cleanup for a session that never registered."""
+    try:
+        await session.shutdown()
+    except asyncio.CancelledError:
+        logger.warning("Session %s cleanup was cancelled", session_id)
+    except Exception:
+        logger.exception("Session %s cleanup failed", session_id)
 
 
 class Credentials(BaseModel):
@@ -36,6 +73,7 @@ class Credentials(BaseModel):
 class CreateSessionRequest(BaseModel):
     profile: str = "default"
     agent: Optional[str] = None
+    identity: Optional[str] = None
     system_prompt: Optional[str] = None
     workspace: Optional[str] = None
     approval_mode: str = "confirm_all"
@@ -44,6 +82,12 @@ class CreateSessionRequest(BaseModel):
     credentials: Optional[Credentials] = None
     user_token: Optional[str] = None
     session_id: Optional[str] = None  # caller-supplied ID (proxy pre-generates to enable token injection)
+
+
+class SetProfileRequest(BaseModel):
+    name: str
+    model: Optional[str] = None
+    effort: Optional[str] = None
 
 
 def _sanitize_system_prompt(prompt: Optional[str]) -> Optional[str]:
@@ -206,34 +250,50 @@ async def create_session(body: CreateSessionRequest, request: Request):
             )
         assert profile is not None  # narrowed by raise above
 
-    session_id = body.session_id or f"sess_{uuid.uuid4().hex[:12]}"
+    # Match the normal CLI's memorable session IDs. Reserve both caller-supplied
+    # and generated IDs before constructing or spawning a daemon so concurrent
+    # requests cannot replace an owned registry entry.
+    session_id = _reserve_session_id(registry, body.session_id)
     try:
-        session = EngineSession(
-            session_id=session_id,
-            profile=profile,
-            approval_mode=body.approval_mode,
-            workspace=body.workspace,
-            system_prompt=safe_system_prompt,
-            mcp_server_names=effective_mcp_servers,
-            user_token=user_token,
-            agent=body.agent,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        try:
+            session = EngineSession(
+                session_id=session_id,
+                profile=profile,
+                approval_mode=body.approval_mode,
+                workspace=body.workspace,
+                system_prompt=safe_system_prompt,
+                mcp_server_names=effective_mcp_servers,
+                user_token=user_token,
+                agent=body.agent,
+                identity=body.identity,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # Spawning the daemon is the slow part of session creation (plugin
-    # discovery plus the hub join). Surface a failure as a real error instead
-    # of registering a session with no process behind it.
-    try:
-        await session.initialize()
-    except (TimeoutError, RuntimeError) as e:
-        logger.error(f"Session {session_id} daemon failed to start: {e}")
-        await session.shutdown()
-        raise HTTPException(status_code=503, detail=f"daemon failed to start: {e}")
+        # Spawning the daemon is the slow part of session creation (plugin
+        # discovery plus the hub join). Every failure after construction must
+        # stop the candidate daemon before the error leaves this route.
+        try:
+            await session.initialize()
+        except asyncio.CancelledError:
+            await _shutdown_failed_session(session, session_id)
+            raise
+        except ValueError as e:
+            await _shutdown_failed_session(session, session_id)
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("Session %s daemon failed to start", session_id)
+            await _shutdown_failed_session(session, session_id)
+            raise HTTPException(
+                status_code=503,
+                detail=f"daemon failed to start: {e}",
+            ) from e
 
-    registry[session_id] = session
-    logger.info(f"Session {session_id} created")
-    return session.to_dict()
+        registry[session_id] = session
+        logger.info("Session %s created", session_id)
+        return session.to_dict()
+    finally:
+        _release_session_id(session_id)
 
 
 async def _reap_dead_sessions() -> None:
@@ -270,6 +330,85 @@ async def get_session(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session.to_dict()
+
+
+@router.get("/{session_id}/state")
+async def get_session_state(session_id: str):
+    """Return live daemon state used by the web settings/inspector panels."""
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    async def read(method_name: str, fallback: Any = None) -> Any:
+        try:
+            snapshot = await getattr(session.state, method_name)()
+            to_dict = getattr(snapshot, "to_dict", None)
+            return to_dict() if callable(to_dict) else snapshot
+        except Exception as exc:
+            logger.debug("Session %s state %s failed: %s", session_id, method_name, exc)
+            return fallback
+
+    profile, agent, system, hub, processing = await asyncio.gather(
+        read("get_active_profile"),
+        read("get_active_agent"),
+        read("get_system_info"),
+        read("get_hub_state"),
+        read("get_processing_state"),
+    )
+    return {
+        "session_id": session_id,
+        "profile": profile,
+        "agent": agent,
+        "system": system,
+        "hub": hub,
+        "processing": processing,
+    }
+
+
+@router.post("/{session_id}/profile")
+async def set_session_profile(session_id: str, body: SetProfileRequest):
+    """Switch the live daemon profile/model without restarting the session."""
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.alive:
+        raise HTTPException(status_code=409, detail="Session daemon is not running")
+
+    try:
+        snapshot = await session.state.set_active_profile(
+            body.name,
+            model=body.model,
+            effort=body.effort,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Session %s profile switch failed: %s", session_id, exc)
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {exc}")
+
+    # Keep the engine list response in sync with the daemon snapshot. The
+    # profile manager here is only a redacted mirror; the daemon remains the
+    # authority for the active provider/model.
+    try:
+        from kollabor_ai import ProfileManager
+
+        selected = ProfileManager().get_profile(body.name)
+        if selected is not None:
+            session.profile = selected
+            if body.model:
+                selected.model = body.model
+    except Exception as exc:
+        logger.debug("Session %s profile mirror update failed: %s", session_id, exc)
+
+    result = getattr(snapshot, "to_dict", None)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "profile": result() if callable(result) else snapshot,
+        **session.to_dict(),
+    }
 
 
 @router.patch("/{session_id}")

@@ -22,6 +22,18 @@ router = APIRouter(prefix="/hub", tags=["hub"])
 _bridge = HubBridge()
 
 
+def _resolve_agent(agent_ref: str) -> tuple[Dict[str, Any] | None, str]:
+    """Resolve either the stable agent id or the human-facing identity."""
+    agent = _bridge.get_agent(agent_ref)
+    if agent is not None:
+        return agent, agent_ref
+
+    agent = _bridge.get_agent_by_identity(agent_ref)
+    if agent is None:
+        return None, agent_ref
+    return agent, str(agent.get("agent_id") or agent_ref)
+
+
 class SendMessageRequest(BaseModel):
     target: str  # identity or agent_id
     content: str
@@ -40,14 +52,14 @@ async def list_agents(
 @router.get("/agents/{agent_id}")
 async def get_agent(agent_id: str, ping: bool = Query(False)):
     """Get details for a single hub agent."""
-    agent = _bridge.get_agent(agent_id)
+    agent, resolved_id = _resolve_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
     result: Dict[str, Any] = {"agent": agent}
 
     if ping:
-        alive = await _bridge.ping_agent(agent_id)
+        alive = await _bridge.ping_agent(resolved_id)
         result["socket_alive"] = alive
 
     return result
@@ -59,11 +71,11 @@ async def get_agent_output(
     lines: int = Query(100, ge=1, le=1000),
 ):
     """Fetch recent output from an agent via unix socket."""
-    agent = _bridge.get_agent(agent_id)
+    agent, resolved_id = _resolve_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
-    output = await _bridge.get_agent_output(agent_id, lines=lines)
+    output = await _bridge.get_agent_output(resolved_id, lines=lines)
     if output is None:
         return {
             "agent_id": agent_id,
@@ -77,11 +89,11 @@ async def get_agent_output(
 @router.get("/agents/{agent_id}/status")
 async def get_agent_status(agent_id: str):
     """Fetch current status from an agent via unix socket."""
-    agent = _bridge.get_agent(agent_id)
+    agent, resolved_id = _resolve_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
-    status = await _bridge.get_agent_status(agent_id)
+    status = await _bridge.get_agent_status(resolved_id)
     if status is None:
         return {
             "agent_id": agent_id,

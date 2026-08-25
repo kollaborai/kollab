@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, RefreshCw, Search } from "lucide-react";
+import { Activity, AlertCircle, RefreshCw, Search, Wrench } from "lucide-react";
 import type { EngineApi, SessionEvent } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -53,9 +53,12 @@ export function TrajectoryView({
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [canLoadEarlier, setCanLoadEarlier] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(false);
   const refreshSequenceRef = useRef(0);
+  const historyLimitRef = useRef(200);
 
   const refreshHistory = useCallback(
     async (initial = false) => {
@@ -63,14 +66,16 @@ export function TrajectoryView({
       if (initial) setLoading(true);
       else setRefreshing(true);
       try {
-        const result = await api.getHistory(sessionId);
+        const result = await api.getHistory(sessionId, historyLimitRef.current);
         if (
           !mountedRef.current ||
           sequence !== refreshSequenceRef.current
         ) {
           return;
         }
-        setRecords(projectTrajectory(result.history || []));
+        const history = result.history || [];
+        setRecords(projectTrajectory(history));
+        setCanLoadEarlier(history.length >= historyLimitRef.current);
         setError(null);
       } catch (reason) {
         if (
@@ -88,9 +93,21 @@ export function TrajectoryView({
           setRefreshing(false);
         }
       }
-    },
-    [api, sessionId],
+  },
+  [api, sessionId],
   );
+
+  const loadEarlier = useCallback(async () => {
+    if (loadingEarlier || !canLoadEarlier) return;
+    const nextLimit = historyLimitRef.current + 200;
+    historyLimitRef.current = nextLimit;
+    setLoadingEarlier(true);
+    try {
+      await refreshHistory();
+    } finally {
+      if (mountedRef.current) setLoadingEarlier(false);
+    }
+  }, [canLoadEarlier, loadingEarlier, refreshHistory]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -160,6 +177,18 @@ export function TrajectoryView({
     });
   }, [collapseTurns, records, search]);
 
+  const toolCount = useMemo(
+    () =>
+      records.filter(
+        (record) => record.kind === "tool" || record.kind === "tool-batch",
+      ).length,
+    [records],
+  );
+  const errorCount = useMemo(
+    () => records.filter((record) => record.isError).length,
+    [records],
+  );
+
   const selectedRecord =
     records.find((record) => record.id === selectedId) || null;
   const isMobile = useIsMobile();
@@ -169,17 +198,36 @@ export function TrajectoryView({
       className="flex min-h-0 flex-1 flex-col overflow-hidden"
       data-testid="trajectory-view"
     >
-      <div className="flex shrink-0 flex-col gap-3 border-b px-4 py-3">
+      <div className="flex shrink-0 flex-col gap-3 border-b bg-muted/10 px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
-            <div>
-              <h2 className="text-sm font-semibold">Trajectory</h2>
-              <p className="text-muted-foreground text-xs">
-                {visibleRecords.length} of {records.length} records
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-xl">
+              <Activity className="size-4" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-muted-foreground text-[10px] font-semibold tracking-[0.16em] uppercase">
+                Session trace
               </p>
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <h2 className="text-sm font-semibold">Trajectory</h2>
+                <p className="text-muted-foreground text-xs">
+                  {visibleRecords.length} of {records.length} records
+                  <span className="mx-1.5">·</span>
+                  {toolCount} {toolCount === 1 ? "tool" : "tools"}
+                  {errorCount > 0 && (
+                    <>
+                      <span className="mx-1.5">·</span>
+                      <span className="text-destructive">
+                        {errorCount} {errorCount === 1 ? "error" : "errors"}
+                      </span>
+                    </>
+                  )}
+                </p>
+              </div>
             </div>
             {refreshing && (
-              <Badge variant="secondary" className="font-normal">
+              <Badge variant="secondary" className="gap-1.5 font-normal">
+                <RefreshCw className="size-3 animate-spin" />
                 refreshing
               </Badge>
             )}
@@ -192,7 +240,7 @@ export function TrajectoryView({
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search trajectory"
                 aria-label="Search trajectory"
-                className="h-8 pl-8 text-xs"
+                className="h-8 rounded-lg bg-background/70 pl-8 text-xs shadow-xs"
               />
             </div>
             <label className="text-muted-foreground flex items-center gap-2 text-xs">
@@ -211,6 +259,7 @@ export function TrajectoryView({
               onClick={() => void refreshHistory()}
               disabled={refreshing}
               aria-label="Refresh trajectory"
+              className="rounded-lg bg-background/70 shadow-xs"
             >
               <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
               <span className="hidden sm:inline">Refresh</span>
@@ -218,21 +267,26 @@ export function TrajectoryView({
           </div>
         </div>
         {error && (
-          <div className="text-destructive flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+          <div className="text-destructive flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs shadow-xs">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
             <span className="min-w-0 break-words">{error}</span>
           </div>
         )}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
-        <TrajectoryTable
-          records={visibleRecords}
-          selectedId={selectedId}
-          loading={loading}
-          onSelect={setSelectedId}
-        />
-        <div className="hidden min-h-0 w-[min(26rem,38%)] md:flex">
-          <TrajectoryInspector record={selectedRecord} className="w-full" />
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 md:p-4">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card/30 shadow-sm md:flex-row">
+          <TrajectoryTable
+            records={visibleRecords}
+            selectedId={selectedId}
+            loading={loading}
+            canLoadEarlier={canLoadEarlier}
+            loadingEarlier={loadingEarlier}
+            onLoadEarlier={() => void loadEarlier()}
+            onSelect={setSelectedId}
+          />
+          <div className="hidden min-h-0 w-[min(26rem,38%)] md:flex">
+            <TrajectoryInspector record={selectedRecord} className="w-full" />
+          </div>
         </div>
       </div>
       <Sheet
@@ -241,7 +295,7 @@ export function TrajectoryView({
           if (!open) setSelectedId(null);
         }}
       >
-        <SheetContent side="bottom" className="max-h-[75vh] p-0">
+        <SheetContent side="bottom" className="max-h-[75vh] rounded-t-2xl p-0">
           <SheetHeader className="sr-only">
             <SheetTitle>Trajectory record details</SheetTitle>
           </SheetHeader>

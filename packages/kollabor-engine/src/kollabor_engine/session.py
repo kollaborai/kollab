@@ -102,6 +102,7 @@ class EngineSession:
         mcp_server_names: Optional[List[str]] = None,
         user_token: Optional[str] = None,
         agent: Optional[str] = None,
+        identity: Optional[str] = None,
     ):
         self.session_id = session_id
         self.user_token = user_token
@@ -110,6 +111,7 @@ class EngineSession:
         self.created_at = datetime.utcnow()
         self.profile = profile
         self.agent = agent
+        self.requested_identity = identity
         self.approval_mode = approval_mode
         self.mcp_server_names = mcp_server_names or []
 
@@ -150,6 +152,7 @@ class EngineSession:
             self.session_id,
             profile=profile_name or None,
             agent=self.agent,
+            identity=self.requested_identity,
             workspace=self.workspace,
             system_prompt=self.system_prompt or None,
         )
@@ -216,10 +219,28 @@ class EngineSession:
         if messages is None and isinstance(snapshot, dict):
             messages = snapshot.get("messages", [])
 
-        self.history = [
-            m if isinstance(m, dict) else {"role": m.role, "content": m.content}
-            for m in (messages or [])
-        ]
+        # StateService returns MessageDto snapshots with timestamps, metadata,
+        # and thinking. Keep the complete wire shape in the engine mirror;
+        # reducing messages to role/content here hides native tool-call IDs
+        # from both the trajectory projector and the restored chat runtime.
+        self.history = []
+        for message in messages or []:
+            if isinstance(message, dict):
+                self.history.append(message)
+                continue
+            to_dict = getattr(message, "to_dict", None)
+            if callable(to_dict):
+                self.history.append(to_dict())
+                continue
+            self.history.append(
+                {
+                    "role": getattr(message, "role", ""),
+                    "content": getattr(message, "content", "") or "",
+                    "timestamp": str(getattr(message, "timestamp", "") or ""),
+                    "metadata": dict(getattr(message, "metadata", None) or {}),
+                    "thinking": getattr(message, "thinking", None),
+                }
+            )
         return self.history
 
     async def send_message(self, content: str) -> Dict[str, Any]:
@@ -303,9 +324,18 @@ class EngineSession:
     # === serialization ===
 
     def to_dict(self) -> Dict[str, Any]:
+        identity = self.daemon.identity if self.daemon else ""
+        agent_name = (
+            self.agent
+            or (self.daemon.agent_name if self.daemon else "")
+            or "default"
+        )
         return {
             "session_id": self.session_id,
+            "name": self.session_id,
             "profile": getattr(self.profile, "name", str(self.profile or "")),
+            "model": getattr(self.profile, "model", ""),
+            "agent": agent_name,
             "workspace": self.workspace,
             "approval_mode": _APPROVAL_MODE_MAP.get(
                 self.approval_mode, ApprovalMode.CONFIRM_ALL
@@ -316,7 +346,7 @@ class EngineSession:
             "total_output_tokens": self.total_output_tokens,
             "history_length": len(self.history),
             "active": self.alive,
-            "identity": self.daemon.identity if self.daemon else "",
+            "identity": identity,
             "daemon_pid": self.daemon.pid if self.daemon else 0,
             "mcp_servers": self.mcp_server_names,
         }

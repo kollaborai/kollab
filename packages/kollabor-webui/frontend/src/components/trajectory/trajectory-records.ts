@@ -1,5 +1,6 @@
 import type { HistoryMessage } from "@/api";
 import { isToolOutputBatch } from "@/api";
+import { formatContent } from "@/utils/format-content";
 
 export type TrajectoryRecordKind =
   | "system"
@@ -22,6 +23,9 @@ export interface TrajectoryRecord {
   thinking?: string;
   timestamp: string | null;
   durationSeconds: number | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  thinkingDuration?: number;
   isError?: boolean;
   opensTurn?: boolean;
   sourceIndex: number;
@@ -44,13 +48,22 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
 function firstLine(value: string): string {
   const line = value.trim().split(/\r?\n/, 1)[0]?.trim();
   return line || "(empty)";
 }
 
 export function previewText(value: string, maxLength = 160): string {
-  const compact = value.replace(/\s+/g, " ").trim();
+  const compact = formatContent(value).replace(/\s+/g, " ").trim();
   if (!compact) return "(empty)";
   return compact.length > maxLength
     ? `${compact.slice(0, maxLength - 1)}…`
@@ -79,6 +92,19 @@ function metadataFor(message: HistoryMessage): JsonObject {
   return isObject(message.metadata) ? message.metadata : {};
 }
 
+function usageFor(metadata: JsonObject): {
+  inputTokens?: number;
+  outputTokens?: number;
+  thinkingDuration?: number;
+} {
+  const usage = isObject(metadata.usage) ? metadata.usage : {};
+  return {
+    inputTokens: asNumber(usage.input_tokens),
+    outputTokens: asNumber(usage.output_tokens),
+    thinkingDuration: asNumber(usage.thinking_duration),
+  };
+}
+
 function messageIdentity(message: HistoryMessage, sourceIndex: number): string {
   const metadata = metadataFor(message);
   const identity =
@@ -86,7 +112,24 @@ function messageIdentity(message: HistoryMessage, sourceIndex: number): string {
     asString(metadata.message_id) ??
     asString(metadata.source_seq) ??
     (typeof metadata.seq === "number" ? String(metadata.seq) : undefined);
-  return identity ? `history:${identity}` : `history:${sourceIndex}`;
+  if (identity) return `history:${identity}`;
+
+  // The history endpoint can return a trimmed suffix. Do not use the array
+  // index as the fallback identity or every "load earlier" prepend would
+  // change existing row keys and selection state.
+  const fingerprint = JSON.stringify({
+    role: message.role,
+    content: message.content || "",
+    timestamp: message.timestamp || null,
+    toolCalls: metadata.tool_calls || null,
+    toolBatch: metadata.tool_output_batch || false,
+  });
+  let hash = 2166136261;
+  for (const character of fingerprint) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `history:${(hash >>> 0).toString(16)}`;
 }
 
 function normalizeTimestamp(value: unknown): string | null {
@@ -186,7 +229,9 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
     const next: TrajectoryRecord = {
       ...record,
       index: records.length + 1,
-      durationSeconds: durationBetween(record.timestamp, previousTimestamp),
+      durationSeconds:
+        record.thinkingDuration ??
+        durationBetween(record.timestamp, previousTimestamp),
     };
     records.push(next);
     previousTimestamp = record.timestamp;
@@ -251,6 +296,7 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
 
     if (message.role === "assistant") {
       request += 1;
+      const usage = usageFor(metadata);
       add({
         id: `${identity}:assistant`,
         kind: "assistant",
@@ -260,6 +306,7 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
         summary: firstLine(content),
         output: content,
         thinking: message.thinking || undefined,
+        ...usage,
         timestamp,
         sourceIndex,
       });

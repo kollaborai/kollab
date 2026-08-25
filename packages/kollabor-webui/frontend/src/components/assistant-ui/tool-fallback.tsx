@@ -23,6 +23,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { formatContent } from "@/utils/format-content";
+import { summarizeToolCall } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
 
 const ANIMATION_DURATION = 200;
@@ -126,11 +128,13 @@ function ToolFallbackDuration({
 
 function ToolFallbackTrigger({
   toolName,
+  argsText,
   status,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   toolName: string;
+  argsText?: string;
   status?: ToolCallMessagePartStatus;
 }) {
   const statusType = status?.type ?? "complete";
@@ -139,7 +143,8 @@ function ToolFallbackTrigger({
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  const label = isCancelled ? "Cancelled tool" : "Used tool";
+  const label = isCancelled ? "Cancelled: " : "";
+  const summary = summarizeToolCall(toolName, argsText);
 
   return (
     <CollapsibleTrigger
@@ -166,7 +171,7 @@ function ToolFallbackTrigger({
         )}
       >
         <span>
-          {label}: <b>{toolName}</b>
+          {label}<b>{summary}</b>
         </span>
         {isRunning && (
           <span
@@ -174,7 +179,7 @@ function ToolFallbackTrigger({
             data-slot="tool-fallback-trigger-shimmer"
             className="aui-tool-fallback-trigger-shimmer shimmer pointer-events-none absolute inset-0 motion-reduce:animate-none"
           >
-            {label}: <b>{toolName}</b>
+            {label}<b>{summary}</b>
           </span>
         )}
       </span>
@@ -244,7 +249,7 @@ function ToolFallbackArgs({
       {...props}
     >
       <pre className="aui-tool-fallback-args-value bg-muted/50 text-foreground/90 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {argsText}
+        {formatContent(argsText)}
       </pre>
     </div>
   );
@@ -269,7 +274,7 @@ function ToolFallbackResult({
         Result:
       </p>
       <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+        {formatContent(result)}
       </pre>
     </div>
   );
@@ -551,7 +556,11 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
 
   return (
     <ToolFallbackRoot open={open} onOpenChange={setOpen}>
-      <ToolFallbackTrigger toolName={toolName} status={status} />
+      <ToolFallbackTrigger
+        toolName={toolName}
+        argsText={argsText}
+        status={status}
+      />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
         <ToolFallbackArgs

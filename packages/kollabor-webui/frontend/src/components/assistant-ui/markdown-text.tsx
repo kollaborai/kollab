@@ -134,7 +134,7 @@ const defaultComponents = memoizeMarkdownComponents({
   p: ({ className, ...props }) => (
     <p
       className={cn(
-        "aui-md-p my-3 leading-relaxed first:mt-0 last:mb-0",
+        "aui-md-p my-3 leading-relaxed whitespace-pre-wrap first:mt-0 last:mb-0",
         className,
       )}
       {...props}
@@ -219,7 +219,10 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   li: ({ className, ...props }) => (
-    <li className={cn("aui-md-li leading-relaxed", className)} {...props} />
+    <li
+      className={cn("aui-md-li leading-relaxed whitespace-pre-wrap", className)}
+      {...props}
+    />
   ),
   strong: ({ className, ...props }) => (
     <strong

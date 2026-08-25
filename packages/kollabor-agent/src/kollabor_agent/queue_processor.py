@@ -94,6 +94,19 @@ def _cap_tool_output(text: str, max_chars: int) -> str:
     )
 
 
+def _assistant_history_usage_metadata(
+    session_stats: Dict[str, Any], thinking_duration: float
+) -> Dict[str, Dict[str, Any]]:
+    """Return the usage payload shared by native and XML history writes."""
+    return {
+        "usage": {
+            "input_tokens": session_stats.get("input_tokens", 0),
+            "output_tokens": session_stats.get("output_tokens", 0),
+            "thinking_duration": thinking_duration,
+        }
+    }
+
+
 class QueueProcessor:
     """Handles queue processing and LLM turn execution.
 
@@ -1301,7 +1314,9 @@ class QueueProcessor:
             if has_native_tools:
                 # Native path: store tool_calls in metadata so Responses API
                 # can rebuild function_call items with proper call_ids
-                assistant_metadata = {}
+                assistant_metadata = _assistant_history_usage_metadata(
+                    self.session_stats, thinking_duration
+                )
                 if raw_tool_calls:
                     assistant_metadata["tool_calls"] = [
                         {
@@ -1399,7 +1414,13 @@ class QueueProcessor:
             else:
                 # XML path: simple assistant message + batched tool results
                 self._add_message_fn(
-                    ConversationMessage(role="assistant", content=response),
+                    ConversationMessage(
+                        role="assistant",
+                        content=response,
+                        metadata=_assistant_history_usage_metadata(
+                            self.session_stats, thinking_duration
+                        ),
+                    ),
                     parent_uuid=parent_uuid,
                 )
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -48,6 +49,26 @@ from .snapshots import (
 )
 
 logger = logging.getLogger(__name__)
+
+_HUB_MENTION_RE = re.compile(r"^@([A-Za-z0-9][A-Za-z0-9_-]*)\s+(.+)$", re.DOTALL)
+
+
+def parse_hub_mention(text: str) -> tuple[str, str] | None:
+    """Parse the chat shorthand used to send a message through Hub.
+
+    Only messages that start with an identity mention are intercepted. This
+    keeps normal prose, emails, and code snippets on the regular LLM path.
+    Matching outer quotes are treated as delimiters so the UI accepts both
+    ``@broadcast hello`` and ``@broadcast 'hello'``.
+    """
+    match = _HUB_MENTION_RE.match((text or "").strip())
+    if match is None:
+        return None
+    target, content = match.groups()
+    content = content.strip()
+    if len(content) >= 2 and content[0] == content[-1] and content[0] in "\"'":
+        content = content[1:-1].strip()
+    return (target, content) if content else None
 
 
 class LocalStateService(StateService):
@@ -1997,6 +2018,45 @@ class LocalStateService(StateService):
         if getattr(llm, "is_processing", False):
             return {"accepted": False, "reason": "turn already in flight"}
 
+        # Hub mentions are an explicit transport command, not LLM prose. Keep
+        # the syntax in the chat composer so messaging an online agent is as
+        # direct as typing ``@lapis message here`` or ``@broadcast hello``.
+        hub_mention = parse_hub_mention(text)
+        if hub_mention is not None:
+            target, content = hub_mention
+            create_task = getattr(llm, "create_background_task", None)
+            hub_coro = self._execute_hub_message(text, target, content)
+            if callable(create_task):
+                create_task(hub_coro, name="rpc_hub_message")
+            else:
+                asyncio.get_running_loop().create_task(hub_coro)
+            return {"accepted": True, "reason": "hub message"}
+
+        # Keep browser input on the same slash-command path as the terminal
+        # client. The old web transport sent every string directly to the LLM,
+        # so /help, /mcp, /profile, and plugin commands were treated as prose.
+        parser = None
+        executor = None
+        if self._event_bus is not None:
+            try:
+                parser = self._event_bus.get_service("slash_parser")
+                executor = self._event_bus.get_service("command_executor")
+            except Exception:
+                parser = executor = None
+        if (
+            parser is not None
+            and executor is not None
+            and callable(getattr(parser, "is_slash_command", None))
+            and parser.is_slash_command(text)
+        ):
+            create_task = getattr(llm, "create_background_task", None)
+            command_coro = self._execute_slash_command(text, parser, executor)
+            if callable(create_task):
+                create_task(command_coro, name="rpc_slash_command")
+            else:
+                asyncio.get_running_loop().create_task(command_coro)
+            return {"accepted": True, "reason": "slash command"}
+
         coro = llm.process_user_input(text)
         create_task = getattr(llm, "create_background_task", None)
         if callable(create_task):
@@ -2005,6 +2065,108 @@ class LocalStateService(StateService):
             asyncio.get_running_loop().create_task(coro)
 
         return {"accepted": True, "reason": ""}
+
+    async def _execute_hub_message(
+        self, text: str, target: str, content: str
+    ) -> None:
+        """Send one chat mention through Hub and publish a web turn."""
+        from kollabor_tui.display_tap import publish_semantic
+
+        is_broadcast = target.lower() == "broadcast"
+        metadata = {
+            "hub_message": text,
+            "hub_target": target,
+            "hub_broadcast": is_broadcast,
+        }
+        add_message = getattr(self._llm_service, "_add_conversation_message", None)
+        if callable(add_message):
+            add_message("user", text, metadata=metadata)
+
+        try:
+            result = (
+                await self.hub_broadcast(content)
+                if is_broadcast
+                else await self.hub_send_msg(target, content)
+            )
+            output = str(result or "hub message completed")
+            success = not output.lower().startswith(("hub:", "hub ", "rejected:"))
+            response_metadata = {**metadata, "hub_success": success}
+            if callable(add_message):
+                add_message("assistant", output, metadata=response_metadata)
+            publish_semantic(self._event_bus, "token", text=output)
+            publish_semantic(
+                self._event_bus,
+                "turn_complete",
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls=0,
+                stop_reason="end_turn",
+            )
+        except Exception as exc:
+            logger.exception("hub mention execution failed for web transport")
+            message = str(exc)
+            if callable(add_message):
+                add_message(
+                    "assistant",
+                    message,
+                    metadata={**metadata, "hub_success": False},
+                )
+            publish_semantic(self._event_bus, "error", message=message)
+            publish_semantic(
+                self._event_bus,
+                "turn_complete",
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls=0,
+                stop_reason="error",
+            )
+
+    async def _execute_slash_command(self, text: str, parser: Any, executor: Any) -> None:
+        """Run a parsed slash command and publish its result as a web turn."""
+        from kollabor_tui.display_tap import publish_semantic
+
+        result = None
+        try:
+            command = parser.parse_command(text)
+            if command is None:
+                raise ValueError(f"Could not parse slash command: {text}")
+            result = await executor.execute_command(command, self._event_bus)
+            output = str(getattr(result, "message", "") or "")
+            if not output:
+                output = (
+                    f"/{command.name} completed."
+                    if getattr(result, "success", False)
+                    else f"/{command.name} failed."
+                )
+            metadata = {
+                "slash_command": text,
+                "command_success": bool(getattr(result, "success", False)),
+            }
+            add_message = getattr(self._llm_service, "_add_conversation_message", None)
+            if callable(add_message):
+                add_message("user", text, metadata={"slash_command": text})
+                add_message("assistant", output, metadata=metadata)
+            publish_semantic(self._event_bus, "token", text=output)
+            publish_semantic(
+                self._event_bus,
+                "turn_complete",
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls=0,
+                stop_reason="end_turn",
+            )
+        except Exception as exc:
+            logger.exception("slash command execution failed for web transport")
+            message = str(exc)
+            publish_semantic(self._event_bus, "error", message=message)
+            publish_semantic(
+                self._event_bus,
+                "turn_complete",
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls=0,
+                stop_reason="error",
+            )
 
     async def cancel_current_request(self) -> dict[str, Any]:
         """Cancel the currently processing LLM request.

@@ -1,6 +1,9 @@
 export type Session = {
   session_id: string;
+  name?: string;
   profile?: string;
+  model?: string;
+  agent?: string;
   workspace?: string | null;
   approval_mode?: string;
   history_length?: number;
@@ -9,6 +12,7 @@ export type Session = {
   total_input_tokens?: number;
   total_output_tokens?: number;
   identity?: string;
+  daemon_pid?: number;
 };
 
 export type HistoryMessage = {
@@ -43,11 +47,32 @@ export type Profile = {
   description?: string;
 };
 
+export type AgentPoolEntry = {
+  name: string;
+  identity?: string;
+  agent_type?: string;
+  role_aliases?: string[];
+  personality?: string;
+  caste?: string;
+  available?: boolean;
+  active?: boolean;
+  state?: string;
+  current_task?: string;
+};
+
 export type McpServer = {
   status: "connected" | "disconnected" | string;
   tool_count?: number;
   tools?: unknown[];
   error?: string;
+};
+
+export type McpServerConfig = {
+  type?: string;
+  command?: string;
+  enabled?: boolean;
+  description?: string;
+  env?: Record<string, string>;
 };
 
 export type SessionMcp = {
@@ -61,7 +86,21 @@ export type HubAgent = {
   agent_id?: string;
   identity?: string;
   status?: string;
+  agent_name?: string;
+  state?: string;
+  current_task?: string;
+  profile_name?: string;
+  pid?: number;
+  alive?: boolean;
   [key: string]: unknown;
+};
+
+export type SessionState = {
+  profile?: Record<string, unknown> | null;
+  agent?: Record<string, unknown> | null;
+  system?: Record<string, unknown> | null;
+  hub?: Record<string, unknown> | null;
+  processing?: Record<string, unknown> | null;
 };
 
 export type EngineConfig = {
@@ -180,11 +219,32 @@ export class EngineApi {
     return this.json<Session>(`/sessions/${encodeURIComponent(sessionId)}`);
   }
 
+  getSessionState(sessionId: string) {
+    return this.json<SessionState>(
+      `/sessions/${encodeURIComponent(sessionId)}/state`,
+    );
+  }
+
   createSession(body: Record<string, unknown> = {}) {
     return this.json<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(body),
     });
+  }
+
+  setSessionProfile(
+    sessionId: string,
+    name: string,
+    model?: string,
+    effort?: string,
+  ) {
+    return this.json<Session>(
+      `/sessions/${encodeURIComponent(sessionId)}/profile`,
+      {
+        method: "POST",
+        body: JSON.stringify({ name, model, effort }),
+      },
+    );
   }
 
   deleteSession(sessionId: string) {
@@ -193,9 +253,10 @@ export class EngineApi {
     });
   }
 
-  getHistory(sessionId: string) {
+  getHistory(sessionId: string, limit?: number) {
+    const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
     return this.json<{ history: HistoryMessage[] }>(
-      `/sessions/${encodeURIComponent(sessionId)}/history`,
+      `/sessions/${encodeURIComponent(sessionId)}/history${query}`,
     );
   }
 
@@ -305,8 +366,16 @@ export class EngineApi {
     return this.json<{ profiles: Profile[]; active?: string }>("/profiles");
   }
 
+  listAgentPool(refresh = false) {
+    return this.json<{
+      agents: AgentPoolEntry[];
+      available?: string[];
+      active?: string[];
+    }>(`/agents${refresh ? "?refresh=true" : ""}`);
+  }
+
   listMcpServers() {
-    return this.json<{ servers: Record<string, Record<string, unknown>> }>(
+    return this.json<{ servers: Record<string, McpServerConfig> }>(
       "/mcp/servers",
     );
   }
@@ -337,10 +406,22 @@ export class EngineApi {
     );
   }
 
-  sendHubMessage(target: string, content: string) {
+  getHubAgentStatus(agentId: string) {
+    return this.json<{ agent_id: string; status?: Record<string, unknown>; error?: string }>(
+      `/hub/agents/${encodeURIComponent(agentId)}/status`,
+    );
+  }
+
+  getHubAgentOutput(agentId: string, lines = 80) {
+    return this.json<{ agent_id: string; output?: string | null; error?: string }>(
+      `/hub/agents/${encodeURIComponent(agentId)}/output?lines=${lines}`,
+    );
+  }
+
+  sendHubMessage(target: string, content: string, fromIdentity = "webui") {
     return this.json<{ ok: boolean; target: string }>("/hub/messages", {
       method: "POST",
-      body: JSON.stringify({ target, content, from_identity: "webui" }),
+      body: JSON.stringify({ target, content, from_identity: fromIdentity }),
     });
   }
 }

@@ -16,6 +16,12 @@ export function formatTimestamp(timestamp: string | null): string {
   });
 }
 
+export function formatTokens(value: number | undefined): string {
+  return value === undefined || !Number.isFinite(value)
+    ? "—"
+    : Math.round(value).toLocaleString();
+}
+
 export function formatKind(kind: string): string {
   return kind.replace(/-/g, " ");
 }

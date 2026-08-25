@@ -210,7 +210,7 @@ const ToolGroupImpl: FC<
   const toolCount = endIndex - startIndex + 1;
 
   return (
-    <ToolGroupRoot>
+    <ToolGroupRoot defaultOpen>
       <ToolGroupTrigger count={toolCount} />
       <ToolGroupContent>{children}</ToolGroupContent>
     </ToolGroupRoot>

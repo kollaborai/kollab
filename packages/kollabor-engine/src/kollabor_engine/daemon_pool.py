@@ -120,6 +120,7 @@ class DaemonHandle:
     def __init__(self, session_id: str, identity: str, launcher: subprocess.Popen):
         self.session_id = session_id
         self.identity = identity
+        self.agent_name: str = ""
         # `kollab --detached` double-forks: the process we spawned is only a
         # launcher and exits 0 as soon as the real daemon is detached. The pid
         # that matters comes from hub presence, once the daemon publishes it.
@@ -340,12 +341,64 @@ class DaemonPool:
     def all(self) -> List[DaemonHandle]:
         return list(self._daemons.values())
 
+    def _assign_identity(self, preferred: Optional[str] = None) -> str:
+        """Choose a live hub identity using the same pool as the CLI.
+
+        Web sessions used to pin themselves to ``web-<session id>``. That
+        bypassed the normal hub roster and made the sidebar show an identity
+        that could never be used for agent-to-agent work. Keep allocation in
+        the daemon pool, where concurrent browser session creation is already
+        serialized, and delegate the actual pool ordering to the hub's
+        ``IdentityAssigner``.
+        """
+        active = self._bridge.get_agents(use_cache=False)
+        taken = {
+            str(agent.get("identity") or "")
+            for agent in active
+            if isinstance(agent, dict) and agent.get("identity")
+        }
+
+        requested = (preferred or "").strip()
+        if requested and requested in taken:
+            raise ValueError(
+                f"hub identity '{requested}' is already in use; choose another agent"
+            )
+
+        try:
+            from plugins.hub.coordinator import IdentityAssigner
+
+            return IdentityAssigner().assign(sorted(taken), requested)
+        except Exception as exc:
+            logger.warning("hub pool identity assignment failed: %s", exc)
+
+        # Keep a deterministic, pool-shaped fallback for minimal installs
+        # where the hub plugin is unavailable. Never recreate the old web-
+        # session convention here.
+        fallback_names = [
+            "lapis",
+            "sapphire",
+            "aquamarine",
+            "zircon",
+            "peridot",
+            "jasper",
+        ]
+        for name in fallback_names:
+            if name not in taken:
+                return name
+        for number in range(2, 100):
+            for name in fallback_names:
+                candidate = f"{name}-{number}"
+                if candidate not in taken:
+                    return candidate
+        return f"agent-{os.getpid()}"
+
     async def spawn(
         self,
         session_id: str,
         *,
         profile: Optional[str] = None,
         agent: Optional[str] = None,
+        identity: Optional[str] = None,
         workspace: Optional[str] = None,
         system_prompt: Optional[str] = None,
     ) -> DaemonHandle:
@@ -374,8 +427,8 @@ class DaemonPool:
                         e,
                     )
 
-            identity = f"web-{session_id.replace('sess_', '')[:12]}"
-            argv = _kollab_command() + ["--detached", "--as", identity]
+            identity_name = self._assign_identity(identity)
+            argv = _kollab_command() + ["--detached", "--as", identity_name]
             if agent:
                 argv += ["--agent", agent]
             if profile:
@@ -389,7 +442,7 @@ class DaemonPool:
             if not Path(cwd).is_dir():
                 raise ValueError(f"workspace does not exist: {cwd}")
 
-            logger.info("spawning daemon %s for session %s", identity, session_id)
+            logger.info("spawning daemon %s for session %s", identity_name, session_id)
             process = subprocess.Popen(
                 argv,
                 cwd=cwd,
@@ -400,7 +453,7 @@ class DaemonPool:
                 start_new_session=True,
             )
 
-            handle = DaemonHandle(session_id, identity, process)
+            handle = DaemonHandle(session_id, identity_name, process)
             try:
                 socket_path = await self._await_socket(handle)
                 await handle.connect(socket_path)
@@ -437,6 +490,9 @@ class DaemonPool:
                 # socket check - otherwise a failure between here and connect()
                 # leaves close() with no pid and the daemon orphaned.
                 handle.pid = int(agent.get("pid") or 0) or handle.pid
+                handle.agent_name = str(
+                    agent.get("agent_name") or agent.get("name") or ""
+                )
                 socket_path = self._bridge._socket_path_for_agent(agent)
                 if socket_path and Path(socket_path).exists():
                     return str(socket_path)
