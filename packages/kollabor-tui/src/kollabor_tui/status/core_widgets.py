@@ -1471,18 +1471,30 @@ def render_mcp(width: int, ctx: Optional[WidgetContext]) -> str:
         connected = 0
         total_tools = 0
 
-        if mcp_integration:
+        # Attach mode: the local llm_service is a hollow proxy whose
+        # mcp_integration never connects (daemon owns the real stack), so it
+        # always reports zero. Daemon truth arrives via ctx.remote_state.
+        is_attach = getattr(ctx, "runtime_mode", "") == "attach" or getattr(
+            ctx, "is_attach_mode", False
+        )
+        remote_mcp = (
+            ctx.remote_state.get("mcp", {}) if getattr(ctx, "remote_state", None) else {}
+        )
+
+        if is_attach:
+            connected = remote_mcp.get("connected", 0)
+            total_tools = remote_mcp.get("tools", 0)
+        elif mcp_integration:
             connections = mcp_integration.server_connections
             tool_registry = mcp_integration.tool_registry
             connected = len(
                 [c for c in connections.values() if getattr(c, "initialized", False)]
             )
             total_tools = len(tool_registry)
-        elif ctx and ctx.remote_state:
-            # Attach mode fallback
-            mcp = ctx.remote_state.get("mcp", {})
-            connected = mcp.get("connected", 0)
-            total_tools = mcp.get("tools", 0)
+        elif remote_mcp:
+            # Local mode fallback: no local integration but refreshed state exists
+            connected = remote_mcp.get("connected", 0)
+            total_tools = remote_mcp.get("tools", 0)
 
         if connected == 0:
             # No servers connected

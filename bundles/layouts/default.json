@@ -18,43 +18,32 @@
             "widgets": [
                 {"id": "profile", "width": {"type": "auto"}, "color": "none", "effect": "none"},
                 {"id": "model", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "status", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "stats", "width": {"type": "auto"}, "color": "none", "effect": "none"}
+                {"id": "status", "width": {"type": "auto"}, "color": "none", "effect": "none"}
             ]
         },
         {
             "id": 3,
             "visible": true,
             "widgets": [
-                {"id": "agent", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "skills", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "session", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "mcp", "width": {"type": "auto"}, "color": "none", "effect": "none"}
+                {"id": "stats", "width": {"type": "auto"}, "color": "none", "effect": "none"}
             ]
         },
         {
             "id": 4,
             "visible": true,
             "widgets": [
-                {"id": "tasks", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "bg-tasks", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "altview", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "deep-thought", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "token-io", "width": {"type": "auto"}, "color": "none", "effect": "none"},
-                {"id": "sysmon", "width": {"type": "auto"}, "color": "none", "effect": "none"}
+                {"id": "agent", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "skills", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "session", "width": {"type": "auto"}, "color": "none", "effect": "none"}
             ]
-        },
-        {
-            "id": 5,
-            "visible": true,
-            "widgets": [
-                {"id": "hub", "width": {"type": "auto"}, "color": "none", "effect": "none"}
-            ]
-        },
+        }, 
         {
             "id": 6,
-            "visible": false,
-            "widgets": []
+            "visible": true,
+            "widgets": [
+                {"id": "hub", "width": {"type": "auto"}, "color": "none", "effect": "none"},
+                {"id": "mcp", "width": {"type": "auto"}, "color": "none", "effect": "none"}
+            ]
         }
     ]
 }
