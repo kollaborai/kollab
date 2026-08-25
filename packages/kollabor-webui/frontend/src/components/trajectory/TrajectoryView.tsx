@@ -191,17 +191,20 @@ export function TrajectoryView({
 
   const selectedRecord =
     records.find((record) => record.id === selectedId) || null;
-  const isMobile = useIsMobile();
+  // The two-pane inspector needs more room than the global mobile breakpoint
+  // allows. Keep the ledger readable on compact laptop/tablet widths and use
+  // the same bottom sheet interaction there.
+  const isMobile = useIsMobile(1024);
 
   return (
     <div
       className="flex min-h-0 flex-1 flex-col overflow-hidden"
       data-testid="trajectory-view"
     >
-      <div className="flex shrink-0 flex-col gap-3 border-b bg-muted/10 px-4 py-3">
+      <div className="flex shrink-0 flex-col gap-3 border-b bg-muted/[0.06] px-4 py-3.5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-xl">
+            <div className="bg-primary/10 text-primary flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-primary/10">
               <Activity className="size-4" />
             </div>
             <div className="min-w-0">
@@ -238,7 +241,7 @@ export function TrajectoryView({
               <Input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search trajectory"
+                placeholder="Search records"
                 aria-label="Search trajectory"
                 className="h-8 rounded-lg bg-background/70 pl-8 text-xs shadow-xs"
               />
@@ -274,7 +277,7 @@ export function TrajectoryView({
         )}
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 md:p-4">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card/30 shadow-sm md:flex-row">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card/40 shadow-sm lg:flex-row">
           <TrajectoryTable
             records={visibleRecords}
             selectedId={selectedId}
@@ -284,7 +287,7 @@ export function TrajectoryView({
             onLoadEarlier={() => void loadEarlier()}
             onSelect={setSelectedId}
           />
-          <div className="hidden min-h-0 w-[min(26rem,38%)] md:flex">
+          <div className="hidden min-h-0 min-w-0 w-[min(30rem,42%)] lg:flex">
             <TrajectoryInspector record={selectedRecord} className="w-full" />
           </div>
         </div>

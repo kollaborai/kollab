@@ -1,6 +1,7 @@
 import type { HistoryMessage } from "@/api";
 import { isToolOutputBatch } from "@/api";
 import { formatContent } from "@/utils/format-content";
+import { humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
 
 export type TrajectoryRecordKind =
   | "system"
@@ -59,12 +60,19 @@ function asNumber(value: unknown): number | undefined {
 
 function firstLine(value: string): string {
   const line = value.trim().split(/\r?\n/, 1)[0]?.trim();
-  return line || "(empty)";
+  return line || "No text";
+}
+
+function userSummary(value: string): string {
+  if (/^<agent_hud(?:\s|>)/i.test(value.trim())) {
+    return "Agent status update";
+  }
+  return firstLine(value);
 }
 
 export function previewText(value: string, maxLength = 160): string {
   const compact = formatContent(value).replace(/\s+/g, " ").trim();
-  if (!compact) return "(empty)";
+  if (!compact) return "No output captured";
   return compact.length > maxLength
     ? `${compact.slice(0, maxLength - 1)}…`
     : compact;
@@ -167,7 +175,9 @@ function toolCallId(metadata: JsonObject): string | undefined {
 }
 
 function toolOutput(message: HistoryMessage, metadata: JsonObject): string {
-  if (typeof message.content === "string") return message.content;
+  if (typeof message.content === "string" && message.content.trim()) {
+    return message.content;
+  }
   for (const key of [
     "tool_output",
     "tool_output_content",
@@ -194,8 +204,16 @@ function toolCallRecords(message: HistoryMessage, sourceIndex: number): ToolCall
       asString(call.tool_call_id) ??
       `history-${sourceIndex}-tool-${callIndex}`;
     const name =
-      asString(functionValue.name) ?? asString(call.name) ?? "tool";
-    const rawInput = functionValue.arguments ?? call.arguments ?? {};
+      asString(functionValue.name) ??
+      asString(call.name) ??
+      asString(call.tool_name) ??
+      "tool";
+    const rawInput =
+      functionValue.arguments ??
+      call.arguments ??
+      call.input ??
+      call.args ??
+      {};
     return {
       id,
       name,
@@ -209,11 +227,26 @@ function parseToolBatch(content: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  if (!lines.length) return ["(empty tool result)"];
+  if (!lines.length) return ["No output captured"];
 
   return lines.map((line) =>
-    line.replace(/^Tool result:\s*/i, "").trim() || "(empty tool result)",
+    line.replace(/^Tool result:\s*/i, "").trim() || "No output captured",
   );
+}
+
+function toolLabel(name: string, input?: string): string {
+  return input ? summarizeToolCall(name, input) : humanizeToolName(name);
+}
+
+function toolSummary(name: string, input?: string, output?: string): string {
+  const label = toolLabel(name, input);
+  if (!output?.trim()) return label;
+  return `${label} → ${previewText(output)}`;
+}
+
+function toolResultSummary(label: string, output: string): string {
+  if (!output.trim()) return label;
+  return `${label} → ${previewText(output)}`;
 }
 
 export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[] {
@@ -285,7 +318,7 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
         turn,
         request: null,
         title: "USER",
-        summary: firstLine(content),
+        summary: userSummary(content),
         input: content,
         timestamp,
         opensTurn: true,
@@ -297,13 +330,18 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
     if (message.role === "assistant") {
       request += 1;
       const usage = usageFor(metadata);
+      const calls = toolCallRecords(message, sourceIndex);
       add({
         id: `${identity}:assistant`,
         kind: "assistant",
         turn,
         request,
         title: "ASSISTANT",
-        summary: firstLine(content),
+        summary: content.trim()
+          ? firstLine(content)
+          : calls.length
+            ? `${calls.length} tool ${calls.length === 1 ? "call" : "calls"} requested`
+            : "No text output",
         output: content,
         thinking: message.thinking || undefined,
         ...usage,
@@ -311,17 +349,14 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
         sourceIndex,
       });
 
-      for (const [callIndex, call] of toolCallRecords(
-        message,
-        sourceIndex,
-      ).entries()) {
+      for (const [callIndex, call] of calls.entries()) {
         const record = add({
           id: `${identity}:tool:${call.id || callIndex}`,
           kind: "tool",
           turn,
           request,
-          title: call.name,
-          summary: call.name,
+          title: toolLabel(call.name, call.input),
+          summary: toolSummary(call.name, call.input),
           input: call.input,
           timestamp,
           sourceIndex,
@@ -348,7 +383,7 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
       if (existing) {
         existing.output = output;
         existing.isError = isError;
-        existing.summary = `${existing.title} → ${previewText(output)}`;
+        existing.summary = toolResultSummary(existing.title, output);
         return;
       }
 
@@ -358,8 +393,8 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
         kind: "tool",
         turn,
         request: request || null,
-        title: name,
-        summary: `${name} → ${previewText(output)}`,
+        title: humanizeToolName(name),
+        summary: toolResultSummary(humanizeToolName(name), output),
         output,
         timestamp,
         sourceIndex,

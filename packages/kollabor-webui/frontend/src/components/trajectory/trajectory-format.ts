@@ -23,5 +23,7 @@ export function formatTokens(value: number | undefined): string {
 }
 
 export function formatKind(kind: string): string {
-  return kind.replace(/-/g, " ");
+  return kind
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 }

@@ -50,6 +50,27 @@ function kindIcon(kind: TrajectoryRecord["kind"]): LucideIcon {
   }
 }
 
+function RecordSummary({ record }: { record: TrajectoryRecord }) {
+  const separator = record.kind === "tool" || record.kind === "tool-batch"
+    ? " → "
+    : null;
+  const [label, detail] = separator
+    ? record.summary.split(separator, 2)
+    : [record.summary, undefined];
+
+  if (!detail) {
+    return <span className="min-w-0 truncate">{record.summary}</span>;
+  }
+
+  return (
+    <span className="flex min-w-0 items-center gap-1.5 truncate">
+      <span className="truncate font-medium text-foreground/90">{label}</span>
+      <span className="text-muted-foreground/60 shrink-0">→</span>
+      <span className="text-muted-foreground min-w-0 truncate">{detail}</span>
+    </span>
+  );
+}
+
 export function TrajectoryTable({
   records,
   selectedId,
@@ -109,7 +130,7 @@ export function TrajectoryTable({
           </button>
         </div>
       )}
-      <div className="bg-muted/40 text-muted-foreground grid shrink-0 grid-cols-[3rem_9rem_minmax(0,1fr)] border-b px-3 py-2.5 text-[10px] font-semibold tracking-[0.14em] uppercase md:grid-cols-[4rem_12rem_minmax(0,1fr)]">
+      <div className="bg-muted/55 text-muted-foreground grid shrink-0 grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] border-b px-3 py-2.5 text-[10px] font-semibold tracking-[0.14em] uppercase backdrop-blur md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]">
         <span>#</span>
         <span>Event</span>
         <span>Content</span>
@@ -141,13 +162,13 @@ export function TrajectoryTable({
                   aria-selected={selectedId === record.id}
                   data-record-id={record.id}
                   className={cn(
-                    "grid min-h-11 w-full cursor-pointer grid-cols-[3rem_9rem_minmax(0,1fr)] items-center border-b border-border/50 px-3 py-2.5 text-left text-sm transition-colors md:grid-cols-[4rem_12rem_minmax(0,1fr)]",
+                    "group grid min-h-10 w-full cursor-pointer grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] items-center border-b border-border/45 border-l-2 border-l-transparent px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60 md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]",
                     record.opensTurn && "border-t-2 border-t-primary/40",
                     record.kind === "tool" || record.kind === "tool-batch"
-                      ? "border-l-2 border-l-amber-500/60 bg-amber-500/[0.035]"
+                      ? "border-l-amber-500/60 bg-amber-500/[0.04]"
                       : "",
                     selectedId === record.id
-                      ? "bg-accent text-accent-foreground shadow-[inset_0_1px_0_hsl(var(--primary)/0.2),inset_0_-1px_0_hsl(var(--primary)/0.2)]"
+                      ? "bg-primary/[0.08] text-accent-foreground shadow-[inset_0_1px_0_hsl(var(--primary)/0.22),inset_0_-1px_0_hsl(var(--primary)/0.22)]"
                       : "hover:bg-accent/45",
                   )}
                   onClick={() => onSelect(record.id)}
@@ -159,7 +180,7 @@ export function TrajectoryTable({
                     <Badge
                       variant="outline"
                       className={cn(
-                        "max-w-full gap-1 truncate text-[10px]",
+                        "max-w-full gap-1 rounded-full px-2 text-[10px] shadow-none",
                         kindClass(record.kind),
                       )}
                     >
@@ -181,7 +202,7 @@ export function TrajectoryTable({
                   </span>
                   <span
                     className={cn(
-                      "flex min-w-0 items-center gap-2",
+                      "flex min-w-0 items-center gap-2 leading-5",
                       (record.kind === "tool" || record.kind === "tool-batch") &&
                         "pl-2",
                     )}
@@ -191,16 +212,16 @@ export function TrajectoryTable({
                     )}
                     <span
                       className={cn(
-                        "min-w-0 flex-1 truncate",
-                        record.isError && "text-destructive",
-                      )}
-                      title={record.summary}
-                    >
-                      {record.summary}
+                      "min-w-0 flex-1 truncate",
+                      record.isError && "text-destructive",
+                    )}
+                    title={record.summary}
+                  >
+                      <RecordSummary record={record} />
                     </span>
                     {(record.inputTokens !== undefined ||
                       record.outputTokens !== undefined) && (
-                      <span className="text-muted-foreground hidden shrink-0 font-mono text-[10px] lg:inline">
+                      <span className="text-muted-foreground hidden shrink-0 rounded bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] xl:inline">
                         in {formatTokens(record.inputTokens)} · out {formatTokens(record.outputTokens)}
                       </span>
                     )}

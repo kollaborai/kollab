@@ -150,7 +150,7 @@ function ToolFallbackTrigger({
     <CollapsibleTrigger
       data-slot="tool-fallback-trigger"
       className={cn(
-        "aui-tool-fallback-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
+        "aui-tool-fallback-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full min-w-0 max-w-full origin-left items-center gap-2 overflow-hidden py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
         className,
       )}
       {...props}
@@ -166,20 +166,22 @@ function ToolFallbackTrigger({
       <span
         data-slot="tool-fallback-trigger-label"
         className={cn(
-          "aui-tool-fallback-trigger-label-wrapper relative inline-block text-start leading-none",
+          "aui-tool-fallback-trigger-label-wrapper relative min-w-0 flex-1 overflow-hidden text-start leading-5",
           isCancelled && "text-muted-foreground line-through",
         )}
       >
-        <span>
-          {label}<b>{summary}</b>
+        <span className="block truncate">
+          {label}
+          <span className="font-medium text-foreground/90">{summary}</span>
         </span>
         {isRunning && (
           <span
             aria-hidden
             data-slot="tool-fallback-trigger-shimmer"
-            className="aui-tool-fallback-trigger-shimmer shimmer pointer-events-none absolute inset-0 motion-reduce:animate-none"
+            className="aui-tool-fallback-trigger-shimmer shimmer pointer-events-none absolute inset-0 truncate motion-reduce:animate-none"
           >
-            {label}<b>{summary}</b>
+            {label}
+            <span className="font-medium">{summary}</span>
           </span>
         )}
       </span>
