@@ -69,7 +69,12 @@ would lose it before the terminal or Web UI could render it.
   in the first release;
 - a new generic blob store or a permanent remote image host;
 - storing image bytes/base64 values in conversation history, JSONL logs,
-  hub messages, rendered prompts, or terminal output;
+  hub messages, rendered prompts, terminal output, SSE/history payloads, or browser
+  local storage;
+- treating a server filesystem path as a browser URL or otherwise exposing a
+  filesystem path to a browser client;
+- allowing a browser to retrieve media by guessed identifier, direct storage path, or
+  static-file route without explicit session authorization;
 - assuming ChatGPT OAuth/Codex matches the public OpenAI Responses API;
 - exposing a public Images API call through OAuth without an explicitly
   verified, permitted OAuth contract;
@@ -89,8 +94,15 @@ would lose it before the terminal or Web UI could render it.
 - **provider file ID**: an opaque file/image identifier previously uploaded by
   a provider-specific implementation. It is deferred for phase 1.
 - **generated-image artifact**: a managed local file containing a successful
-  generated image, with durable metadata and a human-readable textual
-  representation.
+  generated image, represented outside storage by an opaque `media_id`, with durable
+  metadata and a human-readable textual representation.
+- **media ID**: a high-entropy opaque identifier. It is the only media locator that
+  may cross API/UI boundaries; it is not a filename, absolute/relative path, URL, or
+  provider credential.
+- **media authorization boundary**: the server-side resolver that maps a `media_id`
+  to bytes only after authenticating the requesting Web UI client and authorizing the
+  requested action against the active session. This is required separately for upload
+  (create/write) and retrieval (read/download).
 - **vision capability**: provider/model/transport declares it can accept a
   particular normalized image source type.
 - **generation capability**: provider/model/transport declares both a supported
@@ -209,15 +221,30 @@ DNS-rebinding, content-type, content-size, and provenance controls.
 
 ### Web UI
 
-Web UI composition is optional/deferred. Phase 1 must expose artifacts and
-message summaries in any existing history/inspection surface without breaking
-it, but need not provide upload, drag/drop, clipboard, or image preview.
+Web UI composition is optional/deferred, but the media boundary is mandatory before
+any Web UI image is exposed. Phase 1 must expose artifacts and message summaries in
+any existing history/inspection surface without breaking it, but need not provide
+upload, drag/drop, clipboard, or image preview.
 
-A later Web UI phase may add a clearly labelled attachment button to the
-composer and reuse the same normalized source-descriptor and validation service.
-It must not invent a browser-only request shape. Browser upload needs a daemon
-upload endpoint with explicit size/type limits, CSRF/auth review, temporary
-storage lifecycle, and a permission/consent affordance.
+A later Web UI composer must reuse the normalized descriptor and validation service;
+it must not invent a browser-only request shape. It requires two distinct, explicitly
+authorized daemon operations:
+
+1. `upload/create`: authenticate the caller, authorize attachment creation for the
+   active session, enforce origin/CSRF policy plus byte/MIME/quota limits, ingest the
+   stream into managed storage, and return only an opaque `media_id` and safe metadata.
+2. `read/download`: authenticate the caller, authorize the requested media action
+   against the active session, resolve `media_id` server-side, and stream bytes with
+   exact content type, `X-Content-Type-Options: nosniff`, restrictive cache headers,
+   and safe content disposition.
+
+There is no static media directory or path-derived browser URL. The browser must never
+receive a server filesystem path, and the backend must not accept a client-provided
+path as a retrieval target. `media_id` guesses, cross-session reads, expired media,
+symlink targets, traversal forms, and unauthorized upload/retrieval requests must all
+fail without disclosing whether a file exists. Browser upload needs this authorization
+review in addition to size/type limits, temporary-storage lifecycle, and an explicit
+transmission-consent affordance.
 
 ### generated-image UX (future, gated)
 
@@ -228,13 +255,15 @@ show a compact message such as:
 
 ```
 Generated image: sunset.png (1024x1024, PNG)
-Artifact: /managed/session/path/sunset.png
+Media: generated image available in this session
 ```
 
-The artifact path/identifier is selectable/copyable and any UI capable of image
-preview may render it. If preview is unavailable, the textual artifact summary
-remains usable. Failure must state that generation is unavailable, rejected by
-the provider, or failed while safely persisting the returned artifact.
+The terminal may offer an explicit safe open/save action, but it must not reveal a
+managed filesystem path. A UI capable of image preview resolves an opaque `media_id`
+through the authorized media-read endpoint; it never interpolates a local path into a
+browser URL. If preview is unavailable, the textual artifact summary remains usable.
+Failure must state that generation is unavailable, rejected by the provider, or failed
+while safely persisting the returned artifact.
 
 
 ## architecture and contracts
@@ -258,9 +287,9 @@ ImagePart = {
 }
 
 ImageSourceDescriptor = {
-    "kind": "local_path" | "url" | "provider_file",
-    # local_path: canonical display path plus safe request-time locator
-    # url: normalized HTTPS URL
+    "kind": "managed_upload" | "url" | "provider_file",
+    # managed_upload: opaque media_id plus safe display metadata; storage locator stays server-side
+    # url: normalized HTTPS URL (when direct provider URL input is explicitly allowed)
     # provider_file: provider name + opaque file id
 }
 ```
@@ -270,12 +299,15 @@ must preserve these invariants:
 
 - every persisted message is JSON serializable;
 - legacy `str` content stays byte-for-byte compatible with existing histories;
-- an image part never contains base64, raw bytes, access tokens, or a data URI;
-- only a request-boundary adapter may read/encode a local file;
+- an image part never contains base64, raw bytes, access tokens, a data URI, or
+  an absolute/relative filesystem path;
+- local image bytes are first ingested into managed media storage and represented by
+  `media_id`; only a server-side request-boundary adapter, after provider capability
+  and explicit send consent, may authorize a read and encode/upload those bytes;
 - a provider-specific file ID is scoped to its named provider/transport and may
   never be replayed through another provider;
 - display text and source metadata are distinct so logs/history can safely show
-  a filename/URL redacted as needed without exposing bytes.
+  a filename/URL redacted as needed without exposing bytes or a storage locator.
 
 For phase 1, generated assistant output uses an explicit content block and
 metadata rather than making assistant `content` a raw image:
@@ -283,9 +315,8 @@ metadata rather than making assistant `content` a raw image:
 ```python
 GeneratedImageContent = {
     "type": "generated_image",
-    "artifact_id": str,
+    "media_id": str,             # opaque managed-media handle, never a path or secret URL
     "media_type": "image/png" | "image/jpeg" | "image/webp",
-    "path": str,                 # managed local artifact, never remote secret URL
     "width": int | None,
     "height": int | None,
     "revised_prompt": str | None,
@@ -303,16 +334,19 @@ may report progress, but never emit base64 or partial binary tokens through
 Create one reusable attachment service at the application/agent boundary, not
 inside terminal widgets and not inside every provider. Its responsibilities:
 
-1. parse `/image` arguments and construct normalized text/image parts;
-2. resolve and permission-check local paths;
-3. identify media type from trusted file signature plus a conservative extension
+1. parse `/image` arguments, resolve and permission-check the selected local path,
+   then ingest it into managed session media storage under a new opaque `media_id`;
+2. identify media type from trusted file signature plus a conservative extension
    allowlist; do not rely only on client-declared MIME;
-4. enforce configurable byte, pixel, frame-count/animation, and image-count
+3. enforce configurable byte, pixel, frame-count/animation, and image-count
    limits before a provider request;
-5. produce safe display/history metadata (basename, media type, bytes,
-   dimensions where safely obtainable, source kind, optional digest);
-6. defer local file reads/base64 encoding until the selected provider adapter
-   has approved the source and is preparing the outbound request;
+4. produce safe display/history metadata (basename, media type, bytes,
+   dimensions where safely obtainable, source kind, optional digest) and construct
+   normalized text/image parts containing the `media_id`, not a filesystem path;
+5. make storage resolution private: request preparation reads only through a
+   server-side `media_id` resolver that reauthorizes the session and source state;
+6. defer provider-directed local-byte reads/base64 encoding until the selected provider
+   adapter has approved the source and the user has confirmed external transmission;
 7. return typed, actionable errors rather than silently converting an image to
    prompt text.
 
@@ -423,12 +457,13 @@ reference/value, a shared artifact service must:
 1. validate the delivery form against the capability record;
 2. retrieve/decode exactly once, with strict response-size, MIME/signature,
    pixel, redirect, and timeout limits where network retrieval is necessary;
-3. write a managed session-scoped artifact with private directory/file modes and
-   collision-resistant names;
+3. write a managed session-scoped artifact with private directory/file modes,
+   collision-resistant names, atomic temp-file replacement, and a new opaque `media_id`;
 4. record digest, byte count, media type, dimensions, provider/model, creation
-   time, source delivery kind, and safe provider reference in metadata;
-5. expose `GeneratedImageContent` to renderers only after artifact persistence
-   succeeds;
+   time, source delivery kind, and safe provider reference in metadata; storage paths
+   remain internal and are never serialized into content/history/UI payloads;
+5. expose `GeneratedImageContent` containing only `media_id` and safe metadata to
+   renderers after artifact persistence succeeds;
 6. preserve a bounded textual failure/result record if persistence fails.
 
 Base64 delivery belongs only inside this artifact boundary. It is decoded and
@@ -481,20 +516,22 @@ implementation decision, not an accidental library default.
 
 ### persistence and retention
 
-Conversation history stores the structured part descriptor and safe metadata,
-not image bytes/data URIs. For a local path, retention policy must decide whether
-the reference is a path-only pointer, a content digest, or both; paths can leak
-local structure, so exported/saved conversations should support redaction.
+Conversation history stores structured descriptors with `media_id` and safe metadata,
+not image bytes/data URIs or storage paths. Exports must support redaction of source
+names and URLs; `media_id` is meaningful only to the original authorized session and
+must not become a portable read credential.
 
-A restored conversation may display that an image was previously attached but
-must not automatically re-read/re-send the local file. On a resend/retry, it
-must revalidate path scope, existence, size, and consent. If unavailable, the
-turn remains readable but reports that the original image cannot be resent.
+A restored conversation may display that an image was previously attached but must not
+automatically re-read/re-send the original local file. On resend/retry, it must resolve
+the managed media record, verify it is retained and authorized for the active session,
+and obtain fresh transmission consent. If it is unavailable, the turn remains readable
+but reports that the original image cannot be resent.
 
-Generated image artifacts use a session-scoped managed directory and follow the
-same private-permission discipline as tool-output artifacts. Define retention,
-manual export, cleanup, and deleted-session behavior before enabling generation.
-Conversation logs record artifact metadata and digest, never the binary/base64.
+Generated image artifacts use a session-scoped managed directory and follow the same
+private-permission discipline as tool-output artifacts. Define retention, explicit
+user-authorized export, cleanup, and deleted-session behavior before enabling generation.
+Conversation logs record artifact metadata and digest, never binary/base64, `media_id`
+resolution details, or a storage path.
 
 
 ## errors and user feedback
@@ -555,10 +592,12 @@ sends image input yet.
 4. Implement provider-local text/image-part serialization in
    `OpenAIResponsesProvider._prepare_request()` while keeping legacy string
    payloads identical.
-5. Add compact terminal attachment echo/display and structured history handling.
-6. Implement consent, policy configuration, size/type/scope guards, and clear
-   errors.
-7. Document usage, supported models, limits, and privacy behavior.
+5. Add compact terminal attachment echo/display and structured history handling using
+   opaque media IDs internally; terminal output never reveals a managed storage path.
+6. Implement consent, policy configuration, managed-media lifecycle, size/type/scope
+   guards, and clear errors.
+7. Document usage, supported models, limits, privacy behavior, and the separate
+   Web UI upload/read authorization contract.
 
 Exit criterion: a supported public profile can answer a text-plus-local-image
 and text-plus-HTTPS-image turn; unsupported/OAuth profiles reject locally before
@@ -571,8 +610,9 @@ media leaves the machine.
 2. Update the Responses transformer to preserve documented image outputs rather
    than dropping them.
 3. Add the managed artifact writer/metadata/persistence contract.
-4. Teach terminal history/display to render artifact summaries and safe paths.
-5. Add artifact lifecycle/retention controls and tests.
+4. Teach terminal history/display to render artifact summaries and only explicitly
+   user-invoked safe open/save actions, never storage paths.
+5. Add artifact lifecycle/retention controls, authorized media resolution, and tests.
 
 Exit criterion: a fixture representing a supported provider result produces a
 managed artifact and textual fallback with no base64/binary leakage.
@@ -598,9 +638,10 @@ capabilities and document that limitation. If all stages are proven, implement a
 separate OAuth serializer/event parser and tests rather than broadening the
 public-path code with assumptions.
 
-Web UI attachment composition can be proposed after terminal and canonical
-contracts are stable. It must reuse phase 1 services and complete a dedicated
-browser upload security review.
+Web UI attachment composition can be proposed after terminal and canonical contracts
+are stable. It must reuse phase 1 services and complete a dedicated browser upload and
+media-read authorization review; no static filesystem route or client-supplied path is
+allowed.
 
 
 ## test plan
@@ -609,8 +650,8 @@ browser upload security review.
 
 - legacy string messages serialize/restore exactly as before;
 - text-plus-image descriptors round-trip as JSON without bytes/base64;
-- session/history export redaction removes sensitive local path details when
-  configured;
+- session/history export redaction removes sensitive source-name/URL details when
+  configured and never includes a storage path;
 - restore never performs a local read or automatic resend;
 - context trim either retains a supported multimodal turn or makes its loss
   explicit; it never silently stringifies/drops the image.
@@ -620,7 +661,8 @@ browser upload security review.
 - accepted PNG/JPEG/WEBP local files and accepted HTTPS URL;
 - absent, directory, FIFO/device, unreadable, symlink-out-of-scope, malformed,
   zero-byte, oversized, excessive-pixel, and unsupported-format inputs;
-- path scope checked both at selection and request-time read;
+- path scope checked at selection/managed-media ingestion; subsequent request-time
+  reads resolve only the opaque media ID server-side;
 - URL rejects HTTP, file/data schemes, userinfo, and policy-denied hosts;
 - `/image` produces one user turn with ordered text/image parts;
 - confirmation allowed/denied behavior and no provider call on denial;
@@ -647,6 +689,11 @@ browser upload security review.
   session artifact files;
 - artifact write/download/decode failures leave a bounded error record and no
   orphan raw data;
+- media retrieval authorizes session ownership and requested action; guessed IDs,
+  cross-session IDs, expired media, traversal, and symlink targets do not disclose
+  file existence or bytes;
+- Web UI upload authorizes attachment creation before ingesting bytes, and browser
+  history/SSE/local storage never receive base64 or a storage path;
 - terminal and history show safe artifact summaries and preserve metadata.
 
 ### live probes and regression
@@ -669,8 +716,14 @@ browser upload security review.
       permits URL input; unsafe URL forms are rejected locally.
 - [ ] Text-only input, existing saved conversations, tool calls, and legacy
       provider request payloads remain unchanged.
-- [ ] Structured image turns persist descriptors/metadata without bytes/base64
-      and are never automatically re-read on restore.
+- [ ] Structured image turns persist opaque `media_id` descriptors/safe metadata without
+      bytes/base64 or storage paths and are never automatically re-read on restore.
+- [ ] A Web UI media upload requires authenticated, session-authorized create permission;
+      a Web UI retrieval requires an independently authenticated, session-authorized read
+      permission. Neither operation accepts or returns a filesystem path.
+- [ ] Guessed/cross-session/expired media IDs, traversal forms, and symlink targets fail
+      without bytes or existence disclosure; authorized reads send precise MIME, nosniff,
+      restrictive cache, and safe disposition headers.
 - [ ] A public, verified Responses profile serializes documented image parts.
 - [ ] `openai-oauth` rejects image input locally as unverified unless a
       model/transport-specific probe and test explicitly enable it.
@@ -684,9 +737,11 @@ browser upload security review.
 - [ ] Transformer and streaming code retain a final generated-image artifact
       without treating binary or base64 as text tokens.
 - [ ] A generated image is persisted in private managed storage with digest,
-      MIME, dimensions where known, and safe provenance metadata.
-- [ ] Terminal/UI surfaces render a textual artifact fallback even where image
-      preview is unavailable.
+      MIME, dimensions where known, safe provenance metadata, and an opaque `media_id`;
+      paths remain server-private.
+- [ ] Terminal/UI surfaces render a textual artifact fallback even where image preview
+      is unavailable; Web UI previews resolve only the `media_id` through the authorized
+      read endpoint and never use a filesystem path as a browser URL.
 - [ ] Provider rejection, download/decode failure, and artifact-write failure
       are visible and do not corrupt conversation history.
 - [ ] `openai-oauth` generation remains disabled until real contract evidence
