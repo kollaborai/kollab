@@ -785,3 +785,27 @@ def test_writes_fail_gracefully_with_no_config():
     assert manager.config is None
     assert manager.create("fast", "work", "gpt-5.6") is False
     assert manager.delete("fast") is False
+
+
+# ----------------------------------------------------------------------
+# persisted default loadout
+# ----------------------------------------------------------------------
+
+
+def test_set_and_get_default_loadout_persists_marker():
+    profiles = [_FakeProfile("work", "openai", api_key="key-1")]
+    config = _MemoryConfig()
+    manager = LoadoutManager(_FakeProfileManager(profiles), config=config)
+    manager.create("fast", "work", "gpt-5.6")
+
+    assert manager.set_default("fast") is True
+    assert manager.get_default() == "fast"
+    assert config.get("kollabor.llm.default_loadout") == {
+        "name": "fast", "level": "global"
+    }
+
+
+def test_set_default_rejects_unknown_loadout():
+    manager = LoadoutManager(_FakeProfileManager([]), config=_MemoryConfig())
+    assert manager.set_default("missing") is False
+    assert manager.get_default() is None

@@ -289,8 +289,6 @@ class TerminalLLMChat:
         # Pass cli_profile so auto-detection is skipped when --llm is used
         self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
 
-        self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
-
         # Apply a persisted loadout default when no explicit --llm override was given.
         if not profile_name:
             try:

@@ -71,8 +71,6 @@ class LoadoutManager:
     """Resolves, persists, and activates loadouts on top of a ProfileManager."""
 
     CONFIG_KEY = "kollabor.llm.loadouts"
-
-    CONFIG_KEY = "kollabor.llm.loadouts"
     DEFAULT_CONFIG_KEY = "kollabor.llm.default_loadout"
 
     def get_default(self) -> Optional[str]:
