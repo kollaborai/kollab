@@ -8562,9 +8562,17 @@ class HubPlugin(BasePlugin):
                 )
 
         # --- Resolve profile ---
-        # Priority: agent bundle's preferred profile > parent's active profile
-        # Without this, agents with no profile in agent.json fall back to
-        # the "default" profile (usually Anthropic) instead of the correct LLM.
+        # Priority: an explicit agent profile > an explicit parent profile >
+        # the parent's active profile.  ``default`` is a placeholder meaning
+        # auto-detect, not an explicit provider selection.  Passing it to a
+        # child can silently auto-select a billable provider, so never let it
+        # override a real parent profile or escape this resolver.
+        def _explicit_profile(value: object) -> str:
+            if not isinstance(value, str):
+                return ""
+            profile = value.strip()
+            return profile if profile and profile != "default" else ""
+
         resolved_profile = ""
         try:
             agent_mgr = (
@@ -8572,32 +8580,46 @@ class HubPlugin(BasePlugin):
             )
             if agent_mgr:
                 agent_def = agent_mgr.get_agent(effective_agent_type)
-                if agent_def and agent_def.profile:
-                    resolved_profile = agent_def.profile
+                resolved_profile = _explicit_profile(
+                    getattr(agent_def, "profile", "") if agent_def else ""
+                )
         except Exception:
             pass
 
-        if not resolved_profile and self._identity and self._identity.profile:
-            resolved_profile = self._identity.profile
+        if not resolved_profile and self._identity:
+            resolved_profile = _explicit_profile(self._identity.profile)
 
         # HubPlugin is initialized through the generic plugin loader, which
         # historically did not pass profile_manager in its kwargs.  Recover
-        # the live profile from the service registry so children spawned from
-        # an agent launched with --llm inherit the same provider instead
-        # of falling back to auto-detection.
+        # a named active profile so children launched from ``--llm`` inherit
+        # that provider instead of falling back to auto-detection.
         if not resolved_profile and self.event_bus:
             try:
                 profile_mgr = self.event_bus.get_service("profile_manager")
-                active_name = getattr(profile_mgr, "active_profile_name", "")
-                if isinstance(active_name, str):
-                    resolved_profile = active_name.strip()
+                resolved_profile = _explicit_profile(
+                    getattr(profile_mgr, "active_profile_name", "")
+                )
                 if not resolved_profile and profile_mgr:
                     active_profile = profile_mgr.get_active_profile()
-                    active_name = getattr(active_profile, "name", "")
-                    if isinstance(active_name, str):
-                        resolved_profile = active_name.strip()
+                    resolved_profile = _explicit_profile(
+                        getattr(active_profile, "name", "")
+                    )
             except Exception:
                 resolved_profile = ""
+
+        if not resolved_profile:
+            # Identity reservation happens before this lookup.  Release it on
+            # the fail-closed path so a later, explicitly configured spawn is
+            # not blocked by a stale reservation.
+            if resolved_identity and self._change_feed:
+                self._change_feed.release(
+                    resolved_identity, f"hub_identity:{resolved_identity}"
+                )
+            return (
+                "Cannot create agent: no explicit LLM profile is available. "
+                "Start the parent with --llm <profile> or configure/select a "
+                "named profile before spawning an agent."
+            )
 
         # --- Spawn ---
         result = await orch.orchestrator.spawn(

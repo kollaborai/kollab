@@ -15,6 +15,8 @@ class _FakeAgentManager:
     def get_agent(self, name):
         if name == "research":
             return SimpleNamespace(name="research", profile="")
+        if name == "coder":
+            return SimpleNamespace(name="coder", profile="default")
         return None
 
 
@@ -122,3 +124,42 @@ class TestHubSpawnResolution(IsolatedAsyncioTestCase):
         call = event_bus.orchestrator_plugin.orchestrator.calls[0]
         self.assertTrue(result.success)
         self.assertEqual(call["profile"], "openai-oauth")
+
+
+    async def test_bundle_default_inherits_named_parent_profile(self):
+        """The bundle placeholder must not replace a parent's --llm profile."""
+        event_bus = _FakeEventBus()
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._identity = SimpleNamespace(
+            identity="koordinator",
+            profile="default",
+            is_coordinator=True,
+        )
+        plugin._presence = _FakePresence()
+
+        result = await plugin._handle_spawn_command(
+            {"name": "coder", "task": "implement safely"}
+        )
+
+        call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+        self.assertIn("Created agent", result)
+        self.assertEqual(call["profile"], "openai-oauth")
+
+    async def test_spawn_fails_closed_without_named_profile(self):
+        """A placeholder default must never start a child through auto-detect."""
+        event_bus = _FakeEventBus()
+        event_bus.profile_manager.active_profile_name = "default"
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._identity = SimpleNamespace(
+            identity="koordinator",
+            profile="default",
+            is_coordinator=True,
+        )
+        plugin._presence = _FakePresence()
+
+        result = await plugin._handle_spawn_command(
+            {"name": "coder", "task": "implement safely"}
+        )
+
+        self.assertIn("no explicit LLM profile", result)
+        self.assertFalse(event_bus.orchestrator_plugin.orchestrator.calls)
