@@ -569,6 +569,9 @@ class LoadoutListAltView(AltView):
             if char in ("d", "D"):
                 self._trigger_delete()
                 return False
+            if char in ("s", "S"):
+                self._trigger_set_default()
+                return False
 
         if name in ("Backspace", "Delete"):
             if self._query:
@@ -609,6 +612,25 @@ class LoadoutListAltView(AltView):
         else:
             self.result_form_mode = "edit"
             self.result_form_name_style = "plain"
+
+    def _trigger_set_default(self) -> None:
+        """Persist the highlighted loadout as the startup default."""
+        item = self._current_item()
+        if item is None:
+            self._note = "no loadout selected — choose a model first."
+            return
+        if self._manager is None or not hasattr(self._manager, "set_default"):
+            self._note = "could not set startup default — loadout manager unavailable."
+            return
+        try:
+            ok = bool(self._manager.set_default(item.name))
+        except Exception as exc:  # noqa: BLE001 - picker must remain usable
+            logger.error("loadout: set_default('%s') failed: %s", item.name, exc)
+            ok = False
+        if ok:
+            self._note = f"startup default set to '{item.name}'."
+        else:
+            self._note = f"could not set '{item.name}' as startup default."
 
     def _trigger_delete(self) -> None:
         item = self._current_item()
@@ -817,7 +839,7 @@ class LoadoutListAltView(AltView):
         elif self._query:
             hint = " up/down navigate | enter activate | esc clear filter"
         else:
-            hint = " up/down navigate | enter activate | n new | e edit | d delete | esc close"
+            hint = " up/down navigate | enter activate | S set startup default | n new | e edit | d delete | esc close"
         r.write_at(
             0,
             footer_y + 1,

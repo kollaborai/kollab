@@ -33,12 +33,18 @@ class _FakeLoadout:
 @dataclass
 class _FakeManager:
     loadouts: List[_FakeLoadout] = field(default_factory=list)
+    defaults: List[str] = field(default_factory=list)
+    set_default_result: bool = True
 
     def list_loadouts(self):
         return list(self.loadouts)
 
     def provider_profiles(self):
         return []
+
+    def set_default(self, name):
+        self.defaults.append(name)
+        return self.set_default_result
 
 
 def _char(c: str) -> KeyPress:
@@ -80,6 +86,25 @@ class TestFilterVsCommandKeys(unittest.TestCase):
         view = _view()
         asyncio.run(view.handle_input(_char("n")))
         self.assertTrue(view.result_open_form)
+
+    def test_set_default_persists_highlighted_loadout(self):
+        view = _view()
+        asyncio.run(view.handle_input(_char("S")))
+        self.assertEqual(view._manager.defaults, ["claude-fable-5"])
+        self.assertIn("startup default set", view._note)
+
+    def test_set_default_failure_shows_feedback(self):
+        view = _view()
+        view._manager.set_default_result = False
+        asyncio.run(view.handle_input(_char("S")))
+        self.assertIn("could not set", view._note)
+
+    def test_set_default_is_filter_safe(self):
+        view = _view()
+        self._type(view, "fable")
+        asyncio.run(view.handle_input(_char("S")))
+        self.assertEqual(view._manager.defaults, [])
+        self.assertEqual(view._query, "fableS")
 
     def test_escape_clears_filter_before_closing(self):
         view = _view()
