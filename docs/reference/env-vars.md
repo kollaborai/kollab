@@ -64,7 +64,7 @@ Disable auto-detection of LLM provider from existing env vars
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.).
 
 ```bash
-KOLLAB_NO_AUTO_DETECT=1 kollab --llm my-custom-profile
+KOLLAB_NO_AUTO_DETECT=1 kollab --provider my-custom-profile
 ```
 
 Useful when you have both provider env vars set AND want to force a
@@ -159,13 +159,13 @@ KOLLAB_MODEL=gpt-5.6-terra kollab
 KOLLAB_FAST_MODEL=claude-haiku-4-5 \
 KOLLAB_FAST_PROVIDER=anthropic \
 KOLLAB_FAST_API_KEY="<your-anthropic-api-key>" \
-kollab --llm fast
+kollab --provider fast
 
 # Persist the auto-created profile to config
-kollab --llm fast --save              # global
-kollab --llm fast --save --local      # project-local
-kollab --llm fast --default           # set startup default (global)
-kollab --llm fast --default --local   # set startup default (project)
+kollab --provider fast --save              # global
+kollab --provider fast --save --local      # project-local
+kollab --provider fast --default           # set startup default (global)
+kollab --provider fast --default --local   # set startup default (project)
 
 # Multiple fields at once
 KOLLAB_MAX_TOKENS=8192 \

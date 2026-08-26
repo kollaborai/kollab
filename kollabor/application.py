@@ -105,13 +105,13 @@ class TerminalLLMChat:
             system_prompt_file: Optional path to a custom system prompt file
                                (overrides all other system prompt sources)
             agent_name: Optional agent name to use (e.g., "lint-editor")
-            profile_name: Optional LLM profile or loadout name (`--llm`)
+            profile_name: Optional LLM profile or loadout name (`--provider`)
             model_override: Optional model id from `--model`, applied over
                 whatever profile_name selected. In-memory only.
             effort_override: Optional reasoning effort from `--effort`, same.
             save_profile: If True, save auto-created profile to config
             save_local: If True with save_profile, save to local project config
-            make_default_profile: If True with --llm, set it as startup default
+            make_default_profile: If True with --provider, set it as startup default
             skill_names: Optional list of skill names to load for the agent
             plugin_registry: Pre-initialized plugin registry (for startup optimization)
         """
@@ -245,7 +245,7 @@ class TerminalLLMChat:
         # agent, skill, system_prompt, save, local) are NOT applied to the
         # client's shadow state. They're stashed here and drained as RPC
         # calls after RemoteStateService is wired up in start(). This
-        # prevents the bug where --llm X would update the client's
+        # prevents the bug where --provider X would update the client's
         # profile_manager while the daemon never hears about it.
         #
         # Note: system_prompt_file was ALREADY installed above via
@@ -286,7 +286,7 @@ class TerminalLLMChat:
             )
 
         # Initialize profile manager (for LLM endpoint profiles)
-        # Pass cli_profile so auto-detection is skipped when --llm is used
+        # Pass cli_profile so auto-detection is skipped when --provider is used
         self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
 
         # Log auto-detection result
@@ -297,7 +297,7 @@ class TerminalLLMChat:
             )
 
         if profile_name:
-            # CLI --llm is a one-time override, don't persist active selection
+            # CLI --provider is a one-time override, don't persist active selection
             if not self.profile_manager.set_active_profile(profile_name, persist=False):
                 # Not an existing profile -- try resolving it as a loadout (a
                 # named preset of provider profile + model + params that
@@ -356,7 +356,7 @@ class TerminalLLMChat:
                             f"Failed to set default profile '{profile_name}' at {level} level"
                         )
 
-        # --model / --effort layer on top of whatever --llm resolved to, and
+        # --model / --effort layer on top of whatever --provider resolved to, and
         # work on their own against the already-active profile. Applied last so
         # an explicit flag beats the loadout field it would otherwise inherit
         # (spec R1/R2). save_to_config=False keeps a launch flag from rewriting
@@ -2003,7 +2003,7 @@ class TerminalLLMChat:
 
         # === Phase 4.5: drain pending launch flags via RPC ===
         #
-        # In attach mode, DAEMON_OWNED launch flags (--llm, --agent,
+        # In attach mode, DAEMON_OWNED launch flags (--provider, --agent,
         # --skill, --system-prompt, --save, --local) were stashed on
         # self._attach_pending_flags in __init__ instead of being applied
         # to the client's shadow state. Now that both RemoteStateService
@@ -2074,7 +2074,7 @@ class TerminalLLMChat:
         """Apply launch flags to the daemon via RPC in attach mode.
 
         Phase 4.5 fix for the "launch flags don't cross the process
-        boundary" bug. In attach mode, --llm / --agent / --skill /
+        boundary" bug. In attach mode, --provider / --agent / --skill /
         --system-prompt were stashed on self._attach_pending_flags in
         __init__ instead of being applied to the client's shadow state.
         This method drains that queue via RPC calls on the newly-wired
@@ -2168,7 +2168,7 @@ class TerminalLLMChat:
         profile_name = flags.get("profile")
         model_override = flags.get("model")
         effort_override = flags.get("effort")
-        # --model / --effort without --llm still have a target: the profile the
+        # --model / --effort without --provider still have a target: the profile the
         # daemon is already on. Without this they would be silently dropped in
         # attach mode, which is the default whenever a daemon is running.
         if not profile_name and (model_override or effort_override):
@@ -2214,7 +2214,7 @@ class TerminalLLMChat:
             except Exception as e:
                 _display(
                     "error",
-                    f"--llm {profile_name!r} failed on daemon: {e}",
+                    f"--provider {profile_name!r} failed on daemon: {e}",
                     {"display_type": "error"},
                 )
                 logger.warning(

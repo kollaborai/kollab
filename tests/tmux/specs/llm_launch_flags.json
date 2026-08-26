@@ -1,8 +1,8 @@
 {
   "name": "llm-launch-flags",
-  "description": "--llm/--model/--effort replace --profile: the model override reaches the status bar, an unlisted model id still launches, and the removed flag names its replacement",
+  "description": "--provider/--model/--effort replace --profile: the model override reaches the status bar, an unlisted model id still launches, and the removed flag names its replacement",
   "config": {
-    "command": "python main.py --no-daemon --llm gemini --model gemini-3.6-flash-lite --effort high",
+    "command": "python main.py --no-daemon --provider gemini --model gemini-3.6-flash-lite --effort high",
     "app_init_sleep": 6,
     "show_captures": false
   },
@@ -19,7 +19,7 @@
     {
       "action": "assert_not_contains",
       "pattern": "not found, using default",
-      "description": "--llm gemini resolves to the provider profile, not a fallback"
+      "description": "--provider gemini resolves to the provider profile, not a fallback"
     },
 
     { "action": "section", "name": "--profile names its replacement" },
@@ -30,8 +30,20 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "--profile was replaced by --llm",
-      "description": "removed flag points at --llm instead of failing obscurely"
+      "pattern": "--profile was replaced by --provider",
+      "description": "removed flag points at --provider instead of failing obscurely"
+    },
+
+    { "action": "section", "name": "--llm also names its replacement" },
+    {
+      "action": "shell",
+      "command": "python main.py --llm gemini --no-daemon 2>&1 | tail -3",
+      "description": "run the interim flag that was also removed"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--llm was replaced by --provider",
+      "description": "the short-lived --llm name also errors early"
     },
 
     { "action": "section", "name": "--effort is validated at parse time" },
@@ -51,15 +63,15 @@
       "description": "R4: the valid list is shown"
     },
 
-    { "action": "section", "name": "--default now hangs off --llm" },
+    { "action": "section", "name": "--default now hangs off --provider" },
     {
       "action": "shell",
       "command": "python main.py --default --no-daemon 2>&1 | tail -3",
-      "description": "run --default with no --llm"
+      "description": "run --default with no --provider"
     },
     {
       "action": "assert_contains",
-      "pattern": "--default requires --llm",
+      "pattern": "--default requires --provider",
       "description": "error text names the new flag"
     }
   ]

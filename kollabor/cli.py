@@ -337,8 +337,8 @@ Examples:
   kollab --system-prompt my-prompt.md       # Use custom system prompt
   kollab --agent lint-editor               # Use specific agent
   kollab -a lint-editor                    # Short form for agent
-  kollab --llm my-profile                  # Use a configured LLM profile
-  kollab --llm openai --model gpt-5.6-luna --effort max
+  kollab --provider my-profile             # Use a configured provider profile
+  kollab --provider openai --model gpt-5.6-luna --effort max
   kollab -a myagent -s coding -s review    # Agent with multiple skills
   kollab --agent myagent --skill coding    # Agent with skill (long form)
   kollab --agent coder --as lapis          # Run coder bundle under hub identity 'lapis'
@@ -422,11 +422,12 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
-        "--llm",
+        "--provider",
+        dest="provider",
         type=str,
         default=None,
-        metavar="LLM",
-        help="Use a configured LLM profile or loadout name (see /setup, /llm)",
+        metavar="PROVIDER",
+        help="Use a configured provider profile or loadout name (see /setup, /llm)",
     )
 
     parser.add_argument(
@@ -435,7 +436,7 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="MODEL",
         help=(
-            "Model id to use, applied over whatever --llm selected "
+            "Model id to use, applied over whatever --provider selected "
             "(e.g. --model gpt-5.6-luna). Not validated against the "
             "catalog -- an unlisted id still launches."
         ),
@@ -530,7 +531,7 @@ Telegram bridge setup (run inside interactive mode):
         "--save",
         action="store_true",
         default=False,
-        help="Save auto-created profile to global config (use with --llm for env-var profiles)",
+        help="Save auto-created profile to global config (use with --provider for env-var profiles)",
     )
 
     parser.add_argument(
@@ -546,7 +547,7 @@ Telegram bridge setup (run inside interactive mode):
         action="store_true",
         default=False,
         help=(
-            "Set --llm as default for next startups "
+            "Set --provider as default for next startups "
             "(use --local to set project default instead of global)"
         ),
     )
@@ -660,21 +661,25 @@ Telegram bridge setup (run inside interactive mode):
     # Parse known args, capture unknown as potential CLI commands
     args, unknown = parser.parse_known_args(argv)
 
-    # --profile was replaced by --llm. Unknown "--x" flags are otherwise
-    # treated as CLI commands, so the old flag would resolve to a nonexistent
-    # "/profile" command and fail obscurely well into startup. Name the
-    # replacement instead. Not an alias -- the flag does not work.
-    if any(
-        arg == "--profile" or arg.startswith("--profile=") for arg in (unknown or [])
-    ):
-        parser.error(
-            "--profile was replaced by --llm. Use: --llm <profile-or-loadout> "
-            "[--model <id>] [--effort <level>]"
-        )
+    # --profile (and its short-lived successor --llm) were replaced by
+    # --provider. Unknown "--x" flags are otherwise treated as CLI commands, so
+    # the old flag would resolve to a nonexistent slash command and fail
+    # obscurely well into startup. Name the replacement instead. Not an alias
+    # -- the old flags do not work.
+    for stale in ("--profile", "--llm"):
+        if any(
+            arg == stale or arg.startswith(f"{stale}=") for arg in (unknown or [])
+        ):
+            parser.error(
+                f"{stale} was replaced by --provider. Use: --provider "
+                "<profile-or-loadout> [--model <id>] [--effort <level>]"
+            )
 
     # Validate profile persistence flags
-    if getattr(args, "make_default_profile", False) and not getattr(args, "llm", None):
-        parser.error("--default requires --llm")
+    if getattr(args, "make_default_profile", False) and not getattr(
+        args, "provider", None
+    ):
+        parser.error("--default requires --provider")
 
     # --project override: propagate to env BEFORE any hub code boots
     # (project_scope.resolve_project_root reads KOLLAB_PROJECT_ROOT).
@@ -1076,7 +1081,7 @@ async def async_main() -> None:
             args=args,
             system_prompt_file=args.system_prompt,
             agent_name=args.agent,
-            profile_name=args.llm,
+            profile_name=args.provider,
             model_override=args.model,
             effort_override=args.effort,
             save_profile=args.save,
@@ -1934,7 +1939,7 @@ def _should_use_daemon() -> bool:
         "--agent",
         "-a",
         "--as",
-        "--llm",
+        "--provider",
         "--model",
         "--effort",
         "--project",
@@ -2017,7 +2022,7 @@ def cli_main() -> None:
         else:
             # Parent: re-enter the CLI as a lightweight attach client.
             # Client only needs --attach <identity>. All other args
-            # (--agent, --llm, query text) already went to the daemon.
+            # (--agent, --provider, query text) already went to the daemon.
             identity = os.path.basename(socket_path).replace(".sock", "")
             sys.argv = [sys.argv[0], "--attach", identity]
 

@@ -54,7 +54,7 @@ wins. The bundled copy remains the install-safe fallback.
 
 fields:
   - description: human-readable description (optional)
-  - profile: default llm profile to use (optional, overrides via --llm)
+  - profile: default llm profile to use (optional, overrides via --provider)
   - tools: registry tool names allowed for the agent; `["*"]` allows all tools
   - skills: names of Agent Skills from the library (optional); use `["*"]` to attach every discovered skill
   - default_skills: subset of skills to load into context automatically (optional)
@@ -75,14 +75,14 @@ another:
 - **Agent bundle** — the behavior definition selected by `--agent`, such as
   `coder`, `research`, or `technical-writer`. It combines `system_prompt.md`,
   optional `sections/`, the `tools` allowlist, and declared skills.
-- **Provider profile** — the provider/model connection selected by `--llm`.
+- **Provider profile** — the provider/model connection selected by `--provider`.
   A profile owns endpoint and credential settings. A loadout can layer a model
   and parameters such as effort or output budget on top of that connection.
 
 For example:
 
 ```bash
-kollab --agent coder --as lapis --llm openai-oauth
+kollab --agent coder --as lapis --provider openai-oauth
 ```
 
 This means: run the `coder` bundle, use `lapis` as the hub identity, and use
@@ -305,4 +305,4 @@ Agents can specify a default LLM profile in `agent.json`:
 }
 ```
 
-This profile is used unless overridden via `--llm`.
+This profile is used unless overridden via `--provider`.

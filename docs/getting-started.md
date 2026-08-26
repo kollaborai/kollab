@@ -81,21 +81,21 @@ For more control than the default auto-detection, create named profiles using th
 KOLLAB_OLLAMA_PROVIDER=custom
 KOLLAB_OLLAMA_BASE_URL=http://localhost:11434/v1
 KOLLAB_OLLAMA_MODEL=llama3.3
-kollab --llm ollama
+kollab --provider ollama
 
 # Azure OpenAI
 KOLLAB_AZURE_PROVIDER=azure_openai
 KOLLAB_AZURE_API_KEY="<your-azure-api-key>"
 KOLLAB_AZURE_MODEL=gpt-5.4
 KOLLAB_AZURE_AZURE_ENDPOINT=https://your-resource.openai.azure.com
-kollab --llm azure
+kollab --provider azure
 
 # Custom endpoint with auth
 KOLLAB_CUSTOM_PROVIDER=custom
 KOLLAB_CUSTOM_BASE_URL=https://api.example.com/v1
 KOLLAB_CUSTOM_API_KEY="<your-api-key>"
 KOLLAB_CUSTOM_MODEL=custom-model-name
-kollab --llm custom
+kollab --provider custom
 ```
 
 ### Profile Fields
@@ -115,27 +115,27 @@ After creating a profile via env vars, save it to your config:
 
 ```bash
 # Save to global config (~/.kollab/config.json)
-kollab --llm myprofile --save
+kollab --provider myprofile --save
 
 # Save to local project config (.kollab/config.json)
-kollab --llm myprofile --save --local
+kollab --provider myprofile --save --local
 ```
 
-Once saved, you can use `kollab --llm myprofile` without setting env vars each time.
+Once saved, you can use `kollab --provider myprofile` without setting env vars each time.
 
 ### Overriding model and effort at launch
 
-`--llm` picks the connection; `--model` and `--effort` layer on top of it.
+`--provider` picks the connection; `--model` and `--effort` layer on top of it.
 Neither writes to config — they apply to this run only.
 
 ```bash
 # Profile plus an explicit model and reasoning effort
-kollab --llm openai --model gpt-5.6-luna --effort max
+kollab --provider openai --model gpt-5.6-luna --effort max
 
 # A saved loadout, with one field overridden
-kollab --llm fable-slim --effort ultra
+kollab --provider fable-slim --effort ultra
 
-# No --llm: both apply to whatever profile is already active
+# No --provider: both apply to whatever profile is already active
 kollab --model gpt-5.6-terra --effort high
 ```
 
@@ -198,8 +198,8 @@ Common flags:
 
 | Flag | Description |
 |------|-------------|
-| `--llm <name>` | Use a configured profile or loadout |
-| `--model <id>` | Model id, applied over whatever `--llm` selected |
+| `--provider <name>` | Use a configured profile or loadout |
+| `--model <id>` | Model id, applied over whatever `--provider` selected |
 | `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `--agent <bundle>` | Use a specific behavior bundle |
 | `--as <identity>` | Run the selected bundle under a stable hub identity |
