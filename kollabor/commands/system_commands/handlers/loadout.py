@@ -283,13 +283,20 @@ class LoadoutCommandHandler(BaseCommandHandler):
 
     async def _set_default(self, query: str) -> CommandResult:
         """Persist a loadout as the startup default (global by default)."""
-        if not query.strip():
-            return CommandResult(
-                success=False,
-                message="Usage: /llm default <loadout-name>",
-                display_type="error",
-            )
         manager = self._get_manager()
+        if manager is None:
+            return CommandResult(False, "Loadout manager unavailable.", "error")
+        if not query.strip():
+            loadouts = manager.list_loadouts()
+            if not loadouts:
+                return CommandResult(False, "No loadouts available.", "error")
+            current = manager.get_default()
+            lines = ["Choose a loadout to set as the startup default:"]
+            for loadout in loadouts:
+                marker = " (current default)" if loadout.name == current else ""
+                lines.append(f"  {loadout.name}{marker}")
+            lines.append("Use: /llm default <loadout-name>")
+            return CommandResult(True, "\\n".join(lines), "info")
         if manager is None:
             return CommandResult(False, "Loadout manager unavailable.", "error")
         loadout, suggestions = manager.resolve(query)
