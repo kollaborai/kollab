@@ -45,6 +45,34 @@ references used for terminology and lifecycle comparison:
 Where behavior is not stated by local help or the linked documentation, this
 spec labels it as inference or leaves it intentionally unspecified.
 
+## web evidence (retrieved 2026-08-25)
+
+The official Claude Code `/goal` guide describes a session-scoped completion
+condition evaluated after each turn by a small model. The evaluator returns
+`met`, `not yet met`, or `impossible`; the goal clears on completion,
+impossibility, unrecoverable authentication/credit/context/model errors, or
+`/goal clear`. One goal is active per session, and `/goal` with no arguments
+shows condition, elapsed time, evaluated turns, token spend, and the latest
+reason. Active goals are restored when a session is resumed, while achieved or
+cleared goals are not. Background work defers evaluation; idle check-ins back
+off and are capped. Source: https://code.claude.com/docs/en/goal
+
+The official OpenAI Codex Goals guide describes a persistent, thread-scoped
+objective with a measurable outcome, verification surface, constraints, and
+budget. `/goal`, `/goal pause`, `/goal resume`, and `/goal clear` manage the
+lifecycle. Continuation is conservative: it occurs only after a turn finishes,
+when the thread is idle, no user input is queued, and no work is pending.
+Completion must be supported by concrete evidence (tests, benchmarks, files,
+logs, or artifacts); budget exhaustion is distinct from success. The guide
+lists support beginning with Codex 0.128.0. Source:
+https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex.md
+
+A Codex issue documenting the command confirms observed states including
+`pursuing`, `paused`, `achieved`, `unmet`, and `budget-limited`, and calls for
+lifecycle/help discovery. The issue is corroborating context rather than an
+API contract: https://github.com/openai/codex/issues/20536
+
+
 ## comparison (verified behavior)
 
 | concern | Claude Code 2.1.246 | Codex CLI 0.149.1 | implication for Kollab |
