@@ -82,6 +82,7 @@ class LoadoutCommandHandler(BaseCommandHandler):
             subcommands=[
                 SubcommandInfo("", "", "Open the loadout picker"),
                 SubcommandInfo("new", "", "Create a loadout"),
+                SubcommandInfo("default <name>", "", "Set startup default loadout"),
                 SubcommandInfo("<name>", "", "Activate a loadout by name"),
             ],
         )
@@ -94,6 +95,8 @@ class LoadoutCommandHandler(BaseCommandHandler):
             return await self._open_list()
         if args[0].lower() == "new":
             return await self._open_new()
+        if args[0].lower() == "default":
+            return await self._set_default(" ".join(args[1:]))
         return await self._activate_by_name(" ".join(args))
 
     # -- manager / stack manager construction --------------------------------
@@ -277,6 +280,32 @@ class LoadoutCommandHandler(BaseCommandHandler):
         return await self._open_list()
 
     # -- direct activation (no UI) ----------------------------------------
+
+    async def _set_default(self, query: str) -> CommandResult:
+        """Persist a loadout as the startup default (global by default)."""
+        if not query.strip():
+            return CommandResult(
+                success=False,
+                message="Usage: /llm default <loadout-name>",
+                display_type="error",
+            )
+        manager = self._get_manager()
+        if manager is None:
+            return CommandResult(False, "Loadout manager unavailable.", "error")
+        loadout, suggestions = manager.resolve(query)
+        if loadout is None:
+            message = f"No loadout matching '{query}'."
+            if suggestions:
+                message += "\n  did you mean:\n    " + "\n    ".join(suggestions)
+            return CommandResult(False, message, "error")
+        if not manager.set_default(loadout.name):
+            return CommandResult(False, f"Could not set '{loadout.name}' as default.", "error")
+        return CommandResult(
+            True,
+            f"Loadout '{loadout.name}' set as startup default.",
+            "success",
+        )
+
 
     async def _activate_by_name(self, query: str) -> CommandResult:
         manager = self._get_manager()

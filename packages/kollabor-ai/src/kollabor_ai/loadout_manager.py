@@ -72,6 +72,36 @@ class LoadoutManager:
 
     CONFIG_KEY = "kollabor.llm.loadouts"
 
+    CONFIG_KEY = "kollabor.llm.loadouts"
+    DEFAULT_CONFIG_KEY = "kollabor.llm.default_loadout"
+
+    def get_default(self) -> Optional[str]:
+        """Return the persisted default loadout name, if configured."""
+        if self.config is None:
+            return None
+        raw = self.config.get(self.DEFAULT_CONFIG_KEY)
+        if isinstance(raw, dict):
+            name = raw.get("name")
+        else:
+            name = raw
+        return str(name).strip() if name else None
+
+    def set_default(self, name: str, level: str = "global") -> bool:
+        """Persist a loadout name as the startup default at global/project level."""
+        if not name or not name.strip() or self.resolve(name)[0] is None:
+            logger.error("Cannot set unknown loadout as default: %s", name)
+            return False
+        if self.config is None:
+            logger.error("No config available to persist default loadout")
+            return False
+        if level not in {"global", "project"}:
+            raise ValueError("level must be 'global' or 'project'")
+        return bool(self.config.save_key(
+            self.DEFAULT_CONFIG_KEY,
+            {"name": name.strip(), "level": level},
+            save_target="local" if level == "project" else "global",
+        ))
+
     def __init__(self, profile_manager: Any, config: Optional[Any] = None) -> None:
         """
         Args:

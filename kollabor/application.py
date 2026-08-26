@@ -289,6 +289,24 @@ class TerminalLLMChat:
         # Pass cli_profile so auto-detection is skipped when --llm is used
         self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
 
+        self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
+
+        # Apply a persisted loadout default when no explicit --llm override was given.
+        if not profile_name:
+            try:
+                from kollabor_ai.loadout_manager import LoadoutManager
+                default_loadout = LoadoutManager(self.profile_manager, config=self.config).get_default()
+                if default_loadout:
+                    loadout_manager = LoadoutManager(self.profile_manager, config=self.config)
+                    loadout, _ = loadout_manager.resolve(default_loadout)
+                    if loadout and self.profile_manager.update_profile(
+                        loadout.provider_profile, model=loadout.model, save_to_config=False
+                    ):
+                        self.profile_manager.set_active_profile(loadout.provider_profile, persist=False)
+                        logger.info("Applied default loadout '%s'", loadout.name)
+            except Exception as exc:
+                logger.warning("Could not apply default loadout: %s", exc)
+
         # Log auto-detection result
         if self.profile_manager.is_auto_detected:
             logger.info(
