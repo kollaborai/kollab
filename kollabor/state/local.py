@@ -53,6 +53,14 @@ logger = logging.getLogger(__name__)
 _HUB_MENTION_RE = re.compile(r"^@([A-Za-z0-9][A-Za-z0-9_-]*)\s+(.+)$", re.DOTALL)
 
 
+def _json_safe_web_value(value: Any) -> Any:
+    """Keep command metadata JSON-safe without losing useful display text."""
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def parse_hub_mention(text: str) -> tuple[str, str] | None:
     """Parse the chat shorthand used to send a message through Hub.
 
@@ -944,6 +952,32 @@ class LocalStateService(StateService):
                     }
                 )
 
+            parameters: list[dict[str, Any]] = []
+            for parameter in getattr(command, "parameters", ()) or ():
+                parameter_name = str(
+                    getattr(parameter, "name", "") or ""
+                ).strip()
+                if not parameter_name:
+                    continue
+                parameter_data: dict[str, Any] = {
+                    "name": parameter_name,
+                    "type": str(getattr(parameter, "type", "") or ""),
+                    "description": str(
+                        getattr(parameter, "description", "") or ""
+                    ),
+                    "required": bool(getattr(parameter, "required", False)),
+                }
+                choices = getattr(parameter, "choices", None) or ()
+                if choices:
+                    parameter_data["choices"] = [str(choice) for choice in choices]
+                default = getattr(parameter, "default", None)
+                if default is not None:
+                    parameter_data["default"] = _json_safe_web_value(default)
+                validation = getattr(parameter, "validation", None)
+                if validation:
+                    parameter_data["validation"] = str(validation)
+                parameters.append(parameter_data)
+
             category = getattr(command, "category", "")
             category = getattr(category, "value", category)
             mode = getattr(command, "mode", "")
@@ -958,6 +992,7 @@ class LocalStateService(StateService):
                     "icon": str(getattr(command, "icon", "") or ""),
                     "mode": str(mode or ""),
                     "enabled": bool(getattr(command, "enabled", True)),
+                    "parameters": parameters,
                     "subcommands": subcommands,
                 }
             )
@@ -2133,6 +2168,35 @@ class LocalStateService(StateService):
         except Exception as e:
             logger.debug(f"hub _handle_msg_command error: {e}")
             return f"hub msg error: {e}"
+
+    async def list_hub_agents(self) -> list[dict[str, Any]]:
+        """Return live and offline pool identities for the TUI @ menu."""
+        hub = self._resolve_hub_plugin()
+        if hub is None:
+            return []
+        fn = getattr(hub, "list_agent_targets", None)
+        if fn is None:
+            return []
+        try:
+            result = await fn()
+        except Exception as e:
+            logger.debug(f"hub list_agent_targets error: {e}")
+            return []
+        return result if isinstance(result, list) else []
+
+    async def send_hub_user_message(self, target: str, content: str) -> str:
+        """Send a direct human-origin Hub message or start an offline identity."""
+        hub = self._resolve_hub_plugin()
+        if hub is None:
+            return "hub: not connected"
+        fn = getattr(hub, "send_user_message", None)
+        if fn is None:
+            return "hub: direct agent messaging is unavailable"
+        try:
+            return str(await fn(target, content))
+        except Exception as e:
+            logger.debug(f"hub send_user_message error: {e}")
+            return f"hub message error: {e}"
 
     async def hub_broadcast(self, content: str, force: bool = False) -> str:
         """Delegate to HubPlugin._handle_broadcast_command."""

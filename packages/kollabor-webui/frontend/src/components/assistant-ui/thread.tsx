@@ -63,6 +63,7 @@ import {
   useMemo,
   type ComponentType,
   type FC,
+  type KeyboardEvent,
   type PropsWithChildren,
 } from "react";
 
@@ -246,37 +247,154 @@ const Composer: FC<{
   commands: readonly SlashCommand[];
 }> = ({ agents, commands }) => {
   const commandItems = useMemo<readonly ComposerPaletteItem[]>(
-    () =>
-      commands
+    () => {
+      const visibleCommands = [...commands]
         .filter((command) => command.enabled !== false && command.name)
-        .map((command) => {
-          const aliases = command.aliases?.filter(Boolean) ?? [];
-          const subcommands =
-            command.subcommands?.filter((item) => item.name) ?? [];
-          const subcommandText = subcommands
-            .map((item) => `${item.name} ${item.description ?? ""}`)
-            .join(" ");
-          return {
-            id: command.name,
-            label: prettyCommandName(command.name),
-            description:
-              command.description ||
-              (subcommands.length > 0
-                ? `${subcommands.length} subcommand${subcommands.length === 1 ? "" : "s"}`
-                : "Run this command"),
-            type: "command" as const,
-            searchText: [command.name, ...aliases, subcommandText]
+        .sort((left, right) => {
+          const categoryCompare = (left.category || "system").localeCompare(
+            right.category || "system",
+          );
+          return categoryCompare || left.name.localeCompare(right.name);
+        });
+
+      return visibleCommands.flatMap((command) => {
+        const aliases = command.aliases?.filter(Boolean) ?? [];
+        const category = command.category || "system";
+        const subcommands =
+          command.subcommands?.filter((item) => item.name.trim()) ?? [];
+        const parameterOptions = (command.parameters ?? []).flatMap(
+          (parameter) =>
+            (parameter.choices ?? []).filter(Boolean).map((choice) => ({
+              choice,
+              parameterName: parameter.name,
+              description:
+                parameter.description ||
+                `Choose a ${prettyCommandName(parameter.name).toLowerCase()}`,
+            })),
+        );
+        const nestedCount = subcommands.length + parameterOptions.length;
+        const parent: ComposerPaletteItem = {
+          id: command.name,
+          label: prettyCommandName(command.name),
+          description:
+            command.description ||
+            (nestedCount > 0
+              ? `${nestedCount} option${nestedCount === 1 ? "" : "s"}`
+              : "Run this command"),
+          type: "command",
+          searchText: [command.name, ...aliases, command.description]
+            .filter(Boolean)
+            .join(" "),
+          secondary:
+            aliases.length > 0
+              ? aliases.map((alias) => `/${alias}`).join(" · ")
+              : undefined,
+          insertText: command.name,
+          category,
+          depth: 0,
+          icon: "command",
+        };
+
+        const nestedSubcommands: ComposerPaletteItem[] = subcommands.map(
+          (subcommand, index) => ({
+            id: `${command.name}::${subcommand.name}::${index}`,
+            label: subcommand.name,
+            description: subcommand.description || "Run this subcommand",
+            type: "command",
+            searchText: [
+              command.name,
+              ...aliases,
+              subcommand.name,
+              subcommand.args,
+              subcommand.description,
+            ]
               .filter(Boolean)
               .join(" "),
-            secondary:
-              aliases.length > 0
-                ? aliases.map((alias) => `/${alias}`).join(" · ")
-                : undefined,
-            icon: "command" as const,
-          };
-        }),
+            insertText: `${command.name} ${subcommand.name}`,
+            commandPath: command.name,
+            parentId: command.name,
+            category,
+            depth: 1,
+            args: subcommand.args,
+            icon: "command",
+          }),
+        );
+
+        const nestedParameters: ComposerPaletteItem[] = parameterOptions.map(
+          ({ choice, parameterName, description }, index) => ({
+            id: `${command.name}::${parameterName}::${choice}::${index}`,
+            label: choice,
+            description,
+            type: "command",
+            searchText: [
+              command.name,
+              ...aliases,
+              parameterName,
+              choice,
+              description,
+            ]
+              .filter(Boolean)
+              .join(" "),
+            insertText: `${command.name} ${choice}`,
+            commandPath: command.name,
+            parentId: command.name,
+            category,
+            depth: 1,
+            secondary: parameterName,
+            icon: "command",
+          }),
+        );
+
+        return [parent, ...nestedSubcommands, ...nestedParameters];
+      });
+    },
     [commands],
   );
+
+  const nestedCommandNames = useMemo(() => {
+    const names = new Set<string>();
+
+    for (const command of commands) {
+      const hasSubcommands = command.subcommands?.some((item) =>
+        item.name.trim(),
+      );
+      const hasParameterChoices = command.parameters?.some((parameter) =>
+        parameter.choices?.some(Boolean),
+      );
+
+      if (!hasSubcommands && !hasParameterChoices) continue;
+
+      names.add(command.name.toLowerCase());
+      for (const alias of command.aliases ?? []) {
+        if (alias) names.add(alias.toLowerCase());
+      }
+    }
+
+    return names;
+  }, [commands]);
+
+  const handleComposerKeyDown = (
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (
+      event.key !== " " ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey
+    ) {
+      return;
+    }
+
+    // assistant-ui stops trigger detection at whitespace. Keep the command
+    // trigger active for the one space that means “show this command's
+    // subcommands”; ordinary message spaces still go through unchanged.
+    const composerText = event.currentTarget.value;
+    if (!/^\/[A-Za-z0-9][A-Za-z0-9_-]*$/.test(composerText)) return;
+    if (!nestedCommandNames.has(composerText.slice(1).toLowerCase())) return;
+
+    event.preventDefault();
+  };
 
   const agentItems = useMemo<readonly ComposerPaletteItem[]>(() => {
     const onlineAgents = agents
@@ -346,6 +464,7 @@ const Composer: FC<{
               autoFocus
               enterKeyHint="send"
               aria-label="Message input"
+              onKeyDown={handleComposerKeyDown}
             />
             <ComposerAction />
           </div>

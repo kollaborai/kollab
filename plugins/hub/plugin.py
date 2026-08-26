@@ -6485,10 +6485,16 @@ class HubPlugin(BasePlugin):
                 if hasattr(message, "metadata") and message.metadata
                 else ""
             )
+            is_operator_direct = bool(
+                message.scope == MessageScope.DIRECT.value
+                and message.metadata
+                and message.metadata.get("operator_message")
+            )
             is_human_elsewhere = bool(
                 message.from_agent == "human"
                 and source_agent
                 and source_agent != my_name
+                and not is_operator_direct
             )
             wake_decision = self._decide_hub_wake(
                 message,
@@ -6766,8 +6772,16 @@ class HubPlugin(BasePlugin):
             if hasattr(message, "metadata") and message.metadata
             else ""
         )
-        is_human_elsewhere = (
-            message.from_agent == "human" and source_agent and source_agent != my_name
+        is_operator_direct = bool(
+            message.scope == MessageScope.DIRECT.value
+            and message.metadata
+            and message.metadata.get("operator_message")
+        )
+        is_human_elsewhere = bool(
+            message.from_agent == "human"
+            and source_agent
+            and source_agent != my_name
+            and not is_operator_direct
         )
 
         if is_human_elsewhere:
@@ -9927,6 +9941,128 @@ class HubPlugin(BasePlugin):
             f"agent_id: {self._identity.agent_id}\n"
             f"pid: {self._identity.pid}\n"
             f"project: {self._identity.project}"
+        )
+
+    async def list_agent_targets(self) -> List[Dict[str, Any]]:
+        """Return live Hub peers plus offline pool identities for the TUI."""
+        live_agents: List[AgentRuntime] = []
+        if self._presence:
+            live_agents = await self._presence.discover_agents_async(include_self=True)
+
+        live_by_identity = {
+            agent.identity: agent for agent in live_agents if agent.identity
+        }
+        my_identity = self._identity.identity if self._identity else ""
+        targets: List[Dict[str, Any]] = []
+
+        # Static pool identities are the runnable offline targets. Live
+        # presence overlays their current state and task.
+        for pool in POOL_IDENTITIES:
+            if pool.name == my_identity:
+                continue
+            runtime = live_by_identity.get(pool.name)
+            targets.append(
+                {
+                    "identity": pool.name,
+                    "status": "online" if runtime else "offline",
+                    "state": runtime.state if runtime else "offline",
+                    "current_task": runtime.current_task if runtime else "",
+                    "description": (
+                        runtime.description
+                        if runtime and runtime.description
+                        else pool.personality
+                    ),
+                    "agent_type": pool.agent_type,
+                    "can_run": runtime is None,
+                    "is_coordinator": bool(runtime and runtime.is_coordinator),
+                }
+            )
+
+        # Keep custom or externally launched identities addressable too. They
+        # are messageable while online but are not spawnable from the pool.
+        known = {target["identity"] for target in targets}
+        for runtime in live_agents:
+            identity = runtime.identity
+            if not identity or identity == my_identity or identity in known:
+                continue
+            targets.append(
+                {
+                    "identity": identity,
+                    "status": "online",
+                    "state": runtime.state,
+                    "current_task": runtime.current_task,
+                    "description": runtime.description,
+                    "agent_type": runtime.name,
+                    "can_run": False,
+                    "is_coordinator": runtime.is_coordinator,
+                }
+            )
+
+        return sorted(
+            targets,
+            key=lambda target: (
+                target["status"] != "online",
+                str(target["identity"]).lower(),
+            ),
+        )
+
+    async def send_user_message(self, target: str, content: str) -> str:
+        """Send a direct human message, waking or starting the target."""
+        target = str(target or "").strip().lower()
+        content = str(content or "").strip()
+        if not target or not content:
+            return "usage: @agent <message>"
+
+        live_agents: List[AgentRuntime] = []
+        if self._presence:
+            live_agents = await self._presence.discover_agents_async()
+        live_target = next(
+            (agent for agent in live_agents if agent.identity == target), None
+        )
+
+        user_name = os.environ.get("USER", "user")
+        if self.config:
+            user_name = self.config.get("plugins.hub.user_name", user_name)
+        source_agent = (
+            self._identity.identity if self._identity else COORDINATOR_IDENTITY
+        )
+
+        if live_target is not None:
+            message = HubMessage(
+                action="message",
+                from_agent="human",
+                from_identity=user_name,
+                to=target,
+                content=content,
+                scope=MessageScope.DIRECT.value,
+                # A direct operator message is an explicit wake request.
+                force=True,
+                metadata={
+                    "source_agent": source_agent,
+                    "source": "tui",
+                    "operator_message": True,
+                },
+            )
+            rejections = await self._route_message(message)
+            if rejections:
+                details = "; ".join(
+                    f"{identity}: {reason}" for identity, reason in rejections
+                )
+                return f"rejected: {details}"
+            return f"sent to {target} as {user_name} from {source_agent}"
+
+        if target in POOL_BY_NAME:
+            # An offline pool identity is started with the operator's message
+            # as its first task; preserve provenance in the task text because
+            # there is no pre-existing socket message to carry the metadata.
+            task = f"[message from {user_name} via {source_agent}] {content}"
+            result = await self._handle_spawn_command({"name": target, "task": task})
+            if result.lower().startswith(("error", "usage", "failed")):
+                return result
+            return f"started {target} as {user_name} from {source_agent}\n{result}"
+
+        return (
+            f"error: agent '{target}' is not online and has no runnable pool identity"
         )
 
     async def _handle_msg_command(self, args: str) -> str:

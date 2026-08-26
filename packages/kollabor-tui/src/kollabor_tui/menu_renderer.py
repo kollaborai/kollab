@@ -667,16 +667,17 @@ class CommandMenuRenderer:
         name = cmd["name"]
         description = cmd.get("description", "")
         aliases = cmd.get("aliases", [])
+        prefix = cmd.get("_prefix", "/")
         line_width = self._get_menu_width()
 
         if is_selected:
             # SELECTED: one solid surface so slash search does not look segmented.
-            name_part = f"/{name}"
+            name_part = f"{prefix}{name}"
 
             alias_hint = ""
             alias_len = 0
             if aliases:
-                alias_str = " ".join(f"/{a}" for a in aliases[:2])
+                alias_str = " ".join(f"{prefix}{a}" for a in aliases[:2])
                 alias_hint = f" also: {alias_str}"
                 alias_len = len(f" also: {alias_str}")
 
@@ -690,7 +691,7 @@ class CommandMenuRenderer:
         else:
             # NOT SELECTED: keep a solid surface so terminal wallpaper never
             # bleeds through and lowers contrast.
-            name_str = f"/{name}"
+            name_str = f"{prefix}{name}"
             name_col_width = 14
 
             # Calculate description area
@@ -701,10 +702,7 @@ class CommandMenuRenderer:
             # Dot leader
             dots = DOT * max(2, name_col_width - len(name_str))
 
-            text = (
-                f"   {name_str.ljust(name_col_width)} "
-                f"{dots} {description}"
-            )
+            text = f"   {name_str.ljust(name_col_width)} " f"{dots} {description}"
             line = solid(text.ljust(line_width), T().dark[0], T().text, line_width)
             return self._normalize_line_width(line)
 

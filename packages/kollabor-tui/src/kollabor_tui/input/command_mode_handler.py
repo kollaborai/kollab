@@ -71,6 +71,8 @@ class CommandModeHandler:
         self.command_mode = CommandMode.NORMAL
         self.command_menu_active = False
         self.selected_command_index = 0
+        self.agent_mention_active = False
+        self._available_agents: List[Dict[str, Any]] = []
 
         # Callbacks for operations that require access to parent InputHandler
         self._update_display_callback: Optional[Callable] = None
@@ -152,6 +154,43 @@ class CommandModeHandler:
             logger.error(f"Error entering command mode: {e}")
             await self.exit_command_mode()
 
+    async def enter_agent_mention_mode(self) -> None:
+        """Enter ``@`` mention mode and show known Hub agent targets."""
+        try:
+            logger.info("Entering agent mention mode")
+            self.command_mode = CommandMode.MENU_POPUP
+            self.command_menu_active = True
+            self.agent_mention_active = True
+            self.selected_command_index = 0
+
+            # Keep the trigger visible while the user filters the roster.
+            self.buffer_manager.insert_char("@")
+
+            self._available_agents = await self._get_available_agents()
+            available_items = self._agent_menu_items(self._available_agents)
+            self.command_menu_renderer.show_command_menu(available_items, "")
+
+            await self.event_bus.emit_with_hooks(
+                EventType.COMMAND_MENU_SHOW,
+                {
+                    "available_agents": self._available_agents,
+                    "filter_text": "",
+                    "mention": True,
+                },
+                "agents",
+            )
+
+            if self._update_display_callback:
+                await self._update_display_callback(force_render=True)
+
+            logger.info(
+                "Agent mention menu activated with %d targets",
+                len(available_items),
+            )
+        except Exception as e:
+            logger.error(f"Error entering agent mention mode: {e}")
+            await self.exit_command_mode()
+
     async def exit_command_mode(self) -> None:
         """Exit command mode and restore normal input."""
         try:
@@ -173,6 +212,8 @@ class CommandModeHandler:
 
             self.command_mode = CommandMode.NORMAL
             self.command_menu_active = False
+            self.agent_mention_active = False
+            self._available_agents = []
 
             # Clear command buffer (remove the '/' and any partial command)
             self.buffer_manager.clear()
@@ -197,6 +238,8 @@ class CommandModeHandler:
         """
         try:
             if self.command_mode == CommandMode.MENU_POPUP:
+                if self.agent_mention_active:
+                    return await self.handle_agent_mention_keypress(key_press)
                 return await self.handle_menu_popup_keypress(key_press)
             elif self.command_mode == CommandMode.STATUS_TAKEOVER:
                 return await self.handle_status_takeover_keypress(key_press)
@@ -235,6 +278,8 @@ class CommandModeHandler:
         """
         try:
             if self.command_mode == CommandMode.MENU_POPUP:
+                if self.agent_mention_active:
+                    return await self.handle_agent_mention_input(char)
                 return await self.handle_menu_popup_input(char)
             elif self.command_mode == CommandMode.STATUS_TAKEOVER:
                 return await self.handle_status_takeover_input(char)
@@ -249,6 +294,72 @@ class CommandModeHandler:
 
         except Exception as e:
             logger.error(f"Error handling command mode input: {e}")
+            await self.exit_command_mode()
+            return False
+
+    async def handle_agent_mention_input(self, char: str) -> bool:
+        """Handle character input while the ``@`` agent menu is open."""
+        if ord(char) == 27:  # Escape
+            await self.exit_command_mode()
+            return True
+        if ord(char) == 13:  # Enter
+            await self._select_agent_mention()
+            return True
+        if ord(char) in (8, 127):  # Backspace/Delete
+            if len(self.buffer_manager.content) <= 1:
+                await self.exit_command_mode()
+            else:
+                self.buffer_manager.delete_char()
+                await self._update_agent_mention_filter()
+            return True
+
+        # A space ends target selection but stays in the input buffer so the
+        # next characters become the message body (``@lapis do the work``).
+        if char == " " and len(self.buffer_manager.content) > 1:
+            self.buffer_manager.insert_char(" ")
+            await self._leave_agent_mention_menu(keep_buffer=True)
+            return True
+
+        if char.isprintable():
+            self.buffer_manager.insert_char(char)
+            await self._update_agent_mention_filter()
+            return True
+
+        return False
+
+    async def handle_agent_mention_keypress(self, key_press: KeyPress) -> bool:
+        """Handle parsed keys while the ``@`` agent menu is open."""
+        try:
+            if key_press.name == "ArrowUp":
+                await self._navigate_menu("up")
+                return True
+            if key_press.name == "ArrowDown":
+                await self._navigate_menu("down")
+                return True
+            if key_press.name == "Enter":
+                await self._select_agent_mention()
+                return True
+            if key_press.name in ("Escape", "Ctrl+U"):
+                await self.exit_command_mode()
+                return True
+            if key_press.name in ("Backspace", "Delete"):
+                if len(self.buffer_manager.content) <= 1:
+                    await self.exit_command_mode()
+                else:
+                    self.buffer_manager.delete_char()
+                    await self._update_agent_mention_filter()
+                return True
+            if key_press.char == " " and len(self.buffer_manager.content) > 1:
+                self.buffer_manager.insert_char(" ")
+                await self._leave_agent_mention_menu(keep_buffer=True)
+                return True
+            if key_press.char and key_press.char.isprintable():
+                self.buffer_manager.insert_char(key_press.char)
+                await self._update_agent_mention_filter()
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error handling agent mention keypress: {e}")
             await self.exit_command_mode()
             return False
 
@@ -340,6 +451,161 @@ class CommandModeHandler:
             logger.error(f"Error handling menu popup keypress: {e}")
             await self.exit_command_mode()
             return False
+
+    async def _get_available_agents(self) -> List[Dict[str, Any]]:
+        """Load online and runnable Hub identities through the state service."""
+        services = []
+        try:
+            get_service = getattr(self.event_bus, "get_service", None)
+            if callable(get_service):
+                services = [
+                    get_service("state_service"),
+                    get_service("hub_plugin"),
+                ]
+        except Exception as e:
+            logger.debug("Unable to resolve Hub services for @ menu: %s", e)
+
+        for service in services:
+            if service is None:
+                continue
+            loader = getattr(service, "list_hub_agents", None)
+            if not callable(loader):
+                loader = getattr(service, "list_agent_targets", None)
+            if not callable(loader):
+                continue
+            try:
+                result = await loader()
+            except Exception as e:
+                logger.debug("Unable to load Hub agent targets: %s", e)
+                continue
+
+            if isinstance(result, dict):
+                result = result.get("agents", [])
+            if not isinstance(result, list):
+                continue
+
+            agents = [dict(item) for item in result if isinstance(item, dict)]
+            return sorted(
+                agents,
+                key=lambda item: (
+                    str(item.get("status", "offline")).lower() != "online",
+                    str(item.get("identity", item.get("name", ""))).lower(),
+                ),
+            )
+
+        return []
+
+    @staticmethod
+    def _agent_menu_items(agents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert Hub target records to the existing menu renderer shape."""
+        items: List[Dict[str, Any]] = []
+        for agent in agents:
+            identity = str(agent.get("identity", agent.get("name", ""))).strip()
+            if not identity:
+                continue
+
+            status = str(agent.get("status", "offline")).strip().lower()
+            state = str(agent.get("state", "")).strip().lower()
+            if status == "online":
+                state_text = state or "online"
+                description = f"online · {state_text}"
+                current_task = str(agent.get("current_task", "")).strip()
+                if current_task:
+                    description += f" · {current_task}"
+            else:
+                description = "offline · select and send to run"
+
+            personality = str(agent.get("description", "")).strip()
+            if personality and status != "online":
+                description += f" · {personality}"
+
+            items.append(
+                {
+                    "name": identity,
+                    "description": description,
+                    "aliases": [],
+                    "category": "agent",
+                    "plugin": "hub",
+                    "icon": "@",
+                    "subcommands": [],
+                    "_prefix": "@",
+                    "_agent": agent,
+                }
+            )
+        return items
+
+    async def _update_agent_mention_filter(self) -> None:
+        """Filter the agent menu from the text after the leading ``@``."""
+        current_input = self.buffer_manager.content
+        filter_text = (
+            current_input[1:] if current_input.startswith("@") else current_input
+        )
+        needle = filter_text.lower()
+        filtered_agents = []
+        for agent in self._available_agents:
+            identity = str(agent.get("identity", agent.get("name", "")))
+            description = str(agent.get("description", ""))
+            if (
+                not needle
+                or needle in identity.lower()
+                or needle in description.lower()
+            ):
+                filtered_agents.append(agent)
+
+        filtered_items = self._agent_menu_items(filtered_agents)
+        self.selected_command_index = 0
+        self.command_menu_renderer.set_selected_index(0)
+        self.command_menu_renderer.filter_commands(filtered_items, filter_text)
+
+        await self.event_bus.emit_with_hooks(
+            EventType.COMMAND_MENU_FILTER,
+            {
+                "filter_text": filter_text,
+                "available_agents": self._available_agents,
+                "filtered_agents": filtered_agents,
+                "mention": True,
+            },
+            "agents",
+        )
+
+        if self._update_display_callback:
+            await self._update_display_callback(force_render=True)
+
+    async def _select_agent_mention(self) -> None:
+        """Insert the highlighted identity and return to message input."""
+        selected = self.command_menu_renderer.get_selected_command()
+        if not selected or selected.get("is_subcommand"):
+            logger.warning("Agent mention menu has no selectable target")
+            return
+
+        identity = str(selected.get("name", "")).strip()
+        if not identity:
+            return
+
+        self.buffer_manager.clear()
+        for char in f"@{identity} ":
+            self.buffer_manager.insert_char(char)
+        await self._leave_agent_mention_menu(keep_buffer=True)
+
+    async def _leave_agent_mention_menu(self, *, keep_buffer: bool) -> None:
+        """Close the @ menu, optionally retaining the selected input text."""
+        self.command_menu_renderer.hide_menu()
+        if self.command_menu_active:
+            await self.event_bus.emit_with_hooks(
+                EventType.COMMAND_MENU_HIDE,
+                {"reason": "agent_target_selected", "mention": True},
+                "agents",
+            )
+
+        self.command_mode = CommandMode.NORMAL
+        self.command_menu_active = False
+        self.agent_mention_active = False
+        self._available_agents = []
+        if not keep_buffer:
+            self.buffer_manager.clear()
+
+        if self._update_display_callback:
+            await self._update_display_callback(force_render=True)
 
     async def handle_status_takeover_input(self, char: str) -> bool:
         """Handle input during status area takeover mode.

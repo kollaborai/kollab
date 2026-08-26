@@ -426,6 +426,24 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             return {"error": str(e)}
         return {"text": text}
 
+    async def _list_hub_agents(params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            agents = await state_service.list_hub_agents()
+        except Exception as e:
+            return {"error": str(e)}
+        return {"agents": agents if isinstance(agents, list) else []}
+
+    async def _send_hub_user_message(params: dict[str, Any]) -> dict[str, Any]:
+        target = params.get("target", "")
+        content = params.get("content", "")
+        if not target or not content:
+            return {"error": "target and content are required"}
+        try:
+            text = await state_service.send_hub_user_message(target, content)
+        except Exception as e:
+            return {"error": str(e)}
+        return {"text": text}
+
     async def _hub_broadcast(params: dict[str, Any]) -> dict[str, Any]:
         content = params.get("content", "")
         force = params.get("force", False)
@@ -499,6 +517,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_hub_work_text": _get_hub_work_text,
         # Phase 4.6: hub writes (msg/broadcast from attach client)
         "state.hub_send_msg": _hub_send_msg,
+        "state.list_hub_agents": _list_hub_agents,
+        "state.send_hub_user_message": _send_hub_user_message,
         "state.hub_broadcast": _hub_broadcast,
         # Phase 4.6: cancel (ESC in attach mode)
         "state.cancel_current_request": _cancel_current_request,

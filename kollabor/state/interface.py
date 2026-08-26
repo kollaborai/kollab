@@ -560,6 +560,18 @@ class StateService(Protocol):
         """
         ...
 
+    async def list_hub_agents(self) -> list[dict[str, Any]]:
+        """Return online and runnable Hub identities for the TUI mention menu."""
+        ...
+
+    async def send_hub_user_message(self, target: str, content: str) -> str:
+        """Send a direct operator message to a Hub identity.
+
+        The Hub owns the sender metadata and decides whether an offline
+        identity should be started with the message as its initial task.
+        """
+        ...
+
     async def hub_broadcast(self, content: str, force: bool = False) -> str:
         """Broadcast a hub message to all agents via the daemon.
 

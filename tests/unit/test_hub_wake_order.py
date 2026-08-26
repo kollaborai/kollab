@@ -119,6 +119,47 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(llm_service.conversation_history[-1].metadata["agent_hud"])
         self.assertEqual(event_bus.emitted[0][0], EventType.TRIGGER_LLM_CONTINUE)
 
+    async def test_direct_operator_message_wakes_target_from_another_window(self):
+        """A direct @ message is not suppressed as passive human broadcast."""
+        llm_service = FakeLLMService()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._task_ledger = None
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="sapphire",
+            state="waiting",
+            waiting_since=1.0,
+            cooldown_until=2.0,
+            waiting_reason="standing by",
+        )
+
+        await plugin._on_message_received(
+            HubMessage(
+                action="message",
+                from_agent="human",
+                from_identity="malmazan",
+                to="sapphire",
+                content="Please work on x.",
+                scope=MessageScope.DIRECT.value,
+                metadata={
+                    "source_agent": "koordinator",
+                    "source": "tui",
+                    "operator_message": True,
+                },
+            )
+        )
+
+        self.assertEqual(event_bus.emitted[0][0], EventType.TRIGGER_LLM_CONTINUE)
+        self.assertEqual(len(llm_service.conversation_history), 1)
+        self.assertIn("Please work on x.", llm_service.conversation_history[0].content)
+        self.assertNotIn(
+            "human is typing in koordinator's window",
+            llm_service.conversation_history[0].content,
+        )
+
     async def test_pure_standing_by_ack_queues_hud_without_wake(self):
         llm_service = FakeLLMService()
         event_bus = FakeEventBus(llm_service)

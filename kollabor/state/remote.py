@@ -753,6 +753,38 @@ class RemoteStateService(StateService):
             raise ValueError(str(result["error"]))
         return str(result.get("text", ""))
 
+    async def list_hub_agents(self) -> list[dict[str, Any]]:
+        """Ask the daemon for online and runnable Hub identities."""
+        logger.debug("state rpc: list_hub_agents")
+        result = await self._rpc.call(
+            "state.list_hub_agents", {}, timeout=self._timeout
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"state.list_hub_agents expected dict, got {type(result).__name__}"
+            )
+        if "error" in result and result.get("error"):
+            raise ValueError(str(result["error"]))
+        agents = result.get("agents", [])
+        return agents if isinstance(agents, list) else []
+
+    async def send_hub_user_message(self, target: str, content: str) -> str:
+        """Ask the daemon to send a direct human-origin Hub message."""
+        logger.debug("state rpc: send_hub_user_message target=%r", target)
+        result = await self._rpc.call(
+            "state.send_hub_user_message",
+            {"target": target, "content": content},
+            timeout=self._timeout,
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                "state.send_hub_user_message expected dict, "
+                f"got {type(result).__name__}"
+            )
+        if "error" in result and result.get("error"):
+            raise ValueError(str(result["error"]))
+        return str(result.get("text", ""))
+
     async def hub_broadcast(self, content: str, force: bool = False) -> str:
         """Ask the daemon to broadcast a hub message to all agents."""
         logger.debug("state rpc: hub_broadcast")

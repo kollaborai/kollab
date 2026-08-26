@@ -84,6 +84,9 @@ class KeyPressHandler:
         self._enter_command_mode_callback: Optional[Callable[[], Awaitable[None]]] = (
             None
         )
+        self._enter_agent_mention_mode_callback: Optional[
+            Callable[[], Awaitable[None]]
+        ] = None
         self._handle_command_mode_keypress_callback: Optional[
             Callable[[KeyPress], Awaitable[bool]]
         ] = None
@@ -107,6 +110,7 @@ class KeyPressHandler:
     def set_callbacks(
         self,
         enter_command_mode: Optional[Callable[[], Awaitable[None]]] = None,
+        enter_agent_mention_mode: Optional[Callable[[], Awaitable[None]]] = None,
         handle_command_mode_keypress: Optional[
             Callable[[KeyPress], Awaitable[bool]]
         ] = None,
@@ -122,6 +126,7 @@ class KeyPressHandler:
             show_help_overlay: Callback to show help overlay.
         """
         self._enter_command_mode_callback = enter_command_mode
+        self._enter_agent_mention_mode_callback = enter_agent_mention_mode
         self._handle_command_mode_keypress_callback = handle_command_mode_keypress
         self._expand_paste_placeholders_callback = expand_paste_placeholders
         self._show_help_overlay_callback = show_help_overlay
@@ -207,6 +212,22 @@ class KeyPressHandler:
                 else:
                     logger.warning(
                         "Slash command detected but no enter_command_mode callback set"
+                    )
+                return
+
+            # Check for Hub agent mention initiation. Keep this parallel to
+            # slash mode so the leading @ is never sent to the LLM as prose.
+            if (
+                char == "@"
+                and self.buffer_manager.is_empty
+                and self.command_mode == CommandMode.NORMAL
+            ):
+                logger.debug("Agent mention detected - opening agent menu")
+                if self._enter_agent_mention_mode_callback:
+                    await self._enter_agent_mention_mode_callback()
+                else:
+                    logger.warning(
+                        "Agent mention detected but no agent menu callback set"
                     )
                 return
 
@@ -641,8 +662,7 @@ class KeyPressHandler:
         now = time.monotonic()
         window_active = (
             self._ctrl_c_first_press_time > 0
-            and now - self._ctrl_c_first_press_time
-            <= self._ctrl_c_window_seconds
+            and now - self._ctrl_c_first_press_time <= self._ctrl_c_window_seconds
         )
 
         if window_active:
@@ -793,6 +813,24 @@ class KeyPressHandler:
                     logger.warning("No command mode handler or slash parser available")
                 return
 
+            # Direct Hub mentions are operator messages, not LLM turns. Route
+            # them through the state service so local and attach sessions use
+            # the same human-sender identity and wake/spawn semantics.
+            if message.strip().startswith("@"):
+                if self._expand_paste_placeholders_callback:
+                    message = self._expand_paste_placeholders_callback(message)
+                else:
+                    message = self.paste_processor.expand_paste_placeholders(message)
+
+                logger.info(
+                    f"Detected agent mention from Enter handler: '{message[:120]}'"
+                )
+                self.buffer_manager.add_to_history(message)
+                self.renderer.input_buffer = ""
+                self.renderer.clear_active_area()
+                await self._handle_agent_mention(message)
+                return
+
             # Not a command - process as normal message with paste expansion
             # GENIUS PASTE BUCKET: Immediate expansion - no waiting needed!
             logger.debug(f"GENIUS SUBMIT: Original message: '{message}'")
@@ -845,6 +883,72 @@ class KeyPressHandler:
                 ErrorSeverity.HIGH,
                 {"buffer_manager": self.buffer_manager},
             )
+
+    async def _handle_agent_mention(self, message: str) -> None:
+        """Send a leading ``@agent message`` through the Hub state service."""
+        stripped = message.strip()
+        parts = stripped[1:].split(None, 1) if stripped.startswith("@") else []
+        if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+            await self._display_agent_message(
+                "usage: @agent <message>",
+                display_type="error",
+                success=False,
+            )
+            return
+
+        target = parts[0].strip()
+        content = parts[1].strip()
+        state_service = None
+        try:
+            get_service = getattr(self.event_bus, "get_service", None)
+            if callable(get_service):
+                state_service = get_service("state_service")
+        except Exception as e:
+            logger.debug("Unable to resolve state service for agent mention: %s", e)
+
+        sender = getattr(state_service, "send_hub_user_message", None)
+        if not callable(sender):
+            await self._display_agent_message(
+                "hub: direct agent messaging is unavailable",
+                display_type="error",
+                success=False,
+            )
+            return
+
+        try:
+            result = await sender(target, content)
+            result_text = str(result)
+            failed = result_text.lower().startswith(("error", "rejected", "hub:"))
+            await self._display_agent_message(
+                result_text,
+                display_type="error" if failed else "info",
+                success=not failed,
+            )
+        except Exception as e:
+            logger.error("Agent mention delivery failed: %s", e)
+            await self._display_agent_message(
+                f"hub: agent message failed: {e}",
+                display_type="error",
+                success=False,
+            )
+
+    async def _display_agent_message(
+        self, message: str, *, display_type: str, success: bool
+    ) -> None:
+        """Display the result of a direct agent operation in the status area."""
+        try:
+            await self.event_bus.emit_with_hooks(
+                EventType.COMMAND_OUTPUT_DISPLAY,
+                {
+                    "message": message,
+                    "display_type": display_type,
+                    "success": success,
+                    "source": "agent_mention",
+                },
+                "agent_mention",
+            )
+        except Exception as e:
+            logger.error("Unable to display agent mention result: %s", e)
 
     async def _handle_escape(self) -> None:
         """Handle Escape key press for request cancellation."""

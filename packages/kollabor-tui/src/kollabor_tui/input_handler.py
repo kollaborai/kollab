@@ -208,6 +208,7 @@ class InputHandler:
         # KeyPressHandler callbacks
         self._key_press_handler.set_callbacks(
             enter_command_mode=self._command_mode_handler.enter_command_mode,
+            enter_agent_mention_mode=self._command_mode_handler.enter_agent_mention_mode,
             handle_command_mode_keypress=self._command_mode_handler.handle_command_mode_keypress,
             expand_paste_placeholders=self._paste_processor.expand_paste_placeholders,
             show_help_overlay=self._show_help_overlay,

@@ -60,6 +60,15 @@ export type AgentPoolEntry = {
   current_task?: string;
 };
 
+export type SlashParameter = {
+  name: string;
+  type?: string;
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  choices?: string[];
+};
+
 export type SlashSubcommand = {
   name: string;
   args?: string;
@@ -75,6 +84,7 @@ export type SlashCommand = {
   icon?: string;
   mode?: string;
   enabled?: boolean;
+  parameters?: SlashParameter[];
   subcommands?: SlashSubcommand[];
 };
 
@@ -91,13 +101,42 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "status", description: "Show session and runtime status" },
   {
     name: "permissions",
-    description: "Show or change tool permission settings",
-    aliases: ["permission"],
+    description: "Manage tool execution permissions",
+    aliases: ["perms", "security", "permission"],
+    category: "system",
+    subcommands: [
+      { name: "show", description: "Show current permission settings" },
+      {
+        name: "default",
+        description: "Use DEFAULT mode (HIGH risk only)",
+      },
+      {
+        name: "strict",
+        description: "Use CONFIRM_ALL mode (prompt everything)",
+      },
+      {
+        name: "trust",
+        description: "Use TRUST_ALL mode (approve everything)",
+      },
+      { name: "stats", description: "Show permission statistics" },
+      { name: "clear", description: "Clear session approvals" },
+    ],
   },
   {
     name: "mode",
-    description: "Show or change the approval mode",
-    aliases: ["approval"],
+    description: "Switch terminal contrast mode for dark or light backgrounds",
+    aliases: ["contrast"],
+    category: "ui",
+    subcommands: [
+      {
+        name: "dark",
+        description: "Use light text for dark terminal backgrounds",
+      },
+      {
+        name: "light",
+        description: "Use dark text for light terminal backgrounds",
+      },
+    ],
   },
   { name: "model", description: "Choose the active model" },
   { name: "agent", description: "Manage the active agent" },
@@ -115,6 +154,8 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "cd", description: "Change the working directory" },
   { name: "compact", description: "Compact the current context" },
   { name: "version", description: "Show the Kollab version" },
+  { name: "restart", description: "Clear conversation and start fresh session" },
+  { name: "upgrade", description: "Update Kollab to the latest release" },
 ];
 
 export type McpServer = {

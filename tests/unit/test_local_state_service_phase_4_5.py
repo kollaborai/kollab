@@ -185,6 +185,7 @@ class TestListCommands(unittest.IsolatedAsyncioTestCase):
                     "icon": "plug",
                     "mode": "instant",
                     "enabled": True,
+                    "parameters": [],
                     "subcommands": [
                         {
                             "name": "status",
@@ -195,6 +196,57 @@ class TestListCommands(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    async def test_parameter_choices_are_available_to_web_command_palette(self) -> None:
+        command = SimpleNamespace(
+            name="example",
+            description="Choose a mode",
+            aliases=(),
+            category=SimpleNamespace(value="system"),
+            plugin_name="system",
+            icon="",
+            mode=SimpleNamespace(value="instant"),
+            enabled=True,
+            parameters=(
+                SimpleNamespace(
+                    name="mode",
+                    type="choice",
+                    description="Select an execution mode",
+                    required=True,
+                    default="safe",
+                    choices=["safe", "fast"],
+                    validation=None,
+                ),
+            ),
+            subcommands=(),
+        )
+
+        class Registry:
+            def get_all_commands(self):
+                return [command]
+
+        class EventBus:
+            def get_service(self, name: str):
+                return Registry() if name == "command_registry" else None
+
+        service = LocalStateService(
+            llm_service=None,
+            profile_manager=MagicMock(),
+            event_bus=EventBus(),
+        )
+
+        result = await service.list_commands()
+
+        self.assertEqual(result[0]["parameters"], [
+            {
+                "name": "mode",
+                "type": "choice",
+                "description": "Select an execution mode",
+                "required": True,
+                "choices": ["safe", "fast"],
+                "default": "safe",
+            }
+        ])
 
 
 # === MCP global enable ===

@@ -80,6 +80,27 @@ def test_unselected_command_row_fills_background_for_readability():
         set_theme(original_theme)
 
 
+def test_agent_target_row_uses_at_prefix():
+    """Agent mention rows should render with @ while slash rows stay unchanged."""
+    menu = CommandMenuRenderer(SimpleNamespace(_app_config=None))
+    menu._get_menu_width = lambda: 72  # type: ignore[method-assign]
+
+    line = menu._format_command_line(
+        {
+            "name": "lapis",
+            "description": "offline · select and send to run",
+            "aliases": [],
+            "_prefix": "@",
+            "_is_selected": False,
+        },
+        "agent",
+    )
+
+    rendered = _strip_ansi(line)
+    assert "@lapis" in rendered
+    assert "/lapis" not in rendered
+
+
 def test_unselected_subcommand_row_fills_background_for_readability():
     """Subcommand text should stay legible when it is not selected."""
     original_theme = T().name
