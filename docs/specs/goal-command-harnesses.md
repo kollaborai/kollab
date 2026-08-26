@@ -24,14 +24,15 @@ The local installations were queried directly on 2026-08-25:
   `/Users/malmazan/dev/kollab`. Help documents interactive-by-default sessions,
   `-p/--print`, `--resume`, `--continue`, `--fork-session`, `--session-id`,
   `--no-session-persistence`, `--permission-mode`, `--agent`, `--agents`,
-  `--bg/--background`, and the `agents` background-session manager. It does not
-  document a built-in `/goal` command.
+  `--bg/--background`, and the `agents` background-session manager. The
+  interactive `/goal` behavior is documented separately at the official URL
+  cited below rather than in these top-level help outputs.
 - `codex --version` -> `codex-cli 0.149.1`.
 - `codex --help`, `codex exec --help`, `codex resume --help`, `codex agents
   --help`, and `codex queue --help` were run locally. Help documents interactive
   sessions, `exec`, `resume`, `fork`, `queue`, `archive`, `delete`, `--ephemeral`,
   JSONL output, sandbox modes, approval policies, and remote app-server sessions.
-  It does not document a built-in `/goal` command.
+  The Goals lifecycle is documented in the official cookbook URL cited below.
 
 These command outputs are authoritative for the installed versions above. They
 are not evidence that undocumented slash commands do or do not exist. Public
