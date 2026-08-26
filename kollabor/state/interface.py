@@ -120,6 +120,12 @@ class StateService(Protocol):
         """Return daemon-level system info (cwd, git branch, pid, uptime)."""
         ...
 
+    # === Command catalog ===
+
+    async def list_commands(self) -> list[dict[str, Any]]:
+        """Return visible slash-command metadata for interactive clients."""
+        ...
+
     # === Writes (phase 4) ===
     #
     # Writes are synchronous from the caller's perspective: the user

@@ -138,6 +138,65 @@ class TestSessionStatsCacheCounters(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.total_cache_creation_tokens, 77)
 
 
+class TestListCommands(unittest.IsolatedAsyncioTestCase):
+    async def test_projects_visible_registry_metadata_for_clients(self) -> None:
+        command = SimpleNamespace(
+            name="mcp",
+            description="Show MCP server status",
+            aliases=("servers",),
+            category=SimpleNamespace(value="system"),
+            plugin_name="system",
+            icon="plug",
+            mode=SimpleNamespace(value="instant"),
+            enabled=True,
+            hidden=False,
+            subcommands=(
+                SimpleNamespace(
+                    name="status",
+                    args="[server]",
+                    description="Show one server",
+                ),
+            ),
+        )
+
+        class Registry:
+            def get_all_commands(self):
+                return [command]
+
+        class EventBus:
+            def get_service(self, name: str):
+                return Registry() if name == "command_registry" else None
+
+        service = LocalStateService(
+            llm_service=None,
+            profile_manager=MagicMock(),
+            event_bus=EventBus(),
+        )
+
+        self.assertEqual(
+            await service.list_commands(),
+            [
+                {
+                    "name": "mcp",
+                    "description": "Show MCP server status",
+                    "aliases": ["servers"],
+                    "category": "system",
+                    "plugin": "system",
+                    "icon": "plug",
+                    "mode": "instant",
+                    "enabled": True,
+                    "subcommands": [
+                        {
+                            "name": "status",
+                            "args": "[server]",
+                            "description": "Show one server",
+                        }
+                    ],
+                }
+            ],
+        )
+
+
 # === MCP global enable ===
 
 

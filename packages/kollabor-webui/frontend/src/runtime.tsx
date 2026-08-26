@@ -4,11 +4,10 @@ import {
   type ThreadMessageLike,
   unstable_createMessageConverter as createMessageConverter,
   useAssistantTransportRuntime,
-  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   EngineApi,
   HistoryMessage,
@@ -270,6 +269,52 @@ const converter = (
   };
 };
 
+type ThreadReadyRuntime = {
+  thread: {
+    getState: () => { messages: readonly ThreadMessageLike[] };
+  };
+};
+
+function InitialMessagesGate({
+  runtime,
+  messages,
+  children,
+}: {
+  runtime: ThreadReadyRuntime;
+  messages: readonly ThreadMessageLike[];
+  children: ReactNode;
+}) {
+  const [ready, setReady] = useState(messages.length === 0);
+
+  useEffect(() => {
+    let attempts = 0;
+    let retry: number | undefined;
+    const hydrate = () => {
+      if (
+        runtime.thread.getState().messages.length >= messages.length ||
+        attempts >= 20
+      ) {
+        // Give the provider's assistant-ui adapter one commit to publish the
+        // bound thread state before Thread reads its empty-state selector.
+        retry = window.setTimeout(() => setReady(true), 50);
+        return;
+      }
+      attempts += 1;
+      retry = window.setTimeout(hydrate, 10);
+    };
+
+    // The remote thread runtime is bound by AssistantRuntimeProvider after
+    // this component mounts. Wait for that binding before mounting Thread so
+    // its initial empty-state selector cannot stick after a full reload.
+    hydrate();
+    return () => {
+      if (retry !== undefined) window.clearTimeout(retry);
+    };
+  }, [messages.length, runtime]);
+
+  return ready ? children : null;
+}
+
 export function EngineRuntimeProvider({
   api,
   sessionId,
@@ -315,11 +360,15 @@ export function EngineRuntimeProvider({
     },
   });
 
-  const aui = useAui();
   return (
-    <AssistantRuntimeProvider aui={aui} runtime={runtime}>
-      <PermissionToolUI />
-      {children}
+    <AssistantRuntimeProvider runtime={runtime}>
+      <InitialMessagesGate
+        runtime={runtime}
+        messages={initialState.messages}
+      >
+        <PermissionToolUI />
+        {children}
+      </InitialMessagesGate>
     </AssistantRuntimeProvider>
   );
 }

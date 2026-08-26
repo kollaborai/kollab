@@ -40,6 +40,11 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  APPROVAL_MODE_OPTIONS,
+  formatApprovalMode,
+  normalizeApprovalMode,
+} from "@/utils/approval-mode";
 import { formatSessionName } from "@/utils/session-display";
 import {
   Select,
@@ -48,31 +53,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
-const APPROVAL_MODES = [
-  "confirm_all",
-  "default",
-  "auto_approve_edits",
-  "trust_all",
-] as const;
-
-// GET /sessions serialises approval_mode as the ApprovalMode enum's integer
-// value (auto(): DEFAULT=1, CONFIRM_ALL=2, AUTO_APPROVE_EDITS=3, TRUST_ALL=4),
-// while POST /permissions/mode takes the lowercase string. /permissions returns
-// the SCREAMING_CASE name. Normalise all three so the Select never renders a
-// raw "2".
-const MODE_BY_ORDINAL: Record<string, string> = {
-  "1": "default",
-  "2": "confirm_all",
-  "3": "auto_approve_edits",
-  "4": "trust_all",
-};
-
-function normalizeApprovalMode(value: unknown): string {
-  if (value === null || value === undefined) return "confirm_all";
-  const raw = String(value);
-  return MODE_BY_ORDINAL[raw] ?? raw.toLowerCase();
-}
 
 export function SessionToolbar({
   api,
@@ -136,7 +116,7 @@ export function SessionToolbar({
       const response = await api.setApprovalMode(session.session_id, next);
       const resolved = normalizeApprovalMode(response.mode || next);
       setMode(resolved);
-      onStatus(`Approval mode: ${resolved}`);
+      onStatus(`Approval mode: ${formatApprovalMode(resolved)}`);
     } catch (error) {
       setMode(normalizeApprovalMode(session.approval_mode));
       fail(error);
@@ -237,12 +217,12 @@ export function SessionToolbar({
 
       <Select value={mode} onValueChange={(next) => void changeMode(next)}>
         <SelectTrigger size="sm" className="w-[11rem]" aria-label="Approval mode">
-          <SelectValue />
+          <SelectValue>{formatApprovalMode(mode)}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          {APPROVAL_MODES.map((value) => (
+          {APPROVAL_MODE_OPTIONS.map(({ value, label }) => (
             <SelectItem key={value} value={value}>
-              {value}
+              {label}
             </SelectItem>
           ))}
         </SelectContent>

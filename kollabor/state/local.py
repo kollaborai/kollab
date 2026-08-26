@@ -71,6 +71,86 @@ def parse_hub_mention(text: str) -> tuple[str, str] | None:
     return (target, content) if content else None
 
 
+def _web_command_output(result: Any, command_name: str) -> str:
+    """Render terminal UI command results as visible web-chat Markdown.
+
+    The command registry is shared with the terminal, where ``ui_config`` is
+    consumed by a status/modal renderer. The browser has no terminal renderer,
+    so keep the same command result but project its structured sections into
+    the assistant message instead of returning only "opened".
+    """
+    message = str(getattr(result, "message", "") or "")
+    ui_config = getattr(result, "ui_config", None)
+    modal_config = getattr(ui_config, "modal_config", None)
+    if not isinstance(modal_config, dict):
+        return message or (
+            f"/{command_name} completed."
+            if getattr(result, "success", False)
+            else f"/{command_name} failed."
+        )
+
+    title = str(
+        modal_config.get("title")
+        or getattr(ui_config, "title", "")
+        or command_name.title()
+    ).strip()
+    lines = [f"### {title}"]
+    rendered_section = False
+
+    sections = modal_config.get("sections")
+    if isinstance(sections, list):
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            section_lines: list[str] = []
+
+            commands = section.get("commands")
+            if isinstance(commands, list):
+                for command in commands:
+                    if not isinstance(command, dict):
+                        continue
+                    name = str(command.get("name") or "").strip()
+                    description = str(command.get("description") or "").strip()
+                    if not name:
+                        continue
+                    suffix = f" — {description}" if description else ""
+                    section_lines.append(f"- **`{name}`**{suffix}")
+
+            widgets = section.get("widgets")
+            if isinstance(widgets, list):
+                for widget in widgets:
+                    if not isinstance(widget, dict):
+                        continue
+                    label = str(widget.get("label") or "").strip()
+                    value = str(widget.get("value") or "").strip()
+                    if label:
+                        section_lines.append(
+                            f"- **{label}:** {value or 'not available'}"
+                        )
+
+            if not section_lines:
+                continue
+            section_title = str(section.get("title") or "").strip()
+            if section_title:
+                lines.append(f"#### {section_title}")
+            lines.extend(section_lines)
+            rendered_section = True
+
+    if not rendered_section:
+        return message or (
+            f"/{command_name} completed."
+            if getattr(result, "success", False)
+            else f"/{command_name} failed."
+        )
+
+    footer = str(
+        modal_config.get("footer") or getattr(ui_config, "footer", "") or ""
+    ).strip()
+    if footer:
+        lines.extend(["", f"_{footer}_"])
+    return "\n".join(lines)
+
+
 class LocalStateService(StateService):
     """In-process StateService backed by the existing kollabor services.
 
@@ -810,6 +890,78 @@ class LocalStateService(StateService):
             command_categories=command_categories,
             plugin_count=plugin_count,
         )
+
+    # === Command catalog ===
+
+    async def list_commands(self) -> list[dict[str, Any]]:
+        """Return the daemon's visible command registry in JSON-safe form.
+
+        The browser must discover the same core and plugin commands as the
+        terminal. Keep this projection here instead of duplicating command
+        names in the web client, and deliberately use ``get_all_commands`` so
+        hidden commands retain the registry's existing visibility rules.
+        """
+        if self._event_bus is None:
+            return []
+        try:
+            registry = self._event_bus.get_service("command_registry")
+        except Exception as exc:
+            logger.debug("command registry lookup failed: %s", exc)
+            return []
+        if registry is None or not hasattr(registry, "get_all_commands"):
+            return []
+
+        try:
+            commands = registry.get_all_commands()
+        except Exception as exc:
+            logger.debug("command catalog lookup failed: %s", exc)
+            return []
+
+        catalog: list[dict[str, Any]] = []
+        for command in commands or []:
+            name = str(getattr(command, "name", "") or "").strip()
+            if not name:
+                continue
+
+            aliases = getattr(command, "aliases", ()) or ()
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            else:
+                aliases = list(aliases)
+
+            subcommands: list[dict[str, str]] = []
+            for subcommand in getattr(command, "subcommands", ()) or ():
+                sub_name = str(getattr(subcommand, "name", "") or "").strip()
+                if not sub_name:
+                    continue
+                subcommands.append(
+                    {
+                        "name": sub_name,
+                        "args": str(getattr(subcommand, "args", "") or ""),
+                        "description": str(
+                            getattr(subcommand, "description", "") or ""
+                        ),
+                    }
+                )
+
+            category = getattr(command, "category", "")
+            category = getattr(category, "value", category)
+            mode = getattr(command, "mode", "")
+            mode = getattr(mode, "value", mode)
+            catalog.append(
+                {
+                    "name": name,
+                    "description": str(getattr(command, "description", "") or ""),
+                    "aliases": [str(alias) for alias in aliases if str(alias)],
+                    "category": str(category or ""),
+                    "plugin": str(getattr(command, "plugin_name", "") or ""),
+                    "icon": str(getattr(command, "icon", "") or ""),
+                    "mode": str(mode or ""),
+                    "enabled": bool(getattr(command, "enabled", True)),
+                    "subcommands": subcommands,
+                }
+            )
+        return catalog
 
     # === Writes (phase 4) ===
 
@@ -2037,10 +2189,11 @@ class LocalStateService(StateService):
         # so /help, /mcp, /profile, and plugin commands were treated as prose.
         parser = None
         executor = None
-        if self._event_bus is not None:
+        event_bus = getattr(self, "_event_bus", None)
+        if event_bus is not None:
             try:
-                parser = self._event_bus.get_service("slash_parser")
-                executor = self._event_bus.get_service("command_executor")
+                parser = event_bus.get_service("slash_parser")
+                executor = event_bus.get_service("command_executor")
             except Exception:
                 parser = executor = None
         if (
@@ -2131,13 +2284,7 @@ class LocalStateService(StateService):
             if command is None:
                 raise ValueError(f"Could not parse slash command: {text}")
             result = await executor.execute_command(command, self._event_bus)
-            output = str(getattr(result, "message", "") or "")
-            if not output:
-                output = (
-                    f"/{command.name} completed."
-                    if getattr(result, "success", False)
-                    else f"/{command.name} failed."
-                )
+            output = _web_command_output(result, command.name)
             metadata = {
                 "slash_command": text,
                 "command_success": bool(getattr(result, "success", False)),

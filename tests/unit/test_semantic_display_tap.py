@@ -246,8 +246,127 @@ class TestToolCountAccounting:
         assert executor.take_executed_count() == 1
 
 
+class TestWebCommandOutput:
+    def test_formats_label_panels_for_the_chat(self):
+        from types import SimpleNamespace
+
+        from kollabor.state.local import _web_command_output
+
+        result = SimpleNamespace(
+            success=True,
+            message="System status opened",
+            ui_config=SimpleNamespace(
+                title="System Status",
+                modal_config={
+                    "sections": [
+                        {
+                            "title": "Session",
+                            "widgets": [
+                                {"label": "Agent", "value": "lapis"},
+                                {"label": "Permissions", "value": "TRUST_ALL"},
+                            ],
+                        }
+                    ],
+                    "footer": "Esc to close",
+                },
+            ),
+        )
+
+        output = _web_command_output(result, "status")
+
+        assert output == (
+            "### System Status\n"
+            "#### Session\n"
+            "- **Agent:** lapis\n"
+            "- **Permissions:** TRUST_ALL\n\n"
+            "_Esc to close_"
+        )
+
+
 class TestSendMessage:
     """state.send_message must return on acceptance, not on turn completion."""
+
+    @pytest.mark.asyncio
+    async def test_routes_slash_commands_to_the_registered_executor(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from kollabor.state.local import LocalStateService
+
+        class FakeLlm:
+            is_processing = False
+
+            def __init__(self) -> None:
+                self.messages: list[tuple[str, str, dict[str, str]]] = []
+                self.task = None
+
+            def create_background_task(self, coro, *, name: str):
+                self.task = asyncio.create_task(coro, name=name)
+                return self.task
+
+            async def process_user_input(self, _text: str):
+                raise AssertionError("slash commands must not invoke the LLM")
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                self.messages.append((role, content, metadata))
+
+        class FakeEventBus:
+            def __init__(self, parser, executor) -> None:
+                self.services = {
+                    "slash_parser": parser,
+                    "command_executor": executor,
+                }
+
+            def get_service(self, name: str):
+                return self.services[name]
+
+        parser = SimpleNamespace(
+            is_slash_command=lambda text: text.strip().startswith("/"),
+            parse_command=lambda text: SimpleNamespace(name=text.strip()[1:]),
+        )
+        executor = SimpleNamespace(
+            execute_command=AsyncMock(
+                return_value=SimpleNamespace(
+                    success=True,
+                    message="Help opened in status modal",
+                    ui_config=SimpleNamespace(
+                        title="Available Commands",
+                        footer="Esc to close",
+                        modal_config={
+                            "sections": [
+                                {
+                                    "title": "System Commands",
+                                    "commands": [
+                                        {
+                                            "name": "/help",
+                                            "description": "Show available commands",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    ),
+                )
+            )
+        )
+        llm = FakeLlm()
+        service = LocalStateService(
+            llm,
+            object(),
+            event_bus=FakeEventBus(parser, executor),
+        )
+
+        response = await service.send_message("/help")
+
+        assert response == {"accepted": True, "reason": "slash command"}
+        await llm.task
+        executor.execute_command.assert_awaited_once()
+        assert [role for role, _, _ in llm.messages] == ["user", "assistant"]
+        assert llm.messages[0][1] == "/help"
+        assert "### Available Commands" in llm.messages[1][1]
+        assert "**`/help`**" in llm.messages[1][1]
+        assert "Show available commands" in llm.messages[1][1]
+        assert "Help opened in status modal" not in llm.messages[1][1]
 
     @pytest.mark.asyncio
     async def test_returns_before_the_turn_finishes(self):

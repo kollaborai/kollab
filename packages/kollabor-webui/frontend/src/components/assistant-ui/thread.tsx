@@ -5,6 +5,10 @@ import {
   ComposerAttachments,
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
+import {
+  ComposerPalette,
+  type ComposerPaletteItem,
+} from "@/components/assistant-ui/composer-palette";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import {
@@ -23,6 +27,7 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import type { AgentPoolEntry, SlashCommand } from "@/api";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -55,6 +60,7 @@ import {
 import {
   createContext,
   useContext,
+  useMemo,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -83,6 +89,8 @@ export type ThreadComponents = {
 
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
+  agents?: readonly AgentPoolEntry[] | undefined;
+  commands?: readonly SlashCommand[] | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -96,17 +104,25 @@ const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 &&
   (!s.thread.isLoading || s.threads.isLoading);
 
-export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
+export const Thread: FC<ThreadProps> = ({
+  components = EMPTY_COMPONENTS,
+  agents = [],
+  commands = [],
+}) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} />
+      <ThreadRoot isEmpty={isEmpty} agents={agents} commands={commands} />
     </ThreadComponentsContext.Provider>
   );
 };
 
-const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
+const ThreadRoot: FC<{
+  isEmpty: boolean;
+  agents: readonly AgentPoolEntry[];
+  commands: readonly SlashCommand[];
+}> = ({ isEmpty, agents, commands }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
 
   return (
@@ -153,7 +169,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <Composer />
+            <Composer agents={agents} commands={commands} />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -225,29 +241,136 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
-const Composer: FC = () => {
+const Composer: FC<{
+  agents: readonly AgentPoolEntry[];
+  commands: readonly SlashCommand[];
+}> = ({ agents, commands }) => {
+  const commandItems = useMemo<readonly ComposerPaletteItem[]>(
+    () =>
+      commands
+        .filter((command) => command.enabled !== false && command.name)
+        .map((command) => {
+          const aliases = command.aliases?.filter(Boolean) ?? [];
+          const subcommands =
+            command.subcommands?.filter((item) => item.name) ?? [];
+          const subcommandText = subcommands
+            .map((item) => `${item.name} ${item.description ?? ""}`)
+            .join(" ");
+          return {
+            id: command.name,
+            label: prettyCommandName(command.name),
+            description:
+              command.description ||
+              (subcommands.length > 0
+                ? `${subcommands.length} subcommand${subcommands.length === 1 ? "" : "s"}`
+                : "Run this command"),
+            type: "command" as const,
+            searchText: [command.name, ...aliases, subcommandText]
+              .filter(Boolean)
+              .join(" "),
+            secondary:
+              aliases.length > 0
+                ? aliases.map((alias) => `/${alias}`).join(" · ")
+                : undefined,
+            icon: "command" as const,
+          };
+        }),
+    [commands],
+  );
+
+  const agentItems = useMemo<readonly ComposerPaletteItem[]>(() => {
+    const onlineAgents = agents
+      .filter((agent) => agent.name && agent.available !== false)
+      .map((agent) => ({
+        id: agent.name,
+        label: agent.name,
+        description:
+          agent.personality ||
+          agent.role_aliases?.filter(Boolean).join(" · ") ||
+          agent.agent_type ||
+          "Online Kollab agent",
+        type: "agent" as const,
+        searchText: [
+          agent.name,
+          agent.identity,
+          agent.agent_type,
+          agent.personality,
+          ...(agent.role_aliases ?? []),
+        ]
+          .filter(Boolean)
+          .join(" "),
+        status: "online",
+        icon: "agent" as const,
+      }));
+    return [
+      {
+        id: "broadcast",
+        label: "Broadcast",
+        description: "Send a message to every online agent",
+        type: "agent" as const,
+        searchText: "broadcast all everyone",
+        status: "online",
+        icon: "broadcast" as const,
+      },
+      ...onlineAgents,
+    ];
+  }, [agents]);
+
   return (
-    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone asChild>
-        <div
-          data-slot="aui_composer-shell"
-          className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
-        >
-          <ComposerAttachments />
-          <ComposerPrimitive.Input
-            placeholder="Send a message..."
-            className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
-            rows={1}
-            autoFocus
-            enterKeyHint="send"
-            aria-label="Message input"
-          />
-          <ComposerAction />
-        </div>
-      </ComposerPrimitive.AttachmentDropzone>
-    </ComposerPrimitive.Root>
+    <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+      <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
+        <ComposerPalette
+          char="/"
+          items={commandItems}
+          title="Commands"
+          emptyMessage="No matching commands"
+          emptyHint="Keep typing to refine the command search."
+        />
+        <ComposerPalette
+          char="@"
+          items={agentItems}
+          title="Message an agent"
+          emptyMessage="No online agents"
+          emptyHint="Try @broadcast to reach every online agent."
+        />
+        <ComposerPrimitive.AttachmentDropzone asChild>
+          <div
+            data-slot="aui_composer-shell"
+            className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
+          >
+            <ComposerAttachments />
+            <ComposerPrimitive.Input
+              placeholder="Send a message..."
+              className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
+              rows={1}
+              autoFocus
+              enterKeyHint="send"
+              aria-label="Message input"
+            />
+            <ComposerAction />
+          </div>
+        </ComposerPrimitive.AttachmentDropzone>
+      </ComposerPrimitive.Root>
+    </ComposerPrimitive.Unstable_TriggerPopoverRoot>
   );
 };
+
+function prettyCommandName(name: string): string {
+  const words = name
+    .replace(/[-_]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return words
+    .map((word) => {
+      const lower = word.toLowerCase();
+      if (["api", "cli", "id", "mcp", "ui", "url"].includes(lower)) {
+        return lower.toUpperCase();
+      }
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
+}
 
 const ComposerAction: FC = () => {
   return (

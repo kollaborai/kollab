@@ -60,6 +60,63 @@ export type AgentPoolEntry = {
   current_task?: string;
 };
 
+export type SlashSubcommand = {
+  name: string;
+  args?: string;
+  description?: string;
+};
+
+export type SlashCommand = {
+  name: string;
+  description?: string;
+  aliases?: string[];
+  category?: string;
+  plugin?: string;
+  icon?: string;
+  mode?: string;
+  enabled?: boolean;
+  subcommands?: SlashSubcommand[];
+};
+
+// Keep the first paint useful when the browser is connected to an older
+// engine that does not expose GET /sessions/{id}/commands yet. A current
+// engine replaces this compatibility catalog with its complete core + plugin
+// registry as soon as the request resolves.
+export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
+  {
+    name: "help",
+    description: "Show available commands and usage",
+    aliases: ["h", "?"],
+  },
+  { name: "status", description: "Show session and runtime status" },
+  {
+    name: "permissions",
+    description: "Show or change tool permission settings",
+    aliases: ["permission"],
+  },
+  {
+    name: "mode",
+    description: "Show or change the approval mode",
+    aliases: ["approval"],
+  },
+  { name: "model", description: "Choose the active model" },
+  { name: "agent", description: "Manage the active agent" },
+  { name: "mcp", description: "Show MCP server status" },
+  { name: "context", description: "Show context and prompt details" },
+  { name: "skills", description: "List available agent skills" },
+  { name: "config", description: "Open system configuration" },
+  { name: "setup", description: "Run first-time setup" },
+  { name: "doctor", description: "Run a readiness check" },
+  { name: "login", description: "Sign in to a provider" },
+  { name: "llm", description: "Choose a model loadout" },
+  { name: "save", description: "Save the current conversation" },
+  { name: "resume", description: "Resume a saved conversation" },
+  { name: "terminal", description: "Manage terminal sessions" },
+  { name: "cd", description: "Change the working directory" },
+  { name: "compact", description: "Compact the current context" },
+  { name: "version", description: "Show the Kollab version" },
+];
+
 export type McpServer = {
   status: "connected" | "disconnected" | string;
   tool_count?: number;
@@ -222,6 +279,12 @@ export class EngineApi {
   getSessionState(sessionId: string) {
     return this.json<SessionState>(
       `/sessions/${encodeURIComponent(sessionId)}/state`,
+    );
+  }
+
+  listCommands(sessionId: string) {
+    return this.json<{ session_id: string; commands: SlashCommand[] }>(
+      `/sessions/${encodeURIComponent(sessionId)}/commands`,
     );
   }
 

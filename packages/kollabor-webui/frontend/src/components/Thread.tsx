@@ -1,5 +1,6 @@
 import type { FC } from "react";
 import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
+import type { AgentPoolEntry, SlashCommand } from "@/api";
 
 // kollab-branded welcome screen. Replaces the kit's generic ThreadWelcome via
 // the `components.Welcome` slot; everything else (messages, tool calls,
@@ -19,4 +20,13 @@ const Welcome: FC = () => (
 // (PermissionToolUI, mounted in runtime.tsx) resolve via `part.toolUI` inside
 // the kit's own AssistantMessage and take precedence over ToolFallback — see
 // components/assistant-ui/thread.tsx line ~398.
-export const Thread: FC = () => <AssistantThread components={{ Welcome }} />;
+export const Thread: FC<{
+  agents?: readonly AgentPoolEntry[];
+  commands?: readonly SlashCommand[];
+}> = ({ agents = [], commands = [] }) => (
+  <AssistantThread
+    components={{ Welcome }}
+    agents={agents}
+    commands={commands}
+  />
+);

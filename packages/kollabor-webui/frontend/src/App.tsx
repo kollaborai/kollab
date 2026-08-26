@@ -13,7 +13,9 @@ import {
 import {
   EngineApi,
   type AgentPoolEntry,
+  DEFAULT_SLASH_COMMANDS,
   type Profile,
+  type SlashCommand,
   type Session,
 } from "./api";
 import {
@@ -43,10 +45,12 @@ function hasPendingPermission(state: EngineState): boolean {
 function RuntimeShell({
   session,
   profiles,
+  agents,
   onSessionUpdated,
 }: {
   session: Session;
   profiles: Profile[];
+  agents: AgentPoolEntry[];
   onSessionUpdated: (session: Session) => void;
 }) {
   const runtimeState = useEngineRuntimeState();
@@ -55,9 +59,32 @@ function RuntimeShell({
   const model = profile?.model;
   const sessionLabel = formatSessionName(session.name, session.session_id);
   const [view, setView] = useState<SessionView>("chat");
+  const [commands, setCommands] = useState<SlashCommand[]>(
+    DEFAULT_SLASH_COMMANDS,
+  );
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
+
+  useEffect(() => {
+    let mounted = true;
+    setCommands(DEFAULT_SLASH_COMMANDS);
+    void api
+      .listCommands(session.session_id)
+      .then((result) => {
+        if (!mounted) return;
+        setCommands(
+          result.commands?.length ? result.commands : DEFAULT_SLASH_COMMANDS,
+        );
+      })
+      .catch(() => {
+        // Keep the first-paint compatibility catalog when an older daemon does
+        // not expose the live registry yet.
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [session.session_id]);
 
   return (
     <>
@@ -122,7 +149,7 @@ function RuntimeShell({
       </header>
       <div className="flex min-h-0 flex-1 flex-col">
         {view === "chat" ? (
-          <Thread />
+          <Thread agents={agents} commands={commands} />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} />
         )}
@@ -415,6 +442,7 @@ export default function App() {
             <RuntimeShell
               session={activeSession}
               profiles={profiles}
+              agents={agents}
               onSessionUpdated={(updated) => {
                 setSessions((current) =>
                   current.map((item) =>

@@ -47,6 +47,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.get_hub_state
         state.get_processing_state
         state.get_system_info
+        state.list_commands
         state.set_active_profile      (phase 4 write)
         state.set_approval_mode       (phase 4 write)
         state.get_active_agent        (phase 4.5 read)
@@ -123,6 +124,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
     async def _get_system_info(params: dict[str, Any]) -> dict[str, Any]:
         snapshot = await state_service.get_system_info()
         return snapshot.to_dict()
+
+    async def _list_commands(params: dict[str, Any]) -> dict[str, Any]:
+        return {"commands": await state_service.list_commands()}
 
     # === Writes (phase 4) ===
     # Both write handlers catch ValueError and return an {"error": ...}
@@ -456,6 +460,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_hub_state": _get_hub_state,
         "state.get_processing_state": _get_processing_state,
         "state.get_system_info": _get_system_info,
+        "state.list_commands": _list_commands,
         "state.set_active_profile": _set_active_profile,
         "state.set_approval_mode": _set_approval_mode,
         # Phase 4.5: agents / skills / system prompt

@@ -200,6 +200,21 @@ class RemoteStateService(StateService):
             )
         return SystemInfoSnapshot.from_dict(result)
 
+    # === Command catalog ===
+
+    async def list_commands(self) -> list[dict[str, Any]]:
+        """Fetch the daemon's visible slash-command catalog."""
+        logger.debug("state rpc: list_commands")
+        result = await self._rpc.call("state.list_commands", {}, timeout=self._timeout)
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"state.list_commands expected dict, got {type(result).__name__}"
+            )
+        commands = result.get("commands", [])
+        if not isinstance(commands, list):
+            raise TypeError("state.list_commands result missing 'commands' list")
+        return commands
+
     # === Writes (phase 4) ===
 
     async def set_active_profile(

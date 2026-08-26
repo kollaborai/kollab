@@ -366,6 +366,22 @@ async def get_session_state(session_id: str):
     }
 
 
+@router.get("/{session_id}/commands")
+async def list_session_commands(session_id: str):
+    """Return the daemon-owned visible slash-command catalog."""
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        commands = await session.state.list_commands()
+    except Exception as exc:
+        logger.error("Session %s command catalog failed: %s", session_id, exc)
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {exc}")
+    return {"session_id": session_id, "commands": commands}
+
+
 @router.post("/{session_id}/profile")
 async def set_session_profile(session_id: str, body: SetProfileRequest):
     """Switch the live daemon profile/model without restarting the session."""

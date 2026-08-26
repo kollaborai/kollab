@@ -7,6 +7,19 @@
 // API Client - Clean wrapper for all engine endpoints
 // ============================================================================
 
+const APPROVAL_MODE_LABELS = {
+  confirm_all: 'Confirm All',
+  default: 'Default',
+  auto_approve_edits: 'Auto-Approve Edits',
+  trust_all: 'Trust All',
+};
+
+function formatApprovalMode(mode) {
+  const normalized = String(mode || 'confirm_all').toLowerCase();
+  return APPROVAL_MODE_LABELS[normalized] || normalized.replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
 class EngineAPI {
   constructor(baseUrl) {
     this.baseUrl = baseUrl || 'http://127.0.0.1:7433';
@@ -543,7 +556,7 @@ class TerminalSession {
   async setMode(mode) {
     try {
       await this.api.setApprovalMode(this.id, mode);
-      this.printSuccess(`approval mode set to: ${mode}`);
+      this.printSuccess(`approval mode set to: ${formatApprovalMode(mode)}`);
     } catch (e) {
       this.printError(`failed to set mode: ${e.message}`);
     }
@@ -1399,10 +1412,10 @@ class TerminalManager {
       <div class="form-group">
         <label>Approval Mode</label>
         <select id="new-session-mode">
-          <option value="confirm_all">confirm_all</option>
-          <option value="default">default</option>
-          <option value="auto_approve_edits">auto_approve_edits</option>
-          <option value="trust_all">trust_all</option>
+          <option value="confirm_all">Confirm All</option>
+          <option value="default">Default</option>
+          <option value="auto_approve_edits">Auto-Approve Edits</option>
+          <option value="trust_all">Trust All</option>
         </select>
       </div>
       <div class="form-group">
