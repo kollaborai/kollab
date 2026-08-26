@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-25
+
+### Added
+
+- Added a Web UI trajectory view and richer session workflows, including model-aware
+  session navigation, command palettes, and improved tool-call presentation.
+- Added Hub agent mentions in terminal and Web UI composers, routing operator messages
+  directly to selected agents through the daemon-owned state service.
+
+### Changed
+
+- Made the system-prompt prefix byte-stable while moving per-turn volatile context to a
+  separate rail, improving prompt-cache reuse without losing live context.
+
+### Fixed
+
+- Fixed setup onboarding to run when providers are unavailable, attach-mode MCP widgets
+  to read daemon state, provider-facing error messages, custom-provider empty choices,
+  and OpenAI OAuth origin handling.
+
 ## [0.7.2] - 2026-08-22
 
 ### Fixed
