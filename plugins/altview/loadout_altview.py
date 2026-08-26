@@ -569,7 +569,7 @@ class LoadoutListAltView(AltView):
             if char in ("d", "D"):
                 self._trigger_delete()
                 return False
-            if char in ("s", "S"):
+            if char == "S":
                 self._trigger_set_default()
                 return False
 
