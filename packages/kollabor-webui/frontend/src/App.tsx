@@ -296,6 +296,7 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController();
+    const pollTimerRef = { current: null as number | null };
     const poll = async () => {
       while (!controller.signal.aborted) {
         try {
@@ -307,11 +308,14 @@ export default function App() {
         } catch {
           // Keep the last known sidebar while the daemon is unavailable.
         }
-        await waitForRetry(controller.signal, 3000, { current: null });
+        await waitForRetry(controller.signal, 3000, pollTimerRef);
       }
     };
     void poll();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
+    };
   }, [loadSessions]);
 
   useEffect(() => {
