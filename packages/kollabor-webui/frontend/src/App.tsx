@@ -407,7 +407,7 @@ export default function App() {
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return;
-      const next = result.at(-1);
+      const next = [...result].reverse().find((session) => session.attachable !== false);
       if (!next) {
         setActiveId(null);
         setInitialState(null);
