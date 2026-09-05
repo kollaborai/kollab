@@ -297,9 +297,20 @@ class TerminalLLMChat:
                 if default_loadout:
                     loadout_manager = LoadoutManager(self.profile_manager, config=self.config)
                     loadout, _ = loadout_manager.resolve(default_loadout)
-                    if loadout and self.profile_manager.update_profile(
-                        loadout.provider_profile, model=loadout.model, save_to_config=False
-                    ):
+                    if loadout:
+                        update_kwargs = {"model": loadout.model, "save_to_config": False}
+                        if loadout.temperature is not None:
+                            update_kwargs["temperature"] = loadout.temperature
+                        if loadout.effort:
+                            update_kwargs["effort"] = loadout.effort
+                        if loadout.max_tokens is not None:
+                            update_kwargs["max_tokens"] = loadout.max_tokens
+                        applied = self.profile_manager.update_profile(
+                            loadout.provider_profile, **update_kwargs
+                        )
+                    else:
+                        applied = False
+                    if loadout and applied:
                         self.profile_manager.set_active_profile(loadout.provider_profile, persist=False)
                         logger.info("Applied default loadout '%s'", loadout.name)
             except Exception as exc:

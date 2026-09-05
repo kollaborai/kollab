@@ -43,9 +43,11 @@ function waitForRetry(
 export function TrajectoryView({
   api,
   sessionId,
+  refreshSignal = 0,
 }: {
   api: EngineApi;
   sessionId: string;
+  refreshSignal?: number;
 }) {
   const [records, setRecords] = useState<TrajectoryRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -154,6 +156,10 @@ export function TrajectoryView({
       }
     };
   }, [api, refreshHistory, sessionId]);
+
+  useEffect(() => {
+    if (refreshSignal > 0) void refreshHistory();
+  }, [refreshHistory, refreshSignal]);
 
   useEffect(() => {
     if (selectedId && !records.some((record) => record.id === selectedId)) {

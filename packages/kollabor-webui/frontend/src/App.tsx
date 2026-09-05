@@ -26,6 +26,21 @@ import {
 } from "./runtime";
 import { formatSessionName } from "@/utils/session-display";
 
+function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timerRef.current = window.setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
 const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
 
@@ -47,11 +62,13 @@ function RuntimeShell({
   profiles,
   agents,
   onSessionUpdated,
+  refreshSignal,
 }: {
   session: Session;
   profiles: Profile[];
   agents: AgentPoolEntry[];
   onSessionUpdated: (session: Session) => void;
+  refreshSignal: number;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
@@ -151,7 +168,7 @@ function RuntimeShell({
         {view === "chat" ? (
           <Thread agents={agents} commands={commands} />
         ) : (
-          <TrajectoryView api={api} sessionId={session.session_id} />
+          <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
         )}
       </div>
     </>
@@ -169,6 +186,7 @@ export default function App() {
   const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
   const [error, setError] = useState<string | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
+  const [refreshSignal, setRefreshSignal] = useState(0);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
@@ -178,40 +196,18 @@ export default function App() {
     sessionId: string;
     controller: AbortController;
   } | null>(null);
+  const refreshSignalRef = useRef(0);
 
   const abortRecovery = useCallback(() => {
     recoveryRef.current?.controller.abort();
     recoveryRef.current = null;
   }, []);
 
+  // The persistent active-session stream below also covers pending turns after
+  // reload, so do not open a second recovery stream for the same session.
   const recoverPendingTurn = useCallback(
-    (sessionId: string, pending?: boolean) => {
+    (_sessionId: string, _pending?: boolean) => {
       abortRecovery();
-      if (pending === false) return;
-      const controller = new AbortController();
-      recoveryRef.current = { sessionId, controller };
-
-      // A daemon does not replay permission_request after reload. The prompt was
-      // restored from /permissions while loading initial state; now follow
-      // /events so this tab remains subscribed to the blocked turn until
-      // turn_complete. The assistant transport request created by
-      // PermissionToolUI has its own subscription for the answer and remaining
-      // output.
-      void api
-        .streamEvents(sessionId, controller.signal)
-        .catch((reason) => {
-          if (
-            !controller.signal.aborted &&
-            recoveryRef.current?.controller === controller
-          ) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-          }
-        })
-        .finally(() => {
-          if (recoveryRef.current?.controller === controller) {
-            recoveryRef.current = null;
-          }
-        });
     },
     [abortRecovery],
   );
@@ -260,6 +256,65 @@ export default function App() {
   );
 
   useEffect(() => {
+    const controller = new AbortController();
+    const retryTimerRef = { current: null as number | null };
+    const refreshActiveState = async (sessionId: string) => {
+      try {
+        const nextSessions = await loadSessions();
+        if (controller.signal.aborted || activeId !== sessionId) return;
+        const nextState = await loadState(sessionId, nextSessions);
+        if (controller.signal.aborted || activeId !== sessionId) return;
+        setInitialState(nextState);
+        refreshSignalRef.current += 1;
+        setRefreshSignal(refreshSignalRef.current);
+      } catch {
+        // Retry on the next event or polling cycle.
+      }
+    };
+    const followEvents = async () => {
+      while (!controller.signal.aborted && activeId) {
+        try {
+          await api.streamEvents(activeId, controller.signal, (event) => {
+            if (event.type === "turn_complete" || event.type === "error") {
+              void refreshActiveState(activeId);
+            }
+          });
+        } catch {
+          if (controller.signal.aborted) break;
+          await waitForRetry(controller.signal, 1000, retryTimerRef);
+          continue;
+        }
+        await waitForRetry(controller.signal, 50, retryTimerRef);
+      }
+    };
+    void followEvents();
+    return () => {
+      controller.abort();
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+    };
+  }, [activeId, loadSessions, loadState]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const poll = async () => {
+      while (!controller.signal.aborted) {
+        try {
+          const next = await loadSessions();
+          if (!controller.signal.aborted) {
+            setSessions(next);
+            setInitialState((state) => state ? { ...state, sessions: next } : state);
+          }
+        } catch {
+          // Keep the last known sidebar while the daemon is unavailable.
+        }
+        await waitForRetry(controller.signal, 3000, { current: null });
+      }
+    };
+    void poll();
+    return () => controller.abort();
+  }, [loadSessions]);
+
+  useEffect(() => {
     let mounted = true;
     const operation = ++operationRef.current;
     (async () => {
@@ -280,7 +335,7 @@ export default function App() {
         profileResult.active || nextProfiles[0]?.name || "default",
       );
       setSelectedIdentity(nextAgents.find((agent) => agent.available)?.name || "");
-      const first = result.at(-1);
+      const first = [...result].reverse().find((session) => session.attachable !== false);
       if (first) {
         setBusyMessage("Restoring session…");
         const firstState = await loadState(first.session_id, result);
@@ -443,6 +498,7 @@ export default function App() {
               session={activeSession}
               profiles={profiles}
               agents={agents}
+              refreshSignal={refreshSignal}
               onSessionUpdated={(updated) => {
                 setSessions((current) =>
                   current.map((item) =>

@@ -14,6 +14,7 @@ from kollabor_ai.session_naming import generate_session_name
 
 from ..server import get_session_registry
 from ..session import EngineSession
+from ..hub_bridge import HubBridge
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -317,9 +318,20 @@ async def _reap_dead_sessions() -> None:
 
 @router.get("")
 async def list_sessions():
+    """List local sessions plus running detached sessions found via hub presence."""
     await _reap_dead_sessions()
     registry = get_session_registry()
-    return {"sessions": [s.to_dict() for s in registry.values()]}
+    sessions = [s.to_dict() for s in registry.values()]
+    local_ids = {str(item.get("session_id")) for item in sessions}
+    discovered = [
+        item for item in HubBridge().discover_sessions(use_cache=False)
+        if item.get("session_id") not in local_ids
+    ]
+    return {
+        "sessions": sessions + discovered,
+        "discovered": discovered,
+        "active_count": len(sessions) + len(discovered),
+    }
 
 
 @router.get("/{session_id}")
@@ -327,9 +339,14 @@ async def get_session(session_id: str):
     await _reap_dead_sessions()
     registry = get_session_registry()
     session = registry.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session.to_dict()
+    if session:
+        return session.to_dict()
+    # Detached daemons survive engine restarts; expose their presence record so
+    # clients can discover/reconnect instead of receiving a false 404.
+    for discovered in HubBridge().discover_sessions(use_cache=False):
+        if discovered.get("session_id") == session_id:
+            return discovered
+    raise HTTPException(status_code=404, detail="Session not found")
 
 
 @router.get("/{session_id}/state")

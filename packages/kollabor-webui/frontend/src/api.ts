@@ -13,6 +13,10 @@ export type Session = {
   total_output_tokens?: number;
   identity?: string;
   daemon_pid?: number;
+  /** False for metadata-only rows discovered from external runtimes. */
+  attachable?: boolean;
+  /** Actions supported by the backing runtime for this session row. */
+  actions_supported?: string[];
 };
 
 export type HistoryMessage = {
