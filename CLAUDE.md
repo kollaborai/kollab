@@ -847,6 +847,32 @@ Files reading version: `kollabor/application.py`, `kollabor/cli.py`, `kollabor_c
 
 To update: Only modify `pyproject.toml`.
 
+### Cutting a Release
+
+`main` is branch-protected: **no direct pushes**, every change lands via PR + 3
+required CI checks (`ci/security-scan`, `ci/standards-check`, `ci/tests`).
+
+**Correct order — prep PR BEFORE the tag** (source must already match the tag; do
+not rely on CI to repair it):
+
+1. Prep PR bumping *everything* to `X.Y.Z`, in one commit:
+   - root `pyproject.toml` + all 10 `packages/*/pyproject.toml` versions
+   - inter-package `kollabor-*>=` constraints, then `uv lock`
+   - move `[Unreleased]` → `## [X.Y.Z] - DATE` in **both** `CHANGELOG.md` and
+     `kollabor/updates/CHANGELOG.md` (keep them **byte-identical** — `cmp` them;
+     the in-app update UI reads the packaged copy)
+2. Merge the prep PR.
+3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
+   then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).
+
+The tag triggers `.github/workflows/publish.yml` → PyPI + GitHub Release +
+Homebrew tap. Its first step, **Verify release consistency**, fails the publish
+if the tagged commit's versions/changelog don't already agree with the tag — so
+a tag cut without a prep PR fails fast instead of publishing silently.
+
+Canonical checklist: `docs/release-process.md`. Full agent playbook (not
+invocable from Claude Code — read + follow by hand): `bundles/skills/release-manager/SKILL.md`.
+
 ### Code Standards
 - PEP 8 with Black formatting (88-char) and ruff linting (120-char)
 - Lint: `ruff check` must pass with 0 violations before commit
