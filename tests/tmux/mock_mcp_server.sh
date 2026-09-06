@@ -26,6 +26,30 @@ log() {
     echo "[MOCK-MCP] $1" >&2
 }
 
+json_field() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+try:
+    obj = json.loads(sys.argv[1])
+except Exception:
+    obj = {}
+
+field = sys.argv[2]
+if field == "method":
+    print(obj.get("method", ""))
+elif field == "id":
+    if "id" in obj:
+        print(json.dumps(obj["id"]))
+    else:
+        print("")
+elif field == "tool_name":
+    params = obj.get("params") or {}
+    print(params.get("name", ""))
+PY
+}
+
 log "Mock MCP server starting..."
 
 # Read JSON-RPC messages from stdin and respond
@@ -35,9 +59,8 @@ while IFS= read -r line; do
 
     log "Received: $line"
 
-    # Parse the method from the JSON (simple grep-based parsing)
-    method=$(echo "$line" | grep -o '"method"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
-    id=$(echo "$line" | grep -o '"id"[[:space:]]*:[[:space:]]*[0-9]*' | sed 's/.*:[[:space:]]*//')
+    method=$(json_field "$line" method)
+    id=$(json_field "$line" id)
 
     log "Method: $method, ID: $id"
 
@@ -102,7 +125,7 @@ while IFS= read -r line; do
 
         "tools/call")
             # Handle tool calls
-            tool_name=$(echo "$line" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+            tool_name=$(json_field "$line" tool_name)
             log "Tool call: $tool_name"
 
             response='{
