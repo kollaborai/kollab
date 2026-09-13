@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Default OpenAI API and ChatGPT OAuth profiles to `gpt-5.6-luna`.
+
+### Fixed
+
+- Bound OpenAI device-code polling to its configured timeout and report progress
+  while authorization is pending.
+- Keep missing-model profile lookups quiet during repeated status-bar renders.
+
 ## [0.7.3] - 2026-08-25
 
 ### Added
