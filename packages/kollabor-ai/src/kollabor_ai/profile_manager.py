@@ -185,11 +185,8 @@ class LLMProfile:
             return global_val
         if self.model:
             return self.model
-        # All sources empty - warn user
-        logger.warning(
-            f"Profile '{self.name}': No model configured. "
-            f"Set {self._get_env_key('MODEL')} or configure in config.json"
-        )
+        # This getter is also used while rendering the status bar. Keep it
+        # quiet so a missing model does not create a log entry on every frame.
         return ""
 
     def get_max_tokens(self) -> Optional[int]:
@@ -583,8 +580,7 @@ class ProfileManager:
             "env_var": "OPENAI_API_KEY",
             "model_env": "OPENAI_MODEL",
             "provider": "openai",
-            # Terra tier: same $/token as gpt-5.4, current generation
-            "model": "gpt-5.6-terra",
+            "model": "gpt-5.6-luna",
             "profile_name": "openai-auto",
             "description": "Auto-detected from OPENAI_API_KEY",
         },
@@ -968,7 +964,7 @@ class ProfileManager:
                     provider="openai_responses",
                     # Must be a slug the codex backend actually serves (see
                     # query_codex_model_details); bare "gpt-5.6" is not one.
-                    model="gpt-5.6-sol",
+                    model="gpt-5.6-luna",
                     api_key=tokens.access_token,
                     base_url=CODEX_API_BASE_URL,
                     extra_headers=extra_headers,

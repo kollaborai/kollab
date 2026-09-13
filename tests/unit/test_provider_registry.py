@@ -353,6 +353,14 @@ class TestConfigCreation:
         assert config.max_tokens == 2048
         assert config.organization == "org-123"
 
+    @pytest.mark.parametrize("provider", ["openai", "openai_responses"])
+    def test_openai_config_without_model_defaults_to_luna(self, provider):
+        config = create_config_from_profile(
+            {"provider": provider, "api_key": "test-api-key"}
+        )
+
+        assert config.model == "gpt-5.6-luna"
+
     def test_create_anthropic_config(self):
         """Test creating Anthropic config from profile."""
         profile = {

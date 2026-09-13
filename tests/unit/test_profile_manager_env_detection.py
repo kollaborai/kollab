@@ -41,6 +41,17 @@ def _isolated_profile_manager(monkeypatch, tmp_path):
     return ProfileManager()
 
 
+def test_openai_api_key_auto_detect_defaults_to_luna(monkeypatch, tmp_path):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    manager = _isolated_profile_manager(monkeypatch, tmp_path)
+
+    active = manager.get_active_profile()
+    assert active.name == "openai-auto"
+    assert active.model == "gpt-5.6-luna"
+
+
 def test_anthropic_auth_token_auto_detects_anthropic_compatible_profile(
     monkeypatch, tmp_path
 ):

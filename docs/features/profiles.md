@@ -438,7 +438,7 @@ When provider env vars are set, ephemeral auto-profiles are created:
 | Env Var | Profile Name | Provider | Model |
 |---------|--------------|----------|-------|
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | anthropic-auto | anthropic | claude-sonnet-5 |
-| `OPENAI_API_KEY` | openai-auto | openai | gpt-5.6-terra |
+| `OPENAI_API_KEY` | openai-auto | openai | gpt-5.6-luna |
 | `AZURE_OPENAI_API_KEY` | azure-auto | azure_openai | gpt-5.6-terra |
 | `GEMINI_API_KEY` | gemini-auto | gemini | gemini-3.6-flash |
 | `OPENROUTER_API_KEY` | openrouter-auto | openrouter | deepseek/deepseek-v3.2 |
