@@ -327,6 +327,10 @@ class LoginAltView(AltView):
             # Step 1: Request device code
             self._stage = "init"
             device = await client._request_device_code()
+            logger.info(
+                "LoginAltView: device code ready; poll interval=%ss",
+                device.interval,
+            )
 
             # Step 2: Open browser
             self._stage = "device_code"
@@ -348,10 +352,12 @@ class LoginAltView(AltView):
             auth_resp = await client._poll_for_auth_code(device)
 
             # Step 4: Exchange for tokens
+            logger.info("LoginAltView: authorization received; exchanging tokens")
             tokens = await client._exchange_code(
                 auth_resp.authorization_code,
                 auth_resp.code_verifier,
             )
+            logger.info("LoginAltView: token exchange complete; saving tokens")
 
             await client.close()
             client = None
@@ -361,6 +367,7 @@ class LoginAltView(AltView):
 
             # Step 5: Query available models
             self._stage = "models"
+            logger.info("LoginAltView: OAuth tokens saved; querying available models")
             available_models = await query_codex_models(
                 tokens.access_token, tokens.account_id
             )

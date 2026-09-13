@@ -35,3 +35,9 @@ def test_provider_defaults_are_preselectable():
             f"{choice.key}: default_model {choice.default_model!r} is not in the "
             "registry, so the wizard cannot preselect it"
         )
+
+
+def test_openai_setup_defaults_to_luna():
+    choice = next(provider for provider in PROVIDERS if provider.key == "openai")
+
+    assert choice.default_model == "gpt-5.6-luna"

@@ -36,6 +36,7 @@ CODEX_PAYLOAD = {
                 {"effort": "ultra"},
             ],
         },
+        {"slug": "gpt-5.6-luna", "context_window": 1050000},
         {"slug": "gpt-5.6-terra", "context_window": 272000},
         {"slug": "gpt-5.4-mini", "context_window": 272000},
         {"slug": "gpt-5.3-codex-spark", "context_window": 128000},
@@ -108,6 +109,7 @@ def test_parses_slug_shape_and_keeps_metadata(fake_session):
 
     assert [m["slug"] for m in models] == [
         "gpt-5.6-sol",
+        "gpt-5.6-luna",
         "gpt-5.6-terra",
         "gpt-5.4-mini",
         "gpt-5.3-codex-spark",
@@ -135,8 +137,8 @@ def test_ids_wrapper_and_error_paths(fake_session):
 @pytest.mark.parametrize(
     "models,expected",
     [
-        # frontier beats the spark/auto-review slugs that "codex" matching hit
-        ([m["slug"] for m in CODEX_PAYLOAD["models"]], "gpt-5.6-sol"),
+        # Luna is the default tier even though the backend lists Sol first.
+        ([m["slug"] for m in CODEX_PAYLOAD["models"]], "gpt-5.6-luna"),
         # flagship beats a lighter tier of the same version
         (["gpt-5.4-mini", "gpt-5.4"], "gpt-5.4"),
         # a dated snapshot must not out-rank the flagship: matching every number
@@ -150,7 +152,7 @@ def test_ids_wrapper_and_error_paths(fake_session):
         (["codex-auto-review", "gpt-5.3-codex-spark"], "gpt-5.3-codex-spark"),
         # ...unless it is all there is (better than a bogus fallback)
         (["codex-auto-review"], "codex-auto-review"),
-        ([], "codex"),
+        ([], "gpt-5.6-luna"),
     ],
 )
 def test_pick_best_model(models, expected):
