@@ -70,6 +70,18 @@ function userSummary(value: string): string {
   return firstLine(value);
 }
 
+function compactionSummary(metadata: JsonObject): string {
+  const round = asNumber(metadata.compaction_round);
+  const preCount = asNumber(metadata.pre_message_count);
+  const postCount = asNumber(metadata.post_message_count);
+  const roundText = round === undefined ? "" : ` (round ${round})`;
+  const countText =
+    preCount === undefined || postCount === undefined
+      ? ""
+      : `: ${preCount} -> ${postCount} messages`;
+  return `Context compacted${roundText}${countText}.`;
+}
+
 export function previewText(value: string, maxLength = 160): string {
   const compact = formatContent(value).replace(/\s+/g, " ").trim();
   if (!compact) return "No output captured";
@@ -277,6 +289,24 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
     const timestamp = normalizeTimestamp(message.timestamp);
     const content = historyContentToText(message.content);
     const identity = messageIdentity(message, sourceIndex);
+
+    if (
+      metadata.context_compaction === true ||
+      metadata.context_compaction === "true"
+    ) {
+      add({
+        id: `${identity}:compaction`,
+        kind: "system",
+        turn,
+        request: null,
+        title: "COMPACTION",
+        summary: compactionSummary(metadata),
+        output: content,
+        timestamp,
+        sourceIndex,
+      });
+      return;
+    }
 
     if (message.role === "system") {
       add({

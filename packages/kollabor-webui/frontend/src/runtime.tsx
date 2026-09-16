@@ -171,10 +171,48 @@ function historyToMessages(
     return undefined;
   };
 
+  const compactionMessage = (message: HistoryMessage): string => {
+    const metadata = asRecord(message.metadata);
+    const round = typeof metadata?.compaction_round === "number"
+      ? metadata.compaction_round
+      : typeof metadata?.compaction_round === "string"
+        ? Number(metadata.compaction_round)
+        : null;
+    const preCount = typeof metadata?.pre_message_count === "number"
+      ? metadata.pre_message_count
+      : typeof metadata?.pre_message_count === "string"
+        ? Number(metadata.pre_message_count)
+        : null;
+    const postCount = typeof metadata?.post_message_count === "number"
+      ? metadata.post_message_count
+      : typeof metadata?.post_message_count === "string"
+        ? Number(metadata.post_message_count)
+        : null;
+    const roundText = Number.isFinite(round) ? ` (round ${round})` : "";
+    const countText = Number.isFinite(preCount) && Number.isFinite(postCount)
+      ? `: ${preCount} -> ${postCount} messages`
+      : "";
+    return `Context compacted${roundText}${countText}.`;
+  };
+
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
 
   history.forEach((message, sourceIndex) => {
+    const metadata = asRecord(message.metadata);
+    if (
+      metadata?.context_compaction === true ||
+      metadata?.context_compaction === "true"
+    ) {
+      messages.push({
+        id: `history-${sourceIndex}`,
+        role: "assistant",
+        content: compactionMessage(message),
+        status: { type: "complete", reason: "stop" },
+      });
+      return;
+    }
+
     if (isToolOutputBatch(message)) return;
 
     if (message.role === "user") {

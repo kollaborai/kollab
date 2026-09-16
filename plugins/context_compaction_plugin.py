@@ -895,16 +895,30 @@ class ContextCompactionPlugin(BasePlugin):
 
         # Capture any messages added during background compaction
         new_msgs = history[self._pre_compaction_len :]
+        pending_compaction = self._pending_compaction
+        assert pending_compaction is not None
 
         # Atomic swap via slice assignment
         pre_len = len(history)
-        history[:] = self._pending_compaction + new_msgs
+        history[:] = pending_compaction + new_msgs
         post_len = len(history)
+
+        # The summary metadata is also the Web UI's durable compaction marker.
+        # Update it after the swap so it agrees with the visible event when
+        # messages arrived while the background compaction was running.
+        for message in pending_compaction:
+            metadata = getattr(message, "metadata", None)
+            if isinstance(metadata, dict) and metadata.get("context_compaction"):
+                metadata["pre_message_count"] = pre_len
+                metadata["post_message_count"] = post_len
+                break
 
         logger.info(
             f"Applied compaction round {self._compaction_round}: "
             f"{pre_len} -> {post_len} messages"
         )
+
+        self._display_compaction_event(pre_len, post_len)
 
         # Sync conversation_manager if available
         if self._conversation_manager:
@@ -915,6 +929,49 @@ class ContextCompactionPlugin(BasePlugin):
         self._pre_compaction_len = 0
 
         return data
+
+    def _display_compaction_event(self, pre_count: int, post_count: int) -> None:
+        """Show the completed compaction in the visible chat transcript.
+
+        Compaction runs in the background and replaces the model-facing history
+        without going through the normal message display path. Emit a
+        display-only system message after the replacement succeeds so the user
+        can see that the transcript changed. It is intentionally not added to
+        ``conversation_history``: the compaction summary already represents
+        the model-facing context, and this marker is UI-only.
+        """
+        renderer = self.renderer
+        if renderer is None or getattr(renderer, "pipe_mode", False) is True:
+            return
+
+        coordinator = getattr(renderer, "message_coordinator", None)
+        if coordinator is None or not hasattr(coordinator, "display_message_sequence"):
+            return
+
+        content = (
+            f"Context compacted (round {self._compaction_round}): "
+            f"{pre_count} -> {post_count} messages."
+        )
+        try:
+            coordinator.display_message_sequence(
+                [
+                    (
+                        "system",
+                        content,
+                        {
+                            "display_type": "info",
+                            "context_compaction": True,
+                            "compaction_round": self._compaction_round,
+                            "pre_message_count": pre_count,
+                            "post_message_count": post_count,
+                        },
+                    )
+                ]
+            )
+        except Exception:
+            # Rendering is observability only; never turn a successful history
+            # swap into a failed compaction.
+            logger.debug("Failed to display compaction event", exc_info=True)
 
     # ------------------------------------------------------------------
     # Core compaction logic
@@ -1240,6 +1297,8 @@ class ContextCompactionPlugin(BasePlugin):
                 to_keep,
                 preserved_tasks,
                 ledger_handled=ledger_handled,
+                compaction_round=self._compaction_round + 1,
+                pre_message_count=snapshot_len,
             )
 
             # Write checkpoint before staging the compaction swap
@@ -1489,6 +1548,8 @@ class ContextCompactionPlugin(BasePlugin):
         to_keep: List[ConversationMessage],
         preserved_tasks: Optional[List[ConversationMessage]] = None,
         ledger_handled: Optional[List[ConversationMessage]] = None,
+        compaction_round: Optional[int] = None,
+        pre_message_count: Optional[int] = None,
     ) -> List[ConversationMessage]:
         """Build the new compacted history list.
 
@@ -1510,7 +1571,18 @@ class ContextCompactionPlugin(BasePlugin):
             SUMMARY_INJECTION_PREFIX + summary_text + SUMMARY_INJECTION_SUFFIX
         )
 
-        compacted.append(ConversationMessage(role="user", content=summary_content))
+        summary_metadata: Dict[str, Any] = {"context_compaction": True}
+        if compaction_round is not None:
+            summary_metadata["compaction_round"] = compaction_round
+        if pre_message_count is not None:
+            summary_metadata["pre_message_count"] = pre_message_count
+
+        summary_message = ConversationMessage(
+            role="user",
+            content=summary_content,
+            metadata=summary_metadata,
+        )
+        compacted.append(summary_message)
 
         # Inject ledger-handled messages (decisions already applied)
         if ledger_handled:
@@ -1563,6 +1635,9 @@ class ContextCompactionPlugin(BasePlugin):
             )
 
         compacted.extend(to_keep)
+
+        if pre_message_count is not None:
+            summary_message.metadata["post_message_count"] = len(compacted)
 
         return compacted
 
