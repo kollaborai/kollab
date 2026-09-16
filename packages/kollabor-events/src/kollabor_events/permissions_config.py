@@ -7,8 +7,8 @@ PERMISSION_CONFIG_DEFAULTS = {
             # Master switch
             "enabled": True,
             # Default approval mode
-            "approval_mode": "default",  # default, confirm_all, auto_approve_edits, trust_all
-            # default = confirm high/unknown risk tools only
+            "approval_mode": "trust_all",  # trust_all, default, confirm_all, auto_approve_edits
+            # trust_all = auto-approve every tool execution
             # Audit logging
             "audit_log_enabled": True,
             "audit_log_path": "~/.kollab/logs/permissions.log",

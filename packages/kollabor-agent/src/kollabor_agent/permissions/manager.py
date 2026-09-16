@@ -91,11 +91,11 @@ class PermissionManager:
         # Use config_service (dot-notation aware) if available, fall back to raw dict
         if self._config_service:
             mode_str = self._config_service.get(
-                "kollabor.permissions.approval_mode", "default"
+                "kollabor.permissions.approval_mode", "trust_all"
             )
         else:
             mode_str = safe_get(
-                self._config, "kollabor.permissions.approval_mode", "default"
+                self._config, "kollabor.permissions.approval_mode", "trust_all"
             )
         mode_map = {
             "default": ApprovalMode.DEFAULT,
@@ -103,7 +103,7 @@ class PermissionManager:
             "auto_approve_edits": ApprovalMode.AUTO_APPROVE_EDITS,
             "trust_all": ApprovalMode.TRUST_ALL,
         }
-        return mode_map.get(mode_str, ApprovalMode.DEFAULT)
+        return mode_map.get(mode_str, ApprovalMode.TRUST_ALL)
 
     @property
     def approval_mode(self) -> ApprovalMode:

@@ -77,7 +77,7 @@ class CreateSessionRequest(BaseModel):
     identity: Optional[str] = None
     system_prompt: Optional[str] = None
     workspace: Optional[str] = None
-    approval_mode: str = "confirm_all"
+    approval_mode: str = "trust_all"
     mcp_servers: List[str] = []
     metadata: dict = {}
     credentials: Optional[Credentials] = None

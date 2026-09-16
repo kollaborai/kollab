@@ -581,7 +581,7 @@ class LocalStateService(StateService):
         try:
             approval_mode = getattr(pm, "approval_mode", None)
             if approval_mode is None:
-                mode_str = "DEFAULT"
+                mode_str = "TRUST_ALL"
             elif hasattr(approval_mode, "name"):
                 mode_str = str(approval_mode.name)
             else:

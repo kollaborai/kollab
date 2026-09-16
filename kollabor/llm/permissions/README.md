@@ -37,7 +37,7 @@ The permission system provides fine-grained control over LLM tool execution, all
   - `RiskAssessmentResult` - Risk assessment output
 
 - **`config.py`** - Configuration defaults
-  - Default approval mode: `confirm_all`
+  - Default approval mode: `trust_all`
   - Risk assessment patterns and rules
   - UI settings (timeout, default response)
   - Audit logging configuration
@@ -57,7 +57,14 @@ The permission system provides fine-grained control over LLM tool execution, all
 
 ## Approval Modes
 
-### CONFIRM_ALL (Default)
+### TRUST_ALL (Default)
+Auto-approve **everything**. Dangerous - use with caution.
+
+```bash
+/permissions trust
+```
+
+### CONFIRM_ALL
 Require confirmation for **all** tool executions. Most secure mode.
 
 ```bash
@@ -77,13 +84,6 @@ Auto-approve file operations (file_write, file_edit, file_create). Confirm shell
 ```bash
 # Not directly accessible via command
 # Activated by "always approve edits" response in prompt
-```
-
-### TRUST_ALL
-Auto-approve **everything**. Dangerous - use with caution.
-
-```bash
-/permissions trust
 ```
 
 ## Risk Levels
@@ -225,7 +225,7 @@ press `d` or `ESC` to unblock. A timeout feature is planned but not yet implemen
 {
   "kollabor.permissions": {
     "enabled": true,
-    "approval_mode": "confirm_all",
+    "approval_mode": "trust_all",
     "audit_log_enabled": true,
     "audit_log_path": "~/.kollab/logs/permissions.log",
     "risk_assessment": {
@@ -390,7 +390,7 @@ from kollabor.llm.permissions import PermissionManager, RiskAssessor
 from kollabor.llm.permissions.models import RiskAssessmentRules
 from kollabor_events.bus import EventBus
 
-config = {'kollabor.permissions': {'enabled': True, 'approval_mode': 'default'}}
+config = {'kollabor.permissions': {'enabled': True, 'approval_mode': 'trust_all'}}
 event_bus = EventBus(config)
 risk_rules = RiskAssessmentRules()
 risk_assessor = RiskAssessor(risk_rules, config)

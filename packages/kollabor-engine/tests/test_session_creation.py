@@ -37,6 +37,10 @@ def _body(session_id: str | None = None) -> sessions.CreateSessionRequest:
     )
 
 
+def test_session_request_defaults_to_trust_all():
+    assert sessions.CreateSessionRequest().approval_mode == "trust_all"
+
+
 class _FakeSession:
     def __init__(self, session_id: str, initialize_error: BaseException | None = None):
         self.session_id = session_id

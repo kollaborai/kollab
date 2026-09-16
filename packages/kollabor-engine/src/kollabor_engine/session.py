@@ -96,7 +96,7 @@ class EngineSession:
         self,
         session_id: str,
         profile: Any,
-        approval_mode: str = "confirm_all",
+        approval_mode: str = "trust_all",
         workspace: Optional[str] = None,
         system_prompt: Optional[str] = None,
         mcp_server_names: Optional[List[str]] = None,
@@ -338,7 +338,7 @@ class EngineSession:
             "agent": agent_name,
             "workspace": self.workspace,
             "approval_mode": _APPROVAL_MODE_MAP.get(
-                self.approval_mode, ApprovalMode.CONFIRM_ALL
+                self.approval_mode, ApprovalMode.TRUST_ALL
             ).value,
             "created_at": self.created_at.isoformat(),
             "total_turns": self.total_turns,

@@ -375,7 +375,7 @@ export default function App() {
       const session = await api.createSession({
         profile: selectedProfile || "default",
         identity: selectedIdentity || undefined,
-        approval_mode: "confirm_all",
+        approval_mode: "trust_all",
       });
       const result = await loadSessions();
       await refreshAgentPool();

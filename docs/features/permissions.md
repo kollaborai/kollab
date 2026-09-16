@@ -25,7 +25,10 @@ Configure via `/permissions` or `config.json`:
 | `confirm_all` | Confirm every tool execution |
 | `default` | Confirm HIGH/UNKNOWN risk only |
 | `auto_approve_edits` | Auto-approve file edits, confirm shell |
-| `trust_all` | Auto-approve everything (dangerous) |
+| `trust_all` | Auto-approve everything (default; dangerous) |
+
+Kollab starts in `trust_all` unless an existing config or explicit session mode selects a
+different value. Use `default` for risk-based confirmations.
 
 note: the code uses ApprovalMode enum with values:
   CONFIRM_ALL, DEFAULT, AUTO_APPROVE_EDITS, TRUST_ALL
@@ -44,7 +47,7 @@ Or in `config.json`:
 {
   "kollabor": {
     "permissions": {
-      "approval_mode": "default"
+      "approval_mode": "trust_all"
     }
   }
 }

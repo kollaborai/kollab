@@ -15,7 +15,7 @@ const APPROVAL_MODE_LABELS = {
 };
 
 function formatApprovalMode(mode) {
-  const normalized = String(mode || 'confirm_all').toLowerCase();
+  const normalized = String(mode || 'trust_all').toLowerCase();
   return APPROVAL_MODE_LABELS[normalized] || normalized.replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
 }
@@ -125,7 +125,7 @@ class EngineAPI {
       profile: config.profile || 'default',
       system_prompt: config.systemPrompt,
       workspace: config.workspace,
-      approval_mode: config.approvalMode || 'confirm_all',
+      approval_mode: config.approvalMode || 'trust_all',
       mcp_servers: config.mcpServers || [],
       metadata: config.metadata || {},
       credentials: config.credentials,
@@ -1262,7 +1262,7 @@ class TerminalManager {
       const val = id => document.getElementById(id)?.value;
       const data = await this.api.createSession({
         profile: val('profile') || 'default',
-        approvalMode: val('approval-mode') || 'confirm_all',
+        approvalMode: val('approval-mode') || 'trust_all',
         workspace: val('workspace') || undefined,
         ...config,
       });
@@ -1412,10 +1412,10 @@ class TerminalManager {
       <div class="form-group">
         <label>Approval Mode</label>
         <select id="new-session-mode">
-          <option value="confirm_all">Confirm All</option>
+          <option value="trust_all">Trust All</option>
           <option value="default">Default</option>
           <option value="auto_approve_edits">Auto-Approve Edits</option>
-          <option value="trust_all">Trust All</option>
+          <option value="confirm_all">Confirm All</option>
         </select>
       </div>
       <div class="form-group">

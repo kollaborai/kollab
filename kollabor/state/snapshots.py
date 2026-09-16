@@ -163,7 +163,7 @@ class PermissionSnapshot(Snapshot):
     dict of counters the widget shows inline.
     """
 
-    approval_mode: str = "DEFAULT"
+    approval_mode: str = "TRUST_ALL"
     session_approvals_count: int = 0
     project_approvals_count: int = 0
     stats: dict[str, int] = field(default_factory=dict)

@@ -32,7 +32,7 @@ class CapturingEventBus:
         return {}
 
 
-def test_permission_defaults_are_nested_and_start_in_default_mode():
+def test_permission_defaults_are_nested_and_start_in_trust_all_mode():
     config = deep_merge(PERMISSION_CONFIG_DEFAULTS, {})
     assessor = RiskAssessor(rules=RiskAssessmentRules(), config=config)
 
@@ -45,8 +45,8 @@ def test_permission_defaults_are_nested_and_start_in_default_mode():
     )
 
     assert safe_get(config, "kollabor.permissions.enabled") is True
-    assert safe_get(config, "kollabor.permissions.approval_mode") == "default"
-    assert manager.approval_mode is ApprovalMode.DEFAULT
+    assert safe_get(config, "kollabor.permissions.approval_mode") == "trust_all"
+    assert manager.approval_mode is ApprovalMode.TRUST_ALL
 
     decision = asyncio.run(
         manager.check_permission({"id": "tool-1", "type": "hub_msg", "name": "hub_msg"})
