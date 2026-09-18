@@ -997,6 +997,26 @@ class LLMService:
             logger.warning(f"Provider initialization failed, using legacy system: {e}")
             self._current_provider = None
 
+    async def _announce_hub_model_switch(
+        self, profile: Any, previous_model: Optional[str] = None
+    ) -> None:
+        """Best-effort lifecycle notice after a successful profile switch."""
+        if not self.event_bus or profile is None:
+            return
+        try:
+            hub = self.event_bus.get_service("hub_plugin")
+            announce = getattr(hub, "announce_model_switch", None)
+            if not callable(announce):
+                return
+            await announce(
+                profile_name=profile.name,
+                provider=profile.get_provider(),
+                model=profile.get_model(),
+                previous_model=previous_model,
+            )
+        except Exception:
+            logger.debug("hub model-switch announcement failed", exc_info=True)
+
     async def switch_profile(self, profile_name: str, persist: bool = True) -> bool:
         """Switch to a different profile with thread-safe provider reinitialization.
 
@@ -1028,6 +1048,11 @@ class LLMService:
                 if not profile:
                     logger.error(f"Profile not found: {profile_name}")
                     return False
+
+                active_profile = self.profile_manager.get_active_profile()
+                previous_model = (
+                    active_profile.get_model() if active_profile is not None else None
+                )
 
                 # Auto-refresh OAuth tokens and resolve model before switching
                 if profile.auth_type == "oauth":
@@ -1115,6 +1140,12 @@ class LLMService:
                     logger.warning(
                         f"Could not sync active profile '{profile_name}': {e}"
                     )
+
+                # Keep this explicit class call compatible with the focused
+                # unbound-method test stand-in used for switch_profile.
+                await LLMService._announce_hub_model_switch(
+                    self, profile, previous_model
+                )
 
                 logger.info(
                     f"Switched to profile '{profile_name}' "

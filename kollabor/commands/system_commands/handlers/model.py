@@ -58,6 +58,26 @@ class ModelCommandHandler(BaseCommandHandler):
             return None
         return self.event_bus.get_service("llm_service")
 
+    async def _announce_hub_model_switch(
+        self, profile: Any, previous_model: str | None = None
+    ) -> None:
+        """Best-effort lifecycle notice after a successful model change."""
+        if not self.event_bus or profile is None:
+            return
+        try:
+            hub = self.event_bus.get_service("hub_plugin")
+            announce = getattr(hub, "announce_model_switch", None)
+            if not callable(announce):
+                return
+            await announce(
+                profile_name=profile.name,
+                provider=profile.get_provider(),
+                model=profile.get_model(),
+                previous_model=previous_model,
+            )
+        except Exception:
+            logger.debug("hub model-switch announcement failed", exc_info=True)
+
     def register_commands(self) -> None:
         """Register /model command."""
         model_command = CommandDefinition(
@@ -764,6 +784,7 @@ class ModelCommandHandler(BaseCommandHandler):
                 message="Active profile not available",
                 display_type="error",
             )
+        previous_model = profile.get_model()
 
         if not profile_manager.update_profile(
             profile.name,
@@ -800,6 +821,8 @@ class ModelCommandHandler(BaseCommandHandler):
             await llm_service.api_service.reinitialize_provider(profile)
             await llm_service._load_native_tools()
 
+        await self._announce_hub_model_switch(profile, previous_model)
+
         return CommandResult(
             success=True,
             message=(
@@ -830,6 +853,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
 
+        previous_profile = profile_manager.get_active_profile()
+        previous_model = (
+            previous_profile.get_model() if previous_profile is not None else None
+        )
         if profile_manager.set_active_profile(profile_name):
             profile = profile_manager.get_active_profile()
             # Reinitialize the provider with new profile settings
@@ -837,6 +864,7 @@ class ModelCommandHandler(BaseCommandHandler):
                 await llm_service.api_service.reinitialize_provider(profile)
                 # Reload native tools (profile may have different supports_tools setting)
                 await llm_service._load_native_tools()
+            await self._announce_hub_model_switch(profile, previous_model)
             tools_mode = "enabled" if profile.get_supports_tools() else "disabled"
             return CommandResult(
                 success=True,
@@ -866,6 +894,7 @@ class ModelCommandHandler(BaseCommandHandler):
             supports_tools = data.get("command", {}).get("supports_tools")
             if provider_catalog == "openrouter" and model_name and self.profile_manager:
                 profile = self.profile_manager.get_active_profile()
+                previous_model = profile.get_model() if profile else None
                 if profile and self.profile_manager.update_profile(
                     profile.name,
                     model=model_name,
@@ -884,6 +913,7 @@ class ModelCommandHandler(BaseCommandHandler):
                             lambda: llm_service._load_native_tools(),
                             name="reload_native_tools",
                         )
+                    await self._announce_hub_model_switch(profile, previous_model)
                     data["display_messages"] = [
                         (
                             "system",
@@ -897,6 +927,12 @@ class ModelCommandHandler(BaseCommandHandler):
                     ]
                 return data
             if profile_name and self.profile_manager:
+                previous_profile = self.profile_manager.get_active_profile()
+                previous_model = (
+                    previous_profile.get_model()
+                    if previous_profile is not None
+                    else None
+                )
                 if self.profile_manager.set_active_profile(profile_name):
                     profile = self.profile_manager.get_active_profile()
                     # Reinitialize the provider with new profile settings
@@ -912,6 +948,7 @@ class ModelCommandHandler(BaseCommandHandler):
                             lambda: llm_service._load_native_tools(),
                             name="reload_native_tools",
                         )
+                    await self._announce_hub_model_switch(profile, previous_model)
                     tools_mode = (
                         "enabled" if profile.get_supports_tools() else "disabled"
                     )
