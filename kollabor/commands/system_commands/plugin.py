@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Set, cast
 if TYPE_CHECKING:
     from .handlers import (
         AgentCommandHandler,
+        ArtifactCommandHandler,
         ContextCommandHandler,
         DirectoryCommandHandler,
         LoadoutCommandHandler,
@@ -37,6 +38,7 @@ class SystemCommandsPlugin:
 
     # Class-level type annotations for mypy (body of untyped __init__ is skipped)
     _agent_handler: AgentCommandHandler | None
+    _artifact_handler: ArtifactCommandHandler | None
     _skill_handler: SkillCommandHandler | None
     _system_handler: SystemCommandHandler | None
     _model_handler: ModelCommandHandler | None
@@ -91,6 +93,7 @@ class SystemCommandsPlugin:
 
         # Lazy init - create handlers on first use or explicitly provided
         self._agent_handler: AgentCommandHandler | None = agent_command_handler
+        self._artifact_handler: ArtifactCommandHandler | None = None
         self._skill_handler: SkillCommandHandler | None = skill_command_handler
         self._system_handler: SystemCommandHandler | None = system_command_handler
         self._model_handler: ModelCommandHandler | None = model_command_handler
@@ -107,6 +110,14 @@ class SystemCommandsPlugin:
 
     def _init_handlers(self):
         """Initialize handlers if not already provided."""
+        from .handlers import ArtifactCommandHandler
+
+        if self._artifact_handler is None:
+            self._artifact_handler = ArtifactCommandHandler(
+                self.command_registry,
+                self.event_bus,
+            )
+
         if (
             self._agent_handler is None
             or self._skill_handler is None
@@ -196,6 +207,8 @@ class SystemCommandsPlugin:
     def MODAL_ACTIONS(self) -> Set[str]:
         """Aggregate MODAL_ACTIONS from all handlers."""
         actions = set()
+        if self._artifact_handler:
+            actions.update(self._artifact_handler.MODAL_ACTIONS)
         if self._agent_handler:
             actions.update(self._agent_handler.MODAL_ACTIONS)
         if self._skill_handler:
@@ -218,6 +231,8 @@ class SystemCommandsPlugin:
 
     def register_all_commands(self):
         """Register all commands from all handlers."""
+        if self._artifact_handler:
+            self._artifact_handler.register_commands()
         if self._agent_handler:
             self._agent_handler.register_commands()
         if self._skill_handler:
@@ -264,6 +279,16 @@ class SystemCommandsPlugin:
         return CommandResult(
             success=False,
             message="Directory handler not initialized",
+            display_type="error",
+        )
+
+    async def handle_artifact(self, command: SlashCommand) -> CommandResult:
+        """Handle /artifact command."""
+        if self._artifact_handler:
+            return await self._artifact_handler.handle_artifact(command)
+        return CommandResult(
+            success=False,
+            message="Artifact handler not initialized",
             display_type="error",
         )
 

@@ -18,9 +18,10 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from .providers.models import GeneratedImageContent
+if TYPE_CHECKING:
+    from .providers.models import GeneratedImageContent
 
 DEFAULT_MAX_GENERATED_IMAGE_BYTES = 50 * 1024 * 1024
 _MEDIA_ID_RE = re.compile(r"^img_[A-Za-z0-9_-]{16,64}$")
@@ -75,6 +76,13 @@ def _safe_metadata_text(value: Any, max_length: int = 1000) -> Optional[str]:
         return None
     cleaned = " ".join(value.split())
     return cleaned[:max_length] or None
+
+
+def _safe_provider_reference(value: Any) -> Optional[str]:
+    cleaned = _safe_metadata_text(value, 256)
+    if cleaned and not any(marker in cleaned for marker in ("/", "\\", ":")):
+        return cleaned
+    return None
 
 
 def _decode_base64_result(result: Any, max_bytes: int) -> bytes:
@@ -197,6 +205,8 @@ class GeneratedImageArtifactStore:
     ) -> GeneratedImageContent:
         """Decode, validate, and atomically persist one generated image."""
 
+        from .providers.models import GeneratedImageContent
+
         data = _decode_base64_result(result, self.max_bytes)
         media_type, width, height = _image_metadata(data)
         media_id = f"img_{secrets.token_urlsafe(24)}"
@@ -227,7 +237,7 @@ class GeneratedImageArtifactStore:
             width=width,
             height=height,
             revised_prompt=_safe_metadata_text(revised_prompt),
-            provider_reference=_safe_metadata_text(provider_reference, 256),
+            provider_reference=_safe_provider_reference(provider_reference),
         )
         self._artifacts[media_id] = _StoredGeneratedImage(
             content=content,
