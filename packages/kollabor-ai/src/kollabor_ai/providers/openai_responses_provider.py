@@ -42,6 +42,7 @@ from .tuning import EffortStyle, effort_params, sampling_params
 logger = logging.getLogger(__name__)
 
 RESPONSES_TOOL_OUTPUT_MAX_CHARS = 10_485_760
+RESPONSES_MAX_SSE_LINE_BYTES = 96 * 1024 * 1024
 
 
 def _cap_function_call_output(output: str) -> str:
@@ -791,7 +792,7 @@ class OpenAIResponsesProvider(LLMProvider):
         current_event: Optional[str] = None
         current_data_lines: List[bytes] = []
         buffer = bytearray()
-        max_line_bytes = 64 * 1024 * 1024
+        max_line_bytes = RESPONSES_MAX_SSE_LINE_BYTES
 
         def flush_event() -> Optional[StreamingResponse]:
             nonlocal current_event, current_data_lines
