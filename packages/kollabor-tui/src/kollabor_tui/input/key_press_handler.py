@@ -752,7 +752,18 @@ class KeyPressHandler:
                     logger.warning(f"Input validation warning: {error}")
 
             # Get message and clear buffer
-            message = self.buffer_manager.get_content_and_clear()
+            raw_message = self.buffer_manager.get_content_and_clear()
+            message = raw_message
+
+            # Expand paste placeholders before dispatching special input. A
+            # pasted slash command arrives here as ``[Pasted #N ...]``; if we
+            # classify it before expansion it falls through as an ordinary
+            # LLM turn instead of reaching the local command executor.
+            if self._expand_paste_placeholders_callback:
+                message = self._expand_paste_placeholders_callback(message)
+            else:
+                message = self.paste_processor.expand_paste_placeholders(message)
+
             has_image_token = getattr(
                 self.paste_processor, "has_live_image_token", None
             )
@@ -761,10 +772,10 @@ class KeyPressHandler:
             )
 
             # DEBUG: Log what we received
-            starts_with_bang = message.strip().startswith("!")
+            starts_with_bang = raw_message.strip().startswith("!")
             logger.info(
-                f"_handle_enter received: '{message}' "
-                f"(repr: {repr(message)}, starts_with!: {starts_with_bang})"
+                f"_handle_enter received: '{raw_message}' "
+                f"(repr: {repr(raw_message)}, starts_with!: {starts_with_bang})"
             )
 
             # Check if this is a shell command - delegate to shell command service
@@ -774,12 +785,6 @@ class KeyPressHandler:
                 and self.shell_command_service
                 and not has_image_message
             ):
-                # Expand paste placeholders in shell commands too
-                if self._expand_paste_placeholders_callback:
-                    message = self._expand_paste_placeholders_callback(message)
-                else:
-                    message = self.paste_processor.expand_paste_placeholders(message)
-
                 logger.info(
                     f"Detected shell command (from input or history): '{message[:120]}'"
                 )
@@ -797,12 +802,6 @@ class KeyPressHandler:
             # Check if this is a slash command - execute it directly
             # This handles both typed commands AND commands from history
             if message.strip().startswith("/") and not has_image_message:
-                # Expand paste placeholders in slash command args too
-                if self._expand_paste_placeholders_callback:
-                    message = self._expand_paste_placeholders_callback(message)
-                else:
-                    message = self.paste_processor.expand_paste_placeholders(message)
-
                 logger.info(
                     f"Detected slash command (from input or history): '{message[:120]}'"
                 )
@@ -849,11 +848,6 @@ class KeyPressHandler:
             # them through the state service so local and attach sessions use
             # the same human-sender identity and wake/spawn semantics.
             if message.strip().startswith("@") and not has_image_message:
-                if self._expand_paste_placeholders_callback:
-                    message = self._expand_paste_placeholders_callback(message)
-                else:
-                    message = self.paste_processor.expand_paste_placeholders(message)
-
                 logger.info(
                     f"Detected agent mention from Enter handler: '{message[:120]}'"
                 )
@@ -870,13 +864,7 @@ class KeyPressHandler:
                 f"GENIUS SUBMIT: Paste bucket contains: {list(self.paste_processor.paste_bucket.keys())}"
             )
 
-            if self._expand_paste_placeholders_callback:
-                expanded_message = self._expand_paste_placeholders_callback(message)
-            else:
-                # Fallback to direct expansion if callback not set
-                expanded_message = self.paste_processor.expand_paste_placeholders(
-                    message
-                )
+            expanded_message = message
 
             logger.debug(
                 f"GENIUS SUBMIT: Final expanded: '{expanded_message[:100]}...' ({len(expanded_message)} chars)"

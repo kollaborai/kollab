@@ -1,10 +1,15 @@
 """Focused lifecycle tests for KeyPressHandler background tasks."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from kollabor.commands.executor import SlashCommandExecutor
+from kollabor.commands.parser import SlashCommandParser
+from kollabor.commands.registry import SlashCommandRegistry
+from kollabor.commands.system_commands.plugin import SystemCommandsPlugin
 from kollabor_events.models import EventType
 from kollabor_tui.buffer_manager import BufferManager
 from kollabor_tui.input.key_press_handler import KeyPressHandler
@@ -146,3 +151,56 @@ async def test_enter_emits_cli_image_as_ordered_structured_message_parts():
     assert paste_processor.has_image_attachments is False
     assert buffer.navigate_history("up")
     assert buffer.content == "inspect [image attachment omitted]"
+
+
+@pytest.mark.asyncio
+async def test_pasted_slash_command_is_dispatched_after_paste_expansion():
+    """Pasted local commands must not become ordinary model turns."""
+    buffer = BufferManager()
+    paste_processor = PasteProcessor(buffer)
+    paste_processor._paste_bucket["PASTE_1"] = "/artifact open img_1234567890abcdef"
+    await paste_processor.create_paste_placeholder("PASTE_1")
+
+    class ArtifactApi:
+        def __init__(self):
+            self.opened_media_id = None
+
+        def open_generated_artifact(self, media_id):
+            self.opened_media_id = media_id
+            return True
+
+    api_service = ArtifactApi()
+
+    class CommandEventBus(_EventBus):
+        def get_service(self, name):
+            if name == "llm_service":
+                return SimpleNamespace(api_service=api_service)
+            return None
+
+    event_bus = CommandEventBus()
+    registry = SlashCommandRegistry()
+    SystemCommandsPlugin(
+        command_registry=registry, event_bus=event_bus
+    ).register_commands()
+    command_mode_handler = SimpleNamespace(
+        slash_parser=SlashCommandParser(),
+        command_executor=SlashCommandExecutor(registry),
+    )
+    handler = KeyPressHandler(
+        buffer_manager=buffer,
+        key_parser=KeyParser(),
+        event_bus=event_bus,
+        error_handler=_ErrorHandler(),
+        display_controller=AsyncMock(),
+        paste_processor=paste_processor,
+        renderer=_Renderer(),
+        command_mode_handler=command_mode_handler,
+    )
+
+    await handler._handle_enter()
+
+    assert api_service.opened_media_id == "img_1234567890abcdef"
+    assert paste_processor.paste_bucket == {}
+    assert not any(
+        event_type == EventType.USER_INPUT for event_type, _, _ in event_bus.events
+    )
