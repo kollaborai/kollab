@@ -997,6 +997,14 @@ class LocalStateService(StateService):
             )
         return catalog
 
+    async def open_generated_artifact(self, media_id: str) -> bool:
+        """Open a generated image through the daemon-owned API service."""
+        api_service = getattr(self._llm_service, "api_service", None)
+        opener = getattr(api_service, "open_generated_artifact", None)
+        if not callable(opener):
+            return False
+        return bool(opener(media_id))
+
     # === Writes (phase 4) ===
 
     async def set_active_profile(

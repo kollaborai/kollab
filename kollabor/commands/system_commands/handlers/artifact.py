@@ -1,5 +1,6 @@
 """Slash commands for private generated-image artifacts."""
 
+import inspect
 import re
 
 from kollabor_events.models import (
@@ -44,6 +45,11 @@ class ArtifactCommandHandler(BaseCommandHandler):
         llm_service = self.event_bus.get_service("llm_service")
         return getattr(llm_service, "api_service", None)
 
+    def _get_state_service(self):
+        if self.event_bus is None or not hasattr(self.event_bus, "get_service"):
+            return None
+        return self.event_bus.get_service("state_service")
+
     async def handle_artifact(self, command: SlashCommand) -> CommandResult:
         args = command.args or []
         if len(args) != 2 or args[0].lower() != "open" or not args[1]:
@@ -60,8 +66,14 @@ class ArtifactCommandHandler(BaseCommandHandler):
                 message="invalid generated image media ID",
                 display_type="error",
             )
-        api_service = self._get_api_service()
-        opener = getattr(api_service, "open_generated_artifact", None)
+        state_service = self._get_state_service()
+        opener = getattr(state_service, "open_generated_artifact", None)
+        if not callable(opener):
+            # Compatibility for early-startup/local harnesses that have not
+            # wired StateService yet. Normal local and attach sessions use
+            # StateService so the daemon owns the artifact lookup.
+            api_service = self._get_api_service()
+            opener = getattr(api_service, "open_generated_artifact", None)
         if not callable(opener):
             return CommandResult(
                 success=False,
@@ -70,7 +82,10 @@ class ArtifactCommandHandler(BaseCommandHandler):
             )
 
         try:
-            opened = bool(opener(media_id))
+            opened_result = opener(media_id)
+            if inspect.isawaitable(opened_result):
+                opened_result = await opened_result
+            opened = bool(opened_result)
         except Exception:
             self.logger.warning("Failed to open generated image artifact")
             opened = False

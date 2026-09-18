@@ -215,6 +215,23 @@ class RemoteStateService(StateService):
             raise TypeError("state.list_commands result missing 'commands' list")
         return commands
 
+    async def open_generated_artifact(self, media_id: str) -> bool:
+        """Ask the daemon to open a generated image in its active session."""
+        logger.debug("state rpc: open_generated_artifact media_id=%s", media_id)
+        result = await self._rpc.call(
+            "state.open_generated_artifact",
+            {"media_id": media_id},
+            timeout=self._timeout,
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                "state.open_generated_artifact expected dict, "
+                f"got {type(result).__name__}"
+            )
+        if "error" in result and result.get("error"):
+            raise ValueError(str(result["error"]))
+        return bool(result.get("opened", False))
+
     # === Writes (phase 4) ===
 
     async def set_active_profile(

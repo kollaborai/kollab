@@ -87,6 +87,18 @@ def test_artifact_store_writes_private_png_and_returns_opaque_id(tmp_path: Path)
     assert store.open_media(content.media_id) is False
 
 
+def test_artifact_store_rehydrates_persisted_media_id(tmp_path: Path):
+    original = GeneratedImageArtifactStore(tmp_path / "session-images")
+    content = original.write_base64(PNG_RESULT)
+
+    reopened = GeneratedImageArtifactStore(original.root)
+
+    assert reopened.is_reopenable(content.media_id) is True
+    assert reopened._path_for_testing(content.media_id) == original._path_for_testing(
+        content.media_id
+    )
+
+
 def test_artifact_store_rejects_non_image_data(tmp_path: Path):
     store = GeneratedImageArtifactStore(tmp_path / "session-images")
 

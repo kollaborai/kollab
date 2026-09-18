@@ -48,6 +48,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.get_processing_state
         state.get_system_info
         state.list_commands
+        state.open_generated_artifact
         state.set_active_profile      (phase 4 write)
         state.set_approval_mode       (phase 4 write)
         state.get_active_agent        (phase 4.5 read)
@@ -127,6 +128,17 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
 
     async def _list_commands(params: dict[str, Any]) -> dict[str, Any]:
         return {"commands": await state_service.list_commands()}
+
+    async def _open_generated_artifact(params: dict[str, Any]) -> dict[str, Any]:
+        media_id = params.get("media_id", "")
+        if not isinstance(media_id, str) or not media_id:
+            return {"error": "media_id is required"}
+        try:
+            opened = await state_service.open_generated_artifact(media_id)
+        except Exception as exc:
+            logger.debug("state.open_generated_artifact failed: %s", exc)
+            return {"error": "generated image artifact is unavailable"}
+        return {"opened": bool(opened)}
 
     # === Writes (phase 4) ===
     # Both write handlers catch ValueError and return an {"error": ...}
@@ -479,6 +491,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_processing_state": _get_processing_state,
         "state.get_system_info": _get_system_info,
         "state.list_commands": _list_commands,
+        "state.open_generated_artifact": _open_generated_artifact,
         "state.set_active_profile": _set_active_profile,
         "state.set_approval_mode": _set_approval_mode,
         # Phase 4.5: agents / skills / system prompt

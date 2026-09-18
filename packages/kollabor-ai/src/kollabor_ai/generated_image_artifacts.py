@@ -261,7 +261,55 @@ class GeneratedImageArtifactStore:
     def _stored(self, media_id: str) -> Optional[_StoredGeneratedImage]:
         if not isinstance(media_id, str) or not _MEDIA_ID_RE.fullmatch(media_id):
             return None
-        return self._artifacts.get(media_id)
+        stored = self._artifacts.get(media_id)
+        if stored is not None:
+            return stored
+        return self._rehydrate(media_id)
+
+    def _rehydrate(self, media_id: str) -> Optional[_StoredGeneratedImage]:
+        """Recover a persisted artifact after an API service restart.
+
+        The media ID is deliberately the only lookup key exposed to callers.
+        Search is restricted to this session's private directory and the
+        exact filenames this store writes, so a fresh command/service object
+        can reopen an image without accepting arbitrary filesystem paths.
+        """
+        from .providers.models import GeneratedImageContent
+
+        candidates = [
+            self.root / f"{media_id}{suffix}" for suffix in _MEDIA_TYPE_SUFFIX.values()
+        ]
+        matches = [
+            path for path in candidates if not path.is_symlink() and path.is_file()
+        ]
+        if len(matches) != 1:
+            return None
+
+        path = matches[0]
+        try:
+            with path.open("rb") as handle:
+                data = handle.read(self.max_bytes + 1)
+            if len(data) > self.max_bytes:
+                return None
+            media_type, width, height = _image_metadata(data)
+            if path.suffix != _MEDIA_TYPE_SUFFIX.get(media_type):
+                return None
+        except (OSError, GeneratedImageArtifactError):
+            return None
+
+        stored = _StoredGeneratedImage(
+            content=GeneratedImageContent(
+                media_id=media_id,
+                media_type=media_type,
+                width=width,
+                height=height,
+            ),
+            path=path,
+            byte_count=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
+        self._artifacts[media_id] = stored
+        return stored
 
     def open_media(self, media_id: str) -> bool:
         """Open a stored image using the host's default image application."""

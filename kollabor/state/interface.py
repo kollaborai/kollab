@@ -126,6 +126,15 @@ class StateService(Protocol):
         """Return visible slash-command metadata for interactive clients."""
         ...
 
+    async def open_generated_artifact(self, media_id: str) -> bool:
+        """Open a session-private generated image by opaque media ID.
+
+        The operation belongs to the daemon's active session in attach mode;
+        clients must not try to resolve the artifact against their shadow
+        ``llm_service``.
+        """
+        ...
+
     # === Writes (phase 4) ===
     #
     # Writes are synchronous from the caller's perspective: the user
