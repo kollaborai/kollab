@@ -80,6 +80,11 @@ def test_artifact_store_writes_private_png_and_returns_opaque_id(tmp_path: Path)
     assert path.read_bytes() == PNG_BYTES
     assert os.stat(store.root).st_mode & 0o777 == 0o700
     assert os.stat(path).st_mode & 0o777 == 0o600
+    assert store.is_reopenable(content.media_id) is True
+
+    path.unlink()
+    assert store.is_reopenable(content.media_id) is False
+    assert store.open_media(content.media_id) is False
 
 
 def test_artifact_store_rejects_non_image_data(tmp_path: Path):

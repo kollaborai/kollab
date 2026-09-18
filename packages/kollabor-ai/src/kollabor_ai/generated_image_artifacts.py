@@ -247,6 +247,15 @@ class GeneratedImageArtifactStore:
             byte_count=len(data),
             sha256=hashlib.sha256(data).hexdigest(),
         )
+        if not self.is_reopenable(media_id):
+            self._artifacts.pop(media_id, None)
+            try:
+                final_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise GeneratedImageArtifactError(
+                "generated image could not be reopened after persistence"
+            )
         return content
 
     def _stored(self, media_id: str) -> Optional[_StoredGeneratedImage]:
@@ -258,7 +267,7 @@ class GeneratedImageArtifactStore:
         """Open a stored image using the host's default image application."""
 
         stored = self._stored(media_id)
-        if stored is None or not stored.path.is_file():
+        if stored is None or not self.is_reopenable(media_id):
             return False
 
         try:
@@ -284,6 +293,30 @@ class GeneratedImageArtifactStore:
         except OSError:
             return False
         return True
+
+    def is_reopenable(self, media_id: str) -> bool:
+        """Verify that a stored artifact still exists and can be read safely."""
+
+        stored = self._stored(media_id)
+        if stored is None or not stored.path.is_file():
+            return False
+
+        try:
+            with stored.path.open("rb") as handle:
+                data = handle.read(self.max_bytes + 1)
+            if len(data) != stored.byte_count:
+                return False
+            if hashlib.sha256(data).hexdigest() != stored.sha256:
+                return False
+            media_type, width, height = _image_metadata(data)
+        except (OSError, GeneratedImageArtifactError):
+            return False
+
+        return (
+            media_type == stored.content.media_type
+            and width == stored.content.width
+            and height == stored.content.height
+        )
 
     def _path_for_testing(self, media_id: str) -> Optional[Path]:
         """Return an internal path for tests; never include it in user output."""

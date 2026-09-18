@@ -8,7 +8,15 @@ import pytest
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.message_content import EphemeralImageStore, normalize_message_content
 from kollabor_ai.providers.errors import ProviderError
-from kollabor_ai.providers.models import StreamingResponse, TextDelta, UsageInfo
+from kollabor_ai.providers.models import (
+    ImageGenerationDelta,
+    StreamingResponse,
+    TextDelta,
+    UsageInfo,
+)
+from kollabor_ai.providers.openai_responses_transformer import (
+    OpenAIResponsesTransformer,
+)
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -169,3 +177,143 @@ async def test_streamed_generated_image_is_persisted_and_raw_log_is_redacted(
     path = service._generated_image_store._path_for_testing(media_id)
     assert path is not None
     assert path.read_bytes() == PNG_BYTES
+
+
+@pytest.mark.asyncio
+async def test_nonstream_duplicate_image_item_is_persisted_once(tmp_path: Path):
+    config = MagicMock()
+    config.get = lambda key, default=None: default
+
+    profile = MagicMock()
+    profile.provider = "openai_responses"
+    profile.name = "generated-image-nonstream-test"
+    profile.get_model.return_value = "gpt-5.6-luna"
+    profile.get_temperature.return_value = 0.7
+    profile.get_max_tokens.return_value = 4096
+    profile.get_timeout.return_value = 30
+
+    service = APICommunicationService(config, tmp_path, profile)
+    payload = {
+        "status": "completed",
+        "output": [
+            {
+                "type": "image_generation_call",
+                "id": "ig_call_duplicate",
+                "result": PNG_RESULT,
+            },
+            {
+                "type": "image_generation_call",
+                "id": "ig_call_duplicate",
+                "result": PNG_RESULT,
+                "revised_prompt": "a small seedling",
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    class _Provider:
+        provider_name = "openai_responses"
+        model = "gpt-5.6-luna"
+
+        def set_generated_image_store(self, store):
+            self.store = store
+
+        async def call(self, **kwargs):
+            return OpenAIResponsesTransformer.transform_response(
+                payload, self.model, artifact_store=self.store
+            )
+
+    service._provider = _Provider()
+    service._initialized = True
+    service.set_session_id("session-duplicate")
+
+    content = await service._call_provider_nonstream(
+        [{"role": "user", "content": "draw a seedling"}]
+    )
+
+    assert "Generated image: img_" in content
+    assert len(service.last_generated_images) == 1
+    assert len(list(service._generated_image_store.root.glob("img_*"))) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output",
+    [
+        [
+            {
+                "type": "image_generation_call",
+                "id": "ig_call_invalid",
+                "result": "not-base64",
+            }
+        ],
+        [],
+    ],
+    ids=["invalid-result", "missing-final-item"],
+)
+async def test_stream_image_claim_does_not_release_text_without_artifact(
+    tmp_path: Path, output: list[dict]
+):
+    config = MagicMock()
+    config.get = lambda key, default=None: default
+
+    profile = MagicMock()
+    profile.provider = "openai_responses"
+    profile.name = "generated-image-failure-test"
+    profile.get_model.return_value = "gpt-5.6-luna"
+    profile.get_temperature.return_value = 0.7
+    profile.get_max_tokens.return_value = 4096
+    profile.get_timeout.return_value = 30
+
+    service = APICommunicationService(config, tmp_path, profile)
+
+    class _Provider:
+        provider_name = "openai_responses"
+        model = "gpt-5.6-luna"
+        supports_hosted_image_generation = True
+
+        def set_generated_image_store(self, store):
+            self.store = store
+
+        async def stream(self, **kwargs):
+            yield StreamingResponse(
+                delta=ImageGenerationDelta(
+                    status="generating", provider_reference="ig_call_invalid"
+                )
+            )
+            yield StreamingResponse(delta=TextDelta(content="logo generated"))
+            final = StreamingResponse(
+                delta=TextDelta(content=""),
+                usage=UsageInfo(
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    total_tokens=15,
+                ),
+                is_final=True,
+                raw_chunk={"event": "response.completed", "response": {"output": []}},
+            )
+            final._raw_payload = {
+                "event": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": output,
+                },
+            }
+            yield final
+
+    service._provider = _Provider()
+    service._initialized = True
+    service.set_session_id("session-failure")
+    seen_chunks: list[str] = []
+
+    async def callback(chunk: str):
+        seen_chunks.append(chunk)
+
+    with pytest.raises(ProviderError) as error:
+        await service._call_provider_stream(
+            [{"role": "user", "content": "draw a seedling"}],
+            streaming_callback=callback,
+        )
+
+    assert error.value.error_code == "image_artifact_persistence_failed"
+    assert seen_chunks == []

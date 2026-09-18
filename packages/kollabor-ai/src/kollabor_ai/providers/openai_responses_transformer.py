@@ -10,6 +10,7 @@ Responses API format:
 - Streaming: SSE events (response.started, output_item.added, content_block.delta, response.done)
 """
 
+import copy
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -19,6 +20,7 @@ from ..generated_image_artifacts import (
     GeneratedImageArtifactStore,
     redact_generated_image_data,
 )
+from .errors import ProviderError
 from .models import (
     ContentBlock,
     GeneratedImageContent,
@@ -178,7 +180,42 @@ class OpenAIResponsesTransformer:
                 raw_response=redact_generated_image_data(response),
             )
 
+        # Responses can repeat one completed image item across output events.
+        # Merge those copies before touching the artifact store so one logical
+        # provider item produces exactly one private artifact.
+        merged_image_items: Dict[str, Dict[str, Any]] = {}
+        for item in output_items:
+            if item.get("type") != "image_generation_call":
+                continue
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                raise ProviderError(
+                    "image generation item is missing its provider id",
+                    provider="openai_responses",
+                    error_code="image_generation_missing_id",
+                )
+            existing = merged_image_items.get(item_id)
+            if existing is None:
+                merged_image_items[item_id] = copy.deepcopy(item)
+                continue
+            existing_result = existing.get("result")
+            incoming_result = item.get("result")
+            if (
+                existing_result
+                and incoming_result
+                and existing_result != incoming_result
+            ):
+                raise ProviderError(
+                    "conflicting payloads received for one image generation item",
+                    provider="openai_responses",
+                    error_code="image_generation_conflict",
+                )
+            for key, value in item.items():
+                if key not in existing or existing.get(key) in (None, "", []):
+                    existing[key] = copy.deepcopy(value)
+
         content_blocks: List[ContentBlock] = []
+        transformed_image_ids: set[str] = set()
 
         # Process each output item
         for item in output_items:
@@ -204,9 +241,13 @@ class OpenAIResponsesTransformer:
 
             # Hosted image-generation item -> private managed artifact
             elif item_type == "image_generation_call":
+                item_id = item.get("id")
+                if item_id in transformed_image_ids:
+                    continue
+                transformed_image_ids.add(item_id)
                 image_content = (
                     OpenAIResponsesTransformer._transform_image_generation_item(
-                        item, artifact_store
+                        merged_image_items[item_id], artifact_store
                     )
                 )
                 if image_content is not None:
@@ -238,14 +279,16 @@ class OpenAIResponsesTransformer:
         """Persist a completed hosted image without returning its bytes."""
         result = item.get("result")
         if not result:
-            return None
-        if artifact_store is None:
-            logger.warning(
-                "Hosted image generation completed without an artifact store (id=%s)",
-                item.get("id", "unknown"),
+            raise ProviderError(
+                "image generation completed without image data",
+                provider="openai_responses",
+                error_code="image_artifact_persistence_failed",
             )
-            return TextContent(
-                text="[generated image unavailable: artifact storage is not configured]"
+        if artifact_store is None:
+            raise ProviderError(
+                "image generation completed without artifact storage",
+                provider="openai_responses",
+                error_code="image_artifact_persistence_failed",
             )
         try:
             return artifact_store.write_base64(
@@ -253,14 +296,13 @@ class OpenAIResponsesTransformer:
                 revised_prompt=item.get("revised_prompt"),
                 provider_reference=item.get("id"),
             )
-        except GeneratedImageArtifactError:
-            logger.warning(
-                "Hosted image generation result could not be persisted (id=%s)",
-                item.get("id", "unknown"),
-            )
-            return TextContent(
-                text="[generated image unavailable: safe persistence failed]"
-            )
+        except GeneratedImageArtifactError as exc:
+            raise ProviderError(
+                "image generation completed but the artifact could not be persisted",
+                provider="openai_responses",
+                error_code="image_artifact_persistence_failed",
+                original_error=exc,
+            ) from exc
 
     @staticmethod
     def _transform_message_item(item: Dict[str, Any]) -> List[TextContent]:

@@ -243,6 +243,77 @@ class APICommunicationService:
             )
         return self._generated_image_store
 
+    @staticmethod
+    def _count_generated_image_items(raw_response: Any) -> int:
+        """Count distinct hosted image items in a provider response."""
+        if not isinstance(raw_response, dict):
+            return 0
+        output = raw_response.get("output")
+        if not isinstance(output, list):
+            return 0
+
+        image_ids: set[str] = set()
+        count = 0
+        for item in output:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") != "image_generation_call"
+            ):
+                continue
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id:
+                if item_id in image_ids:
+                    continue
+                image_ids.add(item_id)
+            count += 1
+        return count
+
+    def _verify_generated_image_artifacts(
+        self,
+        raw_response: Any,
+        *,
+        image_generation_signaled: bool = False,
+    ) -> None:
+        """Reject image success unless every item has a readable private file."""
+        expected = self._count_generated_image_items(raw_response)
+        if (
+            expected == 0
+            and not image_generation_signaled
+            and not self.last_generated_images
+        ):
+            return
+
+        if expected == 0 and image_generation_signaled:
+            provider = (
+                getattr(self._provider, "provider_name", None)
+                or getattr(self, "provider_type", None)
+                or "provider"
+            )
+            raise ProviderError(
+                "image generation emitted progress but no completed image item",
+                provider=str(provider),
+                error_code="image_artifact_persistence_failed",
+            )
+
+        store = self._generated_image_store
+        actual = [
+            image
+            for image in self.last_generated_images
+            if store is not None and store.is_reopenable(image.media_id)
+        ]
+        if expected != len(self.last_generated_images) or len(actual) != expected:
+            provider = (
+                getattr(self._provider, "provider_name", None)
+                or getattr(self, "provider_type", None)
+                or "provider"
+            )
+            raise ProviderError(
+                "image generation completed without a valid saved artifact "
+                f"(expected {expected}, saved {len(actual)})",
+                provider=str(provider),
+                error_code="image_artifact_persistence_failed",
+            )
+
     def _configure_generated_image_store(self) -> None:
         """Attach the session-private artifact store to providers that support it."""
         if self._provider is None:
@@ -833,6 +904,7 @@ class APICommunicationService:
 
         # Extract text content
         self.last_generated_images = response.get_generated_images()
+        self._verify_generated_image_artifacts(response.raw_response)
         content = response.get_text_content()
         self._raise_if_empty_provider_response(content)
 
@@ -877,6 +949,11 @@ class APICommunicationService:
 
         content_parts = []
         thinking_parts = []
+        deferred_text_parts = []
+        image_generation_signaled = False
+        defer_text_until_final = bool(
+            getattr(self._provider, "supports_hosted_image_generation", False)
+        )
         final_usage = None
         final_stop_reason = None
         accumulated_tools = []  # For EXPLICIT mode
@@ -934,10 +1011,19 @@ class APICommunicationService:
                             self.last_generated_images = (
                                 transformed.get_generated_images()
                             )
-                        except Exception:
-                            logger.warning(
-                                "Failed to transform a streamed generated image response"
-                            )
+                        except ProviderError:
+                            raise
+                        except Exception as exc:
+                            raise ProviderError(
+                                "image generation response could not be transformed",
+                                provider="openai_responses",
+                                error_code="image_artifact_persistence_failed",
+                                original_error=exc,
+                            ) from exc
+                    self._verify_generated_image_artifacts(
+                        response_payload,
+                        image_generation_signaled=image_generation_signaled,
+                    )
 
                 # Handle delta types
                 delta = streaming_response.delta
@@ -947,9 +1033,14 @@ class APICommunicationService:
                     content_chunk = delta.content
                     content_parts.append(content_chunk)
 
-                    # Call streaming callback if provided
+                    # Hosted-image responses are withheld until final artifact
+                    # validation, so model prose cannot announce an image that
+                    # was never persisted. Other providers keep live streaming.
                     if streaming_callback:
-                        await streaming_callback(content_chunk)
+                        if defer_text_until_final or image_generation_signaled:
+                            deferred_text_parts.append(content_chunk)
+                        else:
+                            await streaming_callback(content_chunk)
 
                 # Thinking/reasoning content
                 elif isinstance(delta, ThinkingDelta):
@@ -958,6 +1049,7 @@ class APICommunicationService:
 
                 # Tool call delta
                 elif isinstance(delta, ImageGenerationDelta):
+                    image_generation_signaled = True
                     logger.debug(
                         "Hosted image generation progress: %s",
                         delta.status,
@@ -1139,6 +1231,10 @@ class APICommunicationService:
                 )
 
             self._raise_if_empty_provider_response(content)
+
+            if streaming_callback:
+                for content_chunk in deferred_text_parts:
+                    await streaming_callback(content_chunk)
 
             return content
 
