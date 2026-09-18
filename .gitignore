@@ -16,6 +16,11 @@ eggs/
 .eggs/
 lib/
 lib64/
+
+# The generic Python lib/ rule must not hide the checked-in Web UI source tree.
+!packages/kollabor-webui/frontend/src/lib/
+!packages/kollabor-webui/frontend/src/lib/**
+
 parts/
 sdist/
 var/
