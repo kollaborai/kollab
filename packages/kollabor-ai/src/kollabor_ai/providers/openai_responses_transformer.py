@@ -386,10 +386,12 @@ class OpenAIResponsesTransformer:
                 delta=TextDelta(content=""),
                 usage=usage,
                 is_final=True,
-                raw_chunk=chunk,
+                raw_chunk=redact_generated_image_data(chunk),
             )
 
-        if event_type.startswith("response.image_generation_call."):
+        if isinstance(event_type, str) and event_type.startswith(
+            "response.image_generation_call."
+        ):
             status = event_type.rsplit(".", 1)[-1]
             if status not in {"in_progress", "generating", "completed", "failed"}:
                 return None

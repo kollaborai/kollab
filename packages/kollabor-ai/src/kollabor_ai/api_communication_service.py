@@ -914,10 +914,15 @@ class APICommunicationService:
                         if isinstance(raw_payload, dict)
                         else None
                     )
-                    has_generated_image = isinstance(response_payload, dict) and any(
+                    output_items = (
+                        response_payload.get("output", [])
+                        if isinstance(response_payload, dict)
+                        else []
+                    )
+                    has_generated_image = isinstance(output_items, list) and any(
                         isinstance(item, dict)
                         and item.get("type") == "image_generation_call"
-                        for item in response_payload.get("output", [])
+                        for item in output_items
                     )
                     if has_generated_image:
                         try:
