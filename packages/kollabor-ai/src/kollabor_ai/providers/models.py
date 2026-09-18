@@ -584,9 +584,7 @@ class UnifiedResponse(BaseModel):
     def get_generated_images(self) -> List[GeneratedImageContent]:
         """Extract generated image references from the response."""
         return [
-            block
-            for block in self.content
-            if isinstance(block, GeneratedImageContent)
+            block for block in self.content if isinstance(block, GeneratedImageContent)
         ]
 
     def get_tool_uses(self) -> List[ToolUseContent]:

@@ -84,15 +84,21 @@ class OpenAIResponsesTransformer:
             details = {}
 
         prompt_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
-        completion_tokens = usage.get(
-            "output_tokens", usage.get("completion_tokens", 0)
-        ) or 0
-        cached_tokens = details.get("cached_tokens", 0) or usage.get(
-            "cache_read_input_tokens", usage.get("cache_read_tokens", 0)
-        ) or 0
-        cache_write_tokens = details.get("cache_write_tokens", 0) or usage.get(
-            "cache_creation_input_tokens", usage.get("cache_creation_tokens", 0)
-        ) or 0
+        completion_tokens = (
+            usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+        )
+        cached_tokens = (
+            details.get("cached_tokens", 0)
+            or usage.get("cache_read_input_tokens", usage.get("cache_read_tokens", 0))
+            or 0
+        )
+        cache_write_tokens = (
+            details.get("cache_write_tokens", 0)
+            or usage.get(
+                "cache_creation_input_tokens", usage.get("cache_creation_tokens", 0)
+            )
+            or 0
+        )
         total_tokens = usage.get("total_tokens") or prompt_tokens + completion_tokens
 
         return UsageInfo(
@@ -198,8 +204,10 @@ class OpenAIResponsesTransformer:
 
             # Hosted image-generation item -> private managed artifact
             elif item_type == "image_generation_call":
-                image_content = OpenAIResponsesTransformer._transform_image_generation_item(
-                    item, artifact_store
+                image_content = (
+                    OpenAIResponsesTransformer._transform_image_generation_item(
+                        item, artifact_store
+                    )
                 )
                 if image_content is not None:
                     content_blocks.append(image_content)
@@ -372,9 +380,7 @@ class OpenAIResponsesTransformer:
         # response.done - final chunk with usage
         if event_type in ("response.done", "response.completed"):
             response_data = chunk.get("response", {})
-            usage = OpenAIResponsesTransformer._usage_info(
-                response_data.get("usage")
-            )
+            usage = OpenAIResponsesTransformer._usage_info(response_data.get("usage"))
 
             return StreamingResponse(
                 delta=TextDelta(content=""),

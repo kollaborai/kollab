@@ -110,7 +110,9 @@ def _decode_base64_result(result: Any, max_bytes: int) -> bytes:
     try:
         decoded = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise GeneratedImageArtifactError("generated image result is invalid base64") from exc
+        raise GeneratedImageArtifactError(
+            "generated image result is invalid base64"
+        ) from exc
 
     if not decoded:
         raise GeneratedImageArtifactError("generated image result is empty")

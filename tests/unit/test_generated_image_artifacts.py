@@ -109,8 +109,7 @@ def test_transformer_persists_image_and_redacts_raw_response(tmp_path: Path):
     assert PNG_RESULT not in json.dumps(unified.model_dump())
     assert unified.raw_response is not None
     assert (
-        unified.raw_response["output"][0]["result"]
-        == "[generated image data redacted]"
+        unified.raw_response["output"][0]["result"] == "[generated image data redacted]"
     )
 
 

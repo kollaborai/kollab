@@ -118,10 +118,7 @@ class SystemCommandsPlugin:
                 self.event_bus,
             )
 
-        if (
-            self._agent_handler is None
-            or self._skill_handler is None
-        ):
+        if self._agent_handler is None or self._skill_handler is None:
             from .handlers import (
                 AgentCommandHandler,
                 ContextCommandHandler,

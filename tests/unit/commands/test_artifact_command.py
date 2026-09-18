@@ -14,9 +14,7 @@ def _command(*args: str) -> SlashCommand:
 
 
 def test_artifact_open_delegates_by_opaque_media_id():
-    api_service = SimpleNamespace(
-        open_generated_artifact=MagicMock(return_value=True)
-    )
+    api_service = SimpleNamespace(open_generated_artifact=MagicMock(return_value=True))
     event_bus = MagicMock()
     event_bus.get_service.return_value = SimpleNamespace(api_service=api_service)
     handler = ArtifactCommandHandler(SlashCommandRegistry(), event_bus)
