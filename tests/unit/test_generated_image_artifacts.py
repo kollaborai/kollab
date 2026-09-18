@@ -20,7 +20,10 @@ from kollabor_ai.providers.models import (
     ProviderType,
     TextDelta,
 )
-from kollabor_ai.providers.openai_responses_provider import OpenAIResponsesProvider
+from kollabor_ai.providers.openai_responses_provider import (
+    HOSTED_IMAGE_GENERATION_INSTRUCTIONS,
+    OpenAIResponsesProvider,
+)
 from kollabor_ai.providers.openai_responses_transformer import (
     OpenAIResponsesTransformer,
 )
@@ -164,6 +167,8 @@ def test_oauth_request_auto_exposes_hosted_image_tool(model: str):
     )
 
     assert request["tools"] == [{"type": "image_generation"}]
+    assert HOSTED_IMAGE_GENERATION_INSTRUCTIONS in request["instructions"]
+    assert "Do not claim that an image was generated" in request["instructions"]
 
 
 def test_oauth_request_does_not_auto_expose_hosted_image_tool_for_unknown_model():
@@ -175,6 +180,7 @@ def test_oauth_request_does_not_auto_expose_hosted_image_tool_for_unknown_model(
     )
 
     assert "tools" not in request
+    assert HOSTED_IMAGE_GENERATION_INSTRUCTIONS not in request.get("instructions", "")
 
 
 def test_hosted_tools_are_preserved_and_public_route_does_not_auto_add():
@@ -212,6 +218,9 @@ def test_hosted_tools_are_preserved_and_public_route_does_not_auto_add():
         [{"role": "user", "content": "draw"}], tools=None, stream=False
     )
     assert "tools" not in public_request
+    assert HOSTED_IMAGE_GENERATION_INSTRUCTIONS not in public_request.get(
+        "instructions", ""
+    )
 
 
 def test_image_generation_sse_event_is_typed_and_redacted():

@@ -41,6 +41,21 @@ from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
+
+HOSTED_IMAGE_GENERATION_INSTRUCTIONS = (
+    "Hosted image-generation contract:\n"
+    "- When the user asks for an image or explicitly asks to use image generation, "
+    "call the hosted `image_generation` tool. Do not substitute scratchpad, file "
+    "inspection, ASCII text, or prose for the image tool.\n"
+    "- Do not claim that an image was generated unless this request contains a "
+    "completed image-generation result.\n"
+    "- After a completed image-generation result, tell the user the image is ready "
+    "and direct them to the exact artifact action that the application appends in "
+    "the form `Open: /artifact open <img_...>`. Never invent a media ID or "
+    "filesystem path, and do not say only \"link above\" without an actionable "
+    "open instruction."
+)
+
 RESPONSES_TOOL_OUTPUT_MAX_CHARS = 10_485_760
 RESPONSES_MAX_SSE_LINE_BYTES = 96 * 1024 * 1024
 HOSTED_IMAGE_GENERATION_MODELS = frozenset(
@@ -732,6 +747,12 @@ class OpenAIResponsesProvider(LLMProvider):
             params["instructions"] = instructions
         elif self._requires_streaming:
             params["instructions"] = "You are a helpful assistant."
+
+        if self.supports_hosted_image_generation:
+            params["instructions"] = (
+                f"{params.get('instructions', '').strip()}\n\n"
+                f"{HOSTED_IMAGE_GENERATION_INSTRUCTIONS}"
+            ).strip()
 
         # Convert messages to input format
         # For Responses API, input can be:
