@@ -62,6 +62,83 @@ def _cap_function_call_output(output: str) -> str:
     return output[:prefix_len] + suffix
 
 
+def _record_image_generation_item(
+    items_by_id: Dict[str, Dict[str, Any]], item: Any
+) -> None:
+    """Retain one completed image item without exposing its result downstream."""
+    if not isinstance(item, dict) or item.get("type") != "image_generation_call":
+        return
+
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        raise ProviderError(
+            "image generation item is missing its provider id",
+            provider="openai_responses",
+            error_code="image_generation_missing_id",
+        )
+
+    existing = items_by_id.get(item_id)
+    if existing is None:
+        items_by_id[item_id] = copy.deepcopy(item)
+        return
+
+    existing_result = existing.get("result")
+    incoming_result = item.get("result")
+    if existing_result and incoming_result and existing_result != incoming_result:
+        raise ProviderError(
+            "conflicting payloads received for one image generation item",
+            provider="openai_responses",
+            error_code="image_generation_conflict",
+        )
+
+    # The same item can arrive once without its result and again with it. Merge
+    # metadata while preserving the first-seen order and provider identity.
+    for key, value in item.items():
+        if key not in existing or existing.get(key) in (None, "", []):
+            existing[key] = copy.deepcopy(value)
+
+
+def _merge_image_generation_items(
+    response: Dict[str, Any],
+    completed_items: Dict[str, Dict[str, Any]],
+) -> None:
+    """Reconcile output_item.done images into the final Responses payload."""
+    output = response.get("output", [])
+    if output is None:
+        output = []
+    if not isinstance(output, list):
+        raise ProviderError(
+            "Responses API returned a non-list output payload",
+            provider="openai_responses",
+            error_code="invalid_response_output",
+        )
+
+    image_items: Dict[str, Dict[str, Any]] = {}
+    normalized_output: List[Dict[str, Any]] = []
+    image_positions: Dict[str, int] = {}
+
+    for item in output:
+        if isinstance(item, dict) and item.get("type") == "image_generation_call":
+            _record_image_generation_item(image_items, item)
+            item_id = item["id"]
+            if item_id not in image_positions:
+                image_positions[item_id] = len(normalized_output)
+                normalized_output.append({})
+            continue
+        normalized_output.append(copy.deepcopy(item))
+
+    for item_id, item in completed_items.items():
+        _record_image_generation_item(image_items, item)
+        if item_id not in image_positions:
+            image_positions[item_id] = len(normalized_output)
+            normalized_output.append({})
+
+    for item_id, position in image_positions.items():
+        normalized_output[position] = copy.deepcopy(image_items[item_id])
+
+    response["output"] = normalized_output
+
+
 @register_provider(ProviderType.OPENAI_RESPONSES)
 class OpenAIResponsesProvider(LLMProvider):
     """
@@ -407,18 +484,31 @@ class OpenAIResponsesProvider(LLMProvider):
             # transformer has something to work with
             accumulated_text = "".join(accumulated_text_parts)
             output_items = final_response.get("output", [])
-            if not output_items and accumulated_text:
-                logger.info(
-                    f"Final payload had empty output, injecting {len(accumulated_text)} chars from stream deltas"
+            if not isinstance(output_items, list):
+                raise ProviderError(
+                    "Responses API returned an invalid final output payload",
+                    provider="openai_responses",
+                    error_code="invalid_response_output",
                 )
-                final_response["output"] = [
+
+            has_text_output = any(
+                isinstance(item, dict) and item.get("type") == "message"
+                for item in output_items
+            )
+            if accumulated_text and not has_text_output:
+                logger.info(
+                    "Final payload omitted streamed text, injecting %d chars from stream deltas",
+                    len(accumulated_text),
+                )
+                output_items.append(
                     {
                         "type": "message",
                         "role": "assistant",
                         "content": [{"type": "output_text", "text": accumulated_text}],
                     }
-                ]
-            elif not output_items:
+                )
+                final_response["output"] = output_items
+            if not output_items:
                 logger.warning(
                     f"OpenAI Responses stream: empty output AND no deltas, "
                     f"status={final_response.get('status')}, "
@@ -430,6 +520,19 @@ class OpenAIResponsesProvider(LLMProvider):
                 self.model,
                 artifact_store=self._generated_image_store,
             )
+
+            image_items = [
+                item
+                for item in output_items
+                if isinstance(item, dict)
+                and item.get("type") == "image_generation_call"
+            ]
+            if image_items and len(unified.get_generated_images()) != len(image_items):
+                raise ProviderError(
+                    "image generation completed without a valid saved artifact",
+                    provider="openai_responses",
+                    error_code="image_artifact_persistence_failed",
+                )
 
             logger.debug(
                 f"OpenAI Responses call-via-stream complete (tokens={unified.usage.total_tokens})"
@@ -801,6 +904,38 @@ class OpenAIResponsesProvider(LLMProvider):
         current_data_lines: List[bytes] = []
         buffer = bytearray()
         max_line_bytes = RESPONSES_MAX_SSE_LINE_BYTES
+        completed_image_items: Dict[str, Dict[str, Any]] = {}
+        pending_final: Optional[StreamingResponse] = None
+
+        def accept_event(event_chunk: Optional[StreamingResponse]) -> bool:
+            """Capture private image items and defer the final event."""
+            nonlocal pending_final
+            if event_chunk is None:
+                return False
+
+            raw_payload = getattr(event_chunk, "_raw_payload", None)
+            if isinstance(raw_payload, dict):
+                event_name = raw_payload.get("event")
+                if event_name == "response.output_item.done":
+                    _record_image_generation_item(
+                        completed_image_items, raw_payload.get("item")
+                    )
+                elif event_name in ("response.done", "response.completed"):
+                    response_payload = raw_payload.get("response")
+                    if isinstance(response_payload, dict):
+                        for item in response_payload.get("output", []) or []:
+                            _record_image_generation_item(completed_image_items, item)
+
+            if event_chunk.is_final:
+                if pending_final is not None:
+                    raise ProviderError(
+                        "Responses API emitted multiple final events",
+                        provider="openai_responses",
+                        error_code="multiple_final_events",
+                    )
+                pending_final = event_chunk
+                return True
+            return False
 
         def flush_event() -> Optional[StreamingResponse]:
             nonlocal current_event, current_data_lines
@@ -851,7 +986,8 @@ class OpenAIResponsesProvider(LLMProvider):
                         # Empty line means end of event
                         event_chunk = flush_event()
                         if event_chunk:
-                            yield event_chunk
+                            if not accept_event(event_chunk):
+                                yield event_chunk
                         continue
 
                     if line.startswith(":"):
@@ -869,7 +1005,23 @@ class OpenAIResponsesProvider(LLMProvider):
             # Flush remaining event if stream ended without trailing newline
             event_chunk = flush_event()
             if event_chunk:
-                yield event_chunk
+                if not accept_event(event_chunk):
+                    yield event_chunk
+
+            if pending_final is not None:
+                raw_payload = getattr(pending_final, "_raw_payload", None)
+                response_payload = (
+                    raw_payload.get("response")
+                    if isinstance(raw_payload, dict)
+                    else None
+                )
+                if isinstance(response_payload, dict):
+                    _merge_image_generation_items(
+                        response_payload,
+                        completed_image_items,
+                    )
+                    pending_final._raw_payload = raw_payload
+                yield pending_final
 
         except Exception as e:
             logger.error(f"Failed to parse SSE stream: {e}")
@@ -922,9 +1074,12 @@ class OpenAIResponsesProvider(LLMProvider):
             if event in ("response.output_item.added", "response.output_item.done"):
                 item = parsed_data.get("item", parsed_data)
                 event_data = {"event": event, "item": item}
-                return OpenAIResponsesTransformer.transform_streaming_chunk(
+                chunk = OpenAIResponsesTransformer.transform_streaming_chunk(
                     event_data, self.model
                 )
+                if chunk and event == "response.output_item.done":
+                    chunk._raw_payload = event_data
+                return chunk
 
             # Final response (both event names)
             if event in ("response.done", "response.completed"):

@@ -40,6 +40,12 @@ class _ByteStream:
             yield chunk
 
 
+def _sse_event(event: str, payload: dict) -> bytes:
+    return (
+        f"event: {event}\n" f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    ).encode()
+
+
 def _oauth_provider(model: str = "gpt-5.6-luna") -> OpenAIResponsesProvider:
     return OpenAIResponsesProvider(
         OpenAIResponsesConfig(
@@ -222,6 +228,69 @@ def test_image_generation_sse_event_is_typed_and_redacted():
     assert PNG_RESULT not in json.dumps(final.raw_chunk)
     assert final._raw_payload is not None
     assert final._raw_payload["response"]["output"][0]["result"] == PNG_RESULT
+
+
+@pytest.mark.asyncio
+async def test_sse_reconciles_completed_image_item_into_empty_final_output():
+    provider = _oauth_provider()
+    response = _ByteStream(
+        [
+            _sse_event(
+                "response.output_item.added",
+                {
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_call_smoke",
+                        "status": "in_progress",
+                    }
+                },
+            ),
+            _sse_event(
+                "response.image_generation_call.generating",
+                {
+                    "type": "response.image_generation_call.generating",
+                    "item_id": "ig_call_smoke",
+                },
+            ),
+            _sse_event(
+                "response.output_item.done",
+                {
+                    "item": {
+                        "type": "image_generation_call",
+                        "id": "ig_call_smoke",
+                        "status": "completed",
+                        "result": PNG_RESULT,
+                    }
+                },
+            ),
+            _sse_event(
+                "response.output_text.delta",
+                {"delta": "status: generated"},
+            ),
+            _sse_event(
+                "response.completed",
+                {
+                    "response": {
+                        "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 10, "output_tokens": 5},
+                    }
+                },
+            ),
+        ]
+    )
+
+    chunks = [chunk async for chunk in provider._parse_sse_stream(response)]
+    final = chunks[-1]
+
+    assert final.is_final is True
+    assert final._raw_payload is not None
+    output = final._raw_payload["response"]["output"]
+    assert [
+        item["id"] for item in output if item["type"] == "image_generation_call"
+    ] == ["ig_call_smoke"]
+    assert output[0]["result"] == PNG_RESULT
+    assert PNG_RESULT not in json.dumps(final.raw_chunk)
 
 
 @pytest.mark.asyncio
