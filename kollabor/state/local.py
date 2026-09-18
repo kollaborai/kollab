@@ -24,6 +24,8 @@ from datetime import datetime
 from typing import Any
 
 from kollabor_agent.runtime import get_agent_tool_scope
+from kollabor_ai.message_content import contains_image_content, content_to_text
+from kollabor_ai.model_registry import supports_vision
 
 from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
@@ -345,19 +347,19 @@ class LocalStateService(StateService):
                 lines.append("")
                 lines.append(f"```\n{content}\n```")
             elif role == "user":
-                lines.append(f"## User Message {i+1}")
+                lines.append(f"## User Message {i + 1}")
                 if timestamp:
                     lines.append(f"*{timestamp}*")
                 lines.append("")
                 lines.append(content)
             elif role == "assistant":
-                lines.append(f"## Assistant Response {i+1}")
+                lines.append(f"## Assistant Response {i + 1}")
                 if timestamp:
                     lines.append(f"*{timestamp}*")
                 lines.append("")
                 lines.append(content)
             else:
-                lines.append(f"## {role.title()} {i+1}")
+                lines.append(f"## {role.title()} {i + 1}")
                 lines.append("")
                 lines.append(content)
 
@@ -554,6 +556,7 @@ class LocalStateService(StateService):
             provider=(provider or "") if provider is not None else "",
             endpoint=(endpoint or "") if endpoint is not None else "",
             supports_tools=bool(supports_tools),
+            supports_vision=bool(supports_vision(model or "", provider or "")),
             temperature=temperature,
             description=getattr(profile, "description", "") or "",
             is_active=is_active,
@@ -954,17 +957,13 @@ class LocalStateService(StateService):
 
             parameters: list[dict[str, Any]] = []
             for parameter in getattr(command, "parameters", ()) or ():
-                parameter_name = str(
-                    getattr(parameter, "name", "") or ""
-                ).strip()
+                parameter_name = str(getattr(parameter, "name", "") or "").strip()
                 if not parameter_name:
                     continue
                 parameter_data: dict[str, Any] = {
                     "name": parameter_name,
                     "type": str(getattr(parameter, "type", "") or ""),
-                    "description": str(
-                        getattr(parameter, "description", "") or ""
-                    ),
+                    "description": str(getattr(parameter, "description", "") or ""),
                     "required": bool(getattr(parameter, "required", False)),
                 }
                 choices = getattr(parameter, "choices", None) or ()
@@ -1134,10 +1133,7 @@ class LocalStateService(StateService):
         # native tools in the background because that work is independent of
         # provider selection.
         llm = self._llm_service
-        if (
-            llm is not None
-            and hasattr(llm, "api_service")
-        ):
+        if llm is not None and hasattr(llm, "api_service"):
             try:
                 reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
                 if callable(reinitialize):
@@ -1195,8 +1191,7 @@ class LocalStateService(StateService):
         enum_val = alias_map.get(raw.upper())
         if enum_val is None:
             raise ValueError(
-                f"unknown approval mode: {mode!r} "
-                f"(expected DEFAULT, CONFIRM_ALL, AUTO_APPROVE_EDITS, or TRUST_ALL)"
+                f"unknown approval mode: {mode!r} (expected DEFAULT, CONFIRM_ALL, AUTO_APPROVE_EDITS, or TRUST_ALL)"
             )
 
         pm.set_approval_mode(enum_val)
@@ -1753,8 +1748,7 @@ class LocalStateService(StateService):
         identity = identity.strip()
         if self._context_registry is not None:
             logger.debug(
-                "set_context_identity: registry already created with "
-                "identity=%s, ignoring new identity=%s",
+                "set_context_identity: registry already created with identity=%s, ignoring new identity=%s",
                 self._context_identity,
                 identity,
             )
@@ -1793,7 +1787,7 @@ class LocalStateService(StateService):
         if ctx is None:
             # Shouldn't happen -- registry always has at least main.
             raise ValueError(
-                f"active context not found in registry: " f"{reg.get_active_name()!r}"
+                f"active context not found in registry: {reg.get_active_name()!r}"
             )
         return ctx
 
@@ -2216,14 +2210,14 @@ class LocalStateService(StateService):
 
     # === Input ===
 
-    async def send_message(self, message: str) -> dict[str, Any]:
+    async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
         `process_user_input` runs the whole turn, which can take minutes. The
         RPC caller must not wait on that, so the turn is scheduled as a tracked
         background task and progress is followed on the DisplayTap instead.
         """
-        text = (message or "").strip()
+        text = content_to_text(message).strip()
         if not text:
             return {"accepted": False, "reason": "empty message"}
 
@@ -2234,10 +2228,20 @@ class LocalStateService(StateService):
         if getattr(llm, "is_processing", False):
             return {"accepted": False, "reason": "turn already in flight"}
 
+        if contains_image_content(message):
+            supports_images = getattr(llm, "supports_image_input", None)
+            if not callable(supports_images) or not supports_images():
+                return {
+                    "accepted": False,
+                    "reason": "active model does not accept image input",
+                }
+
         # Hub mentions are an explicit transport command, not LLM prose. Keep
         # the syntax in the chat composer so messaging an online agent is as
         # direct as typing ``@lapis message here`` or ``@broadcast hello``.
-        hub_mention = parse_hub_mention(text)
+        hub_mention = (
+            parse_hub_mention(text) if not contains_image_content(message) else None
+        )
         if hub_mention is not None:
             target, content = hub_mention
             create_task = getattr(llm, "create_background_task", None)
@@ -2261,7 +2265,8 @@ class LocalStateService(StateService):
             except Exception:
                 parser = executor = None
         if (
-            parser is not None
+            not contains_image_content(message)
+            and parser is not None
             and executor is not None
             and callable(getattr(parser, "is_slash_command", None))
             and parser.is_slash_command(text)
@@ -2274,7 +2279,7 @@ class LocalStateService(StateService):
                 asyncio.get_running_loop().create_task(command_coro)
             return {"accepted": True, "reason": "slash command"}
 
-        coro = llm.process_user_input(text)
+        coro = llm.process_user_input(message)
         create_task = getattr(llm, "create_background_task", None)
         if callable(create_task):
             create_task(coro, name="rpc_send_message")
@@ -2283,9 +2288,7 @@ class LocalStateService(StateService):
 
         return {"accepted": True, "reason": ""}
 
-    async def _execute_hub_message(
-        self, text: str, target: str, content: str
-    ) -> None:
+    async def _execute_hub_message(self, text: str, target: str, content: str) -> None:
         """Send one chat mention through Hub and publish a web turn."""
         from kollabor_tui.display_tap import publish_semantic
 
@@ -2338,7 +2341,9 @@ class LocalStateService(StateService):
                 stop_reason="error",
             )
 
-    async def _execute_slash_command(self, text: str, parser: Any, executor: Any) -> None:
+    async def _execute_slash_command(
+        self, text: str, parser: Any, executor: Any
+    ) -> None:
         """Run a parsed slash command and publish its result as a web turn."""
         from kollabor_tui.display_tap import publish_semantic
 
@@ -2494,8 +2499,7 @@ class LocalStateService(StateService):
         else:
             # Shouldn't happen in production; log and assign.
             logger.warning(
-                "resume: conversation_history is not a mutable list; "
-                "direct assignment (list identity lost)"
+                "resume: conversation_history is not a mutable list; direct assignment (list identity lost)"
             )
             llm.conversation_history = loaded_messages  # type: ignore[misc]
 

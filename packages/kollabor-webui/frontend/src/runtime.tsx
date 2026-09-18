@@ -1,7 +1,10 @@
 import {
   AssistantRuntimeProvider,
+  SimpleImageAttachmentAdapter,
   type AssistantTransportConnectionMetadata,
+  type ImageMessagePart,
   type ThreadMessageLike,
+  type TextMessagePart,
   unstable_createMessageConverter as createMessageConverter,
   useAssistantTransportRuntime,
   useAuiState,
@@ -31,6 +34,42 @@ export type EngineState = {
 };
 
 const messageConverter = createMessageConverter<ThreadMessageLike>((message) => message);
+const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
+
+function historyContentToThreadContent(content: unknown): ThreadMessageLike["content"] {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  let imageIndex = 0;
+  const parts: Array<TextMessagePart | ImageMessagePart> = [];
+  for (const rawPart of content) {
+    if (!rawPart || typeof rawPart !== "object") continue;
+    const part = rawPart as Record<string, unknown>;
+    if (part.type === "text" && typeof part.text === "string") {
+      parts.push({ type: "text", text: part.text });
+      continue;
+    }
+    if (part.type !== "image") continue;
+    imageIndex += 1;
+
+    const source =
+      part.source && typeof part.source === "object"
+        ? (part.source as Record<string, unknown>)
+        : undefined;
+    const image =
+      typeof part.image === "string"
+        ? part.image
+        : source?.kind === "url" && typeof source.url === "string"
+          ? source.url
+          : undefined;
+    if (image) {
+      parts.push({ type: "image", image });
+    } else {
+      parts.push({ type: "text", text: `[image${imageIndex}]` });
+    }
+  }
+  return parts.length ? parts : "";
+}
 
 function historyToMessages(
   history: HistoryMessage[],
@@ -142,7 +181,7 @@ function historyToMessages(
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
-        content: message.content || "",
+        content: historyContentToThreadContent(message.content),
       });
       return;
     }
@@ -153,7 +192,7 @@ function historyToMessages(
         messages.push({
           id: `history-${sourceIndex}`,
           role: "assistant",
-          content: message.content || "",
+          content: historyContentToThreadContent(message.content),
           status: { type: "complete", reason: "stop" },
         });
         return;
@@ -163,7 +202,17 @@ function historyToMessages(
         | { type: "text"; text: string }
         | RestoredToolCall
       > = [];
-      if (message.content) content.push({ type: "text", text: message.content });
+      const assistantContent = historyContentToThreadContent(message.content);
+      if (typeof assistantContent === "string" && assistantContent) {
+        content.push({ type: "text", text: assistantContent });
+      } else if (Array.isArray(assistantContent)) {
+        content.push(
+          ...assistantContent.filter(
+            (part): part is { type: "text"; text: string } =>
+              part.type === "text",
+          ),
+        );
+      }
       for (const call of calls) {
         callsById.set(call.toolCallId, call);
         content.push(call);
@@ -181,7 +230,7 @@ function historyToMessages(
       const callId = toolResultId(message);
       const existingCall = callId ? callsById.get(callId) : undefined;
       if (existingCall) {
-        existingCall.result = message.content || "";
+        existingCall.result = historyContentToThreadContent(message.content);
         existingCall.isError = toolResultIsError(message);
         return;
       }
@@ -195,7 +244,7 @@ function historyToMessages(
           asString(asRecord(message.metadata)?.tool_name) || "tool result",
         args: {},
         argsText: "{}",
-        result: message.content || "",
+        result: historyContentToThreadContent(message.content),
         isError: toolResultIsError(message),
       };
       messages.push({
@@ -243,13 +292,16 @@ const converter = (
 ) => {
   const optimistic = metadata.pendingCommands.flatMap((command) => {
     if (command.type !== "add-message") return [];
-    const text = command.message.parts
-      .map((part) => (part.type === "text" ? part.text : ""))
-      .join("\n");
+    const parts: Array<TextMessagePart | ImageMessagePart> = command.message.parts.map(
+      (part) =>
+        part.type === "text"
+          ? { type: "text" as const, text: part.text }
+          : { type: "image" as const, image: part.image },
+    );
     return [
       {
         role: "user" as const,
-        content: text,
+        content: parts,
         metadata: { isOptimistic: true },
       } satisfies ThreadMessageLike,
     ];
@@ -331,6 +383,7 @@ export function EngineRuntimeProvider({
     api: api.assistantUrl(sessionId),
     protocol: "assistant-transport",
     converter,
+    adapters: { attachments: imageAttachmentAdapter },
     headers: async () => {
       // Refresh before every transport request. Engine restarts rotate the
       // bearer token; assistant-ui's fetch hook does not retry 401 responses,

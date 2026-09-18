@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from kollabor_ai.message_content import content_to_text, prepend_text
 from kollabor_config import ConfigSchemaBuilder, PluginConfigSchema
 from kollabor_events.models import CommandResult, EventType, Hook, HookPriority
 from kollabor_plugins import BasePlugin
@@ -1907,7 +1908,7 @@ Aliases: /sub, /sa"""
         # The instructions should already be in system prompt via get_system_prompt_addition()
         # But we also inject here to ensure it's present
         original_input = context.get("message", context.get("input", ""))
-        injected = f"""<sys_msg>
+        instruction_prefix = """<sys_msg>
 ## Agent Orchestration
 
 You can spawn parallel sub-agents to work on tasks concurrently. Each agent runs as a separate subprocess.
@@ -1941,7 +1942,8 @@ You can spawn parallel sub-agents to work on tasks concurrently. Each agent runs
 ```
 </sys_msg>
 
-{original_input}"""
+"""
+        injected = prepend_text(instruction_prefix, original_input)
         context["message"] = injected
         if "input" in context:
             context["input"] = injected
@@ -2515,13 +2517,13 @@ You can spawn parallel sub-agents to work on tasks concurrently. Each agent runs
             logger.error(f"Failed to export conversation: {e}")
             return None
 
-    async def _maybe_offer_to_spawn_agent(self, user_input: str) -> None:
+    async def _maybe_offer_to_spawn_agent(self, user_input: Any) -> None:
         """Proactively offer to spawn a sub-agent when user mentions relevant keywords.
 
         This provides the clean natural UX the user was testing for.
         Smart + non-annoying: only triggers once per conversation by default.
         """
-        if not self.message_injector or not user_input:
+        if not self.message_injector:
             return
 
         import time
@@ -2533,7 +2535,9 @@ You can spawn parallel sub-agents to work on tasks concurrently. Each agent runs
             return
 
         # Normalize input
-        normalized = user_input.lower()
+        normalized = content_to_text(user_input).lower()
+        if not normalized:
+            return
 
         # Check if any trigger keyword is present
         triggered = any(kw.lower() in normalized for kw in TRIGGER_KEYWORDS)

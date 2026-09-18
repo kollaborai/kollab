@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from kollabor_ai.message_content import EphemeralImageStore, normalize_message_content
 from kollabor_ai.providers.errors import AuthenticationError, ProviderError
 from kollabor_ai.providers.models import (
     OpenAIResponsesConfig,
@@ -567,6 +568,35 @@ class TestOpenAIResponsesProviderPrepareRequest:
         assert "input" in request
         assert isinstance(request["input"], list)
 
+    def test_prepare_request_serializes_canonical_image(self, provider_config):
+        provider = OpenAIResponsesProvider(provider_config)
+        store = EphemeralImageStore()
+        content = normalize_message_content(
+            [
+                {"type": "text", "text": "inspect"},
+                {"type": "image", "image": "data:image/png;base64,iVBORw0KGgo="},
+            ],
+            store,
+        )
+        provider.set_media_resolver(store.resolve)
+
+        request = provider._prepare_request(
+            [{"role": "user", "content": content}], tools=None, stream=False
+        )
+
+        assert request["input"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "inspect"},
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                    },
+                ],
+            }
+        ]
+
     def test_prepare_request_strips_local_metadata_from_input(self, provider_config):
         """Local-only message metadata must not be sent to Responses API."""
         provider = OpenAIResponsesProvider(provider_config)
@@ -594,9 +624,7 @@ class TestOpenAIResponsesProviderPrepareRequest:
             {"role": "assistant", "content": "ack"},
         ]
 
-    def test_prepare_request_caps_tool_output_at_responses_limit(
-        self, provider_config
-    ):
+    def test_prepare_request_caps_tool_output_at_responses_limit(self, provider_config):
         """Responses API rejects function_call_output strings above 10MB."""
         provider = OpenAIResponsesProvider(provider_config)
         max_output_chars = 10_485_760

@@ -8,8 +8,9 @@ Handles lifecycle management, request tracking, and atomic operations.
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional
 
+from ..model_registry import supports_vision as registry_supports_vision
 from .errors import ProviderError
 from .models import (
     ProviderConfig,
@@ -65,6 +66,10 @@ class LLMProvider(ABC):
         self._provider_name: str = self.provider_type.value
         self._supports_streaming: bool = True
         self._supports_tools: bool = True
+        self._supports_vision: bool = registry_supports_vision(
+            self.model, self.provider_type.value
+        )
+        self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
 
         # Last wire request payload — the exact dict handed to the HTTP
         # client / SDK immediately before transport. Captured by each
@@ -258,6 +263,23 @@ class LLMProvider(ABC):
         """Check if provider supports function calling."""
         return self._supports_tools
 
+    @property
+    def supports_vision(self) -> bool:
+        """Check whether the active catalog model accepts image input."""
+        return self._supports_vision
+
+    def set_media_resolver(
+        self, resolver: Optional[Callable[[str], Optional[str]]]
+    ) -> None:
+        """Attach the session-local resolver for managed image IDs."""
+        self._media_resolver = resolver
+
+    def resolve_media(self, media_id: str) -> Optional[str]:
+        """Resolve a managed media ID at provider serialization time."""
+        if self._media_resolver is None:
+            return None
+        return self._media_resolver(media_id)
+
     def get_metadata(self) -> Dict[str, Any]:
         """
         Get provider metadata.
@@ -271,6 +293,7 @@ class LLMProvider(ABC):
             "model": self.model,
             "supports_streaming": self._supports_streaming,
             "supports_tools": self._supports_tools,
+            "supports_vision": self._supports_vision,
             "initialized": self._initialized,
             "shutdown": self._shutdown,
             "active_requests": self._active_requests,
@@ -285,8 +308,7 @@ class LLMProvider(ABC):
         """
         if not self._initialized:
             raise ProviderError(
-                f"{self._provider_name} provider not initialized. "
-                f"Call initialize() first.",
+                f"{self._provider_name} provider not initialized. Call initialize() first.",
                 provider=self._provider_name,
             )
 
@@ -299,8 +321,7 @@ class LLMProvider(ABC):
         """
         if self._shutdown:
             raise ProviderError(
-                f"{self._provider_name} provider is shut down. "
-                f"Cannot make new requests.",
+                f"{self._provider_name} provider is shut down. Cannot make new requests.",
                 provider=self._provider_name,
             )
 

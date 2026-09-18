@@ -1,7 +1,7 @@
 ---
 title: Multimodal Image Input and Generated-Image Output
 created: 2026-08-24
-modified: 2026-08-24
+modified: 2026-09-17
 status: draft
 author: maintainers
 ---
@@ -18,11 +18,13 @@ wire contracts, artifact handling, and availability risks.
 
 ## problem
 
-Kollab currently treats a conversation message as text. The terminal input path
-accepts typed/pasted text, `ConversationManager.add_message()` persists
-`content: str`, and the OpenAI Responses request builder forwards that value as
-one `content` field. That works for text and native tool turns but cannot
-represent a text-and-image user turn safely or durably.
+The legacy `ConversationManager` remains text-oriented, but the CLI/TUI and
+browser composer now carry text-and-image turns through the structured message
+path described below. The CLI reads the OS clipboard only on an explicit
+`Ctrl+V` input, displays opaque `[imageN]` tokens, and submits the corresponding
+structured parts. The OpenAI Responses request builder and the other provider
+adapters translate that structured content at the wire boundary; durable media
+lifecycle and generated-image output still need separate design work.
 
 The `openai_responses` provider can call the public `/responses` endpoint and
 is also used for the ChatGPT OAuth profile (`openai-oauth`) against the Codex
@@ -37,6 +39,39 @@ There is also no normalized output type for an image. The Responses transformer
 keeps text, function calls, and reasoning; it drops unrecognized output items
 and non-text message blocks. Therefore even a backend that emitted an image
 would lose it before the terminal or Web UI could render it.
+
+## implemented browser input slice
+
+The browser composer now accepts pasted image files through the existing
+assistant-ui attachment adapter. Each image is represented in the composer by
+an editable `[imageN]` token and a removable attachment tile; removing an
+attachment removes its token and renumbers the remaining images. The transport
+submits text and image parts together, the daemon normalizes pasted data URLs
+into bounded process-local media IDs, and provider adapters resolve those IDs
+only while building the provider-native request.
+
+The model catalog exposes an explicit `supports_vision` boolean per model.
+Image turns are rejected before provider I/O when the active provider/model is
+not explicitly marked capable. The API-key OpenAI default is
+`gpt-5.6-luna`; the separate ChatGPT OAuth/Codex Responses profile remains on
+its existing transport-specific model path. The durable media upload/read
+authorization and generated-image output remain outside this slice.
+
+
+## implemented CLI input slice
+
+In the interactive CLI/TUI, copy an image into the operating-system clipboard
+and press `Ctrl+V`. Kollab inserts `[image1]` at the current cursor position;
+additional images receive the next token. `Backspace`/`Delete` remove a token as
+one unit and renumber the remaining tokens. `Enter` emits ordered text and image
+parts through the same event path used by the browser composer. If the clipboard
+does not contain a supported image, `Ctrl+V` retains the existing text-clipboard
+fallback. Raw image data is held only in the process-local input state until the
+turn is submitted, then the normal bounded media/capability path applies.
+
+The exact key sent by a terminal emulator varies. `Ctrl+V` is the portable CLI
+trigger; terminals configured to reserve `Ctrl+V` or use `Cmd+V` must bind that
+key to transmit control character `0x16` for this flow.
 
 
 ## goals
@@ -63,8 +98,8 @@ would lose it before the terminal or Web UI could render it.
 ## non-goals
 
 - universal vision support across providers or models;
-- silently converting arbitrary pasted bytes, local paths in normal prose, or
-  clipboard image data into uploads;
+- silently converting arbitrary pasted bytes or local paths in normal prose into
+  uploads; clipboard image reads happen only after the explicit `Ctrl+V` action;
 - OCR, image editing, image annotation, albums, camera capture, or drag/drop
   in the first release;
 - a new generic blob store or a permanent remote image host;
@@ -78,7 +113,8 @@ would lose it before the terminal or Web UI could render it.
 - assuming ChatGPT OAuth/Codex matches the public OpenAI Responses API;
 - exposing a public Images API call through OAuth without an explicitly
   verified, permitted OAuth contract;
-- Web UI attachment composition in phase 1.
+- durable Web UI media upload/read authorization in this slice; the browser
+  composer currently uses bounded in-memory session media.
 
 
 ## terminology
@@ -117,27 +153,28 @@ would lose it before the terminal or Web UI could render it.
 ### input and persistence
 
 - `kollabor/llm/message_handler.py`,
-  `MessageHandler.handle_user_input()`, reads only `data["message"]` as a
-  string and passes it to `process_user_input()`.
+  `MessageHandler.handle_user_input()`, reads `data["message"]` as text or
+  structured content and passes it to `process_user_input()`.
 - `packages/kollabor-tui/src/kollabor_tui/input/paste_processor.py` handles
-  pasted text; it has no attachment event or binary clipboard path.
+  pasted text plus process-local CLI image tokens and attachment data.
+- `packages/kollabor-tui/src/kollabor_tui/clipboard.py` reads supported image
+  representations from the OS clipboard on explicit `Ctrl+V`, with fixed
+  commands, timeout, signature checks, and byte limits.
 - `packages/kollabor-tui/src/kollabor_tui/widgets/file_browser.py` is a
   reusable browser widget, but it is not connected to composition or message
   submission.
-- `packages/kollabor-ai/src/kollabor_ai/conversation_manager.py`,
-  `ConversationManager.add_message()`, accepts and stores `content: str`.
-  `get_context_messages()` returns those message dictionaries directly.
+- `ConversationManager.add_message()` remains the legacy text-search/reporting
+  store; the primary `conversation_history` retains structured image
+  descriptors while those helpers receive `[imageN]` text projections.
 - `packages/kollabor-ai/src/kollabor_ai/system_prompt_builder.py` supports
   configured `attachment_files`, but reads them as UTF-8 text and injects their
   contents into the system prompt. It is not a binary attachment mechanism.
 
 ### OpenAI Responses translation
 
-- `packages/kollabor-ai/src/kollabor_ai/providers/openai_responses_provider.py`,
-  `OpenAIResponsesProvider._prepare_request()`, builds user/assistant input as
-  `{ "role": role, "content": msg.get("content", "") }`. It does not
-  validate image types, encode local data, create `input_image` parts, or make
-  a capability decision.
+- `OpenAIResponsesProvider._prepare_request()` now translates canonical image
+  descriptors into documented `input_image` parts. Capability validation and
+  media resolution happen before and during request construction.
 - Its existing OAuth guard uses `_requires_streaming` to omit public API fields
   rejected by Codex. This is the required pattern for any image capability:
   serialize only after the selected transport has an affirmative capability.
@@ -160,19 +197,42 @@ would lose it before the terminal or Web UI could render it.
 
 ### tests and docs
 
-`tests/unit/test_openai_responses_provider.py` and
-`tests/unit/test_openai_responses_transformer.py` cover text, tool calls,
-reasoning, streaming, and OAuth-specific request restrictions. They have no
-image URL, data URI, file ID, binary, generation, artifact, or image-streaming
-coverage. `docs/providers.md`, `packages/kollabor-ai/README.md`, and the
-getting-started documentation do not offer image input/generation guidance.
+`tests/unit/test_message_content.py`,
+`tests/unit/test_paste_processor.py`,
+`tests/unit/test_clipboard.py`,
+`tests/unit/test_openai_responses_provider.py`,
+`tests/unit/providers/test_local_message_metadata.py`, and
+`packages/kollabor-engine/tests/test_assistant_route.py` cover canonical image
+normalization, provider wire serialization, and assistant-transport submission.
+Generated-image output, provider file uploads, durable media authorization, and
+legacy standalone attach-client clipboard handling remain open work.
 
 
 ## product UX
 
-### terminal phase 1: explicit image command
+### terminal phase 1: clipboard image input
 
-Use a slash command so ordinary text remains ordinary text:
+Use an explicit key action so ordinary text remains ordinary text:
+
+```
+copy image to OS clipboard
+press Ctrl+V
+inspect [image1]
+```
+
+Multiple images remain editable in the same turn:
+
+```
+compare [image1] with [image2]
+Backspace/Delete on a token removes it and renumbers the rest
+```
+
+The CLI reads an image only after `Ctrl+V`; it does not poll or monitor the
+clipboard in the background. Supported image bytes pass signature checks before
+entering the structured message path. If no image is present, the same key
+falls back to ordinary text clipboard paste.
+
+The future explicit file/URL command remains a separate source contract:
 
 ```
 /image <path> [prompt]
@@ -186,7 +246,7 @@ Examples:
 /image https://example.com/chart.png summarize the trend
 ```
 
-`/image` resolves the argument as follows:
+When implemented, `/image` will resolve the argument as follows:
 
 1. `https://` is a URL source. HTTP, `file:`, `data:`, localhost/private
    network URLs, credentials in URLs, and unsupported URL forms are rejected.
@@ -202,9 +262,9 @@ Examples:
    for the selected source type. An unsupported provider fails before network
    I/O and suggests a vision-capable profile/model.
 
-The command is intentionally singular in phase 1. Multiple images, attachments
-on arbitrary normal messages, clipboard images, and file-browser composition
-are deferred until a simple single-image contract is reliable.
+The command remains intentionally separate from clipboard composition. Multiple
+clipboard images are supported by the CLI slice above; file-browser composition
+and durable upload/read authorization remain future work.
 
 ### URL handling
 
@@ -221,10 +281,15 @@ DNS-rebinding, content-type, content-size, and provenance controls.
 
 ### Web UI
 
-Web UI composition is optional/deferred, but the media boundary is mandatory before
-any Web UI image is exposed. Phase 1 must expose artifacts and message summaries in
-any existing history/inspection surface without breaking it, but need not provide
-upload, drag/drop, clipboard, or image preview.
+The browser composer is enabled for pasted image files and uses the existing
+assistant-ui attachment lifecycle. The media boundary is still mandatory: raw
+data URLs exist only in the transient browser request/state and are converted
+to bounded process-local media IDs before daemon history and provider calls.
+The durable server media endpoint is not part of this implementation.
+
+The durable upload/read contract below remains the design required for a future
+cross-reload media store; the current in-memory path does not claim to satisfy
+that contract.
 
 A later Web UI composer must reuse the normalized descriptor and validation service;
 it must not invent a browser-only request shape. It requires two distinct, explicitly

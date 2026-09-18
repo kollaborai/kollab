@@ -15,8 +15,14 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from kollabor_ai.message_content import (
+    contains_image_content,
+    content_to_text,
+    redact_media_data,
+)
+from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_ai.providers.errors import (
     APIConnectionError,
@@ -101,6 +107,7 @@ class APICommunicationService:
 
         # Provider-based communication
         self._provider: Any = None  # Initialized in initialize()
+        self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
         self._provider_error: Optional[str] = (
             None  # Error message if provider init failed
         )
@@ -172,6 +179,25 @@ class APICommunicationService:
         )
         if self._debug_tool_stream_path:
             logger.info("Tool stream path debugging enabled")
+
+    def set_media_resolver(
+        self, resolver: Optional[Callable[[str], Optional[str]]]
+    ) -> None:
+        """Attach the session-local resolver used by provider serializers."""
+        self._media_resolver = resolver
+        if self._provider is not None:
+            set_resolver = getattr(self._provider, "set_media_resolver", None)
+            if callable(set_resolver):
+                set_resolver(resolver)
+
+    def supports_image_input(self) -> bool:
+        """Return the active catalog model's declared image capability."""
+        if self._provider is not None:
+            return bool(getattr(self._provider, "supports_vision", False))
+        profile = getattr(self, "_profile", None)
+        provider = getattr(profile, "get_provider", lambda: "")()
+        model = getattr(profile, "get_model", lambda: self.model)()
+        return supports_vision(model, provider)
 
     def set_session_id(self, session_id: str) -> None:
         """Set current session ID for raw log linking.
@@ -248,8 +274,7 @@ class APICommunicationService:
             return True
         else:
             logger.warning(
-                "API service initialized with errors - provider not available. "
-                "Use /setup to fix configuration."
+                "API service initialized with errors - provider not available. Use /setup to fix configuration."
             )
             return False
 
@@ -274,10 +299,12 @@ class APICommunicationService:
             # Get or create provider instance
             provider = await ProviderRegistry.get_provider(provider_config)
             self._provider = provider
+            set_resolver = getattr(provider, "set_media_resolver", None)
+            if callable(set_resolver):
+                set_resolver(self._media_resolver)
 
             logger.info(
-                f"Provider initialized: {provider.provider_name} "
-                f"(model={provider.model})"
+                f"Provider initialized: {provider.provider_name} (model={provider.model})"
             )
 
         except ValueError as e:
@@ -285,8 +312,7 @@ class APICommunicationService:
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Profile '{self._profile.name}' has configuration error: {e}. "
-                f"Use /setup to fix the configuration."
+                f"Profile '{self._profile.name}' has configuration error: {e}. Use /setup to fix the configuration."
             )
 
         except Exception as e:
@@ -333,8 +359,7 @@ class APICommunicationService:
                     await self._resolve_oauth_model(tokens)
             else:
                 logger.warning(
-                    "OAuth token refresh failed - token may be expired. "
-                    "Use /login openai to re-authenticate."
+                    "OAuth token refresh failed - token may be expired. Use /login openai to re-authenticate."
                 )
         except Exception as e:
             logger.warning(f"OAuth token refresh error: {e}")
@@ -386,7 +411,7 @@ class APICommunicationService:
 
     async def call_llm(
         self,
-        conversation_history: List[Dict[str, str]],
+        conversation_history: List[Dict[str, Any]],
         max_history: Optional[int] = None,
         streaming_callback=None,
         tools: Optional[List[Dict[str, Any]]] = None,
@@ -472,10 +497,19 @@ class APICommunicationService:
             else:
                 raise RuntimeError("Provider not initialized. Call initialize() first.")
 
-        try:
-            max_retries = max(
-                0, int(self.config.get("kollabor.llm.max_retries", 5))
+        has_image_input = any(
+            isinstance(message, dict) and contains_image_content(message.get("content"))
+            for message in messages
+        )
+        if has_image_input and not self.supports_image_input():
+            raise ProviderError(
+                f"model '{self.model}' does not accept image input",
+                provider=str(getattr(self._provider, "provider_name", "unknown")),
+                error_code="vision_not_supported",
             )
+
+        try:
+            max_retries = max(0, int(self.config.get("kollabor.llm.max_retries", 5)))
         except (TypeError, ValueError):
             max_retries = 5
         base_delay = RETRY_BASE_DELAY_SECONDS
@@ -544,10 +578,7 @@ class APICommunicationService:
                         isinstance(error_code, str)
                         and error_code.startswith("server_error")
                     )
-                    or (
-                        isinstance(status_code, int)
-                        and 500 <= status_code < 600
-                    )
+                    or (isinstance(status_code, int) and 500 <= status_code < 600)
                     or (
                         not is_typed_provider_error
                         and bool(re.search(r"\b5\d{2}\b", error_str))
@@ -556,8 +587,13 @@ class APICommunicationService:
                 )
                 is_transport_error = isinstance(
                     e, (APIConnectionError, APITimeoutError)
-                ) or error_code in {"connection_error", "timeout"}
-                is_transient_http = isinstance(e, TransientHTTPError) or status_code in {
+                ) or error_code in {
+                    "connection_error",
+                    "timeout",
+                }
+                is_transient_http = isinstance(
+                    e, TransientHTTPError
+                ) or status_code in {
                     408,
                     409,
                 }
@@ -603,8 +639,7 @@ class APICommunicationService:
                         and parsed_retry_after > RETRY_MAX_DELAY_SECONDS
                     ):
                         logger.warning(
-                            "Provider requested retry after %.1fs, above local cap %.1fs; "
-                            "not retrying: %s",
+                            "Provider requested retry after %.1fs, above local cap %.1fs; not retrying: %s",
                             parsed_retry_after,
                             RETRY_MAX_DELAY_SECONDS,
                             error_str[:120],
@@ -847,8 +882,7 @@ class APICommunicationService:
                     if self._use_explicit_accumulation and completed_tools:
                         accumulated_tools.extend(completed_tools)
                         logger.debug(
-                            f"EXPLICIT mode: {len(completed_tools)} tools completed "
-                            f"({len(accumulated_tools)} total)"
+                            f"EXPLICIT mode: {len(completed_tools)} tools completed ({len(accumulated_tools)} total)"
                         )
                     if self._debug_tool_stream_path:
                         buf = (
@@ -935,8 +969,7 @@ class APICommunicationService:
                     }
                     self.last_token_usage_is_estimated = True
                     logger.debug(
-                        "Provider stream omitted usage; using estimated tokens "
-                        "(input=%d, output=%d)",
+                        "Provider stream omitted usage; using estimated tokens (input=%d, output=%d)",
                         estimated_prompt,
                         estimated_completion,
                     )
@@ -1069,7 +1102,7 @@ class APICommunicationService:
 
     def _prepare_messages(
         self, conversation_history: List[Any], max_history: Optional[int]
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         """Prepare conversation messages for API request.
 
         Args:
@@ -1130,7 +1163,14 @@ class APICommunicationService:
         """
         if not value:
             return 0
-        text = value if isinstance(value, str) else str(value)
+        if isinstance(value, str):
+            text = value
+        elif isinstance(value, list):
+            text = content_to_text(value)
+            if not text:
+                text = json.dumps(value, ensure_ascii=False, default=str)
+        else:
+            text = json.dumps(value, ensure_ascii=False, default=str)
         return len(text) // 3 + 1
 
     def _message_tokens(self, message: Dict[str, Any]) -> int:
@@ -1336,8 +1376,7 @@ class APICommunicationService:
             return True
         else:
             logger.warning(
-                f"Provider reinitialization failed for profile '{profile.name}': "
-                f"{self._provider_error}"
+                f"Provider reinitialization failed for profile '{profile.name}': {self._provider_error}"
             )
             return False
 
@@ -1393,7 +1432,7 @@ class APICommunicationService:
             local_messages = [
                 LocalMessage(
                     role=str(m.get("role", "")),
-                    content=m.get("content", ""),
+                    content=redact_media_data(m.get("content", "")),
                     metadata={
                         k: v for k, v in m.items() if k not in ("role", "content")
                     },
@@ -1409,7 +1448,7 @@ class APICommunicationService:
                 payload = getattr(self._provider, "last_request_payload", None)
                 if payload is not None:
                     try:
-                        wire_request = copy.deepcopy(payload)
+                        wire_request = redact_media_data(copy.deepcopy(payload))
                     except Exception:
                         wire_request = None
                 wire_provider = getattr(self._provider, "_provider_name", "") or str(
@@ -1533,8 +1572,7 @@ class APICommunicationService:
                     continue
             if removed:
                 logger.info(
-                    "Raw log retention: pruned %d oldest session file(s) to "
-                    "stay under %d MB total",
+                    "Raw log retention: pruned %d oldest session file(s) to stay under %d MB total",
                     removed,
                     self._raw_max_total_bytes // (1024 * 1024),
                 )

@@ -16,6 +16,12 @@ from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
 
+from kollabor_ai.message_content import (
+    MessageContent,
+    contains_image_content,
+    content_to_text,
+)
+
 from .. import sse
 from ..server import get_session_registry
 
@@ -28,7 +34,7 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 
 
 class MessageRequest(BaseModel):
-    content: str
+    content: Any
     continuation: bool = False
 
 
@@ -161,8 +167,8 @@ def _assistant_command_type(command: Dict[str, Any]) -> str:
     return str(command.get("type") or "").strip().lower()
 
 
-def _assistant_message_text(command: Dict[str, Any]) -> str:
-    """Extract text from an assistant-ui ``add-message`` command."""
+def _assistant_message_content(command: Dict[str, Any]) -> MessageContent:
+    """Extract text/image parts from an assistant-ui add-message command."""
     message = command.get("message")
     if isinstance(message, str):
         return message
@@ -172,17 +178,27 @@ def _assistant_message_text(command: Dict[str, Any]) -> str:
 
     parts = message.get("parts", [])
     if isinstance(parts, list):
-        text = "\n".join(
-            str(part.get("text", ""))
-            for part in parts
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
-        if text:
-            return text
+        normalized_parts: List[Dict[str, Any]] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                normalized_parts.append({"type": "text", "text": part["text"]})
+            elif part.get("type") == "image" and isinstance(part.get("image"), str):
+                normalized_parts.append({"type": "image", "image": part["image"]})
+        if any(part.get("type") == "image" for part in normalized_parts):
+            return normalized_parts
+        if normalized_parts:
+            return "\n".join(part["text"] for part in normalized_parts)
     content = message.get("content")
     if isinstance(content, str):
         return content
     return ""
+
+
+def _assistant_message_text(command: Dict[str, Any]) -> str:
+    """Render an assistant-ui add-message command for validation/display."""
+    return content_to_text(_assistant_message_content(command))
 
 
 def _assistant_tool_result(command: Dict[str, Any]) -> tuple[str, Any, str, str]:
@@ -269,9 +285,17 @@ def _assistant_copy_messages(state: Any) -> List[Dict[str, Any]]:
     if not isinstance(state, dict) or not isinstance(state.get("messages"), list):
         return []
     try:
-        return json.loads(json.dumps(state["messages"]))
+        messages = json.loads(json.dumps(state["messages"]))
     except (TypeError, ValueError):
         return []
+    for message in messages:
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and contains_image_content(message.get("content"))
+        ):
+            message["content"] = content_to_text(message["content"])
+    return messages
 
 
 def _assistant_state_content(
@@ -292,14 +316,14 @@ def _assistant_state_content(
 def _assistant_update_message_state(
     messages: List[Dict[str, Any]],
     session_id: str,
-    submitted_texts: List[str],
+    submitted_contents: List[MessageContent],
     text: str,
     reasoning: str,
     tool_parts: List[Dict[str, Any]],
     status: Dict[str, str],
 ) -> List[Dict[str, Any]]:
     """Persist the completed or interrupted turn in assistant-ui state."""
-    if not submitted_texts:
+    if not submitted_contents:
         for message in reversed(messages):
             if message.get("role") != "assistant":
                 continue
@@ -327,12 +351,15 @@ def _assistant_update_message_state(
             message["status"] = status
             return messages
 
-    for index, submitted_text in enumerate(submitted_texts):
+    for index, submitted_content in enumerate(submitted_contents):
         messages.append(
             {
                 "id": f"user-{session_id}-{len(messages) + index}",
                 "role": "user",
-                "content": submitted_text,
+                # Keep data URLs out of assistant-ui state/history. The image
+                # was already handed to the daemon; the visible token is the
+                # durable client-side representation for this slice.
+                "content": content_to_text(submitted_content),
             }
         )
 
@@ -591,7 +618,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         persist_message_state = isinstance(body.state, dict) and isinstance(
             body.state.get("messages"), list
         )
-        submitted_texts: List[str] = []
+        submitted_contents: List[MessageContent] = []
         assistant_text = ""
         assistant_reasoning = ""
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
@@ -602,18 +629,18 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             for command in body.commands:
                 command_type = _assistant_command_type(command)
                 if command_type == "add-message":
-                    text = _assistant_message_text(command)
-                    if not text:
+                    message_content = _assistant_message_content(command)
+                    if not content_to_text(message_content).strip():
                         controller.add_error("add-message command has no text")
                         return
-                    accepted = await session.send_message(text)
-                    submitted_texts.append(text)
+                    accepted = await session.send_message(message_content)
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
                             str(accepted.get("reason", "message rejected"))
                         )
                         return
+                    submitted_contents.append(message_content)
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
@@ -718,7 +745,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     _assistant_update_message_state(
                         state_messages,
                         session_id,
-                        submitted_texts,
+                        submitted_contents,
                         assistant_text,
                         assistant_reasoning,
                         assistant_parts,
@@ -810,7 +837,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     _assistant_update_message_state(
                         state_messages,
                         session_id,
-                        submitted_texts,
+                        submitted_contents,
                         assistant_text,
                         assistant_reasoning,
                         assistant_parts,

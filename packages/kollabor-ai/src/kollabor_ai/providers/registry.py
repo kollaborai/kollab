@@ -11,6 +11,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
+from ..model_registry import resolve_default_model
 from .base import LLMProvider
 from .models import (
     AnthropicConfig,
@@ -133,8 +134,7 @@ class ProviderRegistry:
         if provider_class is None:
             available = ", ".join(p.value for p in cls._providers.keys())
             raise ValueError(
-                f"Provider '{provider_type.value}' not registered.\n"
-                f"Available providers: {available or 'None'}"
+                f"Provider '{provider_type.value}' not registered.\nAvailable providers: {available or 'None'}"
             )
 
         logger.info(f"Creating new {provider_type.value} provider instance")
@@ -189,8 +189,7 @@ class ProviderRegistry:
         if provider_class is None:
             available = ", ".join(p.value for p in cls._providers.keys())
             raise ValueError(
-                f"Provider '{provider_type.value}' not registered.\n"
-                f"Available providers: {available or 'None'}"
+                f"Provider '{provider_type.value}' not registered.\nAvailable providers: {available or 'None'}"
             )
 
         logger.info(f"Creating new {provider_type.value} provider (non-singleton)")
@@ -349,8 +348,7 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
                 return ProviderType(provider_str)
             except ValueError:
                 raise ValueError(
-                    f"Unknown provider type: '{provider_str}'. "
-                    f"Must be one of: {[p.value for p in ProviderType]}"
+                    f"Unknown provider type: '{provider_str}'. Must be one of: {[p.value for p in ProviderType]}"
                 )
         # "auto" falls through to detection logic below
 
@@ -436,7 +434,7 @@ def create_config_from_profile(
     # choosing, suggests the headline alias instead (see setup_altview).
     default_model = "claude-sonnet-5"  # Default for Anthropic
     if provider_type == ProviderType.OPENAI:
-        default_model = "gpt-5.6-terra"
+        default_model = resolve_default_model(provider_type.value) or "gpt-5.6-luna"
     elif provider_type == ProviderType.OPENAI_RESPONSES:
         # Must be a slug the codex backend serves (query_codex_model_details)
         default_model = "gpt-5.6-sol"
@@ -502,8 +500,7 @@ def create_config_from_profile(
     api_key = profile.get("api_key") or profile.get("api_token", "")
     if not api_key and provider_type != ProviderType.CUSTOM:
         raise ValueError(
-            f"Profile missing required 'api_key' or 'api_token' field. "
-            f"Provider: {provider_type.value}"
+            f"Profile missing required 'api_key' or 'api_token' field. Provider: {provider_type.value}"
         )
     base_fields["api_key"] = api_key
 

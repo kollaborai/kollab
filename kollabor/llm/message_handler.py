@@ -10,6 +10,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
+from kollabor_ai.message_content import content_to_text
+
 if TYPE_CHECKING:
     pass
 
@@ -66,10 +68,11 @@ class MessageHandler:
             Unmodified data (context is injected as system message)
         """
         message = data.get("message", "")
-        if message.strip():
+        display_text = content_to_text(message)
+        if display_text.strip():
             try:
                 await self._coordinator.context_service.trigger_context_injection(
-                    message
+                    display_text
                 )
             except Exception as e:
                 logger.error(f"Context injection failed: {e}")
@@ -89,7 +92,8 @@ class MessageHandler:
             Result of processing
         """
         message = data.get("message", "")
-        if not message.strip():
+        display_text = content_to_text(message)
+        if not display_text.strip():
             return {"status": "empty_message"}
 
         pre_displayed = bool(data.get("message_pre_displayed", False))
@@ -100,7 +104,9 @@ class MessageHandler:
         startup_ready = self._coordinator.event_bus.get_service("startup_ready")
         if startup_ready and not startup_ready.is_set():
             if not pre_displayed:
-                self._coordinator.message_display_service.display_user_message(message)
+                self._coordinator.message_display_service.display_user_message(
+                    display_text
+                )
                 data["message_pre_displayed"] = True
                 pre_displayed = True
             try:
@@ -245,25 +251,26 @@ class MessageHandler:
                 # Log message
                 if log_messages:
                     conv_logger = coord.conversation_logger
+                    log_content = content_to_text(content)
                     if role == "user":
                         parent_uuid = await conv_logger.log_user_message(
-                            content, parent_uuid=parent_uuid
+                            log_content, parent_uuid=parent_uuid
                         )
                     elif role == "assistant":
                         parent_uuid = await conv_logger.log_assistant_message(
-                            content,
+                            log_content,
                             parent_uuid=parent_uuid,
                             model=coord.api_service.model,
                             thinking_content=None,
                         )
                     elif role == "system":
                         await conv_logger.log_system_message(
-                            content, parent_uuid=parent_uuid
+                            log_content, parent_uuid=parent_uuid
                         )
 
                 # Build display sequence
                 if display_messages and role in ("user", "assistant", "system"):
-                    display_sequence.append((role, content, {}))
+                    display_sequence.append((role, content_to_text(content), {}))
 
             # CRITICAL FIX: Display messages BEFORE hiding loading indicator
             # The loading indicator must remain active until messages are fully rendered.
@@ -397,8 +404,7 @@ class MessageHandler:
                         # consumed by that message's turn — nothing orphans.
                         if not qp.processing_queue.empty():
                             logger.info(
-                                "Hub continue: user message arrived, "
-                                "yielding chain to queue drain"
+                                "Hub continue: user message arrived, yielding chain to queue drain"
                             )
                             break
                         if time.monotonic() > checkpoint_at:
@@ -512,7 +518,9 @@ class MessageHandler:
                             )
                             return
                         if self._user_is_typing():
-                            logger.info("TRIGGER_LLM_CONTINUE: User typing, skipping retry")
+                            logger.info(
+                                "TRIGGER_LLM_CONTINUE: User typing, skipping retry"
+                            )
                             return
                         logger.info(
                             "TRIGGER_LLM_CONTINUE: Retrying after processing completed"

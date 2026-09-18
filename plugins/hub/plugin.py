@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env
 from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
+from kollabor_ai.message_content import content_to_text
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.models import (
     CommandCategory,
@@ -7104,7 +7105,7 @@ class HubPlugin(BasePlugin):
         if self._identity.state == "waiting":
             await self._exit_waiting_state()
 
-        user_content = (data.get("message") or "").strip()
+        user_content = content_to_text(data.get("message") or "").strip()
         if not user_content:
             return data
 
@@ -7171,7 +7172,7 @@ class HubPlugin(BasePlugin):
         if not self._crystal_store and not self._global_crystal_store:
             return data
 
-        user_content = (data.get("message") or "").strip()
+        user_content = content_to_text(data.get("message") or "").strip()
         if not user_content or len(user_content) < 10:
             return data
 
@@ -10521,11 +10522,12 @@ class HubPlugin(BasePlugin):
         recent = rendered_events[-limit:]
         return [str(e.get("rendered", "")) for e in recent]
 
-    async def _inject_attacher_input(self, text: str) -> None:
-        """Inject text from a remote attacher as if the user typed it.
+    async def _inject_attacher_input(self, text: Any) -> None:
+        """Inject input from a remote attacher as if the user typed it.
 
         Routes through the event bus so all hooks (hub broadcast,
-        working state, etc) fire identically to local input.
+        working state, etc) fire identically to local input. Structured
+        multimodal content is preserved across the attach boundary.
         """
         if not self.event_bus:
             return

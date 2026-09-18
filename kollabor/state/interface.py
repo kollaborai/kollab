@@ -622,7 +622,7 @@ class StateService(Protocol):
 
     # === Input ===
 
-    async def send_message(self, message: str) -> dict[str, Any]:
+    async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn to the daemon.
 
         Returns as soon as the turn is accepted, not when it finishes - a turn

@@ -6,7 +6,7 @@ input validation.
 """
 
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,39 @@ class BufferManager:
             self._buffer[: self._cursor_pos] + self._buffer[self._cursor_pos + 1 :]
         )
         return True
+
+    def delete_range(self, start: int, end: int) -> bool:
+        """Delete the half-open range ``[start, end)`` from the buffer.
+
+        This is used by token-aware input features that need to remove an
+        atomic visible item rather than one character at a time.
+        """
+        if start < 0 or end < start or end > len(self._buffer):
+            return False
+        if start == end:
+            return True
+
+        self._buffer = self._buffer[:start] + self._buffer[end:]
+        if self._cursor_pos > end:
+            self._cursor_pos -= end - start
+        elif self._cursor_pos >= start:
+            self._cursor_pos = start
+        self._reset_history_navigation()
+        return True
+
+    def replace_content(
+        self, content: str, cursor_position: Optional[int] = None
+    ) -> None:
+        """Replace the visible buffer while preserving a valid cursor.
+
+        Callers use this for small, internal rewrites such as renumbering
+        image tokens after a deletion. It deliberately does not add the
+        content to command history.
+        """
+        self._buffer = content
+        requested_cursor = len(content) if cursor_position is None else cursor_position
+        self._cursor_pos = max(0, min(requested_cursor, len(content)))
+        self._reset_history_navigation()
 
     def move_cursor(self, direction: str) -> bool:
         """Move cursor left or right.

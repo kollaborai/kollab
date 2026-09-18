@@ -243,7 +243,7 @@ class EngineSession:
             )
         return self.history
 
-    async def send_message(self, content: str) -> Dict[str, Any]:
+    async def send_message(self, content: Any) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
         return await self.state.send_message(content)
 
@@ -326,9 +326,7 @@ class EngineSession:
     def to_dict(self) -> Dict[str, Any]:
         identity = self.daemon.identity if self.daemon else ""
         agent_name = (
-            self.agent
-            or (self.daemon.agent_name if self.daemon else "")
-            or "default"
+            self.agent or (self.daemon.agent_name if self.daemon else "") or "default"
         )
         return {
             "session_id": self.session_id,

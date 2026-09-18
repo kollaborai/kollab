@@ -22,6 +22,15 @@ from kollabor_ai import (
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.context_injection import ContextService as ContextInjectionService
 from kollabor_ai.context_service import ContextService
+from kollabor_ai.message_content import (
+    EphemeralImageStore,
+    MessageContent,
+    MessageContentError,
+    combine_message_contents,
+    contains_image_content,
+    content_to_text,
+    normalize_message_content,
+)
 from kollabor_ai.providers.registry import ProviderRegistry, create_config_from_profile
 from kollabor_ai.providers.transformers import ToolCallAccumulator
 from kollabor_config import LLMTaskConfig
@@ -87,7 +96,9 @@ class LLMService:
         if hasattr(self, "conversation_manager") and self.conversation_manager:
             message_uuid = self.conversation_manager.add_message(
                 role=role,
-                content=content,
+                # ConversationManager has legacy text-search/reporting helpers;
+                # the canonical structured message remains in conversation_history.
+                content=content_to_text(content),
                 parent_uuid=parent_uuid,
                 metadata=dict(getattr(message, "metadata", None) or metadata or {}),
             )
@@ -350,6 +361,7 @@ class LLMService:
 
         # Conversation state
         self.conversation_history: List[ConversationMessage] = []
+        self._image_store = EphemeralImageStore()
         self._pending_agent_hud: List[AgentHudEntry] = []
         # Note: max_queue_size is now owned by QueueProcessor, accessed via property
 
@@ -434,6 +446,22 @@ class LLMService:
 
         # Link session ID for raw log correlation
         self.api_service.set_session_id(self.conversation_logger.session_id)
+        self.api_service.set_media_resolver(self.resolve_media)
+
+    def resolve_media(self, media_id: str) -> Optional[str]:
+        """Resolve one live pasted image for a provider request."""
+        store = getattr(self, "_image_store", None)
+        return store.resolve(media_id) if store is not None else None
+
+    def supports_image_input(self) -> bool:
+        """Return whether the active provider model accepts image input."""
+        return bool(
+            getattr(
+                getattr(self, "api_service", None),
+                "supports_image_input",
+                lambda: False,
+            )()
+        )
 
     def _init_components(self):
         """Initialize all extracted components (NativeToolsHandler, SystemPromptBuilder, QueueProcessor, etc)."""
@@ -795,11 +823,26 @@ class LLMService:
 
             # Tags already hardcoded in response_parser — don't double-register
             hardcoded_tags = {
-                "terminal", "terminal-status", "terminal-output", "terminal-kill",
-                "tool", "tool_call",
-                "read", "edit", "create", "create-overwrite", "delete", "move",
-                "copy", "copy-overwrite", "append", "insert-after", "insert-before",
-                "grep", "mkdir", "rmdir",
+                "terminal",
+                "terminal-status",
+                "terminal-output",
+                "terminal-kill",
+                "tool",
+                "tool_call",
+                "read",
+                "edit",
+                "create",
+                "create-overwrite",
+                "delete",
+                "move",
+                "copy",
+                "copy-overwrite",
+                "append",
+                "insert-after",
+                "insert-before",
+                "grep",
+                "mkdir",
+                "rmdir",
             }
 
             # Also skip tags registered by plugins (hub, agent_orchestrator, etc.)
@@ -808,7 +851,8 @@ class LLMService:
                 t["tool_type"] for t in self.response_parser._plugin_tags
             }
             existing_plugin_tags.update(
-                t["tool_type"].replace("_", "-") for t in self.response_parser._plugin_tags
+                t["tool_type"].replace("_", "-")
+                for t in self.response_parser._plugin_tags
             )
 
             count = 0
@@ -821,7 +865,9 @@ class LLMService:
 
                 # Skip tags already registered by plugins
                 tool_type_hyphen = tool.name  # e.g. "web-search"
-                tool_type_underscore = tool_type_hyphen.replace("-", "_")  # e.g. "web_search"
+                tool_type_underscore = tool_type_hyphen.replace(
+                    "-", "_"
+                )  # e.g. "web_search"
 
                 if tool_type_underscore in existing_plugin_tags:
                     continue
@@ -834,6 +880,7 @@ class LLMService:
 
                 # Create extract function based on xml_form
                 if tool.xml_form == "nested":
+
                     def _make_extract(tl):
                         def _extract(m):
                             raw = m.group(1)
@@ -847,14 +894,24 @@ class LLMService:
                                 if pm:
                                     params[param.name] = pm.group(1).strip()
                             return params
+
                         return _extract
+
                     extract_fn = _make_extract(tool)
                 elif tool.xml_form == "body":
+
                     def _make_body_extract(tl):
-                        body_param = tl.xml_body_param or tl.parameters[0].name if tl.parameters else "command"
+                        body_param = (
+                            tl.xml_body_param or tl.parameters[0].name
+                            if tl.parameters
+                            else "command"
+                        )
+
                         def _extract(m):
                             return {body_param: m.group(1).strip()}
+
                         return _extract
+
                     extract_fn = _make_body_extract(tool)
                 else:
                     # attributes or mixed — extract all groups as positional
@@ -867,7 +924,9 @@ class LLMService:
                                     if val is not None:
                                         params[param.name] = val.strip()
                             return params
+
                         return _extract
+
                     extract_fn = _make_attr_extract(tool)
 
                 self.response_parser.register_plugin_tag(
@@ -880,8 +939,7 @@ class LLMService:
 
             if count > 0:
                 logger.info(
-                    f"Registered {count} registry tool XML tags with response parser "
-                    f"(web, workspace, on_demand, etc.)"
+                    f"Registered {count} registry tool XML tags with response parser (web, workspace, on_demand, etc.)"
                 )
         except Exception as e:
             logger.warning(f"Failed to register registry tool tags: {e}", exc_info=True)
@@ -925,6 +983,11 @@ class LLMService:
                     self._current_provider = await self._provider_registry.get_provider(
                         provider_config
                     )
+                    set_resolver = getattr(
+                        self._current_provider, "set_media_resolver", None
+                    )
+                    if callable(set_resolver):
+                        set_resolver(self.resolve_media)
 
                 logger.info(
                     f"Provider initialized: {self._current_provider.provider_name} "
@@ -1070,7 +1133,7 @@ class LLMService:
 
     # --- QueueProcessor forwarding methods ---
 
-    async def _enqueue_with_overflow_strategy(self, message: str) -> None:
+    async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> None:
         """Enqueue message with overflow strategy. Delegates to QueueProcessor."""
         await self._queue_processor.enqueue(message)
 
@@ -1082,10 +1145,10 @@ class LLMService:
             continue_conversation_fn=self._continue_conversation,
         )
 
-    async def _process_message_batch(self, messages: List[str]):
+    async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
         if self._pending_agent_hud:
-            combined = "\n".join(messages)
+            combined = combine_message_contents(messages)
             messages = [self.merge_pending_agent_hud(combined)]
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
@@ -1156,7 +1219,7 @@ class LLMService:
         """Return only pending HUD diffs, without creating a turn by itself."""
         return format_agent_hud(self.pop_pending_agent_hud())
 
-    def merge_pending_agent_hud(self, user_message: str) -> str:
+    def merge_pending_agent_hud(self, user_message: MessageContent) -> MessageContent:
         """Return one user payload containing queued HUD diffs + message."""
         return merge_agent_hud_with_user_message(
             self.pop_pending_agent_hud(),
@@ -1265,7 +1328,7 @@ class LLMService:
         await self._native_tools.load_tools()
 
     async def process_user_input(
-        self, message: str, pre_displayed: bool = False
+        self, message: MessageContent, pre_displayed: bool = False
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1279,12 +1342,39 @@ class LLMService:
         Returns:
             Status information about processing
         """
+        image_store = getattr(self, "_image_store", None)
+        if image_store is None:
+            image_store = EphemeralImageStore()
+            self._image_store = image_store
+        if contains_image_content(message) and not self.supports_image_input():
+            return {
+                "status": "rejected",
+                "reason": f"model '{self.api_service.model}' does not accept image input",
+            }
+        try:
+            normalized_message = normalize_message_content(message, image_store)
+        except MessageContentError as exc:
+            logger.warning("Rejected message content: %s", exc)
+            return {"status": "rejected", "reason": str(exc)}
+
+        display_text = content_to_text(normalized_message)
+        if not display_text.strip():
+            return {"status": "rejected", "reason": "empty message"}
+        if (
+            contains_image_content(normalized_message)
+            and not self.supports_image_input()
+        ):
+            return {
+                "status": "rejected",
+                "reason": f"model '{self.api_service.model}' does not accept image input",
+            }
+
         # Display user message using MessageDisplayService (DRY refactoring)
         if not pre_displayed:
             logger.debug(
-                f"DISPLAY DEBUG: About to display user message: '{message[:100]}...' ({len(message)} chars)"
+                f"DISPLAY DEBUG: About to display user message: '{display_text[:100]}...' ({len(display_text)} chars)"
             )
-            self.message_display_service.display_user_message(message)
+            self.message_display_service.display_user_message(display_text)
 
         prompt_builder = getattr(self, "_prompt_builder", None)
         if prompt_builder and prompt_builder.ensure_shell_aliases_loaded():
@@ -1372,11 +1462,11 @@ class LLMService:
 
         # Log user message
         self.current_parent_uuid = await self.conversation_logger.log_user_message(
-            message, parent_uuid=self.current_parent_uuid
+            display_text, parent_uuid=self.current_parent_uuid
         )
 
         # Add to processing queue with overflow handling
-        await self._enqueue_with_overflow_strategy(message)
+        await self._enqueue_with_overflow_strategy(normalized_message)
 
         # Start processing if not already running
         if not self.is_processing:
@@ -1574,6 +1664,10 @@ class LLMService:
             logger.info("Provider system shutdown complete")
         except Exception as e:
             logger.warning(f"Provider shutdown error: {e}")
+
+        image_store = getattr(self, "_image_store", None)
+        if image_store is not None:
+            image_store.clear()
 
         # Shutdown MCP integration
         try:

@@ -448,6 +448,15 @@ class KeyPressHandler:
                 await self._handle_ctrl_c()
                 return
 
+            elif self.key_parser.is_control_key(key_press, "Ctrl+V"):
+                paste_from_clipboard = getattr(
+                    self.paste_processor, "handle_clipboard_paste", None
+                )
+                if callable(paste_from_clipboard):
+                    pasted = await paste_from_clipboard()
+                    if pasted is True:
+                        await self.display_controller.update_display(force_render=True)
+
             elif self.key_parser.is_control_key(key_press, "Enter"):
                 await self._handle_enter()
 
@@ -457,7 +466,11 @@ class KeyPressHandler:
                 await self.display_controller.update_display(force_render=True)
 
             elif self.key_parser.is_control_key(key_press, "Backspace"):
-                self.buffer_manager.delete_char()
+                delete_image = getattr(
+                    self.paste_processor, "delete_image_token_before_cursor", None
+                )
+                if not callable(delete_image) or delete_image() is not True:
+                    self.buffer_manager.delete_char()
 
             elif key_press.name == "Escape":
                 # Check if in navigation mode - route to navigation manager
@@ -530,7 +543,11 @@ class KeyPressHandler:
                     logger.debug("F1 pressed but no help overlay callback available")
 
             elif key_press.name == "Delete":
-                self.buffer_manager.delete_forward()
+                delete_image = getattr(
+                    self.paste_processor, "delete_image_token_at_cursor", None
+                )
+                if not callable(delete_image) or delete_image() is not True:
+                    self.buffer_manager.delete_forward()
 
             # Handle arrow keys for cursor movement and history
             elif key_press.name == "ArrowLeft":
@@ -602,6 +619,11 @@ class KeyPressHandler:
             elif self.key_parser.is_control_key(key_press, "Ctrl+U"):
                 logger.info("Ctrl+U (Cmd+Backspace) - clearing line")
                 self.buffer_manager.clear()
+                clear_images = getattr(
+                    self.paste_processor, "clear_image_attachments", None
+                )
+                if callable(clear_images):
+                    clear_images()
                 await self.display_controller.update_display(force_render=True)
 
             # Handle printable characters
@@ -731,6 +753,12 @@ class KeyPressHandler:
 
             # Get message and clear buffer
             message = self.buffer_manager.get_content_and_clear()
+            has_image_token = getattr(
+                self.paste_processor, "has_live_image_token", None
+            )
+            has_image_message = (
+                callable(has_image_token) and has_image_token(message) is True
+            )
 
             # DEBUG: Log what we received
             starts_with_bang = message.strip().startswith("!")
@@ -741,7 +769,11 @@ class KeyPressHandler:
 
             # Check if this is a shell command - delegate to shell command service
             # This handles both typed commands AND commands from history
-            if message.strip().startswith("!") and self.shell_command_service:
+            if (
+                message.strip().startswith("!")
+                and self.shell_command_service
+                and not has_image_message
+            ):
                 # Expand paste placeholders in shell commands too
                 if self._expand_paste_placeholders_callback:
                     message = self._expand_paste_placeholders_callback(message)
@@ -764,7 +796,7 @@ class KeyPressHandler:
 
             # Check if this is a slash command - execute it directly
             # This handles both typed commands AND commands from history
-            if message.strip().startswith("/"):
+            if message.strip().startswith("/") and not has_image_message:
                 # Expand paste placeholders in slash command args too
                 if self._expand_paste_placeholders_callback:
                     message = self._expand_paste_placeholders_callback(message)
@@ -816,7 +848,7 @@ class KeyPressHandler:
             # Direct Hub mentions are operator messages, not LLM turns. Route
             # them through the state service so local and attach sessions use
             # the same human-sender identity and wake/spawn semantics.
-            if message.strip().startswith("@"):
+            if message.strip().startswith("@") and not has_image_message:
                 if self._expand_paste_placeholders_callback:
                     message = self._expand_paste_placeholders_callback(message)
                 else:
@@ -850,8 +882,28 @@ class KeyPressHandler:
                 f"GENIUS SUBMIT: Final expanded: '{expanded_message[:100]}...' ({len(expanded_message)} chars)"
             )
 
-            # Add to history (with expanded content)
-            self.buffer_manager.add_to_history(expanded_message)
+            # Add a truthful text projection to input history. Image data is
+            # intentionally one-shot; recalling the visible token must not
+            # imply that the original attachment can be resent. Do this before
+            # build_message_content clears the live attachment map.
+            history_message = expanded_message
+            if has_image_message:
+                project_history = getattr(
+                    self.paste_processor, "history_projection", None
+                )
+                if callable(project_history):
+                    history_message = project_history(expanded_message)
+
+            build_message_content = getattr(
+                self.paste_processor, "build_message_content", None
+            )
+            message_content = (
+                build_message_content(expanded_message)
+                if callable(build_message_content)
+                else expanded_message
+            )
+
+            self.buffer_manager.add_to_history(history_message)
 
             # CRITICAL: Clear the input display before emitting event
             # This matches the original InputHandler._handle_enter behavior
@@ -862,7 +914,7 @@ class KeyPressHandler:
             await self.event_bus.emit_with_hooks(
                 EventType.USER_INPUT,
                 {
-                    "message": expanded_message,
+                    "message": message_content,
                     "validation_errors": validation_errors,
                 },
                 "user",

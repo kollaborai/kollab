@@ -2,7 +2,7 @@
   "_meta": {
     "description": "Frontier model registry for kollab",
     "updated": "2026-07-29",
-    "notes": "User overrides: ~/.kollab/models.json (merged on top). Lookup is longest-prefix match on the model string, so keep an explicit entry for every point release whose window differs from its family (e.g. grok-4.5 vs grok-4). supports_sampling=false means the model rejects temperature/top_p/top_k with a 400 -- providers omit them; absent means allowed."
+    "notes": "User overrides: ~/.kollab/models.json (merged on top). Lookup is longest-prefix match on the model string, so keep an explicit entry for every point release whose window differs from its family (e.g. grok-4.5 vs grok-4). supports_sampling=false means the model rejects temperature/top_p/top_k with a 400 -- providers omit them; absent means allowed. supports_vision=true/false declares whether the model accepts image input; unknown models are treated as unsupported."
   },
   "models": {
     "gpt-5.6": {
@@ -612,7 +612,8 @@
     "openai": {
       "context_window": 128000,
       "supports_tools": true,
-      "supports_streaming": true
+      "supports_streaming": true,
+      "default_model": "gpt-5.6-luna"
     },
     "anthropic": {
       "context_window": 200000,

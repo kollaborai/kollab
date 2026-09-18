@@ -13,6 +13,7 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..message_content import content_to_text, serialize_anthropic_content
 from .base import LLMProvider
 from .errors import ProviderError, map_anthropic_error, map_http_status_error
 from .message_sanitizer import strip_local_message_metadata_from_message
@@ -69,8 +70,7 @@ class AnthropicProvider(LLMProvider):
         self._default_base_url = "https://api.anthropic.com"
 
         logger.debug(
-            f"Anthropic provider created (model={config.model}, "
-            f"api_version={config.api_version})"
+            f"Anthropic provider created (model={config.model}, api_version={config.api_version})"
         )
 
     def validate_config(self, config: AnthropicConfig) -> None:  # type: ignore[override]  # type: ignore[override]
@@ -187,8 +187,7 @@ class AnthropicProvider(LLMProvider):
             )
 
             logger.debug(
-                f"Anthropic response received "
-                f"(tokens={unified_response.usage.total_tokens})"
+                f"Anthropic response received (tokens={unified_response.usage.total_tokens})"
             )
 
             return unified_response
@@ -352,10 +351,10 @@ class AnthropicProvider(LLMProvider):
             if msg.get("role") == "system":
                 # Extract system content
                 if system_message is None:
-                    system_message = msg.get("content", "")
+                    system_message = content_to_text(msg.get("content", ""))
                 else:
                     # Append to existing system message
-                    system_message += "\n\n" + msg.get("content", "")
+                    system_message += "\n\n" + content_to_text(msg.get("content", ""))
             elif msg.get("role") == "tool":
                 # Convert OpenAI-style tool results to Anthropic format:
                 # role="tool" -> role="user" with tool_result content block
@@ -366,7 +365,7 @@ class AnthropicProvider(LLMProvider):
                             {
                                 "type": "tool_result",
                                 "tool_use_id": msg.get("tool_call_id", ""),
-                                "content": msg.get("content", ""),
+                                "content": content_to_text(msg.get("content", "")),
                             }
                         ],
                     }
@@ -377,7 +376,15 @@ class AnthropicProvider(LLMProvider):
                 content_blocks = []
                 text = msg.get("content")
                 if text:
-                    content_blocks.append({"type": "text", "text": text})
+                    if isinstance(text, list):
+                        serialized = serialize_anthropic_content(
+                            text, self.resolve_media
+                        )
+                        content_blocks.extend(
+                            serialized if isinstance(serialized, list) else []
+                        )
+                    else:
+                        content_blocks.append({"type": "text", "text": text})
                 for tc in msg["tool_calls"]:
                     func = tc.get("function", {})
                     args_str = func.get("arguments", "{}")
@@ -411,9 +418,13 @@ class AnthropicProvider(LLMProvider):
                 # `content` in place and the raw log looks like duplicate
                 # data was sent when the API actually received one merged
                 # message.
-                anthropic_messages.append(
-                    strip_local_message_metadata_from_message(msg)
-                )
+                cleaned = strip_local_message_metadata_from_message(msg)
+                content = cleaned.get("content")
+                if isinstance(content, list):
+                    cleaned["content"] = serialize_anthropic_content(
+                        content, self.resolve_media
+                    )
+                anthropic_messages.append(cleaned)
 
         # Merge consecutive same-role messages (Anthropic requires alternating roles)
         # This happens when multiple tool results create multiple "user" messages

@@ -1,5 +1,5 @@
 import type { HistoryMessage } from "@/api";
-import { isToolOutputBatch } from "@/api";
+import { historyContentToText, isToolOutputBatch } from "@/api";
 import { formatContent } from "@/utils/format-content";
 import { humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
 
@@ -175,8 +175,9 @@ function toolCallId(metadata: JsonObject): string | undefined {
 }
 
 function toolOutput(message: HistoryMessage, metadata: JsonObject): string {
-  if (typeof message.content === "string" && message.content.trim()) {
-    return message.content;
+  const content = historyContentToText(message.content);
+  if (content.trim()) {
+    return content;
   }
   for (const key of [
     "tool_output",
@@ -274,7 +275,7 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
   history.forEach((message, sourceIndex) => {
     const metadata = metadataFor(message);
     const timestamp = normalizeTimestamp(message.timestamp);
-    const content = message.content || "";
+    const content = historyContentToText(message.content);
     const identity = messageIdentity(message, sourceIndex);
 
     if (message.role === "system") {

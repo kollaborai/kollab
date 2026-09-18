@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.model_registry import supports_vision
 from kollabor_config.config_utils import (
     get_existing_global_config_path,
     get_global_config_path,
@@ -187,8 +188,7 @@ class LLMProfile:
             return self.model
         # All sources empty - warn user
         logger.warning(
-            f"Profile '{self.name}': No model configured. "
-            f"Set {self._get_env_key('MODEL')} or configure in config.json"
+            f"Profile '{self.name}': No model configured. Set {self._get_env_key('MODEL')} or configure in config.json"
         )
         return ""
 
@@ -201,8 +201,7 @@ class LLMProfile:
                 return int(env_val)
             except ValueError:
                 logger.warning(
-                    f"Profile '{self.name}': {env_key}='{env_val}' is not a valid integer, "
-                    f"using config value"
+                    f"Profile '{self.name}': {env_key}='{env_val}' is not a valid integer, using config value"
                 )
         global_val = self._get_global_env_value("MAX_TOKENS")
         if global_val:
@@ -210,8 +209,7 @@ class LLMProfile:
                 return int(global_val)
             except ValueError:
                 logger.warning(
-                    f"KOLLAB_MAX_TOKENS='{global_val}' is not a valid integer, "
-                    f"using config value"
+                    f"KOLLAB_MAX_TOKENS='{global_val}' is not a valid integer, using config value"
                 )
         return self.max_tokens  # Returns None if not configured (uses API default)
 
@@ -224,8 +222,7 @@ class LLMProfile:
                 return float(env_val)
             except ValueError:
                 logger.warning(
-                    f"Profile '{self.name}': {env_key}='{env_val}' is not a valid float, "
-                    f"using config value"
+                    f"Profile '{self.name}': {env_key}='{env_val}' is not a valid float, using config value"
                 )
         global_val = self._get_global_env_value("TEMPERATURE")
         if global_val:
@@ -233,8 +230,7 @@ class LLMProfile:
                 return float(global_val)
             except ValueError:
                 logger.warning(
-                    f"KOLLAB_TEMPERATURE='{global_val}' is not a valid float, "
-                    f"using config value"
+                    f"KOLLAB_TEMPERATURE='{global_val}' is not a valid float, using config value"
                 )
         return self.temperature if self.temperature is not None else 0.7
 
@@ -255,8 +251,7 @@ class LLMProfile:
                 return int(env_val)
             except ValueError:
                 logger.warning(
-                    f"Profile '{self.name}': {env_key}='{env_val}' is not a valid integer, "
-                    f"using config value"
+                    f"Profile '{self.name}': {env_key}='{env_val}' is not a valid integer, using config value"
                 )
         global_val = self._get_global_env_value("TIMEOUT")
         if global_val is not None:
@@ -264,8 +259,7 @@ class LLMProfile:
                 return int(global_val)
             except ValueError:
                 logger.warning(
-                    f"KOLLAB_TIMEOUT='{global_val}' is not a valid integer, "
-                    f"using config value"
+                    f"KOLLAB_TIMEOUT='{global_val}' is not a valid integer, using config value"
                 )
         # 0 is valid (inherit provider default), only fall back if truly None
         if self.timeout is not None:
@@ -321,13 +315,12 @@ class LLMProfile:
 
         # 3. Sentinel string -> resolve from keyring
         if raw.startswith(KEYRING_SENTINEL_PREFIX):
-            keyring_key = raw[len(KEYRING_SENTINEL_PREFIX):]
+            keyring_key = raw[len(KEYRING_SENTINEL_PREFIX) :]
             resolved = _keyring_get(keyring_key)
             if resolved:
                 return resolved
             logger.warning(
-                f"Profile '{self.name}': sentinel found but keyring "
-                f"lookup failed for '{keyring_key}'"
+                f"Profile '{self.name}': sentinel found but keyring lookup failed for '{keyring_key}'"
             )
             return ""
 
@@ -335,7 +328,7 @@ class LLMProfile:
         if raw:
             if self.api_key_from_env:
                 return raw
-            if not getattr(self, '_keyring_migrated', False):
+            if not getattr(self, "_keyring_migrated", False):
                 migrated = _keyring_set(self.name, raw)
                 if migrated:
                     self._keyring_migrated = True
@@ -370,17 +363,20 @@ class LLMProfile:
         providers reject unknown effort levels with a 400.
         """
         value = (
-            self._get_env_value("EFFORT")
-            or self._get_global_env_value("EFFORT")
-            or self.effort
-            or ""
-        ).strip().lower()
+            (
+                self._get_env_value("EFFORT")
+                or self._get_global_env_value("EFFORT")
+                or self.effort
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         if not value:
             return ""
         if value not in EFFORT_LEVELS:
             logger.warning(
-                f"Profile '{self.name}': effort '{value}' is not one of "
-                f"{'/'.join(EFFORT_LEVELS)} — ignoring"
+                f"Profile '{self.name}': effort '{value}' is not one of {'/'.join(EFFORT_LEVELS)} — ignoring"
             )
             return ""
         return value
@@ -505,6 +501,9 @@ class LLMProfile:
         # Feature flags
         result["streaming"] = self.get_streaming()
         result["supports_tools"] = self.get_supports_tools()
+        result["supports_vision"] = supports_vision(
+            self.get_model(), self.get_provider()
+        )
 
         # Auth type (oauth profiles)
         if self.auth_type:
@@ -583,8 +582,7 @@ class ProfileManager:
             "env_var": "OPENAI_API_KEY",
             "model_env": "OPENAI_MODEL",
             "provider": "openai",
-            # Terra tier: same $/token as gpt-5.4, current generation
-            "model": "gpt-5.6-terra",
+            "model": "gpt-5.6-luna",
             "profile_name": "openai-auto",
             "description": "Auto-detected from OPENAI_API_KEY",
         },
@@ -806,8 +804,7 @@ class ProfileManager:
             requires_env = provider_info.get("requires_env")
             if requires_env and not os.environ.get(requires_env, "").strip():
                 logger.debug(
-                    f"Auto-detect skipped {env_var}: "
-                    f"required {requires_env} not set"
+                    f"Auto-detect skipped {env_var}: required {requires_env} not set"
                 )
                 continue
 
@@ -857,16 +854,14 @@ class ProfileManager:
                     first_registered = profile_name
                     first_registered_env = env_var
                 logger.debug(
-                    f"Auto-detect: {profile_name} already in registry, "
-                    f"using existing profile as env-detected candidate"
+                    f"Auto-detect: {profile_name} already in registry, using existing profile as env-detected candidate"
                 )
                 continue
 
             profile = LLMProfile.from_dict(profile_name, profile_data)
             self._profiles[profile_name] = profile
             logger.info(
-                f"Registered auto-profile from {env_var}: "
-                f"{profile_name} ({model})"
+                f"Registered auto-profile from {env_var}: {profile_name} ({model})"
             )
 
             if first_registered is None:
@@ -883,8 +878,7 @@ class ProfileManager:
         # provider env vars such as OPENROUTER_API_KEY.
         if self._profile_explicitly_set:
             logger.debug(
-                "Auto-detect: registered profiles but skipping activation "
-                "(profile explicitly set by user)"
+                "Auto-detect: registered profiles but skipping activation (profile explicitly set by user)"
             )
             return
 
@@ -892,8 +886,7 @@ class ProfileManager:
         self._is_auto_detected = True
         self._auto_detected_source = first_registered_env
         logger.info(
-            f"Auto-detected provider from {first_registered_env}: "
-            f"profile={first_registered}"
+            f"Auto-detected provider from {first_registered_env}: profile={first_registered}"
         )
 
     def _detect_oauth_provider(self) -> None:
@@ -1066,8 +1059,7 @@ class ProfileManager:
         self._pending_default_profile: Optional[str] = default_profile
 
         logger.info(
-            f"Loaded {len(self._profiles)} profiles "
-            f"(pending active: {active_profile or 'default'})"
+            f"Loaded {len(self._profiles)} profiles (pending active: {active_profile or 'default'})"
         )
 
     def _apply_pending_active_profile(self) -> None:
@@ -1108,6 +1100,7 @@ class ProfileManager:
         Returns:
             Tuple of (profiles_dict, active_profile, default_profile)
         """
+
         def _read_config(path: Path) -> Dict[str, Any]:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -1187,8 +1180,7 @@ class ProfileManager:
         profile = self._profiles.get(self._active_profile_name)
         if not profile:
             logger.warning(
-                f"Active profile '{self._active_profile_name}' not found, "
-                "falling back to 'default'"
+                f"Active profile '{self._active_profile_name}' not found, falling back to 'default'"
             )
             profile = self._profiles.get("default")
             if not profile:
@@ -1475,15 +1467,13 @@ class ProfileManager:
                         sentinel = f"{KEYRING_SENTINEL_PREFIX}{profile.name}"
                         profile_dict["api_key"] = sentinel
                         logger.info(
-                            f"Profile '{profile.name}': stored API key "
-                            f"in OS keyring, writing sentinel to config"
+                            f"Profile '{profile.name}': stored API key in OS keyring, writing sentinel to config"
                         )
                     else:
                         # Keyring unavailable -- fall back to plaintext
                         profile_dict["api_key"] = key_val
                         logger.warning(
-                            f"Profile '{profile.name}': keyring unavailable, "
-                            f"API key saved in plaintext"
+                            f"Profile '{profile.name}': keyring unavailable, API key saved in plaintext"
                         )
                 if profile.top_p is not None:
                     profile_dict["top_p"] = profile.top_p

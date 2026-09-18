@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..message_content import content_to_text, serialize_openai_responses_content
 from .base import LLMProvider
 from .errors import ProviderError, map_http_status_error, map_openai_error
 from .message_sanitizer import strip_local_message_metadata_from_message
@@ -115,8 +116,7 @@ class OpenAIResponsesProvider(LLMProvider):
         self._client: Optional[Any] = None
 
         logger.debug(
-            f"OpenAI Responses provider created (model={config.model}, "
-            f"store_responses={config.store_responses})"
+            f"OpenAI Responses provider created (model={config.model}, store_responses={config.store_responses})"
         )
 
     def validate_config(self, config: ProviderConfig) -> None:  # type: ignore[override]
@@ -178,7 +178,7 @@ class OpenAIResponsesProvider(LLMProvider):
 
         except ImportError as e:
             raise ImportError(
-                "httpx not installed. " "Install with: pip install httpx"
+                "httpx not installed. Install with: pip install httpx"
             ) from e
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI Responses client: {e}")
@@ -251,9 +251,7 @@ class OpenAIResponsesProvider(LLMProvider):
                 )
 
                 error_info = (
-                    error_data.get("error", {})
-                    if isinstance(error_data, dict)
-                    else {}
+                    error_data.get("error", {}) if isinstance(error_data, dict) else {}
                 )
                 if not isinstance(error_info, dict):
                     error_info = {}
@@ -278,8 +276,7 @@ class OpenAIResponsesProvider(LLMProvider):
             )
 
             logger.debug(
-                f"OpenAI Responses response received "
-                f"(tokens={unified_response.usage.total_tokens})"
+                f"OpenAI Responses response received (tokens={unified_response.usage.total_tokens})"
             )
 
             return unified_response
@@ -384,8 +381,7 @@ class OpenAIResponsesProvider(LLMProvider):
             output_items = final_response.get("output", [])
             if not output_items and accumulated_text:
                 logger.info(
-                    f"Final payload had empty output, injecting "
-                    f"{len(accumulated_text)} chars from stream deltas"
+                    f"Final payload had empty output, injecting {len(accumulated_text)} chars from stream deltas"
                 )
                 final_response["output"] = [
                     {
@@ -406,8 +402,7 @@ class OpenAIResponsesProvider(LLMProvider):
             )
 
             logger.debug(
-                f"OpenAI Responses call-via-stream complete "
-                f"(tokens={unified.usage.total_tokens})"
+                f"OpenAI Responses call-via-stream complete (tokens={unified.usage.total_tokens})"
             )
             return unified
 
@@ -546,7 +541,7 @@ class OpenAIResponsesProvider(LLMProvider):
         for msg in messages:
             role = msg.get("role")
             if role == "system":
-                instructions = msg.get("content", "")
+                instructions = content_to_text(msg.get("content", ""))
             elif role == "tool":
                 # Convert Chat Completions tool result to Responses API format
                 input_messages.append(
@@ -563,6 +558,10 @@ class OpenAIResponsesProvider(LLMProvider):
                 # First add the text content if any
                 text = msg.get("content")
                 if text:
+                    if isinstance(text, list):
+                        text = serialize_openai_responses_content(
+                            text, self.resolve_media
+                        )
                     input_messages.append(
                         {
                             "role": "assistant",
@@ -581,10 +580,15 @@ class OpenAIResponsesProvider(LLMProvider):
                         }
                     )
             elif role in ("user", "assistant", "developer"):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = serialize_openai_responses_content(
+                        content, self.resolve_media
+                    )
                 input_messages.append(
                     {
                         "role": role,
-                        "content": msg.get("content", ""),
+                        "content": content,
                     }
                 )
             else:
@@ -850,9 +854,7 @@ class OpenAIResponsesProvider(LLMProvider):
             if event in ("response.done", "response.completed"):
                 resp_data = parsed_data.get("response", parsed_data)
                 event_data = {"event": event, "response": resp_data}
-                usage = OpenAIResponsesTransformer._usage_info(
-                    resp_data.get("usage")
-                )
+                usage = OpenAIResponsesTransformer._usage_info(resp_data.get("usage"))
                 return StreamingResponse(
                     delta=TextDelta(content=""),
                     usage=usage,

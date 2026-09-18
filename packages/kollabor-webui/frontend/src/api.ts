@@ -21,11 +21,32 @@ export type Session = {
 
 export type HistoryMessage = {
   role: "system" | "user" | "assistant" | string;
-  content?: string | null;
+  content?: unknown;
   timestamp?: string | null;
   metadata?: Record<string, unknown>;
   thinking?: string | null;
 };
+
+export function historyContentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  let imageIndex = 0;
+  return content
+    .flatMap((rawPart) => {
+      if (!rawPart || typeof rawPart !== "object") return [];
+      const part = rawPart as Record<string, unknown>;
+      if (part.type === "text" && typeof part.text === "string") {
+        return [part.text];
+      }
+      if (part.type === "image") {
+        imageIndex += 1;
+        return [`[image${imageIndex}]`];
+      }
+      return [];
+    })
+    .join("\n");
+}
 
 export function isToolOutputBatch(
   message: Pick<HistoryMessage, "metadata">,
@@ -49,6 +70,7 @@ export type Profile = {
   provider?: string;
   model?: string;
   description?: string;
+  supports_vision?: boolean;
 };
 
 export type AgentPoolEntry = {

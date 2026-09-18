@@ -208,6 +208,50 @@ async def test_assistant_transport_submits_add_message(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_assistant_transport_preserves_image_part_in_submitted_message(
+    monkeypatch,
+):
+    session = _FakeSession([{"type": "turn_complete"}])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "parts": [
+                            {"type": "text", "text": "inspect this"},
+                            {
+                                "type": "image",
+                                "image": "data:image/png;base64,iVBORw0KGgo=",
+                            },
+                        ]
+                    },
+                }
+            ],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    session.send_message.assert_awaited_once_with(
+        [
+            {"type": "text", "text": "inspect this"},
+            {"type": "image", "image": "data:image/png;base64,iVBORw0KGgo="},
+        ]
+    )
+    assert captured["controller"].state["messages"][0]["content"] == (
+        "inspect this\n[image1]"
+    )
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_maps_permission_result(monkeypatch):
     session = _FakeSession([{"type": "turn_complete"}])
     monkeypatch.setattr(

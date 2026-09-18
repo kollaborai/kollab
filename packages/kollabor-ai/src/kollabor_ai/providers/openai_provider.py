@@ -12,6 +12,7 @@ Implements LLMProvider interface for OpenAI API with:
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import map_openai_error
 from .message_sanitizer import strip_local_message_metadata
@@ -72,8 +73,7 @@ class OpenAIProvider(LLMProvider):
         self._tool_accumulator: Optional[ToolCallAccumulator] = None
 
         logger.debug(
-            f"OpenAI provider created (model={config.model}, "
-            f"base_url={config.base_url or 'default'})"
+            f"OpenAI provider created (model={config.model}, base_url={config.base_url or 'default'})"
         )
 
     def validate_config(self, config: OpenAIConfig) -> None:  # type: ignore[override]
@@ -131,7 +131,7 @@ class OpenAIProvider(LLMProvider):
 
         except ImportError as e:
             raise ImportError(
-                "OpenAI SDK not installed. " "Install with: pip install openai"
+                "OpenAI SDK not installed. Install with: pip install openai"
             ) from e
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {e}")
@@ -184,8 +184,7 @@ class OpenAIProvider(LLMProvider):
             )
 
             logger.debug(
-                f"OpenAI response received "
-                f"(tokens={unified_response.usage.total_tokens})"
+                f"OpenAI response received (tokens={unified_response.usage.total_tokens})"
             )
 
             return unified_response
@@ -321,9 +320,17 @@ class OpenAIProvider(LLMProvider):
         Returns:
             Dictionary of API parameters
         """
+        prepared_messages = strip_local_message_metadata(messages)
+        for message in prepared_messages:
+            content = message.get("content")
+            if isinstance(content, (str, list)):
+                message["content"] = serialize_openai_chat_content(
+                    content, self.resolve_media
+                )
+
         params: Dict[str, Any] = {
             "model": self.model,
-            "messages": strip_local_message_metadata(messages),
+            "messages": prepared_messages,
             "stream": stream,
             "max_tokens": self.config.max_tokens,
         }

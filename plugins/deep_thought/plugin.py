@@ -10,6 +10,7 @@ import os
 import time
 from typing import Any, Dict, Optional, cast
 
+from kollabor_ai.message_content import content_to_text
 from kollabor_config import ConfigSchemaBuilder, PluginConfigSchema
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.data_models import ConversationMessage
@@ -353,11 +354,11 @@ class DeepThoughtPlugin(BasePlugin):
         if self._is_pondering:
             return data
 
-        message = data.get("message", "")
-        if not message or not message.strip():
+        message_text = content_to_text(data.get("message", "")).strip()
+        if not message_text:
             return data
 
-        if not self._should_ponder(message):
+        if not self._should_ponder(message_text):
             return data
 
         # Pipe mode check
@@ -365,11 +366,11 @@ class DeepThoughtPlugin(BasePlugin):
             return data
 
         # Dedup: don't ponder the same message twice in a row
-        if message.strip() == self._last_pondered_message:
+        if message_text == self._last_pondered_message:
             return data
-        self._last_pondered_message = message.strip()
+        self._last_pondered_message = message_text
 
-        await self._do_ponder(message)
+        await self._do_ponder(message_text)
         return data
 
     async def _do_ponder(self, message: str):
