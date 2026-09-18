@@ -52,7 +52,7 @@ HOSTED_IMAGE_GENERATION_INSTRUCTIONS = (
     "- After a completed image-generation result, tell the user the image is ready "
     "and direct them to the exact artifact action that the application appends in "
     "the form `Open: /artifact open <img_...>`. Never invent a media ID or "
-    "filesystem path, and do not say only \"link above\" without an actionable "
+    'filesystem path, and do not say only "link above" without an actionable '
     "open instruction."
 )
 
