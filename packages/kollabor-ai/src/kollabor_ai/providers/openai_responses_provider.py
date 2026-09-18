@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 
 RESPONSES_TOOL_OUTPUT_MAX_CHARS = 10_485_760
 RESPONSES_MAX_SSE_LINE_BYTES = 96 * 1024 * 1024
+HOSTED_IMAGE_GENERATION_MODELS = frozenset(
+    {
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+    }
+)
 
 
 def _cap_function_call_output(output: str) -> str:
@@ -196,12 +204,12 @@ class OpenAIResponsesProvider(LLMProvider):
 
     @property
     def supports_hosted_image_generation(self) -> bool:
-        """Whether this exact OAuth/Codex route supports image generation."""
+        """Whether this OAuth/Codex route and model support image generation."""
         auth_type = getattr(self.config.auth_type, "value", self.config.auth_type)
         return (
             self._requires_streaming
             and str(auth_type).lower() == "oauth"
-            and self.model.lower() == "gpt-5.6-luna"
+            and self.model.lower() in HOSTED_IMAGE_GENERATION_MODELS
         )
 
     def set_generated_image_store(self, store: Optional[Any]) -> None:

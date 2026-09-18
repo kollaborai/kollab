@@ -128,8 +128,12 @@ def test_redaction_is_scoped_to_image_generation_calls():
     assert PNG_RESULT not in json.dumps(redacted)
 
 
-def test_oauth_request_auto_exposes_hosted_image_tool():
-    provider = _oauth_provider()
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"],
+)
+def test_oauth_request_auto_exposes_hosted_image_tool(model: str):
+    provider = _oauth_provider(model)
     request = provider._prepare_request(
         [{"role": "user", "content": "draw a seedling"}],
         tools=None,
@@ -137,6 +141,17 @@ def test_oauth_request_auto_exposes_hosted_image_tool():
     )
 
     assert request["tools"] == [{"type": "image_generation"}]
+
+
+def test_oauth_request_does_not_auto_expose_hosted_image_tool_for_unknown_model():
+    provider = _oauth_provider("gpt-5.5")
+    request = provider._prepare_request(
+        [{"role": "user", "content": "draw a seedling"}],
+        tools=None,
+        stream=True,
+    )
+
+    assert "tools" not in request
 
 
 def test_hosted_tools_are_preserved_and_public_route_does_not_auto_add():
