@@ -67,7 +67,7 @@ class WidgetState:
     endpoint: str = ""
 
     # --- Permissions ---
-    approval_mode: str = "DEFAULT"
+    approval_mode: str = "TRUST_ALL"
 
     # --- Agent / Skills ---
     agent: str = ""

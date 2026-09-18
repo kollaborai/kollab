@@ -17,10 +17,13 @@ Chat Completions in several key ways:
 - State: 'previous_response_id' for chaining vs client-managed
 """
 
+import copy
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..generated_image_artifacts import redact_generated_image_data
+from ..message_content import content_to_text, serialize_openai_responses_content
 from .base import LLMProvider
 from .errors import ProviderError, map_http_status_error, map_openai_error
 from .message_sanitizer import strip_local_message_metadata_from_message
@@ -38,7 +41,31 @@ from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
+
+HOSTED_IMAGE_GENERATION_INSTRUCTIONS = (
+    "Hosted image-generation contract:\n"
+    "- When the user asks for an image or explicitly asks to use image generation, "
+    "call the hosted `image_generation` tool. Do not substitute scratchpad, file "
+    "inspection, ASCII text, or prose for the image tool.\n"
+    "- Do not claim that an image was generated unless this request contains a "
+    "completed image-generation result.\n"
+    "- After a completed image-generation result, tell the user the image is ready "
+    "and direct them to the exact artifact action that the application appends in "
+    "the form `Open: /artifact open <img_...>`. Never invent a media ID or "
+    'filesystem path, and do not say only "link above" without an actionable '
+    "open instruction."
+)
+
 RESPONSES_TOOL_OUTPUT_MAX_CHARS = 10_485_760
+RESPONSES_MAX_SSE_LINE_BYTES = 96 * 1024 * 1024
+HOSTED_IMAGE_GENERATION_MODELS = frozenset(
+    {
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+    }
+)
 
 
 def _cap_function_call_output(output: str) -> str:
@@ -48,6 +75,83 @@ def _cap_function_call_output(output: str) -> str:
     suffix = f"\n[output truncated for Responses API: {len(output)} chars total]"
     prefix_len = max(RESPONSES_TOOL_OUTPUT_MAX_CHARS - len(suffix), 0)
     return output[:prefix_len] + suffix
+
+
+def _record_image_generation_item(
+    items_by_id: Dict[str, Dict[str, Any]], item: Any
+) -> None:
+    """Retain one completed image item without exposing its result downstream."""
+    if not isinstance(item, dict) or item.get("type") != "image_generation_call":
+        return
+
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        raise ProviderError(
+            "image generation item is missing its provider id",
+            provider="openai_responses",
+            error_code="image_generation_missing_id",
+        )
+
+    existing = items_by_id.get(item_id)
+    if existing is None:
+        items_by_id[item_id] = copy.deepcopy(item)
+        return
+
+    existing_result = existing.get("result")
+    incoming_result = item.get("result")
+    if existing_result and incoming_result and existing_result != incoming_result:
+        raise ProviderError(
+            "conflicting payloads received for one image generation item",
+            provider="openai_responses",
+            error_code="image_generation_conflict",
+        )
+
+    # The same item can arrive once without its result and again with it. Merge
+    # metadata while preserving the first-seen order and provider identity.
+    for key, value in item.items():
+        if key not in existing or existing.get(key) in (None, "", []):
+            existing[key] = copy.deepcopy(value)
+
+
+def _merge_image_generation_items(
+    response: Dict[str, Any],
+    completed_items: Dict[str, Dict[str, Any]],
+) -> None:
+    """Reconcile output_item.done images into the final Responses payload."""
+    output = response.get("output", [])
+    if output is None:
+        output = []
+    if not isinstance(output, list):
+        raise ProviderError(
+            "Responses API returned a non-list output payload",
+            provider="openai_responses",
+            error_code="invalid_response_output",
+        )
+
+    image_items: Dict[str, Dict[str, Any]] = {}
+    normalized_output: List[Dict[str, Any]] = []
+    image_positions: Dict[str, int] = {}
+
+    for item in output:
+        if isinstance(item, dict) and item.get("type") == "image_generation_call":
+            _record_image_generation_item(image_items, item)
+            item_id = item["id"]
+            if item_id not in image_positions:
+                image_positions[item_id] = len(normalized_output)
+                normalized_output.append({})
+            continue
+        normalized_output.append(copy.deepcopy(item))
+
+    for item_id, item in completed_items.items():
+        _record_image_generation_item(image_items, item)
+        if item_id not in image_positions:
+            image_positions[item_id] = len(normalized_output)
+            normalized_output.append({})
+
+    for item_id, position in image_positions.items():
+        normalized_output[position] = copy.deepcopy(image_items[item_id])
+
+    response["output"] = normalized_output
 
 
 @register_provider(ProviderType.OPENAI_RESPONSES)
@@ -113,10 +217,10 @@ class OpenAIResponsesProvider(LLMProvider):
 
         # httpx client (initialized in initialize())
         self._client: Optional[Any] = None
+        self._generated_image_store: Optional[Any] = None
 
         logger.debug(
-            f"OpenAI Responses provider created (model={config.model}, "
-            f"store_responses={config.store_responses})"
+            f"OpenAI Responses provider created (model={config.model}, store_responses={config.store_responses})"
         )
 
     def validate_config(self, config: ProviderConfig) -> None:  # type: ignore[override]
@@ -178,7 +282,7 @@ class OpenAIResponsesProvider(LLMProvider):
 
         except ImportError as e:
             raise ImportError(
-                "httpx not installed. " "Install with: pip install httpx"
+                "httpx not installed. Install with: pip install httpx"
             ) from e
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI Responses client: {e}")
@@ -189,6 +293,20 @@ class OpenAIResponsesProvider(LLMProvider):
         """ChatGPT codex backend only accepts stream=true."""
         base = self.config.base_url or ""
         return "chatgpt.com" in base
+
+    @property
+    def supports_hosted_image_generation(self) -> bool:
+        """Whether this OAuth/Codex route and model support image generation."""
+        auth_type = getattr(self.config.auth_type, "value", self.config.auth_type)
+        return (
+            self._requires_streaming
+            and str(auth_type).lower() == "oauth"
+            and self.model.lower() in HOSTED_IMAGE_GENERATION_MODELS
+        )
+
+    def set_generated_image_store(self, store: Optional[Any]) -> None:
+        """Attach the private store used for completed hosted images."""
+        self._generated_image_store = store
 
     async def call(
         self,
@@ -251,9 +369,7 @@ class OpenAIResponsesProvider(LLMProvider):
                 )
 
                 error_info = (
-                    error_data.get("error", {})
-                    if isinstance(error_data, dict)
-                    else {}
+                    error_data.get("error", {}) if isinstance(error_data, dict) else {}
                 )
                 if not isinstance(error_info, dict):
                     error_info = {}
@@ -274,12 +390,13 @@ class OpenAIResponsesProvider(LLMProvider):
 
             # Transform to unified format
             unified_response = OpenAIResponsesTransformer.transform_response(
-                response_dict, self.model
+                response_dict,
+                self.model,
+                artifact_store=self._generated_image_store,
             )
 
             logger.debug(
-                f"OpenAI Responses response received "
-                f"(tokens={unified_response.usage.total_tokens})"
+                f"OpenAI Responses response received (tokens={unified_response.usage.total_tokens})"
             )
 
             return unified_response
@@ -366,7 +483,7 @@ class OpenAIResponsesProvider(LLMProvider):
                         accumulated_text_parts.append(chunk.delta.content)
                     # Capture the final response payload
                     if chunk.is_final and chunk.raw_chunk:
-                        raw_event = chunk.raw_chunk
+                        raw_event = chunk._raw_payload or chunk.raw_chunk
                         evt = raw_event.get("event", "")
                         if evt in ("response.done", "response.completed"):
                             final_response = raw_event.get("response", {})
@@ -382,19 +499,31 @@ class OpenAIResponsesProvider(LLMProvider):
             # transformer has something to work with
             accumulated_text = "".join(accumulated_text_parts)
             output_items = final_response.get("output", [])
-            if not output_items and accumulated_text:
-                logger.info(
-                    f"Final payload had empty output, injecting "
-                    f"{len(accumulated_text)} chars from stream deltas"
+            if not isinstance(output_items, list):
+                raise ProviderError(
+                    "Responses API returned an invalid final output payload",
+                    provider="openai_responses",
+                    error_code="invalid_response_output",
                 )
-                final_response["output"] = [
+
+            has_text_output = any(
+                isinstance(item, dict) and item.get("type") == "message"
+                for item in output_items
+            )
+            if accumulated_text and not has_text_output:
+                logger.info(
+                    "Final payload omitted streamed text, injecting %d chars from stream deltas",
+                    len(accumulated_text),
+                )
+                output_items.append(
                     {
                         "type": "message",
                         "role": "assistant",
                         "content": [{"type": "output_text", "text": accumulated_text}],
                     }
-                ]
-            elif not output_items:
+                )
+                final_response["output"] = output_items
+            if not output_items:
                 logger.warning(
                     f"OpenAI Responses stream: empty output AND no deltas, "
                     f"status={final_response.get('status')}, "
@@ -402,12 +531,26 @@ class OpenAIResponsesProvider(LLMProvider):
                 )
 
             unified = OpenAIResponsesTransformer.transform_response(
-                final_response, self.model
+                final_response,
+                self.model,
+                artifact_store=self._generated_image_store,
             )
 
+            image_items = [
+                item
+                for item in output_items
+                if isinstance(item, dict)
+                and item.get("type") == "image_generation_call"
+            ]
+            if image_items and len(unified.get_generated_images()) != len(image_items):
+                raise ProviderError(
+                    "image generation completed without a valid saved artifact",
+                    provider="openai_responses",
+                    error_code="image_artifact_persistence_failed",
+                )
+
             logger.debug(
-                f"OpenAI Responses call-via-stream complete "
-                f"(tokens={unified.usage.total_tokens})"
+                f"OpenAI Responses call-via-stream complete (tokens={unified.usage.total_tokens})"
             )
             return unified
 
@@ -546,7 +689,7 @@ class OpenAIResponsesProvider(LLMProvider):
         for msg in messages:
             role = msg.get("role")
             if role == "system":
-                instructions = msg.get("content", "")
+                instructions = content_to_text(msg.get("content", ""))
             elif role == "tool":
                 # Convert Chat Completions tool result to Responses API format
                 input_messages.append(
@@ -563,6 +706,10 @@ class OpenAIResponsesProvider(LLMProvider):
                 # First add the text content if any
                 text = msg.get("content")
                 if text:
+                    if isinstance(text, list):
+                        text = serialize_openai_responses_content(
+                            text, self.resolve_media
+                        )
                     input_messages.append(
                         {
                             "role": "assistant",
@@ -581,10 +728,15 @@ class OpenAIResponsesProvider(LLMProvider):
                         }
                     )
             elif role in ("user", "assistant", "developer"):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = serialize_openai_responses_content(
+                        content, self.resolve_media
+                    )
                 input_messages.append(
                     {
                         "role": role,
-                        "content": msg.get("content", ""),
+                        "content": content,
                     }
                 )
             else:
@@ -595,6 +747,12 @@ class OpenAIResponsesProvider(LLMProvider):
             params["instructions"] = instructions
         elif self._requires_streaming:
             params["instructions"] = "You are a helpful assistant."
+
+        if self.supports_hosted_image_generation:
+            params["instructions"] = (
+                f"{params.get('instructions', '').strip()}\n\n"
+                f"{HOSTED_IMAGE_GENERATION_INSTRUCTIONS}"
+            ).strip()
 
         # Convert messages to input format
         # For Responses API, input can be:
@@ -668,12 +826,15 @@ class OpenAIResponsesProvider(LLMProvider):
                 if cache_value is not None:
                     params[cache_key] = cache_value
 
-        # Transform tools to Responses API format
-        # Responses API uses flat format: {"type": "function", "name": ..., ...}
-        # NOT the Chat Completions nested format: {"type": "function", "function": {...}}
-        if tools:
+        # Transform function tools to Responses API format while preserving
+        # hosted/non-function tools exactly as supplied. The Codex OAuth route
+        # exposes image generation as a hosted tool, not a function.
+        if tools or self.supports_hosted_image_generation:
             responses_tools = []
-            for tool in tools:
+            for tool in tools or []:
+                if tool.get("type") and tool.get("type") != "function":
+                    responses_tools.append(copy.deepcopy(tool))
+                    continue
                 # Handle both generic format and OpenAI Chat Completions format
                 if "function" in tool:
                     # Already in OpenAI format: {"type": "function", "function": {...}}
@@ -694,6 +855,10 @@ class OpenAIResponsesProvider(LLMProvider):
                         "parameters": parameters,
                     }
                 )
+            if self.supports_hosted_image_generation and not any(
+                tool.get("type") == "image_generation" for tool in responses_tools
+            ):
+                responses_tools.append({"type": "image_generation"})
             params["tools"] = responses_tools
 
         return params
@@ -756,47 +921,128 @@ class OpenAIResponsesProvider(LLMProvider):
         Raises:
             ProviderError: If stream parsing fails
         """
-        current_event = None
-        current_data = b""
-        buffer = b""
+        current_event: Optional[str] = None
+        current_data_lines: List[bytes] = []
+        buffer = bytearray()
+        max_line_bytes = RESPONSES_MAX_SSE_LINE_BYTES
+        completed_image_items: Dict[str, Dict[str, Any]] = {}
+        pending_final: Optional[StreamingResponse] = None
+
+        def accept_event(event_chunk: Optional[StreamingResponse]) -> bool:
+            """Capture private image items and defer the final event."""
+            nonlocal pending_final
+            if event_chunk is None:
+                return False
+
+            raw_payload = getattr(event_chunk, "_raw_payload", None)
+            if isinstance(raw_payload, dict):
+                event_name = raw_payload.get("event")
+                if event_name == "response.output_item.done":
+                    _record_image_generation_item(
+                        completed_image_items, raw_payload.get("item")
+                    )
+                elif event_name in ("response.done", "response.completed"):
+                    response_payload = raw_payload.get("response")
+                    if isinstance(response_payload, dict):
+                        for item in response_payload.get("output", []) or []:
+                            _record_image_generation_item(completed_image_items, item)
+
+            if event_chunk.is_final:
+                if pending_final is not None:
+                    raise ProviderError(
+                        "Responses API emitted multiple final events",
+                        provider="openai_responses",
+                        error_code="multiple_final_events",
+                    )
+                pending_final = event_chunk
+                return True
+            return False
+
+        def flush_event() -> Optional[StreamingResponse]:
+            nonlocal current_event, current_data_lines
+            if current_event and current_data_lines:
+                event = self._parse_sse_event(
+                    current_event, b"\n".join(current_data_lines)
+                )
+                current_event = None
+                current_data_lines = []
+                return event
+            current_event = None
+            current_data_lines = []
+            return None
 
         try:
             async for chunk_bytes in response.aiter_bytes():
-                buffer += chunk_bytes
+                buffer.extend(chunk_bytes)
 
                 # Split by newlines and process complete lines
-                while b"\n" in buffer:
-                    line_bytes, buffer = buffer.split(b"\n", 1)
+                while True:
+                    newline_index = buffer.find(b"\n")
+                    if newline_index < 0:
+                        if len(buffer) > max_line_bytes:
+                            raise ProviderError(
+                                "SSE line exceeds the supported size limit",
+                                provider="openai_responses",
+                                error_code="sse_line_too_large",
+                            )
+                        break
+                    line_bytes = bytes(buffer[:newline_index])
+                    del buffer[: newline_index + 1]
+                    if len(line_bytes) > max_line_bytes:
+                        raise ProviderError(
+                            "SSE line exceeds the supported size limit",
+                            provider="openai_responses",
+                            error_code="sse_line_too_large",
+                        )
+                    line_bytes = line_bytes.rstrip(b"\r")
 
                     # Decode line to string
                     try:
-                        line = line_bytes.decode("utf-8").strip()
+                        line = line_bytes.decode("utf-8")
                     except UnicodeDecodeError:
                         # Skip binary data that can't be decoded
                         continue
 
                     if not line:
                         # Empty line means end of event
-                        if current_event and current_data:
-                            # Parse event
-                            chunk = self._parse_sse_event(current_event, current_data)
-                            if chunk:
-                                yield chunk
-                            current_event = None
-                            current_data = b""
+                        event_chunk = flush_event()
+                        if event_chunk:
+                            if not accept_event(event_chunk):
+                                yield event_chunk
                         continue
 
+                    if line.startswith(":"):
+                        continue
                     if line.startswith("event:"):
-                        current_event = line[len("event:") :].strip()
+                        current_event = line[len("event:") :].lstrip(" ")
                     elif line.startswith("data:"):
-                        # Keep data as bytes for JSON parsing later
-                        current_data = line[len("data:") :].strip().encode("utf-8")
+                        # SSE permits multiple data lines per event. Keep the
+                        # bytes until the complete event is available so large
+                        # image results are not repeatedly reallocated.
+                        current_data_lines.append(
+                            line[len("data:") :].lstrip(" ").encode("utf-8")
+                        )
 
             # Flush remaining event if stream ended without trailing newline
-            if current_event and current_data:
-                chunk = self._parse_sse_event(current_event, current_data)
-                if chunk:
-                    yield chunk
+            event_chunk = flush_event()
+            if event_chunk:
+                if not accept_event(event_chunk):
+                    yield event_chunk
+
+            if pending_final is not None:
+                raw_payload = getattr(pending_final, "_raw_payload", None)
+                response_payload = (
+                    raw_payload.get("response")
+                    if isinstance(raw_payload, dict)
+                    else None
+                )
+                if isinstance(response_payload, dict):
+                    _merge_image_generation_items(
+                        response_payload,
+                        completed_image_items,
+                    )
+                    pending_final._raw_payload = raw_payload
+                yield pending_final
 
         except Exception as e:
             logger.error(f"Failed to parse SSE stream: {e}")
@@ -838,27 +1084,37 @@ class OpenAIResponsesProvider(LLMProvider):
                     )
                 return None
 
+            # Hosted image progress events
+            if event.startswith("response.image_generation_call."):
+                event_data = {"event": event, **parsed_data}
+                return OpenAIResponsesTransformer.transform_streaming_chunk(
+                    event_data, self.model
+                )
+
             # Output item events
             if event in ("response.output_item.added", "response.output_item.done"):
                 item = parsed_data.get("item", parsed_data)
                 event_data = {"event": event, "item": item}
-                return OpenAIResponsesTransformer.transform_streaming_chunk(
+                chunk = OpenAIResponsesTransformer.transform_streaming_chunk(
                     event_data, self.model
                 )
+                if chunk and event == "response.output_item.done":
+                    chunk._raw_payload = event_data
+                return chunk
 
             # Final response (both event names)
             if event in ("response.done", "response.completed"):
                 resp_data = parsed_data.get("response", parsed_data)
                 event_data = {"event": event, "response": resp_data}
-                usage = OpenAIResponsesTransformer._usage_info(
-                    resp_data.get("usage")
-                )
-                return StreamingResponse(
+                usage = OpenAIResponsesTransformer._usage_info(resp_data.get("usage"))
+                chunk = StreamingResponse(
                     delta=TextDelta(content=""),
                     usage=usage,
                     is_final=True,
-                    raw_chunk=event_data,
+                    raw_chunk=redact_generated_image_data(event_data),
                 )
+                chunk._raw_payload = event_data
+                return chunk
 
             # Other events (created, in_progress, content_part) - skip
             return None

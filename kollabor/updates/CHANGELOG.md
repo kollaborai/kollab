@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-18
+
+### Added
+
+- Added multimodal image input for the terminal and Web UI, with explicit model
+  capability checks and provider-aware request translation.
+- Added hosted image generation for supported models, including streamed image
+  reconciliation, persisted session-scoped artifacts, and `/artifact open
+  <media_id>` actions that open generated images through daemon-owned state.
+- Added Hub model lifecycle announcements and startup status messages for clearer
+  agent coordination.
+
+### Changed
+
+- Routed pasted slash commands locally and expanded attach-mode artifact actions
+  through daemon state.
+- Changed the default permission mode to `trust_all`; use `/permissions default`
+  or `/permissions confirm_all` for approval-gated execution.
+
+### Fixed
+
+- Hardened generated-image streaming with bounded SSE payloads, raw image-content
+  redaction, and success reporting only after an artifact is persisted.
+- Fixed Web UI live session refresh/discovery, polling timer cleanup, default
+  loadout startup overrides, and session deletion fallback.
+
+### Documentation
+
+- Documented the provider-neutral goal command/harness contract and the separate
+  capability boundaries for image input and generation.
+
 ## [0.7.3] - 2026-08-25
 
 ### Added

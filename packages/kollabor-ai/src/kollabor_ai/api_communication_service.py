@@ -11,12 +11,23 @@ import logging
 import math
 import random
 import re
+import tempfile
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from kollabor_ai.generated_image_artifacts import (
+    GeneratedImageArtifactStore,
+    redact_generated_image_data,
+)
+from kollabor_ai.message_content import (
+    contains_image_content,
+    content_to_text,
+    redact_media_data,
+)
+from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_ai.providers.errors import (
     APIConnectionError,
@@ -28,11 +39,16 @@ from kollabor_ai.providers.errors import (
     TransientHTTPError,
 )
 from kollabor_ai.providers.models import (
+    GeneratedImageContent,
+    ImageGenerationDelta,
     TextDelta,
     ThinkingDelta,
     ToolCallDelta,
     UnifiedResponse,
     UsageInfo,
+)
+from kollabor_ai.providers.openai_responses_transformer import (
+    OpenAIResponsesTransformer,
 )
 from kollabor_ai.providers.registry import ProviderRegistry, create_config_from_profile
 from kollabor_ai.providers.transformers import ToolCallAccumulator
@@ -98,9 +114,13 @@ class APICommunicationService:
 
         # Session tracking for raw log linking
         self.current_session_id: Optional[str] = None
+        self._generated_image_store: Optional[GeneratedImageArtifactStore] = None
+        self._generated_image_session_key: Optional[str] = None
+        self.last_generated_images: List[GeneratedImageContent] = []
 
         # Provider-based communication
         self._provider: Any = None  # Initialized in initialize()
+        self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
         self._provider_error: Optional[str] = (
             None  # Error message if provider init failed
         )
@@ -173,6 +193,25 @@ class APICommunicationService:
         if self._debug_tool_stream_path:
             logger.info("Tool stream path debugging enabled")
 
+    def set_media_resolver(
+        self, resolver: Optional[Callable[[str], Optional[str]]]
+    ) -> None:
+        """Attach the session-local resolver used by provider serializers."""
+        self._media_resolver = resolver
+        if self._provider is not None:
+            set_resolver = getattr(self._provider, "set_media_resolver", None)
+            if callable(set_resolver):
+                set_resolver(resolver)
+
+    def supports_image_input(self) -> bool:
+        """Return the active catalog model's declared image capability."""
+        if self._provider is not None:
+            return bool(getattr(self._provider, "supports_vision", False))
+        profile = getattr(self, "_profile", None)
+        provider = getattr(profile, "get_provider", lambda: "")()
+        model = getattr(profile, "get_model", lambda: self.model)()
+        return supports_vision(model, provider)
+
     def set_session_id(self, session_id: str) -> None:
         """Set current session ID for raw log linking.
 
@@ -180,7 +219,113 @@ class APICommunicationService:
             session_id: Session identifier from conversation logger
         """
         self.current_session_id = session_id
+        self._generated_image_session_key = session_id
+        self._generated_image_store = GeneratedImageArtifactStore(
+            self._generated_image_root(session_id)
+        )
+        self._configure_generated_image_store()
         logger.debug(f"API service session ID set to: {session_id}")
+
+    def _generated_image_root(self, session_key: str) -> Path:
+        """Build a private session directory without exposing it downstream."""
+        safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_key)[:128] or "session"
+        base = self.raw_conversations_dir or Path(tempfile.gettempdir()) / "kollab"
+        return base / ".generated-images" / safe_key
+
+    def _ensure_generated_image_store(self) -> GeneratedImageArtifactStore:
+        if self._generated_image_store is None:
+            session_key = self._generated_image_session_key or (
+                f"session-{uuid.uuid4().hex}"
+            )
+            self._generated_image_session_key = session_key
+            self._generated_image_store = GeneratedImageArtifactStore(
+                self._generated_image_root(session_key)
+            )
+        return self._generated_image_store
+
+    @staticmethod
+    def _count_generated_image_items(raw_response: Any) -> int:
+        """Count distinct hosted image items in a provider response."""
+        if not isinstance(raw_response, dict):
+            return 0
+        output = raw_response.get("output")
+        if not isinstance(output, list):
+            return 0
+
+        image_ids: set[str] = set()
+        count = 0
+        for item in output:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") != "image_generation_call"
+            ):
+                continue
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id:
+                if item_id in image_ids:
+                    continue
+                image_ids.add(item_id)
+            count += 1
+        return count
+
+    def _verify_generated_image_artifacts(
+        self,
+        raw_response: Any,
+        *,
+        image_generation_signaled: bool = False,
+    ) -> None:
+        """Reject image success unless every item has a readable private file."""
+        expected = self._count_generated_image_items(raw_response)
+        if (
+            expected == 0
+            and not image_generation_signaled
+            and not self.last_generated_images
+        ):
+            return
+
+        if expected == 0 and image_generation_signaled:
+            provider = (
+                getattr(self._provider, "provider_name", None)
+                or getattr(self, "provider_type", None)
+                or "provider"
+            )
+            raise ProviderError(
+                "image generation emitted progress but no completed image item",
+                provider=str(provider),
+                error_code="image_artifact_persistence_failed",
+            )
+
+        store = self._generated_image_store
+        actual = [
+            image
+            for image in self.last_generated_images
+            if store is not None and store.is_reopenable(image.media_id)
+        ]
+        if expected != len(self.last_generated_images) or len(actual) != expected:
+            provider = (
+                getattr(self._provider, "provider_name", None)
+                or getattr(self, "provider_type", None)
+                or "provider"
+            )
+            raise ProviderError(
+                "image generation completed without a valid saved artifact "
+                f"(expected {expected}, saved {len(actual)})",
+                provider=str(provider),
+                error_code="image_artifact_persistence_failed",
+            )
+
+    def _configure_generated_image_store(self) -> None:
+        """Attach the session-private artifact store to providers that support it."""
+        if self._provider is None:
+            return
+        set_store = getattr(self._provider, "set_generated_image_store", None)
+        if callable(set_store):
+            set_store(self._ensure_generated_image_store())
+
+    def open_generated_artifact(self, media_id: str) -> bool:
+        """Open one generated image by opaque media ID."""
+        store = self._generated_image_store
+        return bool(store and store.open_media(media_id))
 
     def update_from_profile(self, profile: LLMProfile) -> None:
         """Update API settings from a profile.
@@ -248,8 +393,7 @@ class APICommunicationService:
             return True
         else:
             logger.warning(
-                "API service initialized with errors - provider not available. "
-                "Use /setup to fix configuration."
+                "API service initialized with errors - provider not available. Use /setup to fix configuration."
             )
             return False
 
@@ -274,10 +418,13 @@ class APICommunicationService:
             # Get or create provider instance
             provider = await ProviderRegistry.get_provider(provider_config)
             self._provider = provider
+            set_resolver = getattr(provider, "set_media_resolver", None)
+            if callable(set_resolver):
+                set_resolver(self._media_resolver)
+            self._configure_generated_image_store()
 
             logger.info(
-                f"Provider initialized: {provider.provider_name} "
-                f"(model={provider.model})"
+                f"Provider initialized: {provider.provider_name} (model={provider.model})"
             )
 
         except ValueError as e:
@@ -285,8 +432,7 @@ class APICommunicationService:
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Profile '{self._profile.name}' has configuration error: {e}. "
-                f"Use /setup to fix the configuration."
+                f"Profile '{self._profile.name}' has configuration error: {e}. Use /setup to fix the configuration."
             )
 
         except Exception as e:
@@ -333,8 +479,7 @@ class APICommunicationService:
                     await self._resolve_oauth_model(tokens)
             else:
                 logger.warning(
-                    "OAuth token refresh failed - token may be expired. "
-                    "Use /login openai to re-authenticate."
+                    "OAuth token refresh failed - token may be expired. Use /login openai to re-authenticate."
                 )
         except Exception as e:
             logger.warning(f"OAuth token refresh error: {e}")
@@ -386,7 +531,7 @@ class APICommunicationService:
 
     async def call_llm(
         self,
-        conversation_history: List[Dict[str, str]],
+        conversation_history: List[Dict[str, Any]],
         max_history: Optional[int] = None,
         streaming_callback=None,
         tools: Optional[List[Dict[str, Any]]] = None,
@@ -472,10 +617,19 @@ class APICommunicationService:
             else:
                 raise RuntimeError("Provider not initialized. Call initialize() first.")
 
-        try:
-            max_retries = max(
-                0, int(self.config.get("kollabor.llm.max_retries", 5))
+        has_image_input = any(
+            isinstance(message, dict) and contains_image_content(message.get("content"))
+            for message in messages
+        )
+        if has_image_input and not self.supports_image_input():
+            raise ProviderError(
+                f"model '{self.model}' does not accept image input",
+                provider=str(getattr(self._provider, "provider_name", "unknown")),
+                error_code="vision_not_supported",
             )
+
+        try:
+            max_retries = max(0, int(self.config.get("kollabor.llm.max_retries", 5)))
         except (TypeError, ValueError):
             max_retries = 5
         base_delay = RETRY_BASE_DELAY_SECONDS
@@ -544,10 +698,7 @@ class APICommunicationService:
                         isinstance(error_code, str)
                         and error_code.startswith("server_error")
                     )
-                    or (
-                        isinstance(status_code, int)
-                        and 500 <= status_code < 600
-                    )
+                    or (isinstance(status_code, int) and 500 <= status_code < 600)
                     or (
                         not is_typed_provider_error
                         and bool(re.search(r"\b5\d{2}\b", error_str))
@@ -556,8 +707,13 @@ class APICommunicationService:
                 )
                 is_transport_error = isinstance(
                     e, (APIConnectionError, APITimeoutError)
-                ) or error_code in {"connection_error", "timeout"}
-                is_transient_http = isinstance(e, TransientHTTPError) or status_code in {
+                ) or error_code in {
+                    "connection_error",
+                    "timeout",
+                }
+                is_transient_http = isinstance(
+                    e, TransientHTTPError
+                ) or status_code in {
                     408,
                     409,
                 }
@@ -603,8 +759,7 @@ class APICommunicationService:
                         and parsed_retry_after > RETRY_MAX_DELAY_SECONDS
                     ):
                         logger.warning(
-                            "Provider requested retry after %.1fs, above local cap %.1fs; "
-                            "not retrying: %s",
+                            "Provider requested retry after %.1fs, above local cap %.1fs; not retrying: %s",
                             parsed_retry_after,
                             RETRY_MAX_DELAY_SECONDS,
                             error_str[:120],
@@ -713,6 +868,8 @@ class APICommunicationService:
             Exception: If provider call fails
         """
         logger.debug(f"Provider non-streaming call (model={self.model})")
+        self._configure_generated_image_store()
+        self.last_generated_images = []
 
         # Call provider
         response: UnifiedResponse = await self._provider.call(
@@ -739,9 +896,15 @@ class APICommunicationService:
         self.last_thinking_content = response.get_thinking_content()
 
         # Capture raw upstream response for raw log
-        self.last_raw_chunks = [response.raw_response] if response.raw_response else []
+        self.last_raw_chunks = (
+            [redact_generated_image_data(response.raw_response)]
+            if response.raw_response
+            else []
+        )
 
         # Extract text content
+        self.last_generated_images = response.get_generated_images()
+        self._verify_generated_image_artifacts(response.raw_response)
         content = response.get_text_content()
         self._raise_if_empty_provider_response(content)
 
@@ -773,6 +936,8 @@ class APICommunicationService:
             Exception: If provider stream fails
         """
         logger.debug(f"Provider streaming call (model={self.model})")
+        self._configure_generated_image_store()
+        self.last_generated_images = []
 
         # A failed/missing usage trailer must not inherit the previous turn's
         # estimate state.
@@ -784,6 +949,11 @@ class APICommunicationService:
 
         content_parts = []
         thinking_parts = []
+        deferred_text_parts = []
+        image_generation_signaled = False
+        defer_text_until_final = bool(
+            getattr(self._provider, "supports_hosted_image_generation", False)
+        )
         final_usage = None
         final_stop_reason = None
         accumulated_tools = []  # For EXPLICIT mode
@@ -806,7 +976,54 @@ class APICommunicationService:
 
                 # Capture raw upstream chunk for raw log (if transformer attached one)
                 if streaming_response.raw_chunk is not None:
-                    self.last_raw_chunks.append(streaming_response.raw_chunk)
+                    self.last_raw_chunks.append(
+                        redact_generated_image_data(streaming_response.raw_chunk)
+                    )
+
+                # OpenAI Responses providers attach the unsanitized final
+                # payload only as a private in-memory field. Transform it
+                # inside the artifact boundary, while the public raw chunk
+                # remains redacted for logging.
+                if streaming_response.is_final:
+                    raw_payload = getattr(streaming_response, "_raw_payload", None)
+                    response_payload = (
+                        raw_payload.get("response")
+                        if isinstance(raw_payload, dict)
+                        else None
+                    )
+                    output_items = (
+                        response_payload.get("output", [])
+                        if isinstance(response_payload, dict)
+                        else []
+                    )
+                    has_generated_image = isinstance(output_items, list) and any(
+                        isinstance(item, dict)
+                        and item.get("type") == "image_generation_call"
+                        for item in output_items
+                    )
+                    if has_generated_image:
+                        try:
+                            transformed = OpenAIResponsesTransformer.transform_response(
+                                response_payload,
+                                self.model,
+                                artifact_store=self._ensure_generated_image_store(),
+                            )
+                            self.last_generated_images = (
+                                transformed.get_generated_images()
+                            )
+                        except ProviderError:
+                            raise
+                        except Exception as exc:
+                            raise ProviderError(
+                                "image generation response could not be transformed",
+                                provider="openai_responses",
+                                error_code="image_artifact_persistence_failed",
+                                original_error=exc,
+                            ) from exc
+                    self._verify_generated_image_artifacts(
+                        response_payload,
+                        image_generation_signaled=image_generation_signaled,
+                    )
 
                 # Handle delta types
                 delta = streaming_response.delta
@@ -816,9 +1033,14 @@ class APICommunicationService:
                     content_chunk = delta.content
                     content_parts.append(content_chunk)
 
-                    # Call streaming callback if provided
+                    # Hosted-image responses are withheld until final artifact
+                    # validation, so model prose cannot announce an image that
+                    # was never persisted. Other providers keep live streaming.
                     if streaming_callback:
-                        await streaming_callback(content_chunk)
+                        if defer_text_until_final or image_generation_signaled:
+                            deferred_text_parts.append(content_chunk)
+                        else:
+                            await streaming_callback(content_chunk)
 
                 # Thinking/reasoning content
                 elif isinstance(delta, ThinkingDelta):
@@ -826,6 +1048,13 @@ class APICommunicationService:
                         thinking_parts.append(delta.content)
 
                 # Tool call delta
+                elif isinstance(delta, ImageGenerationDelta):
+                    image_generation_signaled = True
+                    logger.debug(
+                        "Hosted image generation progress: %s",
+                        delta.status,
+                    )
+
                 elif isinstance(delta, ToolCallDelta):
                     if self._debug_tool_stream_path:
                         logger.info(
@@ -847,8 +1076,7 @@ class APICommunicationService:
                     if self._use_explicit_accumulation and completed_tools:
                         accumulated_tools.extend(completed_tools)
                         logger.debug(
-                            f"EXPLICIT mode: {len(completed_tools)} tools completed "
-                            f"({len(accumulated_tools)} total)"
+                            f"EXPLICIT mode: {len(completed_tools)} tools completed ({len(accumulated_tools)} total)"
                         )
                     if self._debug_tool_stream_path:
                         buf = (
@@ -901,6 +1129,11 @@ class APICommunicationService:
 
             # Combine content
             content = "".join(content_parts)
+            if self.last_generated_images:
+                image_summary = "\n\n".join(
+                    image.display_summary() for image in self.last_generated_images
+                )
+                content = f"{content}\n\n{image_summary}" if content else image_summary
 
             # Set token usage
             if final_usage:
@@ -915,6 +1148,7 @@ class APICommunicationService:
             else:
                 has_response_signal = bool(
                     content
+                    or self.last_generated_images
                     or accumulated_tools
                     or thinking_parts
                     or self.last_raw_chunks
@@ -935,8 +1169,7 @@ class APICommunicationService:
                     }
                     self.last_token_usage_is_estimated = True
                     logger.debug(
-                        "Provider stream omitted usage; using estimated tokens "
-                        "(input=%d, output=%d)",
+                        "Provider stream omitted usage; using estimated tokens (input=%d, output=%d)",
                         estimated_prompt,
                         estimated_completion,
                     )
@@ -998,6 +1231,10 @@ class APICommunicationService:
                 )
 
             self._raise_if_empty_provider_response(content)
+
+            if streaming_callback:
+                for content_chunk in deferred_text_parts:
+                    await streaming_callback(content_chunk)
 
             return content
 
@@ -1069,7 +1306,7 @@ class APICommunicationService:
 
     def _prepare_messages(
         self, conversation_history: List[Any], max_history: Optional[int]
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         """Prepare conversation messages for API request.
 
         Args:
@@ -1130,7 +1367,14 @@ class APICommunicationService:
         """
         if not value:
             return 0
-        text = value if isinstance(value, str) else str(value)
+        if isinstance(value, str):
+            text = value
+        elif isinstance(value, list):
+            text = content_to_text(value)
+            if not text:
+                text = json.dumps(value, ensure_ascii=False, default=str)
+        else:
+            text = json.dumps(value, ensure_ascii=False, default=str)
         return len(text) // 3 + 1
 
     def _message_tokens(self, message: Dict[str, Any]) -> int:
@@ -1336,8 +1580,7 @@ class APICommunicationService:
             return True
         else:
             logger.warning(
-                f"Provider reinitialization failed for profile '{profile.name}': "
-                f"{self._provider_error}"
+                f"Provider reinitialization failed for profile '{profile.name}': {self._provider_error}"
             )
             return False
 
@@ -1393,7 +1636,7 @@ class APICommunicationService:
             local_messages = [
                 LocalMessage(
                     role=str(m.get("role", "")),
-                    content=m.get("content", ""),
+                    content=redact_media_data(m.get("content", "")),
                     metadata={
                         k: v for k, v in m.items() if k not in ("role", "content")
                     },
@@ -1409,7 +1652,7 @@ class APICommunicationService:
                 payload = getattr(self._provider, "last_request_payload", None)
                 if payload is not None:
                     try:
-                        wire_request = copy.deepcopy(payload)
+                        wire_request = redact_media_data(copy.deepcopy(payload))
                     except Exception:
                         wire_request = None
                 wire_provider = getattr(self._provider, "_provider_name", "") or str(
@@ -1533,8 +1776,7 @@ class APICommunicationService:
                     continue
             if removed:
                 logger.info(
-                    "Raw log retention: pruned %d oldest session file(s) to "
-                    "stay under %d MB total",
+                    "Raw log retention: pruned %d oldest session file(s) to stay under %d MB total",
                     removed,
                     self._raw_max_total_bytes // (1024 * 1024),
                 )

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env
 from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
+from kollabor_ai.message_content import content_to_text
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.models import (
     CommandCategory,
@@ -62,6 +63,7 @@ from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
+from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .task_ledger import TaskLedger
 from .vault import AgentVault, sanitize_rebirth_text
 
@@ -4481,21 +4483,7 @@ class HubPlugin(BasePlugin):
             ):
                 renderer.message_coordinator._display_tap = self._display_tap
 
-            if renderer and hasattr(renderer, "message_coordinator"):
-                peer_names = [a.identity for a in existing]
-                peer_list = ", ".join(peer_names) if peer_names else "none"
-                try:
-                    renderer.message_coordinator.display_message_sequence(
-                        [
-                            (
-                                "system",
-                                f"{self._identity.identity} ({role}) | peers: {peer_list}",
-                                {"display_type": "success"},
-                            )
-                        ]
-                    )
-                except Exception:
-                    pass
+            self._display_startup_status(renderer, role, existing)
 
             # Forward own arrival to bridge
             await self._bridge_forward(f"[hub] {self._identity.identity} came online")
@@ -4531,6 +4519,39 @@ class HubPlugin(BasePlugin):
             logger.error(f"Hub startup failed: {e}", exc_info=True)
         finally:
             self._starting = False
+
+    def _display_startup_status(
+        self, renderer: Any, role: str, peers: List[AgentRuntime]
+    ) -> None:
+        """Show local Hub status and the operator stop-all command."""
+        if not renderer or not hasattr(renderer, "message_coordinator"):
+            return
+
+        peer_names = [agent.identity for agent in peers]
+        peer_list = ", ".join(peer_names) if peer_names else "none"
+        new_features = "\n".join(f"  - {feature}" for feature in HUB_NEW_FEATURES)
+        operator_help = (
+            "To stop all agents, submit: /hub stop all\n"
+            f"Tip: {choose_startup_tip()}\n"
+            f"New features:\n{new_features}"
+        )
+        try:
+            renderer.message_coordinator.display_message_sequence(
+                [
+                    (
+                        "system",
+                        f"{self._identity.identity} ({role}) | peers: {peer_list}",
+                        {"display_type": "success"},
+                    ),
+                    (
+                        "system",
+                        operator_help,
+                        {"display_type": "info"},
+                    ),
+                ]
+            )
+        except Exception:
+            pass
 
     async def _heartbeat_loop(self, interval: float) -> None:
         """Periodically update presence and check for dead agents."""
@@ -5679,6 +5700,8 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
+        profile_name, provider, model = self._active_model_details()
+
         # Build a summary of everyone on the hub for the announcement
         roster_lines = []
         for peer in peers:
@@ -5698,6 +5721,9 @@ class HubPlugin(BasePlugin):
                     f"agent '{self._identity.identity}' just came online "
                     f"in project {self._identity.project}.\n"
                     f"cwd: {os.getcwd()}\n"
+                    f"model: {model or 'unknown'}\n"
+                    f"provider: {provider or 'unknown'}\n"
+                    f"profile: {profile_name or 'unknown'}\n"
                     f"current hub roster:\n{roster_summary}\n"
                     f"if you need help with anything, let them know.\n"
                     f"respond back using: "
@@ -5707,6 +5733,98 @@ class HubPlugin(BasePlugin):
             )
             await self._deliver_to_agent(peer, intro)
             logger.info(f"Announced to {peer.identity}")
+
+    def _active_model_details(self) -> Tuple[str, str, str]:
+        """Return the active profile name, provider, and model for notices."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return "", "", ""
+        try:
+            profile_manager = self.event_bus.get_service("profile_manager")
+            if not profile_manager or not hasattr(
+                profile_manager, "get_active_profile"
+            ):
+                return "", "", ""
+            profile = profile_manager.get_active_profile()
+            if not profile:
+                return "", "", ""
+            provider = profile.get_provider()
+            model = profile.get_model()
+            return (
+                str(getattr(profile, "name", "") or ""),
+                str(provider or ""),
+                str(model or ""),
+            )
+        except Exception as exc:
+            logger.debug("active model lookup for hub notice failed: %s", exc)
+            return "", "", ""
+
+    async def announce_model_switch(
+        self,
+        *,
+        profile_name: str,
+        provider: str,
+        model: str,
+        previous_model: Optional[str] = None,
+    ) -> None:
+        """Tell live peers that this agent changed its active model.
+
+        Model changes are lifecycle traffic: peers should see the notice in
+        their hub stream, but must not spend a model call reacting to it.
+        Delivery is best-effort so a peer or a stale presence record cannot
+        make the local model switch fail.
+        """
+        if not self._identity or not self._presence:
+            return
+
+        identity = self._identity.identity
+        model_line = f"model: {model}"
+        if previous_model and previous_model != model:
+            model_line = f"previous model: {previous_model}\n{model_line}"
+        content = (
+            f"agent '{identity}' switched model.\n"
+            f"profile: {profile_name}\n"
+            f"provider: {provider}\n"
+            f"{model_line}"
+        )
+        metadata = {
+            "lifecycle_event": "model_switch",
+            "profile_name": profile_name,
+            "provider": provider,
+            "model": model,
+        }
+        if previous_model:
+            metadata["previous_model"] = previous_model
+
+        try:
+            peers = await self._presence.discover_agents_async()
+        except Exception as exc:
+            logger.debug("model-switch peer discovery failed: %s", exc)
+            return
+
+        for peer in peers:
+            if peer.agent_id == self._identity.agent_id or peer.identity == identity:
+                continue
+            message = HubMessage(
+                action="message",
+                from_agent=self._identity.agent_id,
+                from_identity=identity,
+                to=peer.identity,
+                content=content,
+                scope=MessageScope.DIRECT.value,
+                metadata=metadata.copy(),
+                # Lifecycle notices must render even when a peer is parked;
+                # _decide_hub_wake keeps them passive after delivery.
+                force=True,
+            )
+            try:
+                await self._deliver_to_agent(peer, message)
+                logger.info("Announced model switch to %s", peer.identity)
+            except Exception as exc:
+                logger.debug(
+                    "model-switch announcement to %s failed: %s",
+                    peer.identity,
+                    exc,
+                )
 
     _HUB_WAKE_DEDUPE_TTL = 120.0
     # Incoming content-dedup window: drop verbatim duplicates (same sender +
@@ -5995,6 +6113,8 @@ class HubPlugin(BasePlugin):
             return HubWakeDecision("observe", False, "departure")
 
         metadata = message.metadata or {}
+        if metadata.get("lifecycle_event") == "model_switch":
+            return HubWakeDecision("observe", False, "model switch")
         if metadata.get("task_cron_ack"):
             return HubWakeDecision("observe", False, "task-cron acknowledgement")
         sender_has_task = self._sender_has_active_task(message)
@@ -7104,7 +7224,7 @@ class HubPlugin(BasePlugin):
         if self._identity.state == "waiting":
             await self._exit_waiting_state()
 
-        user_content = (data.get("message") or "").strip()
+        user_content = content_to_text(data.get("message") or "").strip()
         if not user_content:
             return data
 
@@ -7171,7 +7291,7 @@ class HubPlugin(BasePlugin):
         if not self._crystal_store and not self._global_crystal_store:
             return data
 
-        user_content = (data.get("message") or "").strip()
+        user_content = content_to_text(data.get("message") or "").strip()
         if not user_content or len(user_content) < 10:
             return data
 
@@ -10521,11 +10641,12 @@ class HubPlugin(BasePlugin):
         recent = rendered_events[-limit:]
         return [str(e.get("rendered", "")) for e in recent]
 
-    async def _inject_attacher_input(self, text: str) -> None:
-        """Inject text from a remote attacher as if the user typed it.
+    async def _inject_attacher_input(self, text: Any) -> None:
+        """Inject input from a remote attacher as if the user typed it.
 
         Routes through the event bus so all hooks (hub broadcast,
-        working state, etc) fire identically to local input.
+        working state, etc) fire identically to local input. Structured
+        multimodal content is preserved across the attach boundary.
         """
         if not self.event_bus:
             return

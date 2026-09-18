@@ -145,6 +145,22 @@ class TestAttachFlagPlumbing(unittest.TestCase):
         self.assertIn('params.get("model")', source)
         self.assertIn('params.get("effort")', source)
 
+    def test_default_loadout_forwards_all_parameters(self):
+        """Persisted startup loadouts must apply model and every optional tuning field."""
+        import inspect
+
+        from kollabor import application
+
+        source = inspect.getsource(application.TerminalLLMChat.__init__)
+        start = source.index("# Apply a persisted loadout default")
+        end = source.index("# Log auto-detection result", start)
+        block = source[start:end]
+        for field in ("temperature", "effort", "max_tokens"):
+            with self.subTest(field=field):
+                self.assertIn(f'update_kwargs["{field}"] = loadout.{field}', block)
+        self.assertIn("loadout.provider_profile, **update_kwargs", block)
+
+
     def test_application_stashes_both_for_attach(self):
         import inspect
 

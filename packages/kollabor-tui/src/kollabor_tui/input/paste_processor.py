@@ -9,11 +9,22 @@ The PRIMARY system is handled in InputLoopManager (chunk detection).
 This component handles placeholder creation, storage, and expansion.
 """
 
+import asyncio
+import base64
 import logging
 import re
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from kollabor_tui.clipboard import (
+    MAX_CLIPBOARD_IMAGE_BYTES,
+    read_image_from_clipboard,
+    read_text_from_clipboard,
+)
+
 logger = logging.getLogger(__name__)
+
+_IMAGE_TOKEN_PATTERN = re.compile(r"\[image\d+\]")
+_MAX_TOTAL_CLIPBOARD_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class PasteProcessor:
@@ -49,6 +60,13 @@ class PasteProcessor:
         self._current_paste_id: Optional[str] = None  # Currently building paste ID
         self._last_paste_time = 0.0  # Last chunk timestamp
 
+        # CLI image attachments. The terminal can only render the opaque token;
+        # raw clipboard data stays here until Enter hands it to the daemon.
+        self._image_attachments: Dict[str, str] = {}
+        self._image_sizes: Dict[str, int] = {}
+        self._image_counter = 0
+        self._image_total_bytes = 0
+
         # SECONDARY paste system state (timing-based, disabled by default)
         self.paste_detection_enabled = False  # Only enables SECONDARY system
         self._paste_buffer: list = []
@@ -75,6 +93,211 @@ class PasteProcessor:
     def last_paste_time(self) -> float:
         """Get the last paste timestamp."""
         return self._last_paste_time
+
+    @property
+    def has_image_attachments(self) -> bool:
+        """Whether the current input contains live image attachments."""
+        return bool(self._image_attachments)
+
+    @property
+    def image_attachments(self) -> Dict[str, str]:
+        """Return a copy of the current token-to-data-URL map."""
+        return dict(self._image_attachments)
+
+    def has_live_image_token(self, message: str) -> bool:
+        """Whether ``message`` still contains an attached image token."""
+        return any(
+            match.group(0) in self._image_attachments
+            for match in _IMAGE_TOKEN_PATTERN.finditer(message)
+        )
+
+    def history_projection(self, message: str) -> str:
+        """Keep image history truthful after one-shot attachments are sent."""
+        return _IMAGE_TOKEN_PATTERN.sub(
+            lambda match: (
+                "[image attachment omitted]"
+                if match.group(0) in self._image_attachments
+                else match.group(0)
+            ),
+            message,
+        )
+
+    async def handle_clipboard_paste(self) -> bool:
+        """Paste an image token, or fall back to ordinary clipboard text.
+
+        Terminal emulators generally send only text through the PTY. A
+        ``Ctrl+V`` keypress gives the CLI an explicit, platform-neutral hook to
+        query the local clipboard for an image before falling back to text.
+        """
+        image = await asyncio.to_thread(read_image_from_clipboard)
+        if image is not None:
+            media_type, payload = image
+            data_url = (
+                f"data:{media_type};base64,"
+                f"{base64.b64encode(payload).decode('ascii')}"
+            )
+            token = await self.add_image_attachment(data_url, len(payload))
+            if token is not None:
+                logger.info("Inserted clipboard image as %s", token)
+                return True
+            return False
+
+        text = await asyncio.to_thread(read_text_from_clipboard)
+        if text:
+            return await self.buffer_manager.handle_paste(text)
+        return False
+
+    async def add_image_attachment(
+        self, data_url: str, raw_size: Optional[int] = None
+    ) -> Optional[str]:
+        """Insert a token for a validated clipboard image."""
+        if not isinstance(data_url, str) or not data_url.lower().startswith(
+            "data:image/"
+        ):
+            logger.warning("Rejected non-image clipboard data")
+            return None
+
+        size = raw_size if raw_size is not None else len(data_url.encode("utf-8"))
+        if size > MAX_CLIPBOARD_IMAGE_BYTES:
+            logger.warning("Clipboard image exceeds the per-image byte limit")
+            return None
+        if self._image_total_bytes + size > _MAX_TOTAL_CLIPBOARD_IMAGE_BYTES:
+            logger.warning("Clipboard images exceed the session memory limit")
+            return None
+
+        self._image_counter += 1
+        token = f"[image{self._image_counter}]"
+        inserted = await self.buffer_manager.handle_paste(token)
+        if not inserted:
+            self._image_counter -= 1
+            return None
+
+        self._image_attachments[token] = data_url
+        self._image_sizes[token] = size
+        self._image_total_bytes += size
+        return token
+
+    def clear_image_attachments(self) -> None:
+        """Release all unsent CLI image data."""
+        self._image_attachments.clear()
+        self._image_sizes.clear()
+        self._image_total_bytes = 0
+        self._image_counter = 0
+
+    def _image_token_span_at_cursor(
+        self, backward: bool
+    ) -> Optional[tuple[int, int, str]]:
+        """Find the live image token adjacent to the current cursor."""
+        content = self.buffer_manager.content
+        cursor = self.buffer_manager.cursor_position
+        for match in _IMAGE_TOKEN_PATTERN.finditer(content):
+            token = match.group(0)
+            if token not in self._image_attachments:
+                continue
+            if backward and match.end() == cursor:
+                return match.start(), match.end(), token
+            if not backward and match.start() == cursor:
+                return match.start(), match.end(), token
+            if match.start() < cursor < match.end():
+                return match.start(), match.end(), token
+        return None
+
+    def _renumber_image_tokens(self) -> None:
+        """Keep visible token numbers contiguous after an attachment delete."""
+        content = self.buffer_manager.content
+        cursor = self.buffer_manager.cursor_position
+        matches = list(_IMAGE_TOKEN_PATTERN.finditer(content))
+        live_matches = [
+            match for match in matches if match.group(0) in self._image_attachments
+        ]
+
+        live_tokens = {match.group(0) for match in live_matches}
+        stale_tokens = set(self._image_attachments) - live_tokens
+        for token in stale_tokens:
+            self._image_total_bytes -= self._image_sizes.pop(token, 0)
+            self._image_attachments.pop(token, None)
+
+        if not live_matches:
+            self._image_counter = 0
+            return
+
+        renames = {
+            match.group(0): f"[image{index}]"
+            for index, match in enumerate(live_matches, start=1)
+        }
+        new_content = _IMAGE_TOKEN_PATTERN.sub(
+            lambda match: renames.get(match.group(0), match.group(0)), content
+        )
+        new_cursor = cursor
+        for match in matches:
+            if match.start() < cursor:
+                new_cursor += len(renames.get(match.group(0), match.group(0))) - len(
+                    match.group(0)
+                )
+
+        if new_content != content:
+            self.buffer_manager.replace_content(new_content, new_cursor)
+
+        self._image_attachments = {
+            renames[token]: data_url
+            for token, data_url in self._image_attachments.items()
+            if token in renames
+        }
+        self._image_sizes = {
+            renames[token]: size
+            for token, size in self._image_sizes.items()
+            if token in renames
+        }
+        self._image_counter = len(live_matches)
+
+    def _delete_image_token(self, backward: bool) -> bool:
+        span = self._image_token_span_at_cursor(backward)
+        if span is None:
+            return False
+        start, end, token = span
+        if not self.buffer_manager.delete_range(start, end):
+            return False
+        self._image_total_bytes -= self._image_sizes.pop(token, 0)
+        self._image_attachments.pop(token, None)
+        self._renumber_image_tokens()
+        logger.info("Removed clipboard image %s", token)
+        return True
+
+    def delete_image_token_before_cursor(self) -> bool:
+        """Delete the live image token immediately before the cursor."""
+        return self._delete_image_token(backward=True)
+
+    def delete_image_token_at_cursor(self) -> bool:
+        """Delete the live image token immediately after the cursor."""
+        return self._delete_image_token(backward=False)
+
+    def build_message_content(self, message: str) -> Any:
+        """Convert visible image tokens into structured message parts."""
+        matches = list(_IMAGE_TOKEN_PATTERN.finditer(message))
+        live_matches = [
+            match for match in matches if match.group(0) in self._image_attachments
+        ]
+        if not live_matches:
+            self.clear_image_attachments()
+            return message
+
+        parts: list[dict[str, str]] = []
+        cursor = 0
+        for match in matches:
+            token = match.group(0)
+            if match.start() > cursor:
+                parts.append({"type": "text", "text": message[cursor : match.start()]})
+            data_url = self._image_attachments.get(token)
+            if data_url is None:
+                parts.append({"type": "text", "text": token})
+            else:
+                parts.append({"type": "image", "image": data_url})
+            cursor = match.end()
+        if cursor < len(message):
+            parts.append({"type": "text", "text": message[cursor:]})
+
+        self.clear_image_attachments()
+        return parts
 
     def expand_paste_placeholders(self, message: str) -> str:
         """Expand paste placeholders with actual content from paste bucket.

@@ -13,6 +13,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_ai.cost_calculator import calculate_cost
+from kollabor_ai.message_content import (
+    MessageContent,
+    combine_message_contents,
+    content_to_text,
+    prepend_text,
+)
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
@@ -283,7 +289,7 @@ class QueueProcessor:
         except Exception:
             return ""
 
-    async def enqueue(self, message: str) -> None:
+    async def enqueue(self, message: MessageContent) -> None:
         """Enqueue message with overflow strategy."""
         # Watchdog heartbeat: new work arriving is activity — keeps a session
         # that just received a message from being flagged as wedged.
@@ -316,7 +322,7 @@ class QueueProcessor:
         else:
             self._unknown_strategy(message)
 
-    async def _drop_oldest_strategy(self, message: str) -> None:
+    async def _drop_oldest_strategy(self, message: MessageContent) -> None:
         """Drop oldest task to make room."""
         if self.task_config.queue.log_queue_events:
             logger.debug("Applying drop_oldest strategy")
@@ -349,7 +355,7 @@ class QueueProcessor:
             f"Queue is full (max size: {self.max_queue_size}) and overflow strategy is 'drop_newest'"
         )
 
-    async def _block_strategy(self, message: str) -> None:
+    async def _block_strategy(self, message: MessageContent) -> None:
         """Block until queue has space or timeout."""
         self._queue_metrics["block_count"] += 1
         if self.task_config.queue.log_queue_events:
@@ -384,7 +390,7 @@ class QueueProcessor:
 
             await asyncio.sleep(poll_interval)
 
-    def _unknown_strategy(self, message: str) -> None:
+    def _unknown_strategy(self, message: MessageContent) -> None:
         """Handle unknown overflow strategy."""
         logger.warning(
             f"Unknown overflow strategy '{self.task_config.queue.overflow_strategy}', defaulting to drop_oldest"
@@ -420,7 +426,6 @@ class QueueProcessor:
             # continues the conversation.  Without this outer loop those
             # messages sit in the queue forever.
             while not self.cancel_processing:
-
                 # LOOP 1 — drain queued messages
                 while not self.processing_queue.empty() and not self.cancel_processing:
                     try:
@@ -463,8 +468,7 @@ class QueueProcessor:
                     # it as a fresh turn.
                     if not self.processing_queue.empty():
                         logger.info(
-                            "New message arrived during continuation, "
-                            "breaking to process"
+                            "New message arrived during continuation, breaking to process"
                         )
                         break
 
@@ -503,8 +507,7 @@ class QueueProcessor:
                         # (2026-07-03). The 5-min checkpoint WARNING surfaces
                         # progress; per-turn detail belongs at DEBUG.
                         logger.debug(
-                            f"Turn not completed - continuing conversation "
-                            f"(turn {turn_count})"
+                            f"Turn not completed - continuing conversation (turn {turn_count})"
                         )
                         await continue_conversation_fn()
 
@@ -568,7 +571,7 @@ class QueueProcessor:
 
     async def process_message_batch(
         self,
-        messages: List[str],
+        messages: List[MessageContent],
         current_parent_uuid: str,
     ) -> str:
         """Process a batch of messages.
@@ -580,7 +583,7 @@ class QueueProcessor:
         Returns:
             Updated parent UUID
         """
-        combined_message = "\n".join(messages)
+        combined_message = combine_message_contents(messages)
 
         # Add user message to conversation history
         self._add_message_fn(
@@ -668,7 +671,7 @@ class QueueProcessor:
 
         # Estimate input tokens for status display
         total_input_chars = sum(
-            len(msg.content) for msg in self.conversation_history[-3:]
+            len(content_to_text(msg.content)) for msg in self.conversation_history[-3:]
         )
         estimated_input_tokens = total_input_chars // 4
         self.current_processing_tokens = estimated_input_tokens
@@ -758,9 +761,7 @@ class QueueProcessor:
                         _llm_vol is not None
                         and type(_llm_vol).__module__ != "unittest.mock"
                     ):
-                        build_vol = getattr(
-                            _llm_vol, "build_volatile_context", None
-                        )
+                        build_vol = getattr(_llm_vol, "build_volatile_context", None)
                         if callable(build_vol):
                             vol_block = build_vol()
                             if vol_block:
@@ -780,7 +781,9 @@ class QueueProcessor:
                         if getattr(msg, "role", "") == "user":
                             ephemeral_user_message = msg
                             ephemeral_user_content = msg.content
-                            msg.content = combined + "\n\n---\n\n" + msg.content
+                            msg.content = prepend_text(
+                                combined + "\n\n---\n\n", msg.content
+                            )
                             break
 
             # Call LLM API via streaming handler (with auto-continuation on truncation)
@@ -828,7 +831,9 @@ class QueueProcessor:
                 trunc_usage = self.api_service.get_last_token_usage()
                 if trunc_usage:
                     trunc_estimated = (
-                        getattr(self.api_service, "last_token_usage_is_estimated", False)
+                        getattr(
+                            self.api_service, "last_token_usage_is_estimated", False
+                        )
                         is True
                     )
                     if trunc_estimated:
@@ -847,15 +852,15 @@ class QueueProcessor:
                         accumulated_tokens["authoritative_prompt"] += trunc_usage.get(
                             "prompt_tokens", 0
                         )
-                        accumulated_tokens["authoritative_completion"] += trunc_usage.get(
-                            "completion_tokens", 0
-                        )
-                        accumulated_tokens["authoritative_cache_creation"] += trunc_usage.get(
-                            "cache_creation_tokens", 0
-                        )
-                        accumulated_tokens["authoritative_cache_read"] += trunc_usage.get(
-                            "cache_read_tokens", 0
-                        )
+                        accumulated_tokens[
+                            "authoritative_completion"
+                        ] += trunc_usage.get("completion_tokens", 0)
+                        accumulated_tokens[
+                            "authoritative_cache_creation"
+                        ] += trunc_usage.get("cache_creation_tokens", 0)
+                        accumulated_tokens[
+                            "authoritative_cache_read"
+                        ] += trunc_usage.get("cache_read_tokens", 0)
 
                 logger.warning(
                     f"Response truncated (stop_reason=length), "
@@ -913,7 +918,9 @@ class QueueProcessor:
                 getattr(self.api_service, "last_token_usage_is_estimated", False)
                 is True
             )
-            usage_is_estimated = bool(accumulated_tokens["estimated"]) or final_usage_estimated
+            usage_is_estimated = (
+                bool(accumulated_tokens["estimated"]) or final_usage_estimated
+            )
             if token_usage:
                 prompt_tokens += token_usage.get("prompt_tokens", 0)
                 completion_tokens += token_usage.get("completion_tokens", 0)
@@ -926,9 +933,9 @@ class QueueProcessor:
                     accumulated_tokens["authoritative_completion"] += token_usage.get(
                         "completion_tokens", 0
                     )
-                    accumulated_tokens["authoritative_cache_creation"] += token_usage.get(
-                        "cache_creation_tokens", 0
-                    )
+                    accumulated_tokens[
+                        "authoritative_cache_creation"
+                    ] += token_usage.get("cache_creation_tokens", 0)
                     accumulated_tokens["authoritative_cache_read"] += token_usage.get(
                         "cache_read_tokens", 0
                     )
@@ -949,9 +956,15 @@ class QueueProcessor:
                 self.session_stats["cache_read_tokens"] = cache_read_tokens
 
                 authoritative_prompt = accumulated_tokens["authoritative_prompt"]
-                authoritative_completion = accumulated_tokens["authoritative_completion"]
-                authoritative_cache_creation = accumulated_tokens["authoritative_cache_creation"]
-                authoritative_cache_read = accumulated_tokens["authoritative_cache_read"]
+                authoritative_completion = accumulated_tokens[
+                    "authoritative_completion"
+                ]
+                authoritative_cache_creation = accumulated_tokens[
+                    "authoritative_cache_creation"
+                ]
+                authoritative_cache_read = accumulated_tokens[
+                    "authoritative_cache_read"
+                ]
                 has_authoritative_usage = bool(
                     authoritative_prompt
                     or authoritative_completion
@@ -960,7 +973,9 @@ class QueueProcessor:
                 )
                 if has_authoritative_usage:
                     self.session_stats["total_input_tokens"] += authoritative_prompt
-                    self.session_stats["total_output_tokens"] += authoritative_completion
+                    self.session_stats[
+                        "total_output_tokens"
+                    ] += authoritative_completion
                     self.session_stats["total_cache_creation_tokens"] = (
                         self.session_stats.get("total_cache_creation_tokens", 0)
                         + authoritative_cache_creation
@@ -1008,8 +1023,9 @@ class QueueProcessor:
                     "cache_read_tokens": cache_read_tokens,
                     "cost_usd": self.session_stats.get("cost_usd", 0.0),
                     "total_cost_usd": self.session_stats.get("total_cost_usd", 0.0),
-                    "input_tokens_estimated": bool(self.session_stats.get("input_tokens_estimated", False)),
-
+                    "input_tokens_estimated": bool(
+                        self.session_stats.get("input_tokens_estimated", False)
+                    ),
                 },
                 "llm_service",
             )
@@ -1679,7 +1695,7 @@ class QueueProcessor:
                     ctx_ids.append(entry.ctx_id)
             except Exception as e:
                 logger.warning(
-                    f"Failed to ingest tool result into context " f"service: {e}"
+                    f"Failed to ingest tool result into context service: {e}"
                 )
 
     async def _emit_llm_response_and_handle(

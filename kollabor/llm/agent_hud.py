@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from kollabor_ai.message_content import (
+    MessageContent,
+    content_to_text,
+    prepend_text,
+)
+
 AGENT_HUD_OPEN = "<agent_hud>"
 AGENT_HUD_CLOSE = "</agent_hud>"
 
@@ -68,13 +74,13 @@ def format_agent_hud(entries: Iterable[AgentHudEntry]) -> str:
 
 def merge_agent_hud_with_user_message(
     entries: Iterable[AgentHudEntry],
-    user_message: str,
-) -> str:
+    user_message: MessageContent,
+) -> MessageContent:
     """Prepend pending HUD diffs to a real user/hub turn."""
     hud = format_agent_hud(entries)
-    body = (user_message or "").strip()
+    body = content_to_text(user_message).strip()
     if not hud:
-        return body
+        return user_message
     if not body:
         return hud
-    return f"{hud}\n\n{body}"
+    return prepend_text(f"{hud}\n\n", user_message)

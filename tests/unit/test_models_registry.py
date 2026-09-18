@@ -13,8 +13,11 @@ from pathlib import Path
 from kollabor_ai.model_registry import (
     list_models_for_provider,
     resolve_context_window,
+    resolve_default_model,
     supports_sampling,
+    supports_vision,
 )
+from kollabor_ai.providers.registry import create_config_from_profile
 
 REPO = Path(__file__).resolve().parents[2]
 REGISTRY = REPO / "bundles" / "data" / "models.json"
@@ -54,6 +57,19 @@ def test_supports_sampling_flags_reasoning_models():
     # silently stripped of its sampling params.
     for model in ("claude-opus-4-6", "claude-sonnet-4-6", "some-future-model"):
         assert supports_sampling(model) is True, model
+
+
+def test_vision_capability_is_explicit_and_provider_scoped():
+    assert supports_vision("gpt-5.6-luna", "openai") is True
+    assert supports_vision("gpt-5.6-luna", "openai_responses") is True
+    assert supports_vision("gpt-5.6-luna", "custom") is False
+    assert supports_vision("model-that-is-not-cataloged", "openai") is False
+
+
+def test_openai_default_model_comes_from_catalog():
+    assert resolve_default_model("openai") == "gpt-5.6-luna"
+    config = create_config_from_profile({"provider": "openai", "api_key": "sk-test"})
+    assert config.model == "gpt-5.6-luna"
 
 
 def test_list_models_for_provider_skips_retired():

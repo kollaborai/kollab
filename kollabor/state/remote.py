@@ -215,6 +215,23 @@ class RemoteStateService(StateService):
             raise TypeError("state.list_commands result missing 'commands' list")
         return commands
 
+    async def open_generated_artifact(self, media_id: str) -> bool:
+        """Ask the daemon to open a generated image in its active session."""
+        logger.debug("state rpc: open_generated_artifact media_id=%s", media_id)
+        result = await self._rpc.call(
+            "state.open_generated_artifact",
+            {"media_id": media_id},
+            timeout=self._timeout,
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                "state.open_generated_artifact expected dict, "
+                f"got {type(result).__name__}"
+            )
+        if "error" in result and result.get("error"):
+            raise ValueError(str(result["error"]))
+        return bool(result.get("opened", False))
+
     # === Writes (phase 4) ===
 
     async def set_active_profile(
@@ -243,8 +260,7 @@ class RemoteStateService(StateService):
         daemon applies them in memory before activating.
         """
         logger.debug(
-            "state rpc: set_active_profile name=%s persist=%s local=%s reload=%s "
-            "model=%s effort=%s",
+            "state rpc: set_active_profile name=%s persist=%s local=%s reload=%s model=%s effort=%s",
             name,
             persist,
             persist_local,
@@ -680,8 +696,7 @@ class RemoteStateService(StateService):
         )
         if not isinstance(result, dict):
             raise TypeError(
-                f"state.list_project_approvals expected dict, got "
-                f"{type(result).__name__}"
+                f"state.list_project_approvals expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
             raise ValueError(str(result["error"]))
@@ -778,8 +793,7 @@ class RemoteStateService(StateService):
         )
         if not isinstance(result, dict):
             raise TypeError(
-                "state.send_hub_user_message expected dict, "
-                f"got {type(result).__name__}"
+                f"state.send_hub_user_message expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
             raise ValueError(str(result["error"]))
@@ -803,9 +817,12 @@ class RemoteStateService(StateService):
 
     # === Resume (phase 4.5 step 7) ===
 
-    async def send_message(self, message: str) -> dict[str, Any]:
+    async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn to the daemon. Returns once accepted, not done."""
-        logger.debug("state rpc: send_message len=%d", len(message or ""))
+        logger.debug(
+            "state rpc: send_message len=%d",
+            len(str(message or "")),
+        )
         result = await self._rpc.call(
             "state.send_message",
             {"message": message},

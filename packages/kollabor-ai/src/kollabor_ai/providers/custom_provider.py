@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 import aiohttp
 from pydantic import field_validator
 
+from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import (
     APIConnectionError,
@@ -107,9 +108,17 @@ class CustomProvider(LLMProvider):
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
+        prepared_messages = strip_local_message_metadata(messages)
+        for message in prepared_messages:
+            content = message.get("content")
+            if isinstance(content, (str, list)):
+                message["content"] = serialize_openai_chat_content(
+                    content, self.resolve_media
+                )
+
         payload = {
             "model": self.config.model,
-            "messages": strip_local_message_metadata(messages),
+            "messages": prepared_messages,
             "stream": stream,
         }
 
@@ -211,9 +220,7 @@ class CustomProvider(LLMProvider):
         # Parse content (some endpoints return "content": null)
         content_blocks = []
         if message.get("content"):
-            content_blocks.append(
-                TextContent(type="text", text=message["content"])
-            )
+            content_blocks.append(TextContent(type="text", text=message["content"]))
 
         # Parse tool calls
         tool_uses = []
@@ -253,10 +260,9 @@ class CustomProvider(LLMProvider):
             or usage_info.get("cache_read_input_tokens", 0)
             or usage_info.get("cache_read_tokens", 0)
         )
-        cache_creation = (
-            usage_info.get("cache_creation_input_tokens", 0)
-            or usage_info.get("cache_creation_tokens", 0)
-        )
+        cache_creation = usage_info.get(
+            "cache_creation_input_tokens", 0
+        ) or usage_info.get("cache_creation_tokens", 0)
         usage = UsageInfo(
             prompt_tokens=usage_info.get("prompt_tokens", 0),
             completion_tokens=usage_info.get("completion_tokens", 0),
@@ -321,9 +327,17 @@ class CustomProvider(LLMProvider):
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
+        prepared_messages = strip_local_message_metadata(messages)
+        for message in prepared_messages:
+            content = message.get("content")
+            if isinstance(content, (str, list)):
+                message["content"] = serialize_openai_chat_content(
+                    content, self.resolve_media
+                )
+
         payload = {
             "model": self.config.model,
-            "messages": messages,
+            "messages": prepared_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -438,10 +452,9 @@ class CustomProvider(LLMProvider):
                                 or usage.get("cache_read_input_tokens", 0)
                                 or usage.get("cache_read_tokens", 0)
                             )
-                            cache_creation = (
-                                usage.get("cache_creation_input_tokens", 0)
-                                or usage.get("cache_creation_tokens", 0)
-                            )
+                            cache_creation = usage.get(
+                                "cache_creation_input_tokens", 0
+                            ) or usage.get("cache_creation_tokens", 0)
                             usage_info = UsageInfo(
                                 prompt_tokens=usage.get("prompt_tokens", 0),
                                 completion_tokens=usage.get("completion_tokens", 0),

@@ -171,21 +171,32 @@ export function AppSidebar({
                 <SidebarMenuItem key={session.session_id}>
                   <SidebarMenuButton
                     isActive={session.session_id === activeId}
-                    onClick={() => onSelectSession(session.session_id)}
+                    onClick={() => {
+                      if (session.attachable !== false) onSelectSession(session.session_id);
+                    }}
+                    disabled={session.attachable === false}
                     className="h-auto flex-col items-start gap-0.5 py-2"
                   >
                     <span className="truncate font-medium">
                       {formatSessionName(session.name, session.session_id)}
                     </span>
                     <span className="text-muted-foreground truncate text-xs">
-                      {session.identity || session.agent || "unassigned"} ·{" "}
-                      {session.model || session.profile || "default"} ·{" "}
-                      {session.history_length || 0} messages
+                      {session.attachable === false ? (
+                        <span className="text-amber-600 dark:text-amber-400">
+                          discovered · attach unavailable
+                        </span>
+                      ) : (
+                        <>
+                          {session.identity || session.agent || "unassigned"} ·{" "}
+                          {session.model || session.profile || "default"} ·{" "}
+                          {session.history_length || 0} messages
+                        </>
+                      )}
                     </span>
                   </SidebarMenuButton>
                   <SidebarMenuAction
                     onClick={() => setPendingDelete(session)}
-                    disabled={busy}
+                    disabled={busy || session.attachable === false}
                     showOnHover
                     aria-label={`Delete session ${session.session_id}`}
                   >

@@ -96,7 +96,7 @@ class EngineSession:
         self,
         session_id: str,
         profile: Any,
-        approval_mode: str = "confirm_all",
+        approval_mode: str = "trust_all",
         workspace: Optional[str] = None,
         system_prompt: Optional[str] = None,
         mcp_server_names: Optional[List[str]] = None,
@@ -243,7 +243,7 @@ class EngineSession:
             )
         return self.history
 
-    async def send_message(self, content: str) -> Dict[str, Any]:
+    async def send_message(self, content: Any) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
         return await self.state.send_message(content)
 
@@ -326,9 +326,7 @@ class EngineSession:
     def to_dict(self) -> Dict[str, Any]:
         identity = self.daemon.identity if self.daemon else ""
         agent_name = (
-            self.agent
-            or (self.daemon.agent_name if self.daemon else "")
-            or "default"
+            self.agent or (self.daemon.agent_name if self.daemon else "") or "default"
         )
         return {
             "session_id": self.session_id,
@@ -338,7 +336,7 @@ class EngineSession:
             "agent": agent_name,
             "workspace": self.workspace,
             "approval_mode": _APPROVAL_MODE_MAP.get(
-                self.approval_mode, ApprovalMode.CONFIRM_ALL
+                self.approval_mode, ApprovalMode.TRUST_ALL
             ).value,
             "created_at": self.created_at.isoformat(),
             "total_turns": self.total_turns,

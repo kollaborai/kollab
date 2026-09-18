@@ -13,7 +13,7 @@ import re
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 
 class AuthType(str, Enum):
@@ -417,7 +417,20 @@ class ThinkingDelta(BaseModel):
     content: str
 
 
-StreamingDelta = Union[TextDelta, ToolCallDelta, ThinkingDelta]
+class ImageGenerationDelta(BaseModel):
+    """Safe progress update for a hosted image-generation tool."""
+
+    type: Literal["image_generation"] = "image_generation"
+    status: Literal["in_progress", "generating", "completed", "failed"]
+    provider_reference: Optional[str] = None
+
+
+StreamingDelta = Union[
+    TextDelta,
+    ToolCallDelta,
+    ThinkingDelta,
+    ImageGenerationDelta,
+]
 
 
 class TextContent(BaseModel):
@@ -452,7 +465,38 @@ class ThinkingContent(BaseModel):
     thinking: str
 
 
-ContentBlock = Union[TextContent, ToolUseContent, ToolResultContent, ThinkingContent]
+class GeneratedImageContent(BaseModel):
+    """Metadata-only reference to a privately managed generated image."""
+
+    type: Literal["generated_image"] = "generated_image"
+    media_id: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    width: Optional[int] = Field(default=None, ge=1)
+    height: Optional[int] = Field(default=None, ge=1)
+    revised_prompt: Optional[str] = None
+    provider_reference: Optional[str] = None
+
+    def display_summary(self) -> str:
+        """Return a terminal-safe summary with an opaque open action."""
+        dimensions = (
+            f", {self.width}x{self.height}"
+            if self.width is not None and self.height is not None
+            else ""
+        )
+        return (
+            f"Generated image: {self.media_id} "
+            f"({self.media_type}{dimensions})\n"
+            f"Open: /artifact open {self.media_id}"
+        )
+
+
+ContentBlock = Union[
+    TextContent,
+    ToolUseContent,
+    ToolResultContent,
+    ThinkingContent,
+    GeneratedImageContent,
+]
 
 
 class UsageInfo(BaseModel):
@@ -480,6 +524,7 @@ class StreamingResponse(BaseModel):
     is_final: bool = Field(default=False)
     finish_reason: Optional[str] = None
     raw_chunk: Optional[Dict[str, Any]] = None
+    _raw_payload: Optional[Dict[str, Any]] = PrivateAttr(default=None)
 
     # Note: usage is intentionally optional even on final chunks.
     # Many OpenAI-compatible providers (GLM, etc.) omit usage from streaming
@@ -523,10 +568,24 @@ class UnifiedResponse(BaseModel):
             Concatenated text from all text blocks
         """
         text_parts = []
+        image_summaries = []
         for block in self.content:
             if isinstance(block, TextContent):
                 text_parts.append(block.text)
-        return "".join(text_parts)
+            elif isinstance(block, GeneratedImageContent):
+                image_summaries.append(block.display_summary())
+
+        text = "".join(text_parts)
+        if image_summaries:
+            image_text = "\n\n".join(image_summaries)
+            return f"{text}\n\n{image_text}" if text else image_text
+        return text
+
+    def get_generated_images(self) -> List[GeneratedImageContent]:
+        """Extract generated image references from the response."""
+        return [
+            block for block in self.content if isinstance(block, GeneratedImageContent)
+        ]
 
     def get_tool_uses(self) -> List[ToolUseContent]:
         """

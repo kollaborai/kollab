@@ -1,6 +1,12 @@
 "use client";
 
-import { type PropsWithChildren, useEffect, useState, type FC } from "react";
+import {
+  type PropsWithChildren,
+  useEffect,
+  useRef,
+  useState,
+  type FC,
+} from "react";
 import {
   XIcon,
   PlusIcon,
@@ -263,13 +269,51 @@ export const UserMessageAttachments: FC = () => {
   );
 };
 
+const ComposerImageTokenSynchronizer: FC = () => {
+  const aui = useAui();
+  const imageAttachmentKey = useAuiState(
+    useShallow((s) =>
+      s.composer.attachments
+        .filter((attachment) => attachment.type === "image")
+        .map((attachment) => attachment.id)
+        .join("\u0000"),
+    ),
+  );
+  const text = useAuiState((s) => s.composer.text);
+  const managedTokens = useRef<string[]>([]);
+
+  useEffect(() => {
+    const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
+    const nextTokens = imageIds.map((_, index) => `[image${index + 1}]`);
+    let textWithoutManagedTokens = text;
+    for (const token of managedTokens.current) {
+      textWithoutManagedTokens = textWithoutManagedTokens.split(token).join("");
+    }
+    textWithoutManagedTokens = textWithoutManagedTokens
+      .replace(/^\s+|\s+$/g, "")
+      .replace(/\n{3,}/g, "\n\n");
+
+    const nextText = [
+      ...nextTokens,
+      ...(textWithoutManagedTokens ? [textWithoutManagedTokens] : []),
+    ].join("\n");
+    managedTokens.current = nextTokens;
+    if (nextText !== text) aui.composer.setText(nextText);
+  }, [aui, imageAttachmentKey, text]);
+
+  return null;
+};
+
 export const ComposerAttachments: FC = () => {
   return (
-    <div className="aui-composer-attachments flex w-full flex-row items-center gap-2 overflow-x-auto empty:hidden">
-      <ComposerPrimitive.Attachments>
-        {() => <AttachmentUI />}
-      </ComposerPrimitive.Attachments>
-    </div>
+    <>
+      <ComposerImageTokenSynchronizer />
+      <div className="aui-composer-attachments flex w-full flex-row items-center gap-2 overflow-x-auto empty:hidden">
+        <ComposerPrimitive.Attachments>
+          {() => <AttachmentUI />}
+        </ComposerPrimitive.Attachments>
+      </div>
+    </>
   );
 };
 

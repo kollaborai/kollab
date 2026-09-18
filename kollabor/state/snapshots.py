@@ -41,7 +41,7 @@ class MessageDto(Snapshot):
     """
 
     role: str
-    content: str
+    content: Any
     timestamp: str = ""  # ISO 8601 string
     metadata: dict[str, Any] = field(default_factory=dict)
     thinking: str | None = None
@@ -125,6 +125,7 @@ class ProfileSnapshot(Snapshot):
     provider: str = ""
     endpoint: str = ""  # base_url
     supports_tools: bool = True
+    supports_vision: bool = False
     temperature: float = 0.7
     description: str = ""
     is_active: bool = False
@@ -163,7 +164,7 @@ class PermissionSnapshot(Snapshot):
     dict of counters the widget shows inline.
     """
 
-    approval_mode: str = "DEFAULT"
+    approval_mode: str = "TRUST_ALL"
     session_approvals_count: int = 0
     project_approvals_count: int = 0
     stats: dict[str, int] = field(default_factory=dict)
@@ -292,7 +293,9 @@ class SystemInfoSnapshot(Snapshot):
 
     cwd: str = ""
     git_branch: str = ""
-    tmux_sessions_count: int = 0  # legacy field name — counts subprocess sessions, not tmux
+    tmux_sessions_count: int = (
+        0  # legacy field name — counts subprocess sessions, not tmux
+    )
     daemon_pid: int = 0
     daemon_uptime_seconds: float = 0.0
     # Phase 4.5 step 7 additions

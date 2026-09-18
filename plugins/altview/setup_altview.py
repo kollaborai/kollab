@@ -76,7 +76,7 @@ PROVIDERS: List[ProviderChoice] = [
         default_base_url="https://api.openai.com/v1",
         key_hint="sk-... / sk-proj-...",
         key_url="https://platform.openai.com/api-keys",
-        default_model="gpt-5.6",
+        default_model="gpt-5.6-luna",
     ),
     ProviderChoice(
         key="openai-chatgpt",

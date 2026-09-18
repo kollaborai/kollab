@@ -8,7 +8,9 @@ for Azure-specific endpoint format.
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
+from .message_sanitizer import strip_local_message_metadata
 from .models import (
     AzureOpenAIConfig,
     ProviderType,
@@ -61,8 +63,7 @@ class AzureOpenAIProvider(OpenAIProvider):
         self._client: Optional[Any] = None
 
         logger.debug(
-            f"Azure OpenAI provider created "
-            f"(endpoint={config.azure_endpoint}, model={config.model})"
+            f"Azure OpenAI provider created (endpoint={config.azure_endpoint}, model={config.model})"
         )
 
     async def initialize(self) -> None:
@@ -100,7 +101,7 @@ class AzureOpenAIProvider(OpenAIProvider):
 
         except ImportError as e:
             raise ImportError(
-                "OpenAI SDK not installed. " "Install with: pip install openai"
+                "OpenAI SDK not installed. Install with: pip install openai"
             ) from e
         except Exception as e:
             logger.error(f"Failed to initialize Azure OpenAI client: {e}")
@@ -230,9 +231,17 @@ class AzureOpenAIProvider(OpenAIProvider):
 
         from .transformers import ToolSchemaTransformer
 
+        prepared_messages = strip_local_message_metadata(messages)
+        for message in prepared_messages:
+            content = message.get("content")
+            if isinstance(content, (str, list)):
+                message["content"] = serialize_openai_chat_content(
+                    content, self.resolve_media
+                )
+
         params: Dict[str, Any] = {
             "model": self.config.deployment_id or self.model,
-            "messages": messages,
+            "messages": prepared_messages,
             "stream": stream,
             "max_tokens": self.config.max_tokens,
         }

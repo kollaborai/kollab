@@ -10,11 +10,21 @@ Responses API format:
 - Streaming: SSE events (response.started, output_item.added, content_block.delta, response.done)
 """
 
+import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
+from ..generated_image_artifacts import (
+    GeneratedImageArtifactError,
+    GeneratedImageArtifactStore,
+    redact_generated_image_data,
+)
+from .errors import ProviderError
 from .models import (
+    ContentBlock,
+    GeneratedImageContent,
+    ImageGenerationDelta,
     ProviderType,
     StreamingResponse,
     TextContent,
@@ -22,7 +32,6 @@ from .models import (
     ThinkingContent,
     ThinkingDelta,
     ToolCallDelta,
-    ToolResultContent,
     ToolUseContent,
     UnifiedResponse,
     UsageInfo,
@@ -77,15 +86,21 @@ class OpenAIResponsesTransformer:
             details = {}
 
         prompt_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
-        completion_tokens = usage.get(
-            "output_tokens", usage.get("completion_tokens", 0)
-        ) or 0
-        cached_tokens = details.get("cached_tokens", 0) or usage.get(
-            "cache_read_input_tokens", usage.get("cache_read_tokens", 0)
-        ) or 0
-        cache_write_tokens = details.get("cache_write_tokens", 0) or usage.get(
-            "cache_creation_input_tokens", usage.get("cache_creation_tokens", 0)
-        ) or 0
+        completion_tokens = (
+            usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+        )
+        cached_tokens = (
+            details.get("cached_tokens", 0)
+            or usage.get("cache_read_input_tokens", usage.get("cache_read_tokens", 0))
+            or 0
+        )
+        cache_write_tokens = (
+            details.get("cache_write_tokens", 0)
+            or usage.get(
+                "cache_creation_input_tokens", usage.get("cache_creation_tokens", 0)
+            )
+            or 0
+        )
         total_tokens = usage.get("total_tokens") or prompt_tokens + completion_tokens
 
         return UsageInfo(
@@ -97,7 +112,11 @@ class OpenAIResponsesTransformer:
         )
 
     @staticmethod
-    def transform_response(response: Dict[str, Any], model: str) -> UnifiedResponse:
+    def transform_response(
+        response: Dict[str, Any],
+        model: str,
+        artifact_store: Optional[GeneratedImageArtifactStore] = None,
+    ) -> UnifiedResponse:
         """
         Transform complete OpenAI Responses API response to unified format.
 
@@ -140,7 +159,7 @@ class OpenAIResponsesTransformer:
                 model=model,
                 provider=ProviderType.OPENAI_RESPONSES,
                 finish_reason=response.get("status") if response else None,
-                raw_response=response,
+                raw_response=redact_generated_image_data(response),
             )
 
         output_items = response.get("output", [])
@@ -158,12 +177,45 @@ class OpenAIResponsesTransformer:
                 model=model,
                 provider=ProviderType.OPENAI_RESPONSES,
                 finish_reason=response.get("status"),
-                raw_response=response,
+                raw_response=redact_generated_image_data(response),
             )
 
-        content_blocks: List[
-            Union[TextContent, ToolUseContent, ToolResultContent, ThinkingContent]
-        ] = []
+        # Responses can repeat one completed image item across output events.
+        # Merge those copies before touching the artifact store so one logical
+        # provider item produces exactly one private artifact.
+        merged_image_items: Dict[str, Dict[str, Any]] = {}
+        for item in output_items:
+            if item.get("type") != "image_generation_call":
+                continue
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                raise ProviderError(
+                    "image generation item is missing its provider id",
+                    provider="openai_responses",
+                    error_code="image_generation_missing_id",
+                )
+            existing = merged_image_items.get(item_id)
+            if existing is None:
+                merged_image_items[item_id] = copy.deepcopy(item)
+                continue
+            existing_result = existing.get("result")
+            incoming_result = item.get("result")
+            if (
+                existing_result
+                and incoming_result
+                and existing_result != incoming_result
+            ):
+                raise ProviderError(
+                    "conflicting payloads received for one image generation item",
+                    provider="openai_responses",
+                    error_code="image_generation_conflict",
+                )
+            for key, value in item.items():
+                if key not in existing or existing.get(key) in (None, "", []):
+                    existing[key] = copy.deepcopy(value)
+
+        content_blocks: List[ContentBlock] = []
+        transformed_image_ids: set[str] = set()
 
         # Process each output item
         for item in output_items:
@@ -187,8 +239,25 @@ class OpenAIResponsesTransformer:
                     OpenAIResponsesTransformer._transform_reasoning_item(item)
                 )
 
+            # Hosted image-generation item -> private managed artifact
+            elif item_type == "image_generation_call":
+                item_id = item.get("id")
+                if item_id in transformed_image_ids:
+                    continue
+                transformed_image_ids.add(item_id)
+                image_content = (
+                    OpenAIResponsesTransformer._transform_image_generation_item(
+                        merged_image_items[item_id], artifact_store
+                    )
+                )
+                if image_content is not None:
+                    content_blocks.append(image_content)
+
             else:
                 logger.warning(f"Unknown output item type: {item_type}")
+
+        if not content_blocks:
+            content_blocks.append(TextContent(text=""))
 
         # Extract usage, including cache reads and writes.
         usage = OpenAIResponsesTransformer._usage_info(response.get("usage"))
@@ -199,8 +268,41 @@ class OpenAIResponsesTransformer:
             model=model,
             provider=ProviderType.OPENAI_RESPONSES,
             finish_reason=response.get("status"),
-            raw_response=response,
+            raw_response=redact_generated_image_data(response),
         )
+
+    @staticmethod
+    def _transform_image_generation_item(
+        item: Dict[str, Any],
+        artifact_store: Optional[GeneratedImageArtifactStore],
+    ) -> Optional[GeneratedImageContent | TextContent]:
+        """Persist a completed hosted image without returning its bytes."""
+        result = item.get("result")
+        if not result:
+            raise ProviderError(
+                "image generation completed without image data",
+                provider="openai_responses",
+                error_code="image_artifact_persistence_failed",
+            )
+        if artifact_store is None:
+            raise ProviderError(
+                "image generation completed without artifact storage",
+                provider="openai_responses",
+                error_code="image_artifact_persistence_failed",
+            )
+        try:
+            return artifact_store.write_base64(
+                result,
+                revised_prompt=item.get("revised_prompt"),
+                provider_reference=item.get("id"),
+            )
+        except GeneratedImageArtifactError as exc:
+            raise ProviderError(
+                "image generation completed but the artifact could not be persisted",
+                provider="openai_responses",
+                error_code="image_artifact_persistence_failed",
+                original_error=exc,
+            ) from exc
 
     @staticmethod
     def _transform_message_item(item: Dict[str, Any]) -> List[TextContent]:
@@ -318,23 +420,50 @@ class OpenAIResponsesTransformer:
             return None
 
         # response.done - final chunk with usage
-        if event_type == "response.done":
+        if event_type in ("response.done", "response.completed"):
             response_data = chunk.get("response", {})
-            usage = OpenAIResponsesTransformer._usage_info(
-                response_data.get("usage")
-            )
+            usage = OpenAIResponsesTransformer._usage_info(response_data.get("usage"))
 
             return StreamingResponse(
                 delta=TextDelta(content=""),
                 usage=usage,
                 is_final=True,
-                raw_chunk=chunk,
+                raw_chunk=redact_generated_image_data(chunk),
+            )
+
+        if isinstance(event_type, str) and event_type.startswith(
+            "response.image_generation_call."
+        ):
+            status = event_type.rsplit(".", 1)[-1]
+            if status not in {"in_progress", "generating", "completed", "failed"}:
+                return None
+            payload = chunk.get("item") or chunk.get("response") or chunk
+            if not isinstance(payload, dict):
+                payload = {}
+            return StreamingResponse(
+                delta=ImageGenerationDelta(
+                    status=status,
+                    provider_reference=payload.get("id"),
+                ),
+                is_final=False,
+                raw_chunk=redact_generated_image_data(chunk),
             )
 
         # output_item events
         if event_type in ("response.output_item.added", "response.output_item.done"):
             item = chunk.get("item", {})
             item_type = item.get("type")
+
+            if item_type == "image_generation_call":
+                status = "completed" if event_type.endswith("done") else "in_progress"
+                return StreamingResponse(
+                    delta=ImageGenerationDelta(
+                        status=status,
+                        provider_reference=item.get("id"),
+                    ),
+                    is_final=False,
+                    raw_chunk=redact_generated_image_data(chunk),
+                )
 
             # Message item -> text delta
             if item_type == "message":

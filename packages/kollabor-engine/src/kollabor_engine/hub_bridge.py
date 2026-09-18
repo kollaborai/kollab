@@ -136,6 +136,47 @@ class HubBridge:
                 return agent
         return None
 
+    def discover_sessions(self, use_cache: bool = True) -> List[Dict[str, Any]]:
+        """Return running detached daemons persisted by hub presence.
+
+        Engine sessions are process-local, while detached daemons can outlive
+        the engine that created them. Presence is the durable discovery
+        contract: only fresh entries with a usable socket are exposed. The
+        returned ``session_id`` is the daemon identity (the stable reconnect
+        key when the creating engine is gone).
+        """
+        sessions: List[Dict[str, Any]] = []
+        for agent in self.get_agents(use_cache=use_cache):
+            strategy = str(agent.get("launch_strategy") or "").lower()
+            socket_path = self._socket_path_for_agent(agent)
+            if not socket_path or not socket_path.exists():
+                continue
+            if strategy and strategy not in {"subprocess", "api", "detached"}:
+                continue
+            identity = str(agent.get("identity") or agent.get("agent_id") or "")
+            if not identity:
+                continue
+            sessions.append({
+                "session_id": identity,
+                "name": identity,
+                "identity": identity,
+                "agent": agent.get("agent_name") or agent.get("name") or "default",
+                "workspace": agent.get("project") or "",
+                "daemon_pid": int(agent.get("pid") or 0),
+                "socket_path": str(socket_path),
+                "session_log": agent.get("session_log") or "",
+                "created_at": agent.get("started_at") or 0,
+                "active": True,
+                "discovered": True,
+                "source": "hub_presence",
+                # Presence proves the daemon is alive, but this engine process
+                # has no EngineSession/RPC subscription for it. Keep discovery
+                # explicit so clients do not send session-scoped mutations here.
+                "attachable": False,
+                "actions_supported": [],
+            })
+        return sessions
+
     def get_agent_by_identity(
         self, identity: str, use_cache: bool = True
     ) -> Optional[Dict[str, Any]]:

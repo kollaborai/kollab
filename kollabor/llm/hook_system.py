@@ -7,6 +7,7 @@ pre/post processing, tool calls, and intelligence features.
 import logging
 from typing import Any, Dict
 
+from kollabor_ai.message_content import content_to_text
 from kollabor_events import EventType, Hook, HookPriority
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,7 @@ class LLMHookSystem:
             "session_context": self._get_session_context(),
         }
 
-        logger.debug(f"Pre-processing user input: {message[:50]}...")
+        logger.debug(f"Pre-processing user input: {content_to_text(message)[:50]}...")
         return enriched_data
 
     async def _handle_pre_llm_request(

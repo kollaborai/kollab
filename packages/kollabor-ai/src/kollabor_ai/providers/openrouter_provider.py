@@ -17,6 +17,7 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import map_openai_error
 from .message_sanitizer import strip_local_message_metadata
@@ -102,8 +103,7 @@ class OpenRouterProvider(LLMProvider):
             self.config.base_url = "https://openrouter.ai/api/v1"
 
         logger.debug(
-            f"OpenRouter provider created (model={config.model}, "
-            f"base_url={config.base_url})"
+            f"OpenRouter provider created (model={config.model}, base_url={config.base_url})"
         )
 
     def validate_config(self, config: ProviderConfig) -> None:
@@ -162,8 +162,7 @@ class OpenRouterProvider(LLMProvider):
 
             self._initialized = True
             logger.info(
-                f"OpenRouter provider initialized (model={self.model}, "
-                f"base_url={self.config.base_url})"
+                f"OpenRouter provider initialized (model={self.model}, base_url={self.config.base_url})"
             )
 
             # Warm model metadata cache in background so it's ready
@@ -171,23 +170,19 @@ class OpenRouterProvider(LLMProvider):
             # "Task exception was never retrieved" warnings.
             try:
                 loop = asyncio.get_running_loop()
-                self._warmup_task = loop.create_task(
-                    self._model_info.warm_cache()
-                )
+                self._warmup_task = loop.create_task(self._model_info.warm_cache())
                 self._warmup_task.add_done_callback(
                     lambda t: t.exception() if not t.cancelled() else None
                 )
             except RuntimeError:
                 # No running loop — will fetch on first call instead
                 logger.debug(
-                    "No running loop for background metadata fetch, "
-                    "will fetch on first API call"
+                    "No running loop for background metadata fetch, will fetch on first API call"
                 )
 
         except ImportError as e:
             raise ImportError(
-                "OpenAI SDK not installed (required for OpenRouter). "
-                "Install with: pip install openai"
+                "OpenAI SDK not installed (required for OpenRouter). Install with: pip install openai"
             ) from e
         except Exception as e:
             logger.error(f"Failed to initialize OpenRouter client: {e}")
@@ -236,9 +231,16 @@ class OpenRouterProvider(LLMProvider):
                 openai_tools = ToolSchemaTransformer.to_openai_format(tools)
 
             # Build request parameters
+            prepared_messages = strip_local_message_metadata(messages)
+            for message in prepared_messages:
+                content = message.get("content")
+                if isinstance(content, (str, list)):
+                    message["content"] = serialize_openai_chat_content(
+                        content, self.resolve_media
+                    )
             request_params = {
                 "model": self.model,
-                "messages": strip_local_message_metadata(messages),
+                "messages": prepared_messages,
                 "max_tokens": effective_max,
             }
 
@@ -272,8 +274,7 @@ class OpenRouterProvider(LLMProvider):
             )
 
             logger.debug(
-                f"OpenRouter response received: "
-                f"{unified_response.usage.total_tokens} tokens"
+                f"OpenRouter response received: {unified_response.usage.total_tokens} tokens"
             )
 
             return unified_response
@@ -323,9 +324,16 @@ class OpenRouterProvider(LLMProvider):
                 openai_tools = ToolSchemaTransformer.to_openai_format(tools)
 
             # Build request parameters
+            prepared_messages = strip_local_message_metadata(messages)
+            for message in prepared_messages:
+                content = message.get("content")
+                if isinstance(content, (str, list)):
+                    message["content"] = serialize_openai_chat_content(
+                        content, self.resolve_media
+                    )
             request_params = {
                 "model": self.model,
-                "messages": strip_local_message_metadata(messages),
+                "messages": prepared_messages,
                 "max_tokens": effective_max,
                 "stream": True,
                 # Request usage on streams (cached_tokens + full accounting)
@@ -388,9 +396,7 @@ class OpenRouterProvider(LLMProvider):
             await self._track_request_end()
 
     @staticmethod
-    def _estimate_input_tokens(
-        messages: List[Dict[str, Any]]
-    ) -> int:
+    def _estimate_input_tokens(messages: List[Dict[str, Any]]) -> int:
         """
         Rough estimate of input token count from messages.
 

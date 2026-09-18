@@ -434,6 +434,37 @@ class LoadoutManager:
     # Activation
     # ------------------------------------------------------------------
 
+    async def _announce_model_switch(
+        self,
+        event_bus: Optional[Any],
+        loadout: Loadout,
+        previous_model: Optional[str],
+    ) -> None:
+        """Best-effort lifecycle notice after activating a loadout."""
+        if not event_bus or not hasattr(event_bus, "get_service"):
+            return
+        try:
+            hub = event_bus.get_service("hub_plugin")
+            announce = getattr(hub, "announce_model_switch", None)
+            if not callable(announce):
+                return
+
+            profile = self.profile_manager.get_profile(loadout.provider_profile)
+            get_provider = getattr(profile, "get_provider", None)
+            get_model = getattr(profile, "get_model", None)
+            provider = (get_provider() if callable(get_provider) else "") or "unknown"
+            model = (
+                get_model() if callable(get_model) else getattr(profile, "model", "")
+            ) or loadout.model
+            await announce(
+                profile_name=loadout.provider_profile,
+                provider=provider,
+                model=model,
+                previous_model=previous_model,
+            )
+        except Exception:
+            logger.debug("hub model-switch announcement failed", exc_info=True)
+
     async def activate(
         self, loadout_or_name: Any, event_bus: Optional[Any] = None
     ) -> Optional[Loadout]:
@@ -466,6 +497,17 @@ class LoadoutManager:
 
         if loadout is None:
             return None
+
+        previous_model: Optional[str] = None
+        get_profile = getattr(self.profile_manager, "get_profile", None)
+        if callable(get_profile):
+            previous_profile = get_profile(loadout.provider_profile)
+            get_model = getattr(previous_profile, "get_model", None)
+            previous_model = (
+                get_model()
+                if callable(get_model)
+                else getattr(previous_profile, "model", None)
+            )
 
         update_kwargs: Dict[str, Any] = {
             "model": loadout.model,
@@ -511,4 +553,5 @@ class LoadoutManager:
                 await llm_service.api_service.reinitialize_provider(profile)
                 await llm_service._load_native_tools()
 
+        await self._announce_model_switch(event_bus, loadout, previous_model)
         return loadout

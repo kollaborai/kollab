@@ -134,6 +134,42 @@ def supports_sampling(model: str) -> bool:
     return _best_match(model, "supports_sampling") is not False
 
 
+def supports_vision(model: str, provider: Optional[str] = None) -> bool:
+    """Whether the catalog explicitly allows image input for a model.
+
+    Unknown models are treated as unsupported so a pasted image is never sent
+    to an endpoint that has not declared a vision contract. Provider surfaces
+    that serve OpenAI models (Azure and the Responses API) use the OpenAI
+    catalog through :func:`registry_provider_for`.
+    """
+    model_l = (model or "").lower()
+    provider_l = registry_provider_for(provider or "") if provider else None
+    best_len = 0
+    result: Optional[bool] = None
+    for name, info in get_model_registry().get("models", {}).items():
+        if not isinstance(info, dict):
+            continue
+        if provider_l and str(info.get("provider") or "").lower() != provider_l:
+            continue
+        if model_l.startswith(name.lower()) and len(name) > best_len:
+            value = info.get("supports_vision")
+            if isinstance(value, bool):
+                best_len = len(name)
+                result = value
+    return result is True
+
+
+def resolve_default_model(provider: str) -> Optional[str]:
+    """Resolve the catalog-declared default model for a provider."""
+    defaults = (
+        get_model_registry()
+        .get("provider_defaults", {})
+        .get((provider or "").lower(), {})
+    )
+    default = defaults.get("default_model") if isinstance(defaults, dict) else None
+    return str(default) if default else None
+
+
 def registry_provider_for(provider: str) -> str:
     """Map a kollab provider onto the one whose models it serves.
 

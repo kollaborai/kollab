@@ -18,7 +18,7 @@ class ConversationMessage:
     """
 
     role: str
-    content: str
+    content: str | list[Dict[str, Any]]
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
     thinking: Optional[str] = None

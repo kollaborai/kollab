@@ -1,6 +1,7 @@
 """System command handlers package."""
 
 from .agent import AgentCommandHandler
+from .artifact import ArtifactCommandHandler
 from .context import ContextCommandHandler
 from .directory import DirectoryCommandHandler
 from .loadout import LoadoutCommandHandler
@@ -12,6 +13,7 @@ from .system import SystemCommandHandler
 
 __all__ = [
     "AgentCommandHandler",
+    "ArtifactCommandHandler",
     "ContextCommandHandler",
     "SkillCommandHandler",
     "ModelCommandHandler",

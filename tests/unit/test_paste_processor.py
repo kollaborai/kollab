@@ -3,10 +3,15 @@
 Tests the extracted PasteProcessor independently from InputHandler.
 """
 
+import base64
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
+from kollabor_tui.buffer_manager import BufferManager
 from kollabor_tui.input.paste_processor import PasteProcessor
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\nnot-a-real-but-signature-valid-png"
+PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")
 
 
 class TestPasteProcessor(unittest.TestCase):
@@ -222,6 +227,59 @@ class TestPasteProcessorAsync(unittest.IsolatedAsyncioTestCase):
     async def test_simple_paste_detection_disabled_by_default(self):
         """Test that paste detection is disabled by default."""
         self.assertFalse(self.paste_processor.paste_detection_enabled)
+
+    async def test_clipboard_image_inserts_token_and_builds_structured_content(self):
+        buffer = BufferManager()
+        processor = PasteProcessor(buffer)
+
+        with patch(
+            "kollabor_tui.input.paste_processor.read_image_from_clipboard",
+            return_value=("image/png", PNG_BYTES),
+        ):
+            self.assertTrue(await processor.handle_clipboard_paste())
+
+        self.assertEqual(buffer.content, "[image1]")
+        self.assertEqual(
+            processor.build_message_content(buffer.content),
+            [{"type": "image", "image": PNG_DATA_URL}],
+        )
+        self.assertFalse(processor.has_image_attachments)
+
+    async def test_clipboard_text_falls_back_when_no_image_is_available(self):
+        buffer = BufferManager()
+        processor = PasteProcessor(buffer)
+
+        with (
+            patch(
+                "kollabor_tui.input.paste_processor.read_image_from_clipboard",
+                return_value=None,
+            ),
+            patch(
+                "kollabor_tui.input.paste_processor.read_text_from_clipboard",
+                return_value="clipboard text",
+            ),
+        ):
+            self.assertTrue(await processor.handle_clipboard_paste())
+
+        self.assertEqual(buffer.content, "clipboard text")
+
+    async def test_deleted_image_is_atomic_and_remaining_tokens_renumber(self):
+        buffer = BufferManager()
+        processor = PasteProcessor(buffer)
+
+        await processor.add_image_attachment(PNG_DATA_URL, len(PNG_BYTES))
+        await processor.add_image_attachment(PNG_DATA_URL, len(PNG_BYTES))
+        self.assertEqual(buffer.content, "[image1][image2]")
+
+        buffer.move_to_start()
+        self.assertTrue(processor.delete_image_token_at_cursor())
+        self.assertEqual(buffer.content, "[image1]")
+        self.assertEqual(processor.image_attachments, {"[image1]": PNG_DATA_URL})
+
+        buffer.move_to_end()
+        self.assertTrue(processor.delete_image_token_before_cursor())
+        self.assertEqual(buffer.content, "")
+        self.assertFalse(processor.has_image_attachments)
 
 
 if __name__ == "__main__":

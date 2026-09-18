@@ -26,7 +26,7 @@ function titleizeMode(value: string): string {
 }
 
 export function normalizeApprovalMode(value: unknown): string {
-  if (value === null || value === undefined) return "confirm_all";
+  if (value === null || value === undefined) return "trust_all";
   const raw = String(value);
   return MODE_BY_ORDINAL[raw] ?? raw.toLowerCase();
 }

@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
+from kollabor_ai.message_content import EphemeralImageStore, normalize_message_content
 from kollabor_ai.providers.custom_provider import CustomConfig, CustomProvider
 from kollabor_ai.providers.models import OpenAIConfig, OpenRouterConfig, ProviderType
 from kollabor_ai.providers.openai_provider import OpenAIProvider
@@ -43,6 +44,35 @@ class LocalMessageMetadataTests(unittest.TestCase):
         self.assertTrue(messages[0]["agent_hud"])
         self.assertEqual(messages[0]["agent_hud_sources"], ["hub"])
 
+    def test_openai_request_serializes_canonical_image_without_mutating_history(self):
+        config = OpenAIConfig(
+            provider=ProviderType.OPENAI,
+            api_key="sk-test-key",
+            model="gpt-5.4",
+        )
+        provider = OpenAIProvider(config)
+        store = EphemeralImageStore()
+        messages = [
+            {
+                "role": "user",
+                "content": normalize_message_content(
+                    [{"type": "image", "image": "data:image/png;base64,iVBORw0KGgo="}],
+                    store,
+                ),
+            }
+        ]
+        provider.set_media_resolver(store.resolve)
+
+        request = provider._prepare_request_params(messages, tools=None, stream=False)
+
+        assert request["messages"][0]["content"] == [
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+            }
+        ]
+        assert messages[0]["content"][0]["source"]["kind"] == "managed_upload"
+
 
 class LocalMessageMetadataAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_openrouter_request_strips_agent_hud_metadata(self):
@@ -71,9 +101,7 @@ class LocalMessageMetadataAsyncTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         provider._client = MagicMock()
-        provider._client.chat.completions.create = AsyncMock(
-            return_value=mock_response
-        )
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_response)
 
         messages = hud_messages()
         await provider.call(messages)

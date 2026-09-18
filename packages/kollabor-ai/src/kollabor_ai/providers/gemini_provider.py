@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 
+from ..message_content import serialize_gemini_parts
 from .base import LLMProvider
 from .errors import map_httpx_error
 from .gemini_transformer import GeminiResponseTransformer
@@ -74,8 +75,7 @@ class GeminiProvider(LLMProvider):
         self._base_url = config.base_url or DEFAULT_GEMINI_BASE_URL
 
         logger.debug(
-            f"Gemini provider created (model={config.model}, "
-            f"base_url={self._base_url})"
+            f"Gemini provider created (model={config.model}, base_url={self._base_url})"
         )
 
     def validate_config(self, config: GeminiConfig) -> None:  # type: ignore[override]  # type: ignore[override]
@@ -170,8 +170,7 @@ class GeminiProvider(LLMProvider):
             )
 
             logger.debug(
-                f"Gemini response received "
-                f"(tokens={unified_response.usage.total_tokens})"
+                f"Gemini response received (tokens={unified_response.usage.total_tokens})"
             )
 
             return unified_response
@@ -312,13 +311,15 @@ class GeminiProvider(LLMProvider):
 
             if role == "system":
                 # Extract system instruction
-                system_instruction = {"parts": [{"text": content}]}
+                system_instruction = {
+                    "parts": serialize_gemini_parts(content, self.resolve_media)
+                }
             else:
                 # Convert role to Gemini format
                 gemini_role = "model" if role == "assistant" else role
 
                 # Build content parts
-                parts = [{"text": content}]
+                parts = serialize_gemini_parts(content, self.resolve_media)
 
                 contents.append({"role": gemini_role, "parts": parts})
 

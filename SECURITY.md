@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Kollab users should run the latest published release of the 0.5.x series.
+Kollab users should run the latest published release of the 0.8.x series.
 
 For coordinated vulnerability work we currently support the current public release and
 its patch upgrades. Older releases may be unsupported for security fixes.

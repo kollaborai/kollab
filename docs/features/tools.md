@@ -517,7 +517,7 @@ Permission integration:
       "native_tool_calling": true
     },
     "permissions": {
-      "approval_mode": "default",
+      "approval_mode": "trust_all",
       "blocked_tools": [],
       "trusted_tools": ["ls", "cat", "grep"]
     }
