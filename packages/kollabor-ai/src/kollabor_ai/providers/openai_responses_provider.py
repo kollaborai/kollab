@@ -17,10 +17,12 @@ Chat Completions in several key ways:
 - State: 'previous_response_id' for chaining vs client-managed
 """
 
+import copy
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..generated_image_artifacts import redact_generated_image_data
 from ..message_content import content_to_text, serialize_openai_responses_content
 from .base import LLMProvider
 from .errors import ProviderError, map_http_status_error, map_openai_error
@@ -114,6 +116,7 @@ class OpenAIResponsesProvider(LLMProvider):
 
         # httpx client (initialized in initialize())
         self._client: Optional[Any] = None
+        self._generated_image_store: Optional[Any] = None
 
         logger.debug(
             f"OpenAI Responses provider created (model={config.model}, store_responses={config.store_responses})"
@@ -189,6 +192,20 @@ class OpenAIResponsesProvider(LLMProvider):
         """ChatGPT codex backend only accepts stream=true."""
         base = self.config.base_url or ""
         return "chatgpt.com" in base
+
+    @property
+    def supports_hosted_image_generation(self) -> bool:
+        """Whether this exact OAuth/Codex route supports image generation."""
+        auth_type = getattr(self.config.auth_type, "value", self.config.auth_type)
+        return (
+            self._requires_streaming
+            and str(auth_type).lower() == "oauth"
+            and self.model.lower() == "gpt-5.6-luna"
+        )
+
+    def set_generated_image_store(self, store: Optional[Any]) -> None:
+        """Attach the private store used for completed hosted images."""
+        self._generated_image_store = store
 
     async def call(
         self,
@@ -272,7 +289,9 @@ class OpenAIResponsesProvider(LLMProvider):
 
             # Transform to unified format
             unified_response = OpenAIResponsesTransformer.transform_response(
-                response_dict, self.model
+                response_dict,
+                self.model,
+                artifact_store=self._generated_image_store,
             )
 
             logger.debug(
@@ -363,7 +382,7 @@ class OpenAIResponsesProvider(LLMProvider):
                         accumulated_text_parts.append(chunk.delta.content)
                     # Capture the final response payload
                     if chunk.is_final and chunk.raw_chunk:
-                        raw_event = chunk.raw_chunk
+                        raw_event = chunk._raw_payload or chunk.raw_chunk
                         evt = raw_event.get("event", "")
                         if evt in ("response.done", "response.completed"):
                             final_response = raw_event.get("response", {})
@@ -398,7 +417,9 @@ class OpenAIResponsesProvider(LLMProvider):
                 )
 
             unified = OpenAIResponsesTransformer.transform_response(
-                final_response, self.model
+                final_response,
+                self.model,
+                artifact_store=self._generated_image_store,
             )
 
             logger.debug(
@@ -672,12 +693,15 @@ class OpenAIResponsesProvider(LLMProvider):
                 if cache_value is not None:
                     params[cache_key] = cache_value
 
-        # Transform tools to Responses API format
-        # Responses API uses flat format: {"type": "function", "name": ..., ...}
-        # NOT the Chat Completions nested format: {"type": "function", "function": {...}}
-        if tools:
+        # Transform function tools to Responses API format while preserving
+        # hosted/non-function tools exactly as supplied. The Codex OAuth route
+        # exposes image generation as a hosted tool, not a function.
+        if tools or self.supports_hosted_image_generation:
             responses_tools = []
-            for tool in tools:
+            for tool in tools or []:
+                if tool.get("type") and tool.get("type") != "function":
+                    responses_tools.append(copy.deepcopy(tool))
+                    continue
                 # Handle both generic format and OpenAI Chat Completions format
                 if "function" in tool:
                     # Already in OpenAI format: {"type": "function", "function": {...}}
@@ -698,6 +722,10 @@ class OpenAIResponsesProvider(LLMProvider):
                         "parameters": parameters,
                     }
                 )
+            if self.supports_hosted_image_generation and not any(
+                tool.get("type") == "image_generation" for tool in responses_tools
+            ):
+                responses_tools.append({"type": "image_generation"})
             params["tools"] = responses_tools
 
         return params
@@ -760,47 +788,79 @@ class OpenAIResponsesProvider(LLMProvider):
         Raises:
             ProviderError: If stream parsing fails
         """
-        current_event = None
-        current_data = b""
-        buffer = b""
+        current_event: Optional[str] = None
+        current_data_lines: List[bytes] = []
+        buffer = bytearray()
+        max_line_bytes = 64 * 1024 * 1024
+
+        def flush_event() -> Optional[StreamingResponse]:
+            nonlocal current_event, current_data_lines
+            if current_event and current_data_lines:
+                event = self._parse_sse_event(
+                    current_event, b"\n".join(current_data_lines)
+                )
+                current_event = None
+                current_data_lines = []
+                return event
+            current_event = None
+            current_data_lines = []
+            return None
 
         try:
             async for chunk_bytes in response.aiter_bytes():
-                buffer += chunk_bytes
+                buffer.extend(chunk_bytes)
 
                 # Split by newlines and process complete lines
-                while b"\n" in buffer:
-                    line_bytes, buffer = buffer.split(b"\n", 1)
+                while True:
+                    newline_index = buffer.find(b"\n")
+                    if newline_index < 0:
+                        if len(buffer) > max_line_bytes:
+                            raise ProviderError(
+                                "SSE line exceeds the supported size limit",
+                                provider="openai_responses",
+                                error_code="sse_line_too_large",
+                            )
+                        break
+                    line_bytes = bytes(buffer[:newline_index])
+                    del buffer[: newline_index + 1]
+                    if len(line_bytes) > max_line_bytes:
+                        raise ProviderError(
+                            "SSE line exceeds the supported size limit",
+                            provider="openai_responses",
+                            error_code="sse_line_too_large",
+                        )
+                    line_bytes = line_bytes.rstrip(b"\r")
 
                     # Decode line to string
                     try:
-                        line = line_bytes.decode("utf-8").strip()
+                        line = line_bytes.decode("utf-8")
                     except UnicodeDecodeError:
                         # Skip binary data that can't be decoded
                         continue
 
                     if not line:
                         # Empty line means end of event
-                        if current_event and current_data:
-                            # Parse event
-                            chunk = self._parse_sse_event(current_event, current_data)
-                            if chunk:
-                                yield chunk
-                            current_event = None
-                            current_data = b""
+                        event_chunk = flush_event()
+                        if event_chunk:
+                            yield event_chunk
                         continue
 
+                    if line.startswith(":"):
+                        continue
                     if line.startswith("event:"):
-                        current_event = line[len("event:") :].strip()
+                        current_event = line[len("event:") :].lstrip(" ")
                     elif line.startswith("data:"):
-                        # Keep data as bytes for JSON parsing later
-                        current_data = line[len("data:") :].strip().encode("utf-8")
+                        # SSE permits multiple data lines per event. Keep the
+                        # bytes until the complete event is available so large
+                        # image results are not repeatedly reallocated.
+                        current_data_lines.append(
+                            line[len("data:") :].lstrip(" ").encode("utf-8")
+                        )
 
             # Flush remaining event if stream ended without trailing newline
-            if current_event and current_data:
-                chunk = self._parse_sse_event(current_event, current_data)
-                if chunk:
-                    yield chunk
+            event_chunk = flush_event()
+            if event_chunk:
+                yield event_chunk
 
         except Exception as e:
             logger.error(f"Failed to parse SSE stream: {e}")
@@ -842,6 +902,13 @@ class OpenAIResponsesProvider(LLMProvider):
                     )
                 return None
 
+            # Hosted image progress events
+            if event.startswith("response.image_generation_call."):
+                event_data = {"event": event, **parsed_data}
+                return OpenAIResponsesTransformer.transform_streaming_chunk(
+                    event_data, self.model
+                )
+
             # Output item events
             if event in ("response.output_item.added", "response.output_item.done"):
                 item = parsed_data.get("item", parsed_data)
@@ -855,12 +922,14 @@ class OpenAIResponsesProvider(LLMProvider):
                 resp_data = parsed_data.get("response", parsed_data)
                 event_data = {"event": event, "response": resp_data}
                 usage = OpenAIResponsesTransformer._usage_info(resp_data.get("usage"))
-                return StreamingResponse(
+                chunk = StreamingResponse(
                     delta=TextDelta(content=""),
                     usage=usage,
                     is_final=True,
-                    raw_chunk=event_data,
+                    raw_chunk=redact_generated_image_data(event_data),
                 )
+                chunk._raw_payload = event_data
+                return chunk
 
             # Other events (created, in_progress, content_part) - skip
             return None

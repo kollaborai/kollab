@@ -12,9 +12,17 @@ Responses API format:
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
+from ..generated_image_artifacts import (
+    GeneratedImageArtifactError,
+    GeneratedImageArtifactStore,
+    redact_generated_image_data,
+)
 from .models import (
+    ContentBlock,
+    GeneratedImageContent,
+    ImageGenerationDelta,
     ProviderType,
     StreamingResponse,
     TextContent,
@@ -22,7 +30,6 @@ from .models import (
     ThinkingContent,
     ThinkingDelta,
     ToolCallDelta,
-    ToolResultContent,
     ToolUseContent,
     UnifiedResponse,
     UsageInfo,
@@ -97,7 +104,11 @@ class OpenAIResponsesTransformer:
         )
 
     @staticmethod
-    def transform_response(response: Dict[str, Any], model: str) -> UnifiedResponse:
+    def transform_response(
+        response: Dict[str, Any],
+        model: str,
+        artifact_store: Optional[GeneratedImageArtifactStore] = None,
+    ) -> UnifiedResponse:
         """
         Transform complete OpenAI Responses API response to unified format.
 
@@ -140,7 +151,7 @@ class OpenAIResponsesTransformer:
                 model=model,
                 provider=ProviderType.OPENAI_RESPONSES,
                 finish_reason=response.get("status") if response else None,
-                raw_response=response,
+                raw_response=redact_generated_image_data(response),
             )
 
         output_items = response.get("output", [])
@@ -158,12 +169,10 @@ class OpenAIResponsesTransformer:
                 model=model,
                 provider=ProviderType.OPENAI_RESPONSES,
                 finish_reason=response.get("status"),
-                raw_response=response,
+                raw_response=redact_generated_image_data(response),
             )
 
-        content_blocks: List[
-            Union[TextContent, ToolUseContent, ToolResultContent, ThinkingContent]
-        ] = []
+        content_blocks: List[ContentBlock] = []
 
         # Process each output item
         for item in output_items:
@@ -187,8 +196,19 @@ class OpenAIResponsesTransformer:
                     OpenAIResponsesTransformer._transform_reasoning_item(item)
                 )
 
+            # Hosted image-generation item -> private managed artifact
+            elif item_type == "image_generation_call":
+                image_content = OpenAIResponsesTransformer._transform_image_generation_item(
+                    item, artifact_store
+                )
+                if image_content is not None:
+                    content_blocks.append(image_content)
+
             else:
                 logger.warning(f"Unknown output item type: {item_type}")
+
+        if not content_blocks:
+            content_blocks.append(TextContent(text=""))
 
         # Extract usage, including cache reads and writes.
         usage = OpenAIResponsesTransformer._usage_info(response.get("usage"))
@@ -199,8 +219,40 @@ class OpenAIResponsesTransformer:
             model=model,
             provider=ProviderType.OPENAI_RESPONSES,
             finish_reason=response.get("status"),
-            raw_response=response,
+            raw_response=redact_generated_image_data(response),
         )
+
+    @staticmethod
+    def _transform_image_generation_item(
+        item: Dict[str, Any],
+        artifact_store: Optional[GeneratedImageArtifactStore],
+    ) -> Optional[GeneratedImageContent | TextContent]:
+        """Persist a completed hosted image without returning its bytes."""
+        result = item.get("result")
+        if not result:
+            return None
+        if artifact_store is None:
+            logger.warning(
+                "Hosted image generation completed without an artifact store (id=%s)",
+                item.get("id", "unknown"),
+            )
+            return TextContent(
+                text="[generated image unavailable: artifact storage is not configured]"
+            )
+        try:
+            return artifact_store.write_base64(
+                result,
+                revised_prompt=item.get("revised_prompt"),
+                provider_reference=item.get("id"),
+            )
+        except GeneratedImageArtifactError:
+            logger.warning(
+                "Hosted image generation result could not be persisted (id=%s)",
+                item.get("id", "unknown"),
+            )
+            return TextContent(
+                text="[generated image unavailable: safe persistence failed]"
+            )
 
     @staticmethod
     def _transform_message_item(item: Dict[str, Any]) -> List[TextContent]:
@@ -318,7 +370,7 @@ class OpenAIResponsesTransformer:
             return None
 
         # response.done - final chunk with usage
-        if event_type == "response.done":
+        if event_type in ("response.done", "response.completed"):
             response_data = chunk.get("response", {})
             usage = OpenAIResponsesTransformer._usage_info(
                 response_data.get("usage")
@@ -331,10 +383,37 @@ class OpenAIResponsesTransformer:
                 raw_chunk=chunk,
             )
 
+        if event_type.startswith("response.image_generation_call."):
+            status = event_type.rsplit(".", 1)[-1]
+            if status not in {"in_progress", "generating", "completed", "failed"}:
+                return None
+            payload = chunk.get("item") or chunk.get("response") or chunk
+            if not isinstance(payload, dict):
+                payload = {}
+            return StreamingResponse(
+                delta=ImageGenerationDelta(
+                    status=status,
+                    provider_reference=payload.get("id"),
+                ),
+                is_final=False,
+                raw_chunk=redact_generated_image_data(chunk),
+            )
+
         # output_item events
         if event_type in ("response.output_item.added", "response.output_item.done"):
             item = chunk.get("item", {})
             item_type = item.get("type")
+
+            if item_type == "image_generation_call":
+                status = "completed" if event_type.endswith("done") else "in_progress"
+                return StreamingResponse(
+                    delta=ImageGenerationDelta(
+                        status=status,
+                        provider_reference=item.get("id"),
+                    ),
+                    is_final=False,
+                    raw_chunk=redact_generated_image_data(chunk),
+                )
 
             # Message item -> text delta
             if item_type == "message":
