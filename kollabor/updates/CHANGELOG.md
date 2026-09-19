@@ -43,13 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redaction, and success reporting only after an artifact is persisted.
 - Fixed Web UI live session refresh/discovery, polling timer cleanup, default
   loadout startup overrides, and session deletion fallback.
-- Bound OpenAI device-code polling to its configured timeout and report progress
-  while authorization is pending.
-- Keep missing-model profile lookups quiet during repeated status-bar renders.
-
-### Changed
-
-- Default OpenAI API and ChatGPT OAuth profiles to `gpt-5.6-luna`.
 
 ### Documentation
 
