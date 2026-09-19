@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-18
+
+### Fixed
+
+- Backported the OAuth login fixes missed in v0.8.0: OpenAI device-code polling
+  now respects its configured timeout and reports progress while authorization
+  is pending.
+- Default OpenAI API and ChatGPT OAuth profiles to `gpt-5.6-luna` (v0.8.0
+  shipped with the older Sol default).
+- Keep missing-model profile lookups quiet during repeated status-bar renders.
+
 ## [0.8.0] - 2026-09-18
 
 ### Added
