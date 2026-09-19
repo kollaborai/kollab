@@ -226,7 +226,9 @@ class OpenAIOAuthClient:
         try:
             # Step 1: Request device code
             device = await self._request_device_code()
-            logger.info(f"Device code received, user_code={device.user_code}")
+            logger.info(
+                "Device code received; polling interval=%s seconds", device.interval
+            )
 
             # Step 2: Open browser to verification URL
             if open_browser:
@@ -305,23 +307,46 @@ class OpenAIOAuthClient:
             DeviceTokenResponse with authorization_code and code_verifier.
         """
         session = await self._get_session()
-        deadline = time.time() + DEVICE_CODE_TIMEOUT
-        interval = device.interval
+        deadline = time.monotonic() + max(0, DEVICE_CODE_TIMEOUT)
+        interval = max(1, int(device.interval))
+        last_status_log = 0.0
+
+        logger.info(
+            "Waiting for OpenAI device authorization "
+            "(poll interval=%s seconds, timeout=%s seconds)",
+            interval,
+            DEVICE_CODE_TIMEOUT,
+        )
 
         payload = {
             "device_auth_id": device.device_auth_id,
             "user_code": device.user_code,
         }
 
-        while time.time() < deadline:
-            await asyncio.sleep(interval)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            # An unexpectedly large server-provided interval must not extend
+            # the flow beyond its 15-minute deadline.
+            await asyncio.sleep(min(interval, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
 
             try:
+                request_timeout = aiohttp.ClientTimeout(
+                    total=min(HTTP_TIMEOUT, remaining)
+                )
                 async with session.post(
                     DEVICE_TOKEN_URL,
                     json=payload,
+                    timeout=request_timeout,
                 ) as resp:
                     body = await resp.json()
+                    if not isinstance(body, dict):
+                        body = {}
 
                     if resp.status == 200:
                         auth_code = body.get("authorization_code")
@@ -332,36 +357,53 @@ class OpenAIOAuthClient:
                                 "No authorization_code in device token response"
                             )
 
+                        logger.info("OpenAI device authorization approved")
                         return DeviceTokenResponse(
                             authorization_code=auth_code,
                             code_verifier=code_verifier,
                         )
 
                     # Not ready yet - check for specific error states
-                    error = body.get("error", "")
-                    detail = body.get("detail", "")
+                    error = str(body.get("error", "")).strip()
+                    detail = str(body.get("detail", "")).strip()
+                    response_text = f"{error} {detail}".lower()
 
-                    if resp.status == 403 or "pending" in str(detail).lower():
-                        # User hasn't completed auth yet, keep polling
-                        continue
-                    elif "expired" in str(detail).lower():
+                    # Check explicit terminal states before treating all 403s
+                    # as the normal pending response.
+                    if "expired" in response_text:
                         raise OAuthError("Device code expired. Please try again.")
-                    elif "denied" in str(detail).lower():
+                    elif "denied" in response_text:
                         raise OAuthError("Authorization was denied by the user.")
-                    elif resp.status == 400:
-                        # Likely still pending, keep polling
+
+                    if "pending" in response_text or resp.status in (400, 403):
+                        # User hasn't completed auth yet, keep polling
+                        now = time.monotonic()
+                        if now - last_status_log >= 60:
+                            logger.info(
+                                "OpenAI device authorization is still pending "
+                                "(HTTP %s)",
+                                resp.status,
+                            )
+                            last_status_log = now
                         continue
                     else:
                         # Unknown non-200 status, might be transient
-                        logger.debug(
-                            f"Device token poll: HTTP {resp.status}, "
-                            f"error={error}, detail={detail}"
-                        )
+                        now = time.monotonic()
+                        if now - last_status_log >= 60:
+                            logger.warning(
+                                "OpenAI device authorization poll returned "
+                                "HTTP %s (error=%s)",
+                                resp.status,
+                                error or "unknown",
+                            )
+                            last_status_log = now
                         continue
 
-            except aiohttp.ClientError as e:
-                logger.warning(f"Network error during polling: {e}")
-                await asyncio.sleep(interval)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                now = time.monotonic()
+                if now - last_status_log >= 60:
+                    logger.warning("Network error during polling: %s", e)
+                    last_status_log = now
                 continue
 
         raise OAuthError(
@@ -578,13 +620,13 @@ async def query_codex_models(
     return [str(m.get("slug")) for m in details if m.get("slug")]
 
 
-def pick_best_model(models: List[str], fallback: str = "codex") -> str:
+def pick_best_model(models: List[str], fallback: str = "gpt-5.6-luna") -> str:
     """Pick the best chat model from a codex catalog listing.
 
     Highest version wins; a flagship beats a lighter tier of the same version
-    (``gpt-5.4`` over ``gpt-5.4-mini``); helper slugs like
-    ``codex-auto-review`` are never selected. Ties keep backend order, which
-    lists the frontier tier first.
+    (``gpt-5.4`` over ``gpt-5.4-mini``), and Luna is preferred among the
+    available tiers of the same version. Helper slugs like ``codex-auto-review``
+    are never selected.
 
     Args:
         models: List of model ID strings.
@@ -611,7 +653,8 @@ def pick_best_model(models: List[str], fallback: str = "codex") -> str:
         match = re.search(r"\d+(?:\.\d+)?", low)
         version = float(match.group()) if match else 0.0
         is_flagship = not any(tier in low for tier in CODEX_LIGHT_TIERS)
-        return (version, is_flagship)
+        is_luna = "luna" in re.split(r"[-_.]", low)
+        return (version, is_flagship, is_luna)
 
     # sorted() is stable, so same-rank models keep backend order.
     return sorted(pool, key=rank, reverse=True)[0]

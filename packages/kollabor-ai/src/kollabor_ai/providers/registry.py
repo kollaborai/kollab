@@ -429,15 +429,14 @@ def create_config_from_profile(
     # Common fields
     # Fallback model when the profile does not name one. Keep these in step
     # with PROVIDER_ENV_MAP in profile_manager and bundles/data/models.json.
-    # These are deliberately the cost-safe tier: nobody chose them, so a silent
-    # fallback must not land on frontier pricing. /setup, where the user IS
-    # choosing, suggests the headline alias instead (see setup_altview).
+    # These defaults avoid silently selecting frontier pricing; OpenAI follows
+    # the Luna default also offered by /setup.
     default_model = "claude-sonnet-5"  # Default for Anthropic
     if provider_type == ProviderType.OPENAI:
         default_model = resolve_default_model(provider_type.value) or "gpt-5.6-luna"
     elif provider_type == ProviderType.OPENAI_RESPONSES:
         # Must be a slug the codex backend serves (query_codex_model_details)
-        default_model = "gpt-5.6-sol"
+        default_model = "gpt-5.6-luna"
     elif provider_type == ProviderType.GEMINI:
         default_model = "gemini-3.6-flash"
     elif provider_type == ProviderType.AZURE_OPENAI:

@@ -166,7 +166,7 @@ class OpenAIResponsesProvider(LLMProvider):
 
     Configuration:
         api_key: OpenAI API key (sk- or sk-proj- prefix)
-        model: Model identifier (default: gpt-5.6-sol)
+        model: Model identifier (default: gpt-5.6-luna)
         store_responses: Enable server-side response storage for state management
         base_url: Optional custom endpoint (default: https://api.openai.com/v1)
         temperature: Sampling temperature (0.0-2.0)
