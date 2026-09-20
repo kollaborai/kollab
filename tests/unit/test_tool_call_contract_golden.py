@@ -64,7 +64,9 @@ def test_xml_native_and_mcp_normalize_to_executor_shape():
     }
 
     native_mcp = normalize_native_tool_call(
-        SimpleNamespace(id="call_mcp", name="browser_get_page", input={"tab": "active"}),
+        SimpleNamespace(
+            id="call_mcp", name="browser_get_page", input={"tab": "active"}
+        ),
         mcp_tool_names={"browser_get_page"},
     )
     assert native_mcp == {
@@ -85,6 +87,19 @@ def test_xml_native_and_mcp_normalize_to_executor_shape():
     assert native_git["type"] == "terminal"
     assert native_git["name"] == "git"
     assert native_git["command"] == "git status --short"
+
+    native_tool_load = normalize_native_tool_call(
+        SimpleNamespace(
+            id="call_load",
+            name="tool_load",
+            input={"name": "mcp:zai-mcp-server:analyze_image"},
+        )
+    )
+    assert native_tool_load["type"] == "tool_load"
+    assert native_tool_load["name"] == "tool_load"
+    assert native_tool_load["parameters"] == {
+        "name": "mcp:zai-mcp-server:analyze_image"
+    }
 
 
 def test_doctor_contract_probe_reports_stable_proof_labels():
@@ -236,10 +251,7 @@ def test_mixed_native_and_xml_tool_history_shape_is_stable():
             conversation_logger=conversation_logger,
             streaming_handler=SimpleNamespace(
                 call_llm=AsyncMock(
-                    return_value=(
-                        "doing both\n"
-                        "<read><file>README.md</file></read>"
-                    )
+                    return_value=("doing both\n" "<read><file>README.md</file></read>")
                 )
             ),
             native_tools_handler=FakeNativeToolsHandler(),

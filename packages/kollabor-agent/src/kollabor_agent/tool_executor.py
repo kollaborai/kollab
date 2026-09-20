@@ -342,10 +342,10 @@ class ToolExecutor:
         return False
 
     async def cancel_running_tool(self) -> None:
-        """Cancel any currently running shell subprocess.
+        """Cancel any currently running subprocess-backed tool.
 
-        Called by the ESC/cancel handler to interrupt a long-running
-        terminal command that is stuck inside asyncio.wait_for().
+        Called by the ESC/cancel handler to interrupt long-running terminal
+        commands and MCP requests that are waiting on a stdio server.
         """
         if self._active_shell_executor is not None:
             logger.info("Cancelling active shell executor subprocess")
@@ -359,6 +359,18 @@ class ToolExecutor:
                 logger.info("Cancelling tmux plugin foreground subprocess")
                 await active.cancel()
                 self.tmux_plugin._active_executor = None
+
+        # MCP reload and MCP tool calls wait on stdio responses. Closing the
+        # active connection resolves those waits and terminates the child
+        # process; merely setting the LLM cancellation flag is not enough.
+        cancel_mcp = getattr(self.mcp_integration, "cancel_active_connections", None)
+        if callable(cancel_mcp):
+            try:
+                cancellation = cancel_mcp()
+                if hasattr(cancellation, "__await__"):
+                    await cancellation
+            except Exception as e:
+                logger.debug("Could not cancel active MCP connections: %s", e)
 
     def take_executed_count(self) -> int:
         """Return tools executed since the last call, then reset the counter."""
@@ -1312,6 +1324,13 @@ class ToolExecutor:
             configured = counts.get("configured", 0)
             discovered = counts.get("discovered", 0)
             reconnected = counts.get("reconnected", 0)
+            failed = int(counts.get("failed", 0) or 0)
+            failed_servers = counts.get("failed_servers", []) or []
+            cancelled = bool(counts.get("cancelled", False))
+
+            if not isinstance(failed_servers, list):
+                failed_servers = [str(failed_servers)]
+            failed = max(failed, len(failed_servers))
 
             # Count total tools discovered
             total_tools = 0
@@ -1321,27 +1340,44 @@ class ToolExecutor:
                 )
 
             output = (
-                f"MCP servers reloaded.\n"
+                f"MCP servers {'reloaded' if not failed and not cancelled else 'reload incomplete'}.\n"
                 f"  Configured: {configured}\n"
                 f"  Discovered: {discovered}\n"
                 f"  Reconnected: {reconnected}\n"
+                f"  Failed: {failed}\n"
                 f"  Tools available: {total_tools}"
             )
+            if failed_servers:
+                output += f"\n  Failed servers: {', '.join(str(name) for name in failed_servers)}"
+            if cancelled:
+                output += "\n  Cancelled by user."
+
+            success = not failed and not cancelled
+            error = ""
+            if failed_servers:
+                error = f"MCP reload failed for: {', '.join(str(name) for name in failed_servers)}"
+            elif cancelled:
+                error = "MCP reload cancelled by user"
 
             logger.info(
-                f"MCP reload complete: {reconnected}/{configured} servers, "
-                f"{total_tools} tools ({elapsed:.1f}s)"
+                f"MCP reload {'complete' if success else 'incomplete'}: "
+                f"{reconnected}/{configured} servers, {total_tools} tools "
+                f"({elapsed:.1f}s)"
             )
 
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="mcp_reload",
-                success=True,
+                success=success,
                 output=output,
+                error=error,
                 metadata={
                     "configured": configured,
                     "discovered": discovered,
                     "reconnected": reconnected,
+                    "failed": failed,
+                    "failed_servers": failed_servers,
+                    "cancelled": cancelled,
                     "total_tools": total_tools,
                     "elapsed": round(elapsed, 2),
                 },

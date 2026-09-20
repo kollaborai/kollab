@@ -13,11 +13,13 @@ import asyncio
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 # Ensure we can import kollabor_agent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from kollabor_agent.tool_call_contract import normalize_native_tool_call
 from kollabor_agent.tool_registry import ToolRegistry
 
 
@@ -159,8 +161,7 @@ class TestToolSearchExecution(unittest.TestCase):
         self.assertIn("file", result.output.lower())
         # Should find multiple file tools
         self.assertGreater(
-            result.metadata["result_count"], 0,
-            "Should find at least one file tool"
+            result.metadata["result_count"], 0, "Should find at least one file tool"
         )
 
     def test_search_by_category(self):
@@ -409,6 +410,43 @@ class TestToolLoadExecution(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.metadata["loaded_tool"], "terminal")
+
+    def test_native_load_uses_requested_tool_name(self):
+        """Native tool_load must load its input name, not itself."""
+        self.mcp.tool_registry = {
+            "analyze_image": {
+                "server": "zai-mcp-server",
+                "enabled": True,
+                "definition": {
+                    "name": "analyze_image",
+                    "description": "Analyze an image",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_source": {"type": "string"},
+                        },
+                        "required": ["image_source"],
+                    },
+                },
+            },
+        }
+        self.mcp.server_connections = {"zai-mcp-server": MagicMock()}
+
+        tool_data = normalize_native_tool_call(
+            SimpleNamespace(
+                id="call_load",
+                name="tool_load",
+                input={"name": "mcp:zai-mcp-server:analyze_image"},
+            )
+        )
+        result = _run(self.executor._execute_tool_load(tool_data))
+
+        self.assertTrue(result.success, f"Expected success: {result.error}")
+        self.assertIn("analyze_image", result.output)
+        self.assertNotIn("### `<tool-load>`", result.output)
+        self.assertEqual(
+            result.metadata["loaded_tool"], "mcp:zai-mcp-server:analyze_image"
+        )
 
     def test_load_mcp_tool(self):
         """Loading an MCP tool should return its schema."""

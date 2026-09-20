@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -18,6 +19,7 @@ for package_src in (
     sys.path.insert(0, str(package_src))
 
 from kollabor_agent.mcp_integration import MCPIntegration, MCPServerConnection
+from kollabor_agent.native_tools_handler import NativeToolsHandler
 from kollabor_events.bus import EventBus
 from kollabor_events.models import EventType, Hook, HookPriority
 
@@ -232,6 +234,28 @@ class TestMCPServerConnection(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_initialize_uses_short_startup_timeout(self):
+        """A silent server must not hold reload for the 300s tool timeout."""
+
+        async def run_test():
+            connection = MCPServerConnection(
+                "silent-server",
+                "echo test",
+                startup_timeout=0.01,
+            )
+            connection.process = _FakeProcess(stdout=_HangingStdout())
+
+            started = asyncio.get_running_loop().time()
+            initialized = await connection.initialize()
+            elapsed = asyncio.get_running_loop().time() - started
+
+            self.assertFalse(initialized)
+            self.assertLess(elapsed, 1.0)
+            self.assertIsNone(connection.process)
+            self.assertFalse(connection.initialized)
+
+        asyncio.run(run_test())
+
     def test_timed_out_mcp_call_reconnects_before_next_call(self):
         """A timed-out stdio connection cannot poison the next MCP call."""
 
@@ -376,6 +400,39 @@ class TestMCPIntegration(unittest.TestCase):
         self.assertEqual(len(mcp.tool_registry), 0)
         self.assertEqual(len(mcp.server_connections), 0)
         self.assertIsNotNone(mcp.event_bus)
+
+    def test_command_from_config_preserves_args(self):
+        """The stdio launcher must receive args from MCP config."""
+        command = MCPIntegration._command_from_config(
+            {
+                "command": "npx",
+                "args": ["-y", "@z_ai/mcp-server@latest"],
+            }
+        )
+
+        self.assertEqual(command, "npx -y @z_ai/mcp-server@latest")
+
+    def test_discovery_passes_configured_args_to_server_launcher(self):
+        """Configured MCP args must reach the discovery connection path."""
+        mcp = MCPIntegration(event_bus=self.event_bus)
+        mcp.mcp_servers = {
+            "zai-mcp-server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@z_ai/mcp-server@latest"],
+                "enabled": True,
+            }
+        }
+
+        with patch.object(
+            mcp, "_connect_and_list_tools", new_callable=AsyncMock
+        ) as connect:
+            connect.return_value = []
+            asyncio.run(mcp.discover_mcp_servers())
+
+        connect.assert_awaited_once_with(
+            "zai-mcp-server", "npx -y @z_ai/mcp-server@latest"
+        )
 
     def test_tool_registration(self):
         """Test tool registration from server."""
@@ -590,7 +647,114 @@ class TestMCPIntegration(unittest.TestCase):
         self.assertEqual(summary["configured"], 1)
         self.assertEqual(summary["discovered"], 1)
         self.assertEqual(summary["reconnected"], 0)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["failed_servers"], ["new-server"])
         self.assertGreaterEqual(mock_load.call_count, 2)
+
+    @patch.object(MCPIntegration, "_load_mcp_config", return_value=None)
+    def test_reload_refreshes_native_tools_from_134_to_142(self, mock_load):
+        """A reload must replace the native schema snapshot, not just the registry."""
+        mcp = MCPIntegration(event_bus=self.event_bus)
+        definitions_134 = [
+            {"name": f"existing_{index}", "parameters": {}} for index in range(134)
+        ]
+        definitions_142 = [
+            {"name": f"existing_{index}", "parameters": {}} for index in range(142)
+        ]
+        mcp.get_tool_definitions_for_api = MagicMock(  # type: ignore[method-assign]
+            side_effect=[definitions_134, definitions_142]
+        )
+
+        class _Config:
+            def get(self, key, default=None):
+                return default
+
+        class _Profile:
+            name = "test"
+
+            def get_supports_tools(self):
+                return True
+
+        class _ProfileManager:
+            def get_active_profile(self):
+                return _Profile()
+
+        native_tools = NativeToolsHandler(
+            mcp_integration=mcp,
+            profile_manager=_ProfileManager(),
+            api_service=SimpleNamespace(),
+            config=_Config(),
+        )
+        self.event_bus.register_service(
+            "llm_service", SimpleNamespace(_load_native_tools=native_tools.load_tools)
+        )
+
+        async def fake_discover():
+            mcp.mcp_servers["zai-mcp-server"] = {
+                "type": "stdio",
+                "command": "zai-mcp-server",
+                "enabled": True,
+            }
+            mcp.server_connections["zai-mcp-server"] = SimpleNamespace(initialized=True)
+            return {"zai-mcp-server": {"status": "connected"}}
+
+        mcp.discover_mcp_servers = AsyncMock(  # type: ignore[method-assign]
+            side_effect=fake_discover
+        )
+
+        async def run_test():
+            await native_tools.load_tools()
+            self.assertEqual(len(native_tools.tools or []), 134)
+
+            summary = await mcp.reload_mcp_servers()
+
+            self.assertEqual(summary["reconnected"], 1)
+            self.assertEqual(len(native_tools.tools or []), 142)
+            self.assertEqual(mcp.get_tool_definitions_for_api.call_count, 2)
+
+        asyncio.run(run_test())
+
+    def test_cancel_active_connections_closes_inflight_servers(self):
+        """ESC must close a server before it is added to server_connections."""
+        mcp = MCPIntegration.__new__(MCPIntegration)
+        connection = MagicMock()
+        connection.close = AsyncMock()
+        mcp.server_connections = {}
+        mcp._active_connections = {connection}
+        mcp._cancel_requested = False
+
+        asyncio.run(mcp.cancel_active_connections())
+
+        self.assertTrue(mcp._cancel_requested)
+        connection.close.assert_awaited_once_with()
+
+    @patch.object(MCPIntegration, "_load_mcp_config", return_value=None)
+    def test_reload_does_not_count_closed_connections(self, mock_load):
+        """A closed connection must not make a partial reload look healthy."""
+        mcp = MCPIntegration(event_bus=self.event_bus)
+        closed = MagicMock(initialized=False)
+        live = MagicMock(initialized=True)
+        closed.close = AsyncMock()
+        live.close = AsyncMock()
+        mcp.server_connections = {"closed": closed, "live": live}
+
+        async def fake_discover():
+            mcp.mcp_servers.update(
+                {
+                    "closed": {"type": "stdio", "command": "closed"},
+                    "live": {"type": "stdio", "command": "live"},
+                }
+            )
+            mcp.server_connections.update({"closed": closed, "live": live})
+            return {"closed": {}, "live": {}}
+
+        mcp.discover_mcp_servers = AsyncMock(side_effect=fake_discover)  # type: ignore[method-assign]
+
+        summary = asyncio.run(mcp.reload_mcp_servers())
+
+        self.assertEqual(summary["reconnected"], 1)
+        self.assertEqual(summary["failed_servers"], ["closed"])
+        mock_load.assert_called()
 
 
 class TestMCPStatusView(unittest.TestCase):

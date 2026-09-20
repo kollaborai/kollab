@@ -1,7 +1,7 @@
 ---
 title: "Slash Commands"
 created: 2026-02-24
-modified: 2026-08-06
+modified: 2026-09-20
 status: active
 ---
 # Slash Commands
@@ -65,14 +65,23 @@ Many commands support subcommands:
 /llm fable-slim   → Activates a loadout by name
 /llm new          → Create a loadout (pre-filled form)
 
-/mcp              → Opens MCP manager
-/mcp show         → Shows server details
-/mcp servers      → Shows server details
-/mcp setup        → Opens MCP manager
-/mcp tools        → Shows available tools
+/mcp                    → Opens MCP manager
+/mcp setup              → Opens MCP manager (alias)
+/mcp show               → Shows server status
+/mcp list               → Shows server status (alias)
+/mcp servers            → Shows server status (alias)
+/mcp tools [server]     → Shows available tools
+/mcp test <server>      → Tests one server connection
+/mcp enable <server>    → Enables a server in config
+/mcp disable <server>   → Disables a server in config
+/mcp reload             → Reloads config, reconnects enabled servers, and reports failures
 ```
 
-In the MCP manager, press `g` to toggle global MCP on/off.
+`/mcp status` is accepted as a compatibility alias for `/mcp show`. The
+top-level aliases `/mcps` and `/servers` open the manager. In the manager,
+press `g` to toggle global MCP; Space toggles, `a` adds, `d` deletes, `t`
+tests, `r` reloads and reports failures, `/` filters, and Esc exits. See
+[features/mcp.md](mcp.md) for configuration details.
 
 ## Command Categories
 

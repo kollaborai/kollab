@@ -400,13 +400,27 @@ launch files, and experimental DNS-style identity and trust commands. Start with
 
 ```text
 /permissions
-/mcp
-/mcp show
-/mcp reload
+/mcp                 open the MCP manager
+/mcp setup           open the MCP manager
+/mcp show            show MCP server status
+/mcp status          show MCP server status (compatibility alias)
+/mcp list            show MCP server status (alias)
+/mcp servers         show MCP server status (alias)
+/mcp tools [server]  list available MCP tools
+/mcp test <server>   test one server connection
+/mcp enable <server> enable a server in config
+/mcp disable <server> disable a server in config
+/mcp reload          reload config and reconnect enabled servers; report failures
+aliases: /mcps, /servers
 ```
 
-Inside `/mcp`, press `g` to toggle the global MCP subsystem, or manage
-individual configured servers with the per-server actions.
+Inside `/mcp`, press `g` to toggle the global MCP subsystem. Use Space to
+toggle the selected server, `a`/`d` to add or delete a configured server,
+`t` to test, `r` to reload, `/` to filter, and Esc to exit.
+
+See [docs/reference/commands.md](docs/reference/commands.md) for the complete
+slash-command reference and [docs/features/mcp.md](docs/features/mcp.md) for
+configuration details.
 
 MCP tools run through the same approval system as native tools. See
 [docs/features/permissions.md](docs/features/permissions.md) and

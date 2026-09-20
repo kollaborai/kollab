@@ -1,7 +1,7 @@
 ---
 title: "MCP Server Examples"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-09-20
 status: active
 ---
 # MCP Server Examples
@@ -36,8 +36,12 @@ cp docs/mcp/mcp_settings.example.json ~/.kollab/mcp/mcp_settings.json
 nano ~/.kollab/mcp/mcp_settings.json
 
 # 4. Enable desired servers (set "enabled": true)
-# 5. Restart Kollab
+# 5. Restart Kollab, or run /mcp reload in an existing session
 ```
+
+Use [the command reference](../reference/commands.md) for the full `/mcp`
+command list. `/mcp show` and `/mcp servers` report status; `/mcp reload`
+applies config changes without restarting Kollab and reports failed servers.
 
 ### Configuration Template
 
@@ -540,7 +544,7 @@ Use different configurations for different environments:
 ### Tools Not Available
 
 1. Verify server is enabled in config
-2. Check server connected successfully (use `/mcp servers`)
+2. Check server connected successfully (use `/mcp show` or `/mcp servers`)
 3. Review logs for connection errors
 
 ---

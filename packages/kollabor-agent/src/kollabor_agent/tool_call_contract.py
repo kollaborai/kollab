@@ -70,7 +70,9 @@ def normalize_native_tool_call(
     """
     mcp_tool_names = mcp_tool_names or set()
     plugin_handler_names = plugin_handler_names or set()
-    known_names = set(mcp_tool_names) | set(plugin_handler_names) | _registry_native_names()
+    known_names = (
+        set(mcp_tool_names) | set(plugin_handler_names) | _registry_native_names()
+    )
 
     tool_name = str(_get_tool_call_field(tool_call, "name", "") or "")
     tool_name = _clean_tool_name(tool_name, known_names)
@@ -113,6 +115,11 @@ def normalize_native_tool_call(
                 if key not in {"type", "name"}
             }
         )
+        if resolved_type == "tool_load":
+            # ``tool_load`` uses ``name`` as an argument, while the native
+            # envelope also uses ``name`` for the dispatch target. Preserve
+            # the argument in the nested shape supported by its executor.
+            normalized["parameters"] = input_value
     if isinstance(tool_call, Mapping):
         return {**dict(tool_call), **normalized}
     return normalized

@@ -1,14 +1,22 @@
 ---
 title: "MCP Local Server Connection Fix"
 created: 2026-02-24
-modified: 2026-02-24
-status: active
+modified: 2026-09-20
+status: historical
 ---
 # MCP Local Server Connection Fix
 
+This is a historical fix record. The implementation later moved into the
+extracted `kollabor-agent` package; current paths and verification commands
+below are kept aligned with this checkout.
+
 ## Problem
 
-Local MCP servers were being discovered but never connected. The `_discover_local_servers()` method in `core/llm/mcp_integration.py` would load server manifests from disk but never progress to actually connecting to those servers or registering their tools.
+Local MCP servers were being discovered but never connected. The
+`_discover_local_servers()` method in
+`packages/kollabor-agent/src/kollabor_agent/mcp_integration.py` would load
+server manifests from disk but never progress to actually connecting to those
+servers or registering their tools.
 
 ### Current Behavior (Before Fix)
 
@@ -38,7 +46,9 @@ async def _discover_local_servers(self, discovered: Dict):
 
 ## Solution
 
-Added connection logic in `discover_mcp_servers()` method (lines 260-305) to connect to discovered local servers after the discovery phase.
+Added connection logic in `discover_mcp_servers()` to connect to discovered
+local servers after the discovery phase. In the current checkout, the
+connection loop is around lines 699-733.
 
 ### Implementation (After Fix)
 
@@ -77,9 +87,9 @@ async def discover_mcp_servers(self) -> Dict[str, Any]:
 
 ## Key Changes
 
-**File: `/path/to/kollab/core/llm/mcp_integration.py`**
+**File: `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py`**
 
-### Lines 278-305 (NEW CODE)
+### Current connection loop (around lines 699-733)
 
 Added a loop after `_discover_local_servers()` that:
 1. Iterates through discovered servers with status="local"
@@ -102,7 +112,8 @@ Added a loop after `_discover_local_servers()` that:
 
 ### Unit Tests
 
-Added comprehensive unit tests in `tests/test_mcp_integration.py`:
+Added comprehensive unit tests in
+`tests/unit/mcp/test_mcp_integration.py`:
 
 - `TestLocalMCPServerConnection.test_local_server_discovery_creates_connection`
   - Verifies local servers are connected after discovery
@@ -114,20 +125,20 @@ Added comprehensive unit tests in `tests/test_mcp_integration.py`:
 
 All tests pass:
 ```bash
-$ python -m pytest tests/test_mcp_integration.py::TestLocalMCPServerConnection -v
+$ python -m pytest tests/unit/mcp/test_mcp_integration.py::TestLocalMCPServerConnection -v
 ...
-tests/test_mcp_integration.py::TestLocalMCPServerConnection::test_local_server_discovery_creates_connection PASSED
-tests/test_mcp_integration.py::TestLocalMCPServerConnection::test_local_server_without_command_is_marked_invalid PASSED
+tests/unit/mcp/test_mcp_integration.py::TestLocalMCPServerConnection::test_local_server_discovery_creates_connection PASSED
+tests/unit/mcp/test_mcp_integration.py::TestLocalMCPServerConnection::test_local_server_without_command_is_marked_invalid PASSED
 
 ============================== 2 passed in 0.38s ===============================
 ```
 
 ### Integration Test
 
-Created verification test: `tests/tmux/verify_mcp_local_server_connection.sh`
-- Tests real MCP server discovery and connection
-- Verifies tool registration
-- Validates server status updates
+The earlier record referenced
+`tests/tmux/verify_mcp_local_server_connection.sh`, but that script is not
+present in the current checkout. The unit tests and demonstration script below
+are the current checked-in verification surfaces.
 
 ### Demonstration Script
 
@@ -159,16 +170,13 @@ The fix ensures that local MCP servers work identically to configured stdio serv
 
 ## Files Modified
 
-- `core/llm/mcp_integration.py` (lines 278-305)
+- `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py`
   - Added connection loop for local servers
 
 ## Files Added
 
-- `tests/test_mcp_integration.py` (TestLocalMCPServerConnection class)
+- `tests/unit/mcp/test_mcp_integration.py` (TestLocalMCPServerConnection class)
   - Unit tests for the fix
-
-- `tests/tmux/verify_mcp_local_server_connection.sh`
-  - Integration test script
 
 - `scripts/test_mcp_local_fix.py`
   - Demonstration script

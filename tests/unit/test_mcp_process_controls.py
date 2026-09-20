@@ -47,4 +47,7 @@ def test_disabled_mcp_rejects_calls_and_reload_without_connecting():
         "configured": 1,
         "discovered": 0,
         "reconnected": 0,
+        "failed": 0,
+        "failed_servers": [],
+        "cancelled": False,
     }

@@ -555,7 +555,23 @@ class McpWizardAltView(AltView):
             return
 
         reconnected = int(summary.get("reconnected", 0) or 0)
-        self._status_message = f"reload ok: {reconnected} reconnected"
+        failed = int(summary.get("failed", 0) or 0)
+        failed_servers = summary.get("failed_servers", []) or []
+        cancelled = bool(summary.get("cancelled", False))
+        if failed_servers and not isinstance(failed_servers, list):
+            failed_servers = [str(failed_servers)]
+        failed = max(failed, len(failed_servers))
+        if cancelled:
+            self._status_message = "reload cancelled"
+        elif failed:
+            suffix = (
+                f": {', '.join(str(name) for name in failed_servers)}"
+                if failed_servers
+                else ""
+            )
+            self._status_message = f"reload failed ({failed}){suffix}"
+        else:
+            self._status_message = f"reload ok: {reconnected} reconnected"
         await self._load_data()
 
     async def _reload_runtime(self) -> Dict[str, Any]:
@@ -572,10 +588,27 @@ class McpWizardAltView(AltView):
             self._mcp_integration.mcp_servers.clear()
             self._mcp_integration._load_mcp_config()
             discovered = await self._mcp_integration.discover_mcp_servers()
+            configured_enabled = {
+                name
+                for name, config in self._mcp_integration.mcp_servers.items()
+                if config.get("enabled", True)
+            }
+            reconnected = {
+                name
+                for name in configured_enabled
+                if (
+                    connection := self._mcp_integration.server_connections.get(name)
+                ) is not None
+                and connection.initialized
+            }
+            failed_servers = sorted(configured_enabled - reconnected)
             return {
                 "configured": len(self._mcp_integration.mcp_servers),
-                "discovered": discovered,
-                "reconnected": len(self._mcp_integration.server_connections),
+                "discovered": len(discovered),
+                "reconnected": len(reconnected),
+                "failed": len(failed_servers),
+                "failed_servers": failed_servers,
+                "cancelled": False,
             }
         return {"reconnected": 0}
 
