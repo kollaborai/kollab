@@ -780,12 +780,23 @@ class GoalService:
     ) -> set:
         """Return cited refs that are runtime-recorded evidence (provenance)
         AND not already cited for this goal (dedup, 8.4)."""
-        recorded = {e.ref for e in self.store.evidence_for(record.goal_id)}
+        recorded_rows = self.store.evidence_for(record.goal_id)
+        recorded = {e.ref for e in recorded_rows}
+        # multi-line recorded refs are also citeable by their first line
+        first_lines = {
+            e.ref.splitlines()[0].strip()
+            for e in recorded_rows
+            if e.ref and "\n" in e.ref
+        }
         known = {e["ref"] for e in record.last_evidence}
         return {
             e["ref"]
             for e in (control.evidence or [])
-            if e.get("ref") in recorded and e["ref"] not in known
+            if (
+                e.get("ref") in recorded
+                or (e.get("ref") in first_lines and e["ref"] not in known)
+            )
+            and e["ref"] not in known
         }
 
     @staticmethod
@@ -799,7 +810,18 @@ class GoalService:
         or substring refs are rejected — the rejection text lists the
         recorded refs so the model can re-report correctly.
         """
-        return recorded.get(ref)
+        exact = recorded.get(ref)
+        if exact is not None:
+            return exact
+        # multi-line recorded refs (git logs, stack traces) are citeable
+        # by their first line alone — a wrapped citation can't carry the
+        # newline, and the truncated display the model sees IS the first
+        # line (ref[:80])
+        for candidate_ref, candidate in recorded.items():
+            first_line = candidate_ref.splitlines()[0] if candidate_ref else ""
+            if first_line.strip() == ref.strip():
+                return candidate
+        return None
 
     def _audit_completion(
         self,

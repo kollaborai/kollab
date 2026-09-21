@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +27,54 @@ GOAL_REPORT_PATTERN = re.compile(
 EVIDENCE_LINE = re.compile(r"^\s*(.+?)\s*::\s*(.+?)\s*$")
 
 
+def _split_evidence(body: str) -> List[Dict[str, str]]:
+    """Parse the evidence body into {ref, claim} dicts.
+
+    A ref is ``tool_type:output`` where output can be multi-line (for
+    example a git log). Lines are wrapped-ref continuations until a
+    ``::`` separator is found: everything before the FIRST ``::`` on the
+    physical line joins the ref, everything after is the claim.
+    """
+    evidence: List[Dict[str, str]] = []
+    ref_buffer: List[str] = []
+    claim_buffer: List[str] = []
+    in_claim = False
+
+    def flush() -> None:
+        if ref_buffer:
+            ref = "\n".join(ref_buffer).strip()
+            claim = "\n".join(claim_buffer).strip()
+            if ref:
+                evidence.append({"ref": ref, "claim": claim})
+        ref_buffer.clear()
+        claim_buffer.clear()
+
+    for raw in (body or "").strip().splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = EVIDENCE_LINE.match(line)
+        if m and not in_claim:
+            ref_buffer.append(m.group(1))
+            claim_buffer.append(m.group(2))
+            in_claim = True
+        elif m and in_claim:
+            flush()
+            ref_buffer.append(m.group(1))
+            claim_buffer.append(m.group(2))
+        elif in_claim:
+            claim_buffer.append(line)
+        else:
+            ref_buffer.append(line)
+    flush()
+    return evidence
+
+
 def _extract_goal_report(match: re.Match) -> Dict[str, Any]:
     kind = match.group(1).lower()
     version = int(match.group(2)) if match.group(2) else None
     reason = match.group(3) or ""
-    evidence = []
-    for line in (match.group(4) or "").strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        m = EVIDENCE_LINE.match(line)
-        if m:
-            evidence.append({"ref": m.group(1), "claim": m.group(2)})
+    evidence = _split_evidence(match.group(4) or "")
     return {
         "kind": kind,
         "expected_record_version": version,
