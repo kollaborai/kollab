@@ -387,6 +387,28 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("goal_report", note)
         self.assertIn("not progress", note)
 
+    # -- attached-client events (10.2) ---------------------------------
+
+    def test_state_events_published_on_lifecycle(self):
+        events = []
+        self.service.set_state_publisher(
+            lambda **kw: events.append((kw["kind"], kw["status"]))
+        )
+        # idle pause applies immediately as `paused`
+        self.service.pause(self.rec.goal_id)
+        self.service.resume(self.rec.goal_id)
+        kinds = [k for k, _ in events]
+        self.assertIn("paused", kinds)
+        self.assertIn("generation_bumped", kinds)
+        self.assertIn("resumed", kinds)
+        # in-flight pause records the intent event instead
+        self.store.insert_attempt(self.rec.goal_id, 5, self.rec.lease_epoch, 2)
+        self.service.pause(self.rec.goal_id)
+        self.assertIn("pause_requested", [k for k, _ in events])
+        # create notifies too
+        self.service.create_goal("conv-9", "another", "/repo")
+        self.assertIn("created", [k for k, _ in events])
+
 
 if __name__ == "__main__":
     unittest.main()

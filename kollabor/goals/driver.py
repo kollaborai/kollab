@@ -67,6 +67,12 @@ class GoalTurnDriver:
         """Kick the goal loop as a background task (idempotent per goal)."""
         if goal_id in self._running_goals:
             return
+        # pipe mode is one query + exit (same guard as hub continue);
+        # a goal loop there would race process teardown
+        renderer = getattr(self.coord, "renderer", None)
+        if getattr(renderer, "pipe_mode", False):
+            logger.info("goal driver: pipe mode active, not scheduling")
+            return
         runner = getattr(self.coord, "create_background_task", None)
 
         def _fallback_runner(coro, name=None):

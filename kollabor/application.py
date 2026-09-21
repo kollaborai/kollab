@@ -293,12 +293,20 @@ class TerminalLLMChat:
         if not profile_name:
             try:
                 from kollabor_ai.loadout_manager import LoadoutManager
-                default_loadout = LoadoutManager(self.profile_manager, config=self.config).get_default()
+
+                default_loadout = LoadoutManager(
+                    self.profile_manager, config=self.config
+                ).get_default()
                 if default_loadout:
-                    loadout_manager = LoadoutManager(self.profile_manager, config=self.config)
+                    loadout_manager = LoadoutManager(
+                        self.profile_manager, config=self.config
+                    )
                     loadout, _ = loadout_manager.resolve(default_loadout)
                     if loadout:
-                        update_kwargs = {"model": loadout.model, "save_to_config": False}
+                        update_kwargs = {
+                            "model": loadout.model,
+                            "save_to_config": False,
+                        }
                         if loadout.temperature is not None:
                             update_kwargs["temperature"] = loadout.temperature
                         if loadout.effort:
@@ -311,7 +319,9 @@ class TerminalLLMChat:
                     else:
                         applied = False
                     if loadout and applied:
-                        self.profile_manager.set_active_profile(loadout.provider_profile, persist=False)
+                        self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
                         logger.info("Applied default loadout '%s'", loadout.name)
             except Exception as exc:
                 logger.warning("Could not apply default loadout: %s", exc)
@@ -460,7 +470,9 @@ class TerminalLLMChat:
                 if pool:
                     entry = pool.find(startup_identity)
                     desired_bundle = (getattr(entry, "agent_type", "") or "").strip()
-                    active_name = getattr(self.agent_manager, "active_agent_name", "") or ""
+                    active_name = (
+                        getattr(self.agent_manager, "active_agent_name", "") or ""
+                    )
                     if desired_bundle and desired_bundle != active_name:
                         if self.agent_manager.set_active_agent(desired_bundle):
                             self._startup_agent_reconciled = True
@@ -768,6 +780,15 @@ class TerminalLLMChat:
                             open_default_store(),
                             daemon_id=f"{socket.gethostname()}:{os.getpid()}",
                         )
+
+                        def _publish_goal_state(**fields):
+                            from kollabor_tui.display_tap import publish_semantic
+
+                            publish_semantic(
+                                "goal_service", "goal.state_changed", **fields
+                            )
+
+                        self._goal_service.set_state_publisher(_publish_goal_state)
                         self.event_bus.register_service(
                             "goal_service", self._goal_service
                         )

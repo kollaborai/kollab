@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 from kollabor_events.models import (
     CommandCategory,
@@ -78,7 +78,8 @@ class GoalCommandHandler(BaseCommandHandler):
             state = None
         if state is not None and hasattr(state, "get_conversation_uid"):
             try:
-                return state.get_conversation_uid()
+                uid: Optional[str] = state.get_conversation_uid()
+                return uid
             except Exception:
                 return None
         return None
@@ -289,7 +290,7 @@ class GoalCommandHandler(BaseCommandHandler):
 
     # -- controls ------------------------------------------------------
 
-    def _require_active(self):
+    def _require_active(self) -> tuple[Optional[Any], Optional[CommandResult]]:
         svc = self.service
         if svc is None:
             return None, CommandResult(
@@ -309,7 +310,8 @@ class GoalCommandHandler(BaseCommandHandler):
 
     def _do_pause(self) -> CommandResult:
         record, err = self._require_active()
-        if err:
+        if err is not None or record is None:
+            assert err is not None
             return err
         from kollabor.goals.service import GoalError
 
@@ -331,7 +333,8 @@ class GoalCommandHandler(BaseCommandHandler):
 
     def _do_clear(self) -> CommandResult:
         record, err = self._require_active()
-        if err:
+        if err is not None or record is None:
+            assert err is not None
             return err
         from kollabor.goals.service import GoalError
 
@@ -353,7 +356,8 @@ class GoalCommandHandler(BaseCommandHandler):
 
     def _do_resume(self, rest: str) -> CommandResult:
         record, err = self._require_active()
-        if err:
+        if err is not None or record is None:
+            assert err is not None
             return err
         from kollabor.goals.service import GoalError
 

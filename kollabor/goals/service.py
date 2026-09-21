@@ -107,6 +107,44 @@ class GoalService:
         # goal continuation may be in flight for the conversation)
         self._in_flight: Dict[str, GoalAttempt] = {}  # goal_id -> attempt
         self._staged_attachments: Dict[str, List[Dict[str, Any]]] = {}
+        # §10.2: attached clients receive goal.* state events; they never
+        # poll provider sessions or infer state from Hub roster messages
+        self._publisher: Optional[Callable[..., None]] = None
+
+    def set_state_publisher(self, publisher: Callable[..., None]) -> None:
+        """Install the goal.state_changed publisher (display tap / bus)."""
+        self._publisher = publisher
+
+    def _t(
+        self, goal_id: str, expected_version: int, event_kind: str, **kw: Any
+    ) -> GoalRecord:
+        """transition + notify: every visible state change reaches attached
+        clients (§10.2)."""
+        record = self.store.transition(goal_id, expected_version, event_kind, **kw)
+        self._notify(record, event_kind)
+        return record
+
+    def _notify(self, record: GoalRecord, kind: str) -> None:
+        if self._publisher is None:
+            return
+        try:
+            self._publisher(
+                goal_id=record.short_id,
+                conversation_uid=record.conversation_uid,
+                status=record.status,
+                kind=kind,
+                turn_count=record.turn_count,
+                tokens_used=record.tokens_used,
+                token_budget=record.token_budget,
+                last_reason=record.last_reason,
+                objective=(
+                    (record.objective[:120] + "...")
+                    if len(record.objective) > 120
+                    else record.objective
+                ),
+            )
+        except Exception as exc:
+            logger.debug("goal state publish failed: %s", exc)
 
     # ------------------------------------------------------------------
     # in-flight dispatch tracking (driver + goal_report tool)
@@ -134,7 +172,7 @@ class GoalService:
         without the image."""
         record = self.store.get(goal_id)
         reason = f"artifact_missing: {ref}"
-        return self.store.transition(
+        return self._t(
             goal_id,
             record.record_version,
             "artifact_missing",
@@ -205,6 +243,7 @@ class GoalService:
                 "use /goal show, /goal clear, or /goal resume"
             ) from exc
         self._turn_started_at[record.goal_id] = self._monotonic()
+        self._notify(record, "created")
         return record
 
     def pause(self, goal_id: str, actor: str = "user") -> GoalRecord:
@@ -216,7 +255,7 @@ class GoalService:
         if record.status == "active":
             in_flight = self._goal_turn_in_flight(goal_id)
             if in_flight:
-                return self.store.transition(
+                return self._t(
                     goal_id,
                     record.record_version,
                     "pause_requested",
@@ -224,7 +263,7 @@ class GoalService:
                     daemon_id=self.daemon_id,
                     pause_requested=True,
                 )
-            return self.store.transition(
+            return self._t(
                 goal_id,
                 record.record_version,
                 "paused",
@@ -233,7 +272,7 @@ class GoalService:
                 status="paused",
                 reason="user pause",
             )
-        return self.store.transition(
+        return self._t(
             goal_id,
             record.record_version,
             "pause_requested",
@@ -279,7 +318,7 @@ class GoalService:
                     f"already used ({record.turn_count})"
                 )
             updates["auto_turn_limit"] = auto_turn_limit
-        self.store.transition(
+        self._t(
             goal_id,
             record.record_version,
             "generation_bumped",
@@ -289,7 +328,7 @@ class GoalService:
             f"{record.execution_generation + 1}",
         )
         record = self.store.get(goal_id)
-        return self.store.transition(
+        return self._t(
             goal_id,
             record.record_version,
             "resumed",
@@ -304,7 +343,7 @@ class GoalService:
         if not record.is_unfinished:
             return record
         if self._goal_turn_in_flight(goal_id):
-            return self.store.transition(
+            return self._t(
                 goal_id,
                 record.record_version,
                 "clear_requested",
@@ -312,7 +351,7 @@ class GoalService:
                 daemon_id=self.daemon_id,
                 clear_requested=True,
             )
-        return self.store.transition(
+        return self._t(
             goal_id,
             record.record_version,
             "cleared",
@@ -353,7 +392,7 @@ class GoalService:
 
         # stop intents recorded mid-turn apply here, first
         if record.clear_requested:
-            self.store.transition(
+            self._t(
                 goal_id,
                 record.record_version,
                 "cleared",
@@ -364,7 +403,7 @@ class GoalService:
             )
             return None
         if record.pause_requested:
-            self.store.transition(
+            self._t(
                 goal_id,
                 record.record_version,
                 "paused",
@@ -378,7 +417,7 @@ class GoalService:
             return None
 
         if outcome.status == "cancelled":
-            self.store.transition(
+            self._t(
                 goal_id,
                 record.record_version,
                 "paused",
@@ -391,7 +430,7 @@ class GoalService:
             return None
         if outcome.status == "error":
             detail = f"turn error: {outcome.error or 'unknown'}"
-            self.store.transition(
+            self._t(
                 goal_id,
                 record.record_version,
                 "error",
@@ -422,7 +461,7 @@ class GoalService:
             record.token_budget is not None
             and (record.tokens_used or 0.0) >= record.token_budget
         ):
-            self.store.transition(
+            self._t(
                 goal_id,
                 record.record_version,
                 "budget_limited",
@@ -440,7 +479,7 @@ class GoalService:
         attempt = self.store.insert_attempt(
             goal_id, seq, record.lease_epoch, record.execution_generation
         )
-        self.store.transition(
+        self._t(
             goal_id,
             record.record_version,
             "turn_started",
@@ -460,7 +499,7 @@ class GoalService:
         elif record.time_used_seconds >= record.auto_time_limit_s:
             reason = f"auto_time_limit ({record.auto_time_limit_s}s active time)"
         if reason:
-            self.store.transition(
+            self._t(
                 record.goal_id,
                 record.record_version,
                 "budget_limited",
@@ -518,7 +557,7 @@ class GoalService:
             )
         except GoalStoreError as exc:
             logger.warning("settle_attempt failed for %s: %s", goal_id, exc)
-        self.store.transition(
+        self._t(
             goal_id,
             self.store.get(goal_id).record_version,
             "turn_completed",
@@ -545,7 +584,7 @@ class GoalService:
         if new_evidence:
             # a blocker-bearing turn WITH new evidence breaks the consecutive
             # run (8.4): reset the window, never count it as a repeat
-            return self.store.transition(
+            return self._t(
                 goal_id,
                 record.record_version,
                 "progress",
@@ -579,7 +618,7 @@ class GoalService:
                 status="blocked",
                 blocked_reason=stop_reason,
             )
-        return self.store.transition(
+        return self._t(
             goal_id,
             record.record_version,
             "blocked" if stop_reason else "progress",
@@ -681,7 +720,7 @@ class GoalService:
                 for e in (control.evidence or [])
                 if e.get("ref") in new_refs and e["ref"] not in known
             ]
-            self.store.transition(
+            self._t(
                 record.goal_id,
                 record.record_version,
                 "progress",
@@ -709,7 +748,7 @@ class GoalService:
             },
             "declared": audit["declared"],
         }
-        self.store.transition(
+        self._t(
             record.goal_id,
             record.record_version,
             "progress",
@@ -749,8 +788,10 @@ class GoalService:
     ) -> Dict[str, Any]:
         if not control.evidence:
             return {"ok": False, "reason": "completion requires evidence refs"}
-        recorded = {e.ref: e for e in self.store.evidence_for(record.goal_id)}
-        cited = []
+        recorded: Dict[str, GoalEvidence] = {
+            e.ref: e for e in self.store.evidence_for(record.goal_id)
+        }
+        cited: List[GoalEvidence] = []
         for ev in control.evidence:
             ref = ev.get("ref")
             if ref not in recorded:
@@ -761,16 +802,16 @@ class GoalService:
             cited.append(recorded[ref])
         # freshness: evidence must postdate every mutating tool call of its
         # own attempt (8.5) — the runtime's recorded order is authoritative
-        for ev in cited:
+        for cited_ev in cited:
             siblings = [
                 m
                 for m in self.store.evidence_for(record.goal_id)
-                if m.attempt_id == ev.attempt_id and m.is_mutating
+                if m.attempt_id == cited_ev.attempt_id and m.is_mutating
             ]
-            if any(m.tool_seq > ev.tool_seq for m in siblings):
+            if any(m.tool_seq > cited_ev.tool_seq for m in siblings):
                 return {
                     "ok": False,
-                    "reason": f"stale evidence (predates a later edit): {ev.ref}",
+                    "reason": f"stale evidence (predates a later edit): {cited_ev.ref}",
                 }
         checker = REGISTERED_CHECKERS.get(record.goal_id)
         declared = checker is None
@@ -785,7 +826,7 @@ class GoalService:
         pending = record.pending_completion
         if not pending or record.status != "active":
             return None
-        return self.store.transition(
+        return self._t(
             goal_id,
             record.record_version,
             "complete",

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         ArtifactCommandHandler,
         ContextCommandHandler,
         DirectoryCommandHandler,
+        GoalCommandHandler,
         LoadoutCommandHandler,
         LoginCommandHandler,
         ModelCommandHandler,
@@ -47,7 +48,7 @@ class SystemCommandsPlugin:
     _setup_handler: SetupCommandHandler | None
     _context_handler: ContextCommandHandler | None
     _loadout_handler: LoadoutCommandHandler | None
-    _goal_handler: "GoalCommandHandler | None"
+    _goal_handler: GoalCommandHandler | None
 
     def __init__(
         self,
