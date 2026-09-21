@@ -187,6 +187,13 @@ class GoalTurnDriver:
 
         note = self.service.render_goal_context(record)
         try:
+            # §9.3: one internal goal context item per goal turn — never a
+            # synthetic user message. The agent HUD queue is kollab's
+            # existing internal-context pipeline: inject_system_message
+            # queues the entry, and _continue_conversation drains pending
+            # HUD into the turn it drives (llm_coordinator.py:1199), with
+            # agent_hud metadata marking it internal. The driver never
+            # fabricates user input itself.
             await self.coord.inject_system_message(note, subtype="goal_context")
         except Exception as exc:
             logger.error("goal steering injection failed: %s", exc)
@@ -198,7 +205,14 @@ class GoalTurnDriver:
         error: Optional[str] = None
         try:
             qp.is_processing = True
-            qp.turn_completed = False
+            # Leave turn_completed as-is for the first continuation so
+            # _continue_conversation drains the steering HUD entry into
+            # this turn (the hub path sets False to suppress mid-chain
+            # HUD; we want exactly one context item, on the first link).
+            # The queue sets turn_completed=False when tools need follow-up
+            # and True at natural completion — the loop below respects
+            # either, and the HUD queue is empty so later links cannot
+            # re-inject.
             await self.coord._continue_conversation()
             chain_turns = 0
             while not qp.turn_completed and not qp.cancel_processing:
@@ -239,6 +253,12 @@ class GoalTurnDriver:
                     logger.debug("goal turn queue drain failed: %s", drain_exc)
         if cancelled:
             return "cancelled", None
+        # Provider errors surface as a completed turn with a displayed
+        # error, not an exception. The qp records them (last_turn_error);
+        # §8.6: pause the goal, never burn turns against a dead endpoint.
+        turn_error = getattr(qp, "last_turn_error", None)
+        if turn_error:
+            return "error", turn_error
         if error:
             return "error", error
         return "ok", None

@@ -183,6 +183,25 @@ class GoalCommandHandler(BaseCommandHandler):
 
     async def handle_goal(self, command: SlashCommand) -> CommandResult:
         try:
+            remote = self._remote_state()
+            if remote is not None:
+                # Attach client: the daemon owns the conversation identity,
+                # goal store, and driver (goal spec 5 + 10.2). Route the
+                # whole command daemon-side; goal.state_changed events
+                # stream back over the attach socket.
+                try:
+                    result = await remote.goal_command(command.raw_input or "")
+                except Exception as exc:
+                    return CommandResult(
+                        success=False,
+                        message=f"daemon goal command failed: {exc}",
+                        display_type="error",
+                    )
+                return CommandResult(
+                    success=bool(result.get("success")),
+                    message=str(result.get("message", "")),
+                    display_type=str(result.get("display_type", "info")),
+                )
             return await self._dispatch(command)
         except Exception as exc:
             self.logger.error("goal command error: %s", exc, exc_info=True)
@@ -191,6 +210,18 @@ class GoalCommandHandler(BaseCommandHandler):
                 message=f"goal command error: {exc}",
                 display_type="error",
             )
+
+    def _remote_state(self):
+        """The state service when it is an RPC proxy (attach clients)."""
+        try:
+            state = self.event_bus.get_service("state_service")
+        except Exception:
+            return None
+        if getattr(state, "_rpc", None) is not None and hasattr(
+            state, "goal_command"
+        ):
+            return state
+        return None
 
     async def _dispatch(self, command: SlashCommand) -> CommandResult:
         remainder = self._raw_remainder(command)

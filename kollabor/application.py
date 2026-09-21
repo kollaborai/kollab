@@ -784,8 +784,11 @@ class TerminalLLMChat:
                         def _publish_goal_state(**fields):
                             from kollabor_tui.display_tap import publish_semantic
 
+                            # resolve_tap needs an event bus / renderer / tap
+                            # reachable from source — a literal string resolves
+                            # nothing and the event never reaches the socket
                             publish_semantic(
-                                "goal_service", "goal.state_changed", **fields
+                                self.event_bus, "goal.state_changed", **fields
                             )
 
                         self._goal_service.set_state_publisher(_publish_goal_state)
@@ -1993,6 +1996,56 @@ class TerminalLLMChat:
                         )
                         if hasattr(self, "render_loop") and self.render_loop:
                             self.render_loop.request_render()
+
+                elif etype == "goal.state_changed":
+                    # Goal layer state from the daemon (spec 10.2): mirror
+                    # locally, surface lifecycle changes, request a render.
+                    goal_fields = (
+                        "goal_id",
+                        "status",
+                        "kind",
+                        "turn_count",
+                        "tokens_used",
+                        "token_budget",
+                        "last_reason",
+                        "objective",
+                        "conversation_uid",
+                    )
+                    state = getattr(self, "_remote_goal_state", None)
+                    if not isinstance(state, dict):
+                        state = {}
+                        self._remote_goal_state = state
+                    state.update({k: event.get(k) for k in goal_fields})
+                    if event.get("kind") in (
+                        "created",
+                        "paused",
+                        "resumed",
+                        "blocked",
+                        "usage_limited",
+                        "budget_limited",
+                        "complete",
+                        "cleared",
+                        "error",
+                        "reconcile_paused",
+                        "artifact_missing",
+                    ):
+                        reason = (
+                            f" — {event.get('last_reason')}"
+                            if event.get("last_reason")
+                            else ""
+                        )
+                        coordinator.display_message_sequence(
+                            [
+                                (
+                                    "system",
+                                    f"goal {event.get('goal_id', '?')} "
+                                    f"{event.get('status', '')}{reason}",
+                                    {"display_type": "info"},
+                                ),
+                            ]
+                        )
+                    if hasattr(self, "render_loop") and self.render_loop:
+                        self.render_loop.request_render()
 
                 elif etype == "permission_request":
                     if self._rpc_client is not None:

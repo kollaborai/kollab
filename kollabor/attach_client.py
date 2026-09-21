@@ -217,6 +217,45 @@ class AttachClient:
                 # terminal. Phase 6 will add proper local re-rendering.
                 pass
 
+            elif etype == "goal.state_changed":
+                # Goal layer state from the daemon (spec 10.2): keep a local
+                # mirror; surface lifecycle changes as one compact line.
+                if not hasattr(self, "_goal_state"):
+                    self._goal_state = {}
+                self._goal_state.update(
+                    {
+                        k: event.get(k)
+                        for k in (
+                            "goal_id",
+                            "status",
+                            "kind",
+                            "turn_count",
+                            "last_reason",
+                        )
+                    }
+                )
+                if event.get("kind") in (
+                    "created",
+                    "paused",
+                    "resumed",
+                    "blocked",
+                    "complete",
+                    "cleared",
+                    "error",
+                    "reconcile_paused",
+                    "artifact_missing",
+                ):
+                    reason = (
+                        f" — {event.get('last_reason')}"
+                        if event.get("last_reason")
+                        else ""
+                    )
+                    sys.stdout.write(
+                        f"\r\n[goal {event.get('goal_id', '?')}] "
+                        f"{event.get('status', '')}{reason}\r\n"
+                    )
+                    sys.stdout.flush()
+
             elif etype == "heartbeat":
                 pass
 

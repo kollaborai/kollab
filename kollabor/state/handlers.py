@@ -479,6 +479,12 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except Exception as e:
             return {"error": str(e)}
 
+    async def _goal_command(params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await state_service.goal_command(str(params.get("text", "")))
+        except Exception as e:
+            return {"error": str(e)}
+
     handlers: dict[str, Any] = {
         "state.get_conversation": _get_conversation,
         "state.save_conversation": _save_conversation,
@@ -490,6 +496,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_hub_state": _get_hub_state,
         "state.get_processing_state": _get_processing_state,
         "state.get_system_info": _get_system_info,
+        # Goal layer: attach clients execute /goal daemon-side where the
+        # conversation identity, store, and driver live
+        "state.goal_command": _goal_command,
         "state.list_commands": _list_commands,
         "state.open_generated_artifact": _open_generated_artifact,
         "state.set_active_profile": _set_active_profile,

@@ -80,11 +80,13 @@ def make_goal_report_handler(service):
         )
         result = service.handle_goal_report(control, attempt)
         detail = json.dumps(result, default=str)
+        error = "" if result.get("accepted") else str(result.get("detail", ""))[:300]
         return ToolExecutionResult(
             tool_id=tool_id,
             tool_type="goal_report",
             success=bool(result.get("accepted")),
             output=detail,
+            error=error,
         )
 
     return _handle_goal_report

@@ -780,6 +780,19 @@ class GoalService:
             if e.get("ref") in recorded and e["ref"] not in known
         }
 
+    @staticmethod
+    def _bind_evidence_ref(
+        ref: str, recorded: Dict[str, GoalEvidence]
+    ) -> Optional[GoalEvidence]:
+        """Bind a cited evidence ref to a runtime-recorded row.
+
+        Exact match only (spec 8.5: the runtime records provenance itself;
+        the model's claim alone never establishes it). Partial, invented,
+        or substring refs are rejected — the rejection text lists the
+        recorded refs so the model can re-report correctly.
+        """
+        return recorded.get(ref)
+
     def _audit_completion(
         self,
         record: GoalRecord,
@@ -791,15 +804,25 @@ class GoalService:
         recorded: Dict[str, GoalEvidence] = {
             e.ref: e for e in self.store.evidence_for(record.goal_id)
         }
+
+        def _known_refs_hint() -> str:
+            refs = list(recorded.keys())[:5]
+            return f"; recorded evidence refs you may cite: {refs}"
+
         cited: List[GoalEvidence] = []
         for ev in control.evidence:
-            ref = ev.get("ref")
-            if ref not in recorded:
-                return {
-                    "ok": False,
-                    "reason": f"evidence ref not produced by a goal tool: {ref}",
-                }
-            cited.append(recorded[ref])
+            ref = ev.get("ref") or ""
+            bound = self._bind_evidence_ref(ref, recorded)
+            if bound is not None:
+                cited.append(bound)
+                continue
+            return {
+                "ok": False,
+                "reason": (
+                    f"evidence ref not produced by a goal tool: {ref}"
+                    + _known_refs_hint()
+                ),
+            }
         # freshness: evidence must postdate every mutating tool call of its
         # own attempt (8.5) — the runtime's recorded order is authoritative
         for cited_ev in cited:
@@ -949,5 +972,12 @@ class GoalService:
             "instruction; current worktree/external state is authoritative; "
             "status restatement is not progress; report via goal_report "
             "with evidence produced inside this goal."
+        )
+        lines.append(
+            "report exactly like this when the goal is done:\n"
+            f'<goal_report kind="complete" version="{record.record_version}" '
+            'reason="one line">\n'
+            "evidence ref from your tool run :: what it proves\n"
+            "</goal_report>"
         )
         return "\n".join(lines)

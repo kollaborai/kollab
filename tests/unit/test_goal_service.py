@@ -320,6 +320,37 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(out["accepted"])
         self.assertIn("not produced by a goal tool", out["detail"])
 
+    def test_substring_evidence_ref_rejected(self):
+        """Regression: 'pytest: 12 passed' vs recorded
+        'shell:pytest: 12 passed' must NOT complete the goal. Exact
+        runtime-produced refs only (spec 8.5)."""
+        att = self.service.maybe_continue(
+            self.rec.goal_id, outcome_ok(self.rec.goal_id), ctx()
+        )
+        # simulate the real driver ref format: tool_type:output-prefix
+        self.service.note_tool_result(
+            goal_id=self.rec.goal_id,
+            attempt_id=att.attempt_id,
+            tool_result_id="shell-1",
+            kind="shell",
+            ref="shell:pytest: 12 passed",
+            tool_seq=1,
+            turn_id="t1",
+        )
+        control = GoalControl(
+            goal_id=self.rec.goal_id,
+            expected_record_version=self.store.get(self.rec.goal_id).record_version,
+            kind="complete",
+            reason="tests pass",
+            evidence=[{"ref": "pytest: 12 passed", "claim": "suite green"}],
+        )
+        out = self.service.handle_goal_report(control, att)
+        self.assertFalse(out["accepted"])
+        self.assertIn("not produced by a goal tool", out["detail"])
+        # the hint lists recorded refs but never accepts the partial ref
+        self.assertIn("shell:pytest: 12 passed", out["detail"])
+        self.assertEqual(self.store.get(self.rec.goal_id).status, "active")
+
     def test_stale_evidence_freshness(self):
         att = self.service.maybe_continue(
             self.rec.goal_id, outcome_ok(self.rec.goal_id), ctx()

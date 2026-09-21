@@ -75,6 +75,22 @@ class RemoteStateService(StateService):
             )
         return ConversationSnapshot.from_dict(result)
 
+    async def goal_command(self, text: str) -> dict:
+        """Execute one /goal command daemon-side (goal spec 5 + 10.2).
+
+        The daemon owns the conversation identity, goal store, and driver;
+        its goal.state_changed events stream back over the attach socket.
+        """
+        logger.debug("state rpc: goal_command")
+        result = await self._rpc.call(
+            "state.goal_command", {"text": text}, timeout=self._timeout
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"state.goal_command expected dict, got {type(result).__name__}"
+            )
+        return result
+
     async def save_conversation(self, format: str = "transcript") -> str:
         """Ask the daemon to format the conversation and return the resulting string.
 

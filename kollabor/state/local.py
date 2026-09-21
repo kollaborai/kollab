@@ -2234,6 +2234,44 @@ class LocalStateService(StateService):
 
     # === Input ===
 
+    async def goal_command(self, text: str) -> dict[str, Any]:
+        """Execute one /goal command daemon-side (goal spec 5 + 10.2).
+
+        Attach clients route /goal input here via RPC: the daemon owns the
+        conversation identity, the goal store, and the driver, and its
+        goal.state_changed events stream back over the attach socket.
+        Returns the CommandResult fields for client-side rendering.
+        """
+        from datetime import datetime as _dt
+
+        from kollabor_events.models import SlashCommand
+
+        try:
+            registry = self._event_bus.get_service("command_registry")
+        except Exception:
+            registry = None
+        definition = (
+            registry.get_command("goal") if registry is not None else None
+        )
+        if definition is None or definition.handler is None:
+            return {"success": False, "message": "goal command unavailable", "display_type": "error"}
+        command = SlashCommand(
+            name="goal",
+            args=[],
+            raw_input=text,
+            timestamp=_dt.now(),
+        )
+        try:
+            result = await definition.handler(command)
+        except Exception as exc:
+            logger.warning("daemon-side goal command failed: %s", exc)
+            return {"success": False, "message": str(exc), "display_type": "error"}
+        return {
+            "success": bool(getattr(result, "success", False)),
+            "message": str(getattr(result, "message", "") or ""),
+            "display_type": str(getattr(result, "display_type", "info") or "info"),
+        }
+
     async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 

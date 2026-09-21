@@ -239,6 +239,10 @@ class QueueProcessor:
         self.turn_completed = False
         self.cancel_processing = False
         self.cancellation_message_shown = False
+        # Last provider/turn error, for typed outcomes (goal spec 8.6):
+        # the goal driver pauses on provider errors instead of burning
+        # turns against a dead endpoint. Cleared at turn start.
+        self.last_turn_error: str | None = None
 
         # Mutex to prevent concurrent _execute_llm_turn calls. Without this,
         # _hub_continue and process_queue can interleave turns (evidence:
@@ -446,6 +450,7 @@ class QueueProcessor:
                                 "Set tool_format on the profile in ~/.kollab/config.json to match your API\n"
                                 "('openai' or 'anthropic'), then restart."
                             )
+                        self.last_turn_error = error_msg
                         self.message_display_service.display_error_message(error_msg)
                         break
 
@@ -533,6 +538,9 @@ class QueueProcessor:
                     except Exception as e:
                         logger.error(
                             f"Continued conversation error (turn {turn_count}): {e}"
+                        )
+                        self.last_turn_error = (
+                            f"conversation failed on turn {turn_count}: {e}"
                         )
                         self.message_display_service.display_error_message(
                             f"conversation failed on turn {turn_count}: {e}"
@@ -639,6 +647,7 @@ class QueueProcessor:
         # The lock serializes turns; the second caller waits for the first
         # to finish rather than running concurrently.
         async with self._turn_lock:
+            self.last_turn_error = None
             return await self._execute_llm_turn_inner(
                 user_message_provided, current_parent_uuid
             )
@@ -1521,6 +1530,7 @@ class QueueProcessor:
                     "('openai' or 'anthropic'), then restart."
                 )
             self.message_display_service.display_error_message(error_msg)
+            self.last_turn_error = error_msg
             self.turn_completed = True
 
         finally:
