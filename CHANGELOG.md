@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `/goal` command: durable session goals with bounded continuation,
+  a SQLite-backed goal store with crash recovery, model-declared completion
+  gated on runtime-recorded evidence via the `goal_report` tool, and
+  conversation identity that survives `/resume`.
+- Made context compaction observable: the compacted-history summary carries a
+  durable metadata marker, and the terminal transcript and Web UI history and
+  trajectory views render compaction events with round and message counts.
+
+### Fixed
+
+- Opened the goal HUD drain gate on fresh conversations so goal turns render
+  when no prior turn has completed.
+
+### Documentation
+
+- Documented the release flow and tag/publish consistency guard in `CLAUDE.md`.
+
 ## [0.8.1] - 2026-09-18
 
 ### Fixed
