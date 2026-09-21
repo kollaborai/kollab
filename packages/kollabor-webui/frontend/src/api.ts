@@ -3,6 +3,7 @@ export type Session = {
   name?: string;
   profile?: string;
   model?: string;
+  effort?: string;
   agent?: string;
   workspace?: string | null;
   approval_mode?: string;

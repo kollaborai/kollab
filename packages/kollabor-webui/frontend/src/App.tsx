@@ -184,6 +184,7 @@ export default function App() {
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
+  const [workspacePath, setWorkspacePath] = useState("");
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [selectedBundle, setSelectedBundle] = useState("default");
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -390,6 +391,7 @@ export default function App() {
         agent: selectedBundle !== "default" ? selectedBundle : undefined,
         identity: selectedIdentity || undefined,
         approval_mode: "trust_all",
+        workspace: workspacePath.trim() || undefined,
       });
       const result = await loadSessions();
       await refreshAgentPool();
@@ -489,6 +491,8 @@ export default function App() {
         bundles={bundles}
         selectedProfile={selectedProfile}
         selectedIdentity={selectedIdentity}
+        workspacePath={workspacePath}
+        onWorkspaceChange={setWorkspacePath}
         selectedBundle={selectedBundle}
         activeId={activeId}
         busy={busy}
@@ -513,7 +517,9 @@ export default function App() {
         profiles={profiles}
         open={profilesOpen}
         onOpenChange={setProfilesOpen}
-        onSaved={loadSessions}
+        onSaved={async () => {
+          await loadSessions();
+        }}
       />
       <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
         {activeSession && initialState ? (

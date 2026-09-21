@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -82,6 +83,12 @@ export function SessionToolbar({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<SessionState | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [editProfile, setEditProfile] = useState(
+    session.profile || profiles[0]?.name || "default",
+  );
+  const [editModel, setEditModel] = useState(session.model || "");
+  const [editEffort, setEditEffort] = useState(session.effort || "");
+  const [applyBusy, setApplyBusy] = useState(false);
 
   const fail = useCallback(
     (error: unknown) =>
@@ -169,6 +176,33 @@ export function SessionToolbar({
     } catch (error) {
       fail(error);
     }
+  };
+
+  const applySessionSettings = async () => {
+    setApplyBusy(true);
+    try {
+      const updated = await api.setSessionProfile(
+        session.session_id,
+        editProfile,
+        editModel.trim() || undefined,
+        editEffort.trim() || undefined,
+      );
+      onSessionUpdated(updated);
+      setEditModel(updated.model || "");
+      setEditEffort(updated.effort || "");
+      onStatus(`Session settings applied: ${updated.model || editProfile}`);
+      await loadSettings();
+    } catch (error) {
+      fail(error);
+    } finally {
+      setApplyBusy(false);
+    }
+  };
+
+  const resetSessionSettings = () => {
+    setEditProfile(session.profile || profiles[0]?.name || "default");
+    setEditModel(session.model || "");
+    setEditEffort(session.effort || "");
   };
 
   const clearHistory = async () => {
@@ -449,7 +483,7 @@ export function SessionToolbar({
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3 text-sm">
-            <div className="grid grid-cols-[7rem_1fr] gap-2">
+            <div className="grid grid-cols-[7rem_1fr] items-center gap-2">
               <span className="text-muted-foreground">Session</span>
               <span className="break-all font-mono">
                 {sessionLabel}
@@ -458,8 +492,54 @@ export function SessionToolbar({
               <span>{session.identity || session.agent || "unassigned"}</span>
               <span className="text-muted-foreground">Workspace</span>
               <span className="break-all">{workspace}</span>
-              <span className="text-muted-foreground">Model</span>
-              <span>{session.model || session.profile || "unavailable"}</span>
+            </div>
+            <div className="grid gap-2">
+              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-profile">
+                Profile
+              </label>
+              <Select
+                value={editProfile}
+                onValueChange={setEditProfile}
+                disabled={applyBusy}
+              >
+                <SelectTrigger id="settings-profile" className="w-full" aria-label="Session profile">
+                  <SelectValue placeholder="default" />
+                </SelectTrigger>
+                <SelectContent>
+                  {profiles.length ? (
+                    profiles.map((profile) => (
+                      <SelectItem key={profile.name} value={profile.name}>
+                        {profile.name}
+                        {profile.model ? ` · ${profile.model}` : ""}
+                      </SelectItem>
+                    ))
+                  ) : (
+                    <SelectItem value={editProfile}>{editProfile}</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-model">
+                Model override (optional)
+              </label>
+              <Input
+                id="settings-model"
+                value={editModel}
+                onChange={(event) => setEditModel(event.target.value)}
+                placeholder={session.model || "profile default"}
+                disabled={applyBusy}
+                className="font-mono text-xs"
+              />
+              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-effort">
+                Effort override (optional)
+              </label>
+              <Input
+                id="settings-effort"
+                value={editEffort}
+                onChange={(event) => setEditEffort(event.target.value)}
+                placeholder={session.effort || "profile default"}
+                disabled={applyBusy}
+                className="font-mono text-xs"
+              />
             </div>
             <div className="bg-muted/30 rounded-md border p-3 text-xs">
               {settingsBusy ? (
@@ -493,10 +573,25 @@ export function SessionToolbar({
             <Button
               type="button"
               variant="outline"
+              onClick={resetSessionSettings}
+              disabled={applyBusy}
+            >
+              Reset
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
               onClick={() => void loadSettings()}
             >
               <RefreshCw className="size-4" />
               Refresh
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void applySessionSettings()}
+              disabled={applyBusy}
+            >
+              {applyBusy ? "Applying…" : "Apply"}
             </Button>
           </DialogFooter>
         </DialogContent>
