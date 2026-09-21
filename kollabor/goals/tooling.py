@@ -92,14 +92,18 @@ def make_goal_report_handler(service):
         tool_id = tool_data.get("id", "unknown")
         current = service.current_goal_attempt()
         if current is None:
+            reason = (
+                "no goal turn is in flight; goal_report only runs "
+                "inside a goal-owned turn (goal may be paused, or the "
+                "turn already settled — resume it and report inside the "
+                "resumed turn)"
+            )
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="goal_report",
                 success=False,
-                output=(
-                    "no goal turn is in flight; goal_report only runs "
-                    "inside a goal-owned turn"
-                ),
+                output=reason,
+                error=reason,
             )
         record, attempt = current
         version = tool_data.get("expected_record_version")
