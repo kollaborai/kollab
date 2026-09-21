@@ -1,7 +1,7 @@
 ---
 title: "MCP (Model Context Protocol)"
 created: 2026-02-24
-modified: 2026-08-06
+modified: 2026-09-20
 status: active
 ---
 # MCP (Model Context Protocol)
@@ -56,9 +56,11 @@ cp docs/mcp/mcp_settings.example.json .kollab/mcp/mcp_settings.json
 }
 ```
 
-### 3. Restart Kollabor
+### 3. Start or Reload Kollab
 
-Servers auto-connect on startup if enabled.
+Servers auto-connect on startup if enabled. If Kollab is already running,
+use `/mcp reload` to reload both global and project configuration and reconnect
+enabled servers.
 
 ## Configuration
 
@@ -187,24 +189,45 @@ export BRAVE_API_KEY="xxx"
 
 ## MCP Commands
 
+The bare command and `setup` open the interactive MCP manager in the normal
+TUI. The manager reads runtime status and provides per-server actions; the
+slash subcommands below are also usable from attach mode where supported.
+
 | Command | Description |
 |---------|-------------|
-| `/mcp` | Open the full-screen MCP manager |
-| `/mcp setup` | Open the full-screen MCP manager |
+| `/mcp` | Open the interactive MCP manager |
+| `/mcp setup` | Open the interactive MCP manager (alias) |
 | `/mcp show` | Show server status |
-| `/mcp servers` | Show server status |
+| `/mcp list` | Show server status (alias) |
+| `/mcp servers` | Show server status (alias) |
 | `/mcp tools [server]` | Show available tools |
-| `/mcp reload` | Reload MCP config and reconnect enabled servers |
+| `/mcp test <server>` | Test one server connection |
+| `/mcp enable <server>` | Enable a server in configuration |
+| `/mcp disable <server>` | Disable a server in configuration |
+| `/mcp reload` | Reload MCP config and reconnect enabled servers; report failures |
+| `/mcps`, `/servers` | Top-level aliases for `/mcp` |
 
-Inside the `/mcp` manager, `g` toggles the global MCP subsystem
-(`plugins.mcp.enabled`). Server-level actions still manage individual entries.
+`/mcp status` is accepted as a compatibility alias for `/mcp show`.
+
+Inside the `/mcp` manager:
+
+- `g` toggles the global MCP subsystem (`plugins.mcp.enabled`).
+- Space toggles the selected configured server.
+- `a` adds the selected available server to the global configuration.
+- `d` deletes the selected configured server from the global configuration.
+- `t` tests the selected server; `r` reloads enabled servers and reports failures.
+- `/` filters; arrows, Page Up/Down, Home, and End navigate; Esc exits.
+
+The manager's add, delete, and enable/disable actions write the global
+`~/.kollab/mcp/mcp_settings.json`. Edit `.kollab/mcp/mcp_settings.json`
+directly for project-specific configuration, then run `/mcp reload`.
 
 ## Tool Execution
 
 MCP tools integrate with the permission system:
 
 ```
-[tool] mcp:filesystem::read_file
+[tool] mcp:filesystem:read_file
 [server] filesystem
 [path] /Users/you/file.txt
 
@@ -265,10 +288,10 @@ MCP uses JSON-RPC 2.0 over stdio:
 ### Key Files
 
 - `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py` - MCP client and protocol
-- `kollabor/commands/mcp_command.py` - CLI commands
-
-note: mcp_manager.py does not exist. mcp_integration.py handles both
-      protocol and configuration management.
+- `packages/kollabor-agent/src/kollabor_agent/mcp_manager.py` - MCP configuration and server operations
+- `kollabor/commands/mcp_command.py` - slash-command handler
+- `plugins/altview/mcp_wizard_altview.py` - interactive MCP manager
+- `docs/reference/commands.md` - canonical command reference
 
 ### Tool Registry
 

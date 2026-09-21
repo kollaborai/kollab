@@ -97,6 +97,23 @@ class ConversationManager:
         """Bind the live LLM statistics mapping used for persistence and restore."""
         self._session_stats = session_stats
 
+    def _ensure_conversation_uid(self) -> str:
+        """Durable conversation identity (goal-command spec 6.5).
+
+        `current_session_id` rotates on resume by design; this UUID is the
+        stable key goals attach to. Minted once per conversation, persisted
+        in conversation metadata, and carried through `/resume`.
+        """
+        uid = self.conversation_metadata.get("conversation_uid")
+        if not uid:
+            uid = uuid4().hex
+            self.conversation_metadata["conversation_uid"] = uid
+        return uid
+
+    @property
+    def conversation_uid(self) -> str:
+        return self._ensure_conversation_uid()
+
     def _session_stats_snapshot(self) -> Dict[str, Any]:
         """Return the stable persisted subset of the live session statistics."""
         source = self._session_stats or {}
@@ -443,6 +460,9 @@ class ConversationManager:
                 ),
                 "topics": loaded_metadata.get("topics", []),
                 "model_used": loaded_metadata.get("model_used"),
+                # legacy files lack it: mint now, persists on next save
+                "conversation_uid": loaded_metadata.get("conversation_uid")
+                or uuid4().hex,
             }
 
             # Rebuild message index
@@ -473,6 +493,7 @@ class ConversationManager:
             filename = f"{session_id}.jsonl"
             filepath = self.conversations_dir / filename
 
+            self._ensure_conversation_uid()
             session_data = {
                 "session_id": session_id,
                 "metadata": self.conversation_metadata,
@@ -556,6 +577,9 @@ class ConversationManager:
                 ),
                 "topics": loaded_metadata.get("topics", []),
                 "model_used": loaded_metadata.get("model_used"),
+                # legacy files lack it: mint now, persists on next save
+                "conversation_uid": loaded_metadata.get("conversation_uid")
+                or uuid4().hex,
             }
 
             # Rebuild message index if missing

@@ -411,6 +411,39 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result.success)
                 self.assertEqual(result.tool_id, f"terminal_{i}")
 
+    async def test_cancel_running_tool_closes_active_mcp_connections(self):
+        """ESC cancellation must interrupt MCP stdio waits, not only shells."""
+        self.mcp_integration.cancel_active_connections = AsyncMock()
+
+        await self.executor.cancel_running_tool()
+
+        self.mcp_integration.cancel_active_connections.assert_awaited_once_with()
+
+    async def test_mcp_reload_reports_partial_reconnect_as_failure(self):
+        """A reload with one failed server must not be reported as success."""
+        self.mcp_integration.reload_mcp_servers = AsyncMock(
+            return_value={
+                "configured": 2,
+                "discovered": 2,
+                "reconnected": 1,
+                "failed": 1,
+                "failed_servers": ["zai-mcp-server"],
+                "cancelled": False,
+            }
+        )
+        self.mcp_integration.get_tool_definitions_for_api = MagicMock(
+            return_value=[{"name": "existing_tool"}]
+        )
+
+        result = await self.executor._execute_mcp_reload(
+            {"type": "mcp_reload", "id": "reload-0"}
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("reload incomplete", result.output)
+        self.assertIn("zai-mcp-server", result.error)
+        self.assertEqual(result.metadata["failed"], 1)
+
 
 class TestToolExecutorMCPTimeoutOwnership(unittest.IsolatedAsyncioTestCase):
     """MCP integration owns MCP call timeout behavior."""

@@ -1,7 +1,7 @@
 ---
 title: "Kollab Command Reference"
 created: 2026-04-06
-modified: 2026-08-06
+modified: 2026-09-20
 status: active
 ---
 # Kollab Command Reference
@@ -186,7 +186,7 @@ fully migrated (works in attach mode):
   /agent set /agent clear
   /skills load /skills unload
   /permissions (all subcommands)
-  /mcp show /mcp servers /mcp enable /mcp disable /mcp test /mcp tools /mcp reload
+  /mcp show /mcp list /mcp servers /mcp enable /mcp disable /mcp test /mcp tools /mcp reload
   /resume <id>                    (one-shot resume by id)
   /save (all formats)
   /hub status /hub whoami /hub work
@@ -392,6 +392,7 @@ type / in the input box to open the command menu.
   /mcp <sub>                      manage MCP servers
     aliases: /mcps, /servers
     show                          show MCP status
+    status                        alias for show (compatibility)
     servers                       alias for show
     list                          alias for show
     setup                         open MCP manager
@@ -399,10 +400,18 @@ type / in the input box to open the command menu.
     tools [server]                show available tools (state_service)
     enable <server>               enable server (state_service)
     disable <server>              disable server (state_service)
+    reload                        reload config and reconnect enabled servers; report failures
 
-    phase 4.5 migrated show/servers/enable/disable/test/tools through
-    state_service so they work in attach mode. show still has the direct
-    renderer fallback for CLI-only contexts.
+    show/servers/list/enable/disable/test/tools/reload use state_service
+    so they work in attach mode. show still has the direct renderer fallback
+    for CLI-only contexts.
+
+    manager keys: g global toggle, space enable/disable selected server,
+    a add available server, d delete configured server, t test, r reload/report failures,
+    / filter, arrows/page/home/end navigate, enter show selected details, esc exit.
+
+    /mcp enable and /mcp disable write config without reconnecting the
+    subprocess; run /mcp reload (or restart Kollab) to apply the change.
 
   /widgets [name]                 interactive widget gallery
     aliases: /showcase, /storybook

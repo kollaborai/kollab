@@ -1,14 +1,14 @@
 ---
 title: "Provider-neutral /goal command and continuation contract"
-status: proposed-after-two-adversarial-reviews
+status: revised-after-three-adversarial-reviews
 owner: kollab
-date: 2026-09-17
+date: 2026-09-20
 ---
 
 # Provider-neutral `/goal` command and continuation contract
 
-status: proposed for phase-0 implementation; two adversarial review rounds are
-included below.
+status: revised for phase-0 implementation; three adversarial review rounds are
+included below. Round 3's P0/P1 gates are acceptance criteria.
 
 ## decision summary
 
@@ -16,10 +16,12 @@ Kollab should add a durable, provider-neutral goal layer with these boundaries:
 
 - A goal is a user-owned objective plus a continuation, verification, budget,
   and stop contract for one interactive chat session.
-- A goal is scoped to a stable Kollab session/daemon attachment, not to a TUI
-  process, provider session ID, project-wide singleton, or agent name.
-- There is one active goal per session in phase 1. Creating another goal while
-  one is unfinished is rejected; replacement requires an explicit `/goal clear`.
+- A goal is keyed to a durable `conversation_uid` that survives `/resume` and
+  session-ID rotation, not to a TUI process, provider session ID, rotating
+  `current_session_id`, project-wide singleton, or agent name.
+- There is one unfinished goal per conversation in phase 1. Creating another
+  goal while one is unfinished is rejected; replacement requires an explicit
+  `/goal clear`.
 - The daemon owns goal state and continuation. TUI clients and attached clients
   observe it; they must not run duplicate continuations.
 - `plugins/hub/task_ledger.py` remains the project-scoped child-task ledger.
@@ -32,6 +34,19 @@ Kollab should add a durable, provider-neutral goal layer with these boundaries:
   for command parsing, keyword matching, display, and redacted logging. Image
   bytes are stored as attachment/artifact references when needed, never
   stringified into objectives, logs, Hub broadcasts, or event payloads.
+- Goal state is transactional SQLite (records, events, attempts) with a
+  partial unique index enforcing one unfinished goal per conversation. JSON
+  files are not used for goal state in phase 1; round 3 reproduced a
+  lost-update race in the previously proposed shared-index layout.
+- Crash recovery is conservative: an attempt that may have reached the
+  provider pauses the goal for reconciliation and is never automatically
+  re-executed. Only provably undispatched attempts may auto-retry.
+- Every goal carries default automatic turn and time limits independent of
+  any optional token budget. Budgets are enforced per provider request at
+  dispatch time as a documented gate, not a mid-turn kill.
+- Continuation decisions consume typed turn outcomes (origin, goal identity,
+  cancellation/error status, per-request usage) rechecked under the turn
+  lock; bare completion flags are not eligibility evidence.
 
 The intended result is the conservative persistence and continuation behavior of
 Codex combined with Claude's clear progress/reason presentation, without copying
@@ -180,17 +195,17 @@ implementation and not a provider-specific fork of the LLM pipeline.
 
 | concern | Codex | Claude Code | Kollab decision |
 |---|---|---|---|
-| ownership | persistent thread goal | session goal | stable Kollab chat session owned by daemon |
-| active count | one unfinished goal per thread | one goal per session | one active/unfinished goal per session in phase 1 |
+| ownership | persistent thread goal | session goal | durable conversation identity owned by daemon |
+| active count | one unfinished goal per thread | one goal per session | one unfinished goal per conversation in phase 1 |
 | completion authority | typed goal update plus evidence audit | transcript-only evaluator verdict | typed runtime/provider control plus concrete evidence |
 | continuation | idle thread, no queued input, no pending work | after evaluator verdict; background deferral/check-ins | idle queue, no pending work, no queued user input |
 | pause | user/system controlled | user/error controlled | user/system controlled; cooperative safe boundary |
 | blocked/impossible | explicit blocked state | evaluator impossible clears goal | explicit blocked state after evidence-backed repeated blocker |
-| budget | token/time accounting; budget-limited distinct | token display and evaluator billing | provider usage accounting; budget/quota stops are distinct |
+| budget | token/time accounting; budget-limited distinct | token display and evaluator billing | per-request usage accounting; default turn/time bounds; budget/quota stops distinct |
 | objective injection | internal goal context | session goal hook/evaluator context | escaped internal context item, never a fake user message |
 | attachments | materialized references | condition is text/transcript-based | attachment refs only; never stringify bytes |
 | task/delegation | separate from goal | background agents separate | existing TaskLedger remains child-work primitive |
-| restart | persistent thread state | active goal restored on resume | daemon-owned state restored with lease/CAS |
+| restart | persistent thread state | active goal restored on resume | SQLite state restored with lease epochs; ambiguous dispatch pauses for reconciliation |
 | evaluator cost | no separate evaluator required | small evaluator model billed | no paid evaluator in phase 1; optional later |
 
 The direct design lesson is: use Codex's durable state and conservative
@@ -216,7 +231,7 @@ snapshot, and one evidence/result event.
 ### in scope for phase 1
 
 - `/goal` command registration and raw-objective parsing;
-- one active goal per stable session;
+- one active goal per durable conversation (`conversation_uid`);
 - project-scoped durable storage and append-only redacted events;
 - typed goal control (`progress`, `complete`, `blocked`) through the normal
   provider/tool boundary;
@@ -255,6 +270,7 @@ promise project-wide discovery before project-wide ownership semantics exist.
 /goal pause                    stop continuation at the next safe boundary
 /goal resume [--budget N]      resume after pause/block/quota/budget stop
 /goal clear                    stop and preserve the goal as cleared history
+/goal history [N]              list recent completed/cleared goals (default 10)
 ```
 
 Rules:
@@ -271,8 +287,16 @@ Rules:
   short ID and the next actions `/goal show`, `/goal clear`, or `/goal resume`.
   It does not silently replace the goal.
 - `/goal clear` is a user stop, not deletion. It appends a terminal `cleared`
-  event and removes the session's active pointer while retaining a bounded
+  event and removes the conversation's active goal while retaining a bounded
   summary and event history.
+- Goal control subcommands (`show`, `pause`, `resume`, `clear`, `history`) are
+  daemon-side state operations, not LLM turns. They must remain available
+  while a turn is processing: the input path evaluates them before any
+  `is_processing` gate (`kollabor/state/local.py:2236` currently rejects input
+  before command parsing) and must not exclude image-bearing messages from
+  command detection (`local.py:2275`). `pause` and `clear` durably record a
+  stop intent immediately at request time; the running turn applies it at its
+  next safe boundary.
 - Phase-2 commands such as `/goal list`, `/goal cancel <id>`, and `/goal adopt
   <id>` require an explicit project/user scope and lease protocol. They are not
   aliases invented in phase 1.
@@ -290,7 +314,9 @@ The durable record contains at least:
 
 ```text
 goal_id                 opaque UUID; stable across restart/attach
-session_id              stable Kollab chat/daemon session identity
+conversation_uid        durable conversation identity; survives /resume and
+                        session-ID rotation (see 6.5)
+session_id              rotating current session id; diagnostic only, never a key
 project_root            normalized project root captured at creation
 objective               bounded text; never image bytes
 status                  active | paused | blocked | usage_limited |
@@ -310,7 +336,15 @@ task_ids                optional linked TaskLedger IDs
 scope_snapshot          cwd, allowed roots, model/profile, permissions, trust
 owner_daemon_id         current continuation owner, if claimed
 owner_lease_expires_at  lease expiry for crash recovery
+lease_epoch             fencing counter, incremented on lease recovery; all
+                        attempt and control writes must match it
 record_version          CAS/version guard for stale updates
+execution_generation    bumped on pause/resume/clear/scope change; attempts and
+                        controls carrying a stale generation are rejected even
+                        when record_version matches
+auto_turn_limit         default 40 goal turns; independent of token budget
+auto_time_limit_s       default 7200s accumulated active time, monotonic
+completion_declared     true when no deterministic checker applied (see 8.5)
 ```
 
 The model may add `provider_session_refs` and `last_turn_id`, but those are
@@ -333,7 +367,9 @@ Required kinds include:
 ```text
 created, claimed, turn_started, progress, turn_completed,
 paused, resumed, blocked, usage_limited, budget_limited,
-complete, cleared, lease_recovered, error
+complete, cleared, lease_recovered, error,
+pause_requested, clear_requested, reconcile_paused, generation_bumped,
+artifact_missing
 ```
 
 Events are audit metadata, not a transcript. Large tool output and media are
@@ -355,36 +391,97 @@ The goal service may link a valid `TaskCard.id` and show its current status, but
   task is no longer part of the acceptance boundary.
 - `/hub tasks` must not start, pause, or clear a goal implicitly.
 
+### 6.4 GoalAttempt
+
+Every dispatch is a durable attempt row committed before any provider
+submission:
+
+```text
+attempt_id              opaque UUID
+goal_id, conversation_uid, continuation_seq
+lease_epoch             owner fence at dispatch time
+execution_generation    generation at dispatch time
+state                   pending | dispatched | acked | settled | cancelled | ambiguous
+provider_request_ref    provider-side request id when known
+turn_id, outcome        set at settle time
+usage_deltas            per-provider-request usage records
+```
+
+`record_version` CAS covers every write. `lease_epoch` and
+`execution_generation` exist so lease renewal and accounting writes do not
+collide with execution invalidation: a recovered owner or a resumed
+generation rejects the old owner's late attempt writes and controls even
+when the record version would have matched.
+
+### 6.5 durable conversation identity (prerequisite)
+
+`current_session_id` rotates on resume by design — `resume_conversation()`
+mints a fresh ID so resumed history appends to a new `.jsonl`
+(`kollabor/state/local.py:2453`). It can never be a goal key. Phase 0 adds a
+`conversation_uid`:
+
+- a UUID generated once per conversation, persisted in conversation save
+  metadata, and propagated by `resume_conversation()` to the rotated session;
+- exposed by StateService; `GoalRecord` keys on it;
+- legacy conversations without one mint and persist it on first load (no
+  goals predate the feature).
+
+Behavior:
+
+- reconnect/reattach: same uid, same goal; the lease decides continuation
+  ownership;
+- `/resume` into the same conversation: the uid carries; the goal survives;
+- context switch to another conversation: the goal remains owned by the
+  previous uid; status shows "active in another conversation"; control
+  returns when the user switches back; no transfer in phase 1;
+- new conversation / session reset: no active goal;
+- the same conversation open in two daemons: creation resolves via the
+  unique index; the lease loser observes read-only.
+
 ## 7. persistence, ownership, and concurrency
 
 ### 7.1 storage location and format
 
-Implement `GoalStore` under `kollabor/state/goal_store.py`. Use the existing
-project-scoped Kollab data-path policy used by `get_hub_dir()` and
-`context_registry` rather than inventing a second config root. The phase-1
-layout is:
+Implement `GoalStore` under `kollabor/state/goal_store.py`, SQLite-backed.
+Use the existing project-scoped Kollab data-path policy used by `get_hub_dir()`
+and `context_registry` rather than inventing a second config root:
 
 ```text
 <project-scoped-kollab-data>/goals/
-  index.json                 session -> active goal pointer
-  <goal-id>.json             current GoalRecord
-  <goal-id>.events.jsonl     append-only redacted GoalEvent stream
-  .locks/<session-id>.lock   creation/active-pointer/claim lock
+  goals.db                   SQLite (WAL): goals, goal_events, goal_attempts
+  artifacts/<sha256>.<ext>   durable goal attachment bytes (see 9.2)
 ```
+
+Schema essentials:
+
+```sql
+CREATE TABLE goals ( /* GoalRecord columns */ ,
+  record_version INTEGER NOT NULL,
+  lease_epoch INTEGER NOT NULL DEFAULT 0 );
+CREATE UNIQUE INDEX one_unfinished_goal_per_conversation
+  ON goals(conversation_uid)
+  WHERE status NOT IN ('complete', 'cleared');
+CREATE TABLE goal_events ( /* event columns; insert-only */ );
+CREATE TABLE goal_attempts ( /* attempt columns; see 6.4 */ );
+```
+
+Rationale: round 3 reproduced a lost-update race in the previously proposed
+layout — one shared `index.json` guarded by per-session advisory locks let two
+concurrent writers each publish a pointer, leaving one persisted goal. A
+single SQLite transaction is the atomic commit boundary for record, event,
+attempt, and pointer writes; the partial unique index enforces one unfinished
+goal per conversation at the storage layer, not by lock discipline.
+
+Requirements: WAL mode, `busy_timeout`, one connection per daemon,
+`BEGIN IMMEDIATE` for writes, restrictive directory permissions. Corruption
+recovery must never silently invent a goal; on startup, reconcile unfinished
+attempts per 7.4 and emit recovery events rather than deleting history.
+SQLite is not permission to add a second unbounded transcript store; large
+outputs remain artifact references.
 
 The implementation should extract a shared project-data path helper if the
 current import direction would otherwise make core state depend on
 `HubPlugin`. It must not duplicate the Hub task state machine.
-
-Reuse the proven TaskLedger persistence properties: advisory lock, read under
-lock, temp-file write, flush, fsync, atomic replace, restrictive directory
-permissions, and corruption recovery that never silently invents a goal. On
-startup, reconcile orphan goal files and stale index pointers; preserve them as
-history and emit a recovery event rather than deleting them.
-
-If a later implementation selects SQLite, it must preserve the same external
-contract, per-session uniqueness, append-only events, CAS protection, and test
-fixtures. SQLite is not permission to add a second unbounded transcript store.
 
 ### 7.2 owner lease
 
@@ -402,19 +499,49 @@ safe boundary, append `lease_recovered`, and continue at most once for the next
 continuation sequence. An attached TUI observes state; it does not claim a
 second runner merely because it rendered the goal.
 
+Recovery increments `lease_epoch`. All attempt and control writes carry the
+epoch they were issued under, so a previous owner's late writes fail the fence
+even when `record_version` would have matched. Lease expiry alone never
+implies the crashed owner's dispatch did or did not execute; see 7.4.
+
 ### 7.3 creation transaction
 
-`create()` holds the per-session lock across:
+`create()` is one `BEGIN IMMEDIATE` transaction:
 
-1. reading and validating the active pointer;
-2. rejecting any unfinished goal;
-3. writing the new GoalRecord;
-4. appending `created`; and
-5. atomically publishing the active pointer.
+1. insert the GoalRecord (the partial unique index rejects a second
+   unfinished goal for the conversation);
+2. insert the `created` event; and
+3. commit.
 
-Recovery must handle a crash between steps without producing two active goals.
-The acceptance test starts two writers concurrently and requires exactly one
-successful creation.
+Either the whole goal exists or none of it does; there is no pointer/file
+crash window to reconcile. The acceptance test starts two concurrent
+creations and requires exactly one success and one unique-constraint
+rejection.
+
+### 7.4 dispatch protocol and crash recovery
+
+The lease/CAS contract cannot establish whether an external request executed.
+Dispatch therefore uses durable attempt states:
+
+1. **Intent first.** Before provider submission, commit an attempt row
+   (`state=dispatched`, with `goal_id`, `continuation_seq`, `lease_epoch`,
+   `execution_generation`) in its own transaction.
+2. **Ack.** On provider acceptance, flip to `acked` and store
+   `provider_request_ref` when the provider returns one.
+3. **Settle.** When the turn settles, record the typed outcome and
+   per-request usage, and mark `settled`.
+4. **Recover.** On lease recovery, inspect unfinished attempts:
+   - `pending` (never submitted): mark `cancelled`; automatic retry is
+     allowed for this class only.
+   - `dispatched` or `acked` without settle: mark `ambiguous`, transition the
+     goal to `paused` with reason `reconcile`, and emit `reconcile_paused`.
+     Ambiguous attempts are never automatically re-executed. `/goal resume`
+     continues from the next continuation sequence and keeps the ambiguous
+     attempt as history; re-running the same work is a human decision.
+
+P0 acceptance test: a fake provider accepts the request, the daemon is killed
+before ack/settle, and recovery must pause with a reconcile reason and a
+provider request count of exactly one — no re-dispatch.
 
 ## 8. lifecycle and execution semantics
 
@@ -462,28 +589,61 @@ routing.
 The objective is injected as an escaped internal context item with source
 `goal`, clearly marked as user data. It is not rewritten as a synthetic user
 message, and the original `/goal` command is not sent as an ordinary provider
-turn.
+turn. That first injection and every continuation's refreshed steering are
+defined in 9.3.
 
 ### 8.3 safe-boundary continuation
 
-After a goal-owned turn completes, the daemon may enqueue one continuation only
+The queue processor emits one typed outcome per scheduling boundary:
+
+```text
+TurnOutcome {
+  turn_id
+  origin: user | goal | command | hub
+  goal_id: present for goal-owned turns
+  status: ok | cancelled | error
+  error: bounded detail when status=error
+  request_usage: per-provider-request usage records
+}
+```
+
+Bare `turn_completed` flags are not eligibility evidence: they also fire after
+cancellation and exceptions (`queue_processor.py:1500`) and for slash-command
+emissions (`kollabor/state/local.py:2374`). Only `origin=goal, status=ok`
+outcomes drive continuation. `cancelled` maps to a pause with reason
+`cancelled`; `error` follows the error policy in 8.6.
+
+After a goal-owned `ok` outcome, the daemon may enqueue one continuation only
 when all are true:
 
-- the GoalRecord is still `active` and the goal ID/version/lease match;
+- the GoalRecord is still `active` and the goal ID/version/lease/epoch match;
 - the current turn has fully completed;
 - no tool call, background job, or approval is pending;
 - the input queue has no user message waiting;
 - no newer session command has invalidated the continuation;
 - the provider/runtime is healthy and within quota/budget; and
-- no other goal continuation is in flight for the session.
+- no other goal continuation is in flight for the conversation.
 
-The check and claim are one guarded operation. A user message arriving before
-dispatch wins over the continuation: cancel the pending continuation, leave the
-goal active, and route the user message through the normal hook pipeline. The
-next safe boundary may schedule another goal turn.
+The check and claim are one guarded operation, re-evaluated after acquiring
+the existing turn lock — not at outcome-emission time — so a user message or
+command arriving during processing wins before dispatch.
+
+Settle-driven wake: when a pending tool batch, approval, or background job
+tied to a goal-owned turn settles, the daemon runs the same guarded
+eligibility check. An active goal must never sleep indefinitely waiting for a
+periodic tick.
+
+The Hub continuation path (`kollabor/llm/message_handler.py`) routes through
+the same eligibility check as ordinary queue processing; it may not bypass it.
+
+A user message arriving before dispatch wins over the continuation: cancel the
+pending continuation, leave the goal active, and route the user message
+through the normal hook pipeline. The next safe boundary may schedule another
+goal turn.
 
 Every continuation carries `goal_id`, `record_version`, `continuation_seq`,
-`session_id`, and `turn_id`. A stale completion cannot update a newer goal.
+`conversation_uid`, `lease_epoch`, `execution_generation`, and `turn_id`. A
+stale completion cannot update a newer goal.
 
 ### 8.4 progress and no-progress stop
 
@@ -495,9 +655,18 @@ Progress is one of:
 
 Assistant prose, a repeated plan, a status restatement, or a failed observation
 without a state change is not progress. The runtime canonicalizes the blocker
-key. Three consecutive goal turns with the same blocker and no new evidence
+key. Evidence is deduplicated: an evidence reference already recorded for the
+goal never counts as new evidence, so repeated successful reads of the same
+artifact cannot present as progress. Three consecutive goal turns with the
+same canonical blocker and no new evidence, or six consecutive goal turns
+cycling between at most two canonical blockers with no new evidence,
 transition to `blocked`, append the reason, and stop automatic continuation.
 The user can resolve the blocker and explicitly `/goal resume`.
+
+Independent of blockers and budgets, `auto_turn_limit` (default 40) and
+`auto_time_limit_s` (default 7200) stop the goal as `budget_limited` with
+reason `auto_turn_limit`/`auto_time_limit` when reached. These defaults bound
+every goal even when no token budget is set.
 
 ### 8.5 completion authority
 
@@ -511,19 +680,46 @@ contain:
 - the acceptance claims each reference supports; and
 - any linked TaskLedger IDs and their terminal status.
 
+Evidence provenance and acceptance verification are separate checks:
+
+- **Provenance (deterministic, phase 1).** Every evidence reference must be
+  produced by a tool execution inside a goal-owned attempt. The runtime
+  records provenance (`attempt_id`, tool-result id) itself; the model's claim
+  alone never establishes it.
+- **Freshness (deterministic, phase 1).** Evidence produced before the last
+  file-mutating tool call of its turn is stale: the runtime compares its own
+  recorded tool-call order and rejects it. Artifact checksums are verified
+  against the goal artifact store at completion time.
+- **Verification (declared, phase 1; checkers, phase 2).** Phase 1 defines no
+  general checker proving that a test output establishes the objective. When
+  the objective admits no registered deterministic check, completion is
+  written with `completion_declared=true`, displayed as
+  `complete (model-declared)`, and recorded as such in the event. It is never
+  presented as verified.
+
 The runtime rejects completion when the evidence is empty, inaccessible,
-stale/indirect, inconsistent with the current scope, or attached linked tasks
-remain nonterminal. It must perform a final audit against the current
-worktree/external state before writing `complete`.
+stale/indirect, inconsistent with the current scope, not attributable to a
+goal-owned attempt, or attached linked tasks remain nonterminal. Completion
+controls arriving mid-batch are held and committed only after the entire tool
+batch settles; the model cannot complete a goal while a tool that could
+invalidate the evidence is still running.
 
 No completion may be inferred from the words “done”, a near-exhausted budget,
 absence of an obvious error, or a provider's final prose alone.
 
 ### 8.6 budget, quota, and errors
 
-- `token_budget` is optional and positive. If set, enforce it using trusted
-  provider usage at each turn and account for the in-flight turn before
-  transitioning to `budget_limited`.
+- `token_budget` is optional and positive. Usage is accounted per provider
+  request, not per turn: a goal turn may issue several provider requests (the
+  `queue_processor.py` tool loop re-prompts after every tool batch), each
+  contributing its own usage delta.
+- The budget is a dispatch gate, not a mid-turn kill: before each dispatch,
+  if `tokens_used >= token_budget`, transition to `budget_limited` instead of
+  dispatching. Documented overshoot is therefore bounded by the requests of
+  the turn already in flight when the limit was crossed.
+- Budgets are total ceilings across pause/resume. `/goal resume --budget N`
+  replaces the ceiling and is rejected when `N <= tokens_used`; resume
+  without `--budget` keeps the remaining original ceiling.
 - `tokens_used` is nullable when a provider does not report usage. The service
   must not display an invented zero. A configured hard budget with unavailable
   usage pauses safely as `usage_limited` rather than over-running silently.
@@ -555,10 +751,16 @@ GoalControl {
 }
 ```
 
-The envelope may be produced by a provider-native tool call or structured
-response metadata, but it must be normalized before the state store sees it.
-Text scraping is forbidden. The runtime validates goal ID, version, scope,
-evidence, permissions, and linked tasks before mutating state.
+There is exactly one reporting surface: a `goal_report` tool registered
+through the existing unified tool pipeline (`register_plugin_tag` +
+`register_plugin_handler` returning `ToolExecutionResult` for XML-tool
+providers; the equivalent native tool registration for native-tool
+providers). Both paths normalize to the same `GoalControl`; no per-adapter
+goal protocols. Because it runs through the real tool pipeline, hooks,
+permissions, and approvals apply to goal reports like any other tool.
+Text scraping is forbidden. The runtime validates goal ID, version,
+generation, epoch, scope, evidence provenance, permissions, and linked tasks
+before mutating state.
 
 If a provider profile cannot produce a typed control, Kollab must fail goal
 creation with a clear capability message or run in an explicitly non-running
@@ -588,11 +790,46 @@ Required cases:
    attachments;
 2. image-only `/goal`: rejected because the phase-1 objective has no textual
    condition, with no bytes written to logs or Hub messages;
-3. mixed text/image `/goal`: objective is the text projection and the image is
-   represented by a scoped artifact ID/media type/checksum;
+3. mixed text/image `/goal`: before creation is acknowledged, pasted image
+   payloads are promoted from the process-local `EphemeralImageStore`
+   (`message_content.py:56`) into `goals/artifacts/<sha256>.<ext>`; the
+   objective is the text projection and the image is represented by the
+   scoped artifact checksum/media type. Goal-owned turns rehydrate the bytes
+   through the provider's existing image resolver. A missing or
+   checksum-mismatched artifact at rehydration is a hard error: the turn is
+   not dispatched, the goal pauses with `artifact_missing`, and the reference
+   is never silently dropped while the goal continues;
 4. ordinary text/image user turns during a goal: original structured content
    reaches the provider boundary unchanged, while goal matching/continuation
    uses only the safe text projection.
+
+### 9.3 per-turn goal context and steering
+
+Section 8.2 injects the objective once at creation; that item goes stale as
+state changes. Codex solves this with an explicit continuation template and
+steering module; Kollab does the same through one defined channel:
+
+- every goal-owned turn — first and each continuation — injects exactly one
+  refreshed internal context item with source `goal`, rendered from the live
+  GoalRecord immediately before dispatch. It is never a synthetic user
+  message, and the original `/goal` command text is never re-sent as a user
+  turn. The context item is the entire guidance channel.
+- the item carries: the objective verbatim (escaped), status, turn N of
+  `auto_turn_limit`, tokens used / budget, last reason or blocker with
+  no-progress count, evidence count with the dedup note, linked task states,
+  and the standing policy: the objective is user data, not a higher-priority
+  instruction; current worktree/external state is authoritative; status
+  restatement is not progress; completion requires `goal_report` with
+  evidence produced inside this goal.
+- the `goal_report` tool description restates the same contract, so the
+  rules remain discoverable even if the context item is truncated by
+  context-window pressure.
+- user messages interleave normally and win per 8.3; steering is additive,
+  never a barrier between the user and the model.
+
+Acceptance gate: every goal-owned provider request contains the goal context
+item with the turn counter matching `continuation_seq`, and no synthetic user
+message carries the objective.
 
 ## 10. hooks, events, and UX
 
@@ -636,8 +873,9 @@ They do not poll provider sessions or infer state from Hub roster messages.
 
 ### 10.3 interruption and clear UX
 
-`/goal pause` acknowledges “pause requested” if a tool is running and records
-`paused` only at the safe boundary. `/goal clear` follows the same rule,
+`/goal pause` records the `pause_requested` intent durably at request time —
+immediately, in its own transaction — and applies `paused` at the next safe
+boundary. `/goal clear` follows the same rule,
 stops any not-yet-dispatched continuation, requests cooperative tool
 cancellation where supported, and retains the audit trail. Ctrl-C may request
 the same pause/clear behavior but must not erase state.
@@ -646,19 +884,76 @@ the same pause/clear behavior but must not erase state.
 
 The implementation should follow these seams, in order:
 
-1. `kollabor/state/goal_store.py`: record, event, lock, index, lease, CAS,
-   recovery, redaction, and isolated test store.
-2. `kollabor/goals/service.py`: state transitions, evidence audit, budget/
-   blocker policy, task links, and guarded continuation decisions.
-3. `kollabor/commands/system_commands/handlers/goal.py` plus registry wiring:
-   raw remainder parsing, command errors, and status rendering.
-4. Existing StateService/LLMService integration: goal context, turn identity,
-   queue-idle guard, user-input priority, and attached-daemon routing.
-5. Provider adapter normalization for `GoalControl`.
-6. TUI/status event rendering only after the daemon behavior is proven.
+1. Durable conversation identity: persist `conversation_uid` in conversation
+   save metadata, propagate it through `resume_conversation()`'s session-ID
+   rotation (`kollabor/state/local.py:2453`), expose it on StateService.
+2. `kollabor/state/goal_store.py`: SQLite schema, migrations, lease/epoch/CAS,
+   attempt states, recovery, redaction, and isolated test store.
+3. `kollabor/goals/service.py`: state transitions, evidence provenance/
+   freshness checks, budget/blocker policy, task links, and guarded
+   continuation decisions. GoalService owns policy and state only; execution
+   stays on the existing QueueProcessor path — there is no second
+   provider-calling loop.
+4. `kollabor/commands/system_commands/handlers/goal.py` plus registry wiring:
+   raw remainder parsing, command errors, status rendering, and daemon-side
+   control operations available during processing.
+5. Existing StateService/LLMService/QueueProcessor integration: goal context,
+   typed TurnOutcome emission, queue-idle guard under the turn lock,
+   user-input priority, settle-driven wake, and attached-daemon routing.
+6. `goal_report` tool registration through the unified tool pipeline and
+   `GoalControl` normalization.
+7. TUI/status event rendering only after the daemon behavior is proven.
 
 Do not put goal state in `plugins/hub/plugin.py`, duplicate TaskLedger's task
 methods, or add a second path that calls providers outside the current queue.
+
+### file manifest
+
+New files:
+
+```text
+kollabor/state/goal_store.py                     SQLite GoalStore: schema,
+                                                 events, attempts, lease/
+                                                 epoch/CAS, recovery
+kollabor/goals/service.py                        GoalService: transitions,
+                                                 evidence provenance/
+                                                 freshness, budget/blocker
+                                                 policy, guarded continuation,
+                                                 goal_report handler
+                                                 (vault_write pattern)
+kollabor/commands/system_commands/handlers/
+  goal.py                                        /goal command handler,
+                                                 daemon-side control ops,
+                                                 status/history rendering
+tests/unit/test_goal_store.py                    store, concurrency, crash
+                                                 recovery (P0 harness)
+tests/unit/test_goal_service.py                  state machine, evidence,
+                                                 budget/blocker policy
+tests/tmux/specs/goal-command.json               live command-surface spec
+```
+
+Modified files:
+
+```text
+kollabor/state/local.py                          conversation_uid propagation
+                                                 through resume_conversation;
+                                                 goal-control commands ahead
+                                                 of the is_processing gate;
+                                                 image-bearing command parsing
+kollabor_ai conversation logger / save metadata  persist conversation_uid
+kollabor_agent/queue_processor.py                typed TurnOutcome emission
+                                                 at the scheduling boundary
+kollabor/llm/message_handler.py                  hub continuation path runs
+                                                 the same eligibility check
+kollabor/llm/llm_coordinator.py                  goal context injection
+                                                 (9.3), queue-idle guard
+                                                 under the turn lock,
+                                                 settle-driven wake
+```
+
+Data (not code): `<project-scoped-kollab-data>/goals/goals.db` and
+`goals/artifacts/`. Docs: a `docs/features/` page ships with phase 1, not
+phase 0.
 
 ## 12. acceptance and verification plan
 
@@ -701,6 +996,38 @@ configuration. They must not spawn agents or make paid model calls.
 - verify Hub task links do not mutate TaskLedger state and nonterminal linked
   tasks block completion.
 
+### round-3 gates (P0/P1 acceptance criteria)
+
+- crash after provider acceptance but before local ack/settle: recovery marks
+  the attempt ambiguous, pauses with a reconcile reason, and the fake
+  provider's request count stays at one;
+- two concurrent goal creations against the real store: exactly one commits,
+  the loser receives a unique-constraint rejection;
+- `/resume` into another conversation while a goal is active, then back: the
+  goal stays owned by its `conversation_uid`, status names the owning
+  conversation while switched away, and control returns on switch-back;
+- `/goal pause` and `/goal clear` submitted through the real RPC path while a
+  turn is processing: the intent is durably recorded immediately, applied at
+  the next boundary, and no continuation dispatches afterwards;
+- alternating blockers (A/B/A/B over six turns) and default turn/time limits
+  each stop the goal with no token budget set;
+- a multi-provider-request turn accounts per-request usage; a hard budget at
+  the boundary stops the next dispatch instead of a mid-turn kill;
+- a pasted-image goal: the artifact is promoted before the creation ack,
+  resolves in a fresh process, and a deleted artifact pauses with
+  `artifact_missing` rather than silently continuing;
+- a cancelled goal turn emits a `cancelled` outcome, produces no
+  continuation, and leaves the goal paused rather than restarted;
+- a checker-less objective completes with the `model-declared` label in
+  status and events;
+- a completion control carrying a pre-pause `execution_generation` is
+  rejected after resume;
+- a pending background job settling with no user input triggers the
+  eligibility check within one event-loop turn;
+- every goal-owned provider request carries the refreshed `goal` context item
+  (9.3) with the turn counter matching `continuation_seq`, and no synthetic
+  user message carries the objective.
+
 ### multimodal and redaction tests
 
 - text-only, image-only, and mixed `/goal` inputs;
@@ -728,9 +1055,11 @@ The handoff must include:
 
 ### phase 0: harness and store proof
 
-Build only the isolated GoalStore/service state machine, fake-provider control,
-concurrency/recovery tests, and command parser contract. No automatic real
-provider continuation.
+Build only the durable conversation identity plumbing, the SQLite GoalStore
+(records/events/attempts, lease epochs, generations), the service state
+machine, fake-provider control, the dispatch/recovery harness with the P0
+crash test, and the command parser contract. No automatic real provider
+continuation.
 
 ### phase 1: local durable goal
 
@@ -1023,38 +1352,176 @@ policy is intentionally deferred rather than guessed.
 
 disposition: fixed in sections 5 and 13.
 
-## 17. final review recommendation
+## 17. adversarial review round 3 — implementation-readiness attack
 
-The contract is suitable for phase-0 implementation only if the P0/P1 gates in
-round 2 are treated as acceptance criteria, not future polish. The recommended
-build order is GoalStore and fake-provider harness first, then command wiring,
-then daemon continuation, then TUI rendering.
+This pass verified the round-2 "fixed" dispositions against live code paths
+with isolated probes and a storage simulation. It found eight material gaps
+plus two omissions; all are now contract requirements above, with their
+required tests in the round-3 gates. Design guidance adopted alongside them:
+GoalService is policy and state transitions only, execution stays on the
+existing QueueProcessor path; one typed `goal_report` tool through the
+existing tool infrastructure instead of per-adapter protocols; execution
+generation is separate from record versions changed by accounting or lease
+renewal; uncertain crash recovery pauses safely, and automatic recovery
+exists only where execution can be reconciled.
+
+### R3-1 — P0 — lease/CAS cannot decide duplicate execution
+
+- who: daemon and provider;
+- what: persisting dispatch intent does not establish whether an external
+  request executed; daemon A submits and crashes before recording the
+  result, daemon B retries after lease expiry;
+- where: sections 7.2 and 8.3 as previously written;
+- why: duplicate provider turns repeat paid or destructive work;
+- required change: durable attempt states, owner fencing, ambiguous attempts
+  recover as paused pending reconciliation, automatic retry only when
+  non-execution is established;
+- required test: crash after provider acceptance but before local
+  acknowledgement; recover without repeating the operation.
+
+disposition: fixed in 6.1, 6.4, 7.2 (epoch fencing), 7.4, and the round-3
+gates.
+
+### R3-2 — P1 — shared index.json has a reproduced lost-update race
+
+- what: one shared `index.json` guarded by separate per-session advisory
+  locks let two concurrent writers each add a pointer and overwrite each
+  other — two successful writers left one persisted pointer in simulation;
+  separate record/event/index writes also lacked an atomic commit boundary;
+- required change: transactional storage with a uniqueness constraint on
+  unfinished goals per session, or per-session state files with specified
+  crash recovery at every write boundary.
+
+disposition: fixed in 7.1/7.3 — SQLite with a partial unique index replaces
+the JSON layout. Round 3's simulation is the code-level proof the original
+escape hatch anticipated.
+
+### R3-3 — P1 — stable session identity is a prerequisite, not a narrow choice
+
+- what: `resume_conversation()` deliberately generates a new session ID
+  (`kollabor/state/local.py:2453`); context switching replaces conversation
+  history within one daemon; goals keyed to the rotating identity would
+  disappear or follow the wrong conversation;
+- required change: durable conversation identity plus explicit behavior for
+  reconnect, `/resume`, session reset, context switching, and opening the
+  same saved conversation twice;
+- required test: switch contexts and resume saved history while a goal
+  exists; prove exactly which conversation owns it.
+
+disposition: fixed in 6.1, 6.5, 11 seam 1, and the round-3 gates.
+
+### R3-4 — P1 — the input path cannot deliver the promised controls
+
+- what: `send_message()` rejects input while processing before parsing
+  commands (`local.py:2236`) — isolated probes showed `/goal pause`, `/goal
+  clear`, and `/goal show` all returning "turn already in flight"; the same
+  method excludes image-bearing messages from command parsing
+  (`local.py:2275`), so a mixed `/goal` probe reached ordinary LLM input;
+- required change: daemon-side goal control operations that remain available
+  during processing, slash-command routing to them, structured attachments
+  preserved, and stop requests durably recorded immediately even when the
+  running tool must finish cooperatively.
+
+disposition: fixed in 5 (control-command rule), 10.3, 11 seam 4, and the
+round-3 gates.
+
+### R3-5 — P1 — evidence audit promised more than {kind, ref, claim} verifies
+
+- what: a valid test-output reference does not establish that it proves the
+  objective, covers every requirement, or postdates the last relevant edit;
+  deterministic checking was deferred to phase 2, leaving nothing verifiable
+  in phase 1;
+- required change: separate evidence provenance from acceptance
+  verification; define supported deterministic checks and freshness rules
+  now; label unrestricted natural-language completion as model-declared with
+  evidence unless a human or defined checker verifies it; commit completion
+  only after the entire tool batch settles.
+
+disposition: fixed in 6.1 (`completion_declared`), 8.5, and the round-3
+gates.
+
+### R3-6 — P1 — bounded execution and hard budgets were not actually specified
+
+- what: three consecutive identical blockers do not stop alternating
+  blockers or repeated successful reads presented as progress; budgets were
+  optional with no goal-wide turn or time limit; per-turn accounting cannot
+  guarantee a token ceiling because Kollab makes multiple provider requests
+  inside one turn (`queue_processor.py:821`);
+- required change: independent automatic turn/time limits, evidence
+  deduplication, per-request accounting, admission checks, documented
+  bounded overshoot, and explicit resumed-budget semantics.
+
+disposition: fixed in 6.1 (`auto_turn_limit`/`auto_time_limit_s`), 8.4, 8.6,
+and the round-3 gates.
+
+### R3-7 — P1 — pasted-image references do not survive restart
+
+- what: the existing input image store is explicitly process-local
+  (`message_content.py:56`); a reference resolving in its original store
+  fails in a fresh one, so "reuse the existing image-store API" cannot
+  satisfy durable attachments;
+- required change: promote into durable artifact storage before
+  acknowledging goal creation, rehydrate through the provider's image
+  resolver, and define missing-artifact behavior.
+
+disposition: fixed in 7.1 layout, 9.2 case 3, and the round-3 gates.
+
+### R3-8 — P1 — the continuation boundary needs a concrete integration contract
+
+- what: `turn_complete` also follows cancellation and exceptions
+  (`queue_processor.py:1490`) and slash-command emissions
+  (`local.py:2374`); it is not evidence that a successful goal turn reached
+  an idle scheduling boundary, and the Hub continuation path
+  (`kollabor/llm/message_handler.py:367`) was uncovered;
+- required change: typed outcomes carrying turn origin, goal identity,
+  cancellation/error status, and request usage; recheck eligibility after
+  acquiring the existing turn lock; cover Hub continuation as well as
+  ordinary queue processing.
+
+disposition: fixed in 8.3 and the round-3 gates.
+
+### R3-9 — P2 — two omissions
+
+- cleared goals must remain inspectable, but no history command existed:
+  `/goal history [N]` added in section 5;
+- pending background work needs a completion-triggered eligibility check so
+  an active goal cannot remain asleep indefinitely: settle-driven wake
+  added in 8.3.
+
+disposition: fixed in 5 and 8.3; both covered by the round-3 gates.
+
+## 18. final review recommendation
+
+Round 3's verdict was "revise before implementation"; this revision folds its
+contracts in. The contract is suitable for phase-0 implementation only if the
+P0/P1 gates in rounds 2 and 3 are treated as acceptance criteria, not future
+polish. The recommended build order is conversation identity and the SQLite
+GoalStore with the attempt/recovery harness first, then command wiring and
+daemon-side controls, then typed-outcome continuation, then TUI rendering.
 
 The spec is not implementation proof. Before calling the feature complete,
 verify the real attached-daemon path, event-hook consumers, provider boundary,
 restart/recovery, and isolated no-paid-call test evidence listed in section 12.
 
-## 18. unresolved choices that must not be guessed during implementation
+## 19. unresolved choices that must not be guessed during implementation
 
-These are narrow implementation decisions, not permission to expand scope:
+These are narrow implementation decisions, not permission to expand scope.
+Resolved by round 3 and no longer open: session identity (`conversation_uid`,
+6.5), storage format (SQLite, 7.1), attachment durability (goal artifact
+store, 9.2), and the reporting surface (single `goal_report` tool, 9.1).
 
-- choose the exact stable session ID source already owned by StateService/
-  daemon attach; do not derive it from PID or TUI instance;
-- choose the existing artifact/image-store API for attachment refs; do not add a
-  parallel byte store;
-- choose whether the provider adapter uses a hidden tool or structured response
-  envelope, but normalize both to the same `GoalControl` contract;
+Still open:
+
 - choose the existing event-bus event type/serialization while preserving the
   event fields and redaction rules above;
-- choose JSON-file storage as the default phase-1 pattern unless a code-level
-  concurrency test proves SQLite is required; changing storage must not change
-  the external state machine or acceptance tests.
+- choose SQLite pragma/migration details (WAL settings, schema versioning)
+  without changing the external state machine or acceptance tests.
 
 Anything outside these choices requires a new design review, especially global
 goal listing, adoption, child goals, remote execution, evaluator-model billing,
 or changes to TaskLedger semantics.
 
-## 19. limitations
+## 20. limitations
 
 - Provider behavior and public documentation can drift; retain the installed
   command/version evidence when implementation begins.
@@ -1065,3 +1532,7 @@ or changes to TaskLedger semantics.
 - The current Kollab repository has no live `/goal` implementation. This file
   specifies the smallest safe design and the proof required; it does not claim
   that any goal loop is already running.
+- Round 3 verified input routing, image lifetime, and the JSON storage race
+  with isolated probes; no live goal implementation or paid provider
+  execution has been tested. The cited line numbers are snapshots of
+  2026-09-20 and will drift.

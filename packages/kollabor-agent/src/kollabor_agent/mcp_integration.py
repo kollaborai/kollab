@@ -100,6 +100,7 @@ class MCPServerConnection:
     """Manages a connection to an MCP server via stdio."""
 
     DEFAULT_REQUEST_TIMEOUT = 300.0
+    DEFAULT_STARTUP_TIMEOUT = 15.0
 
     def __init__(
         self,
@@ -108,12 +109,14 @@ class MCPServerConnection:
         cwd: Optional[Path] = None,
         extra_env: Optional[dict[str, str]] = None,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
     ):
         self.server_name = server_name
         self.command = command
         self.cwd = cwd
         self.extra_env = extra_env or {}
         self.request_timeout = request_timeout
+        self.startup_timeout = startup_timeout
         self.process: Optional[asyncio.subprocess.Process] = None
         self.initialized = False
         self._read_buffer = ""
@@ -161,7 +164,7 @@ class MCPServerConnection:
 
         logger.debug(f"Sending initialize request to {self.server_name}")
         try:
-            response = await self._send_request(request)
+            response = await self._send_request(request, timeout=self.startup_timeout)
         except MCPRequestTimeoutError:
             response = None
 
@@ -231,7 +234,7 @@ class MCPServerConnection:
         }
 
         try:
-            response = await self._send_request(request)
+            response = await self._send_request(request, timeout=self.startup_timeout)
         except MCPRequestTimeoutError:
             return []
         if response and "result" in response:
@@ -513,6 +516,11 @@ class MCPIntegration:
         self.mcp_servers: Dict[str, Dict[str, Any]] = {}
         self.tool_registry: Dict[str, Dict[str, Any]] = {}
         self.server_connections: Dict[str, MCPServerConnection] = {}
+        # Connections are tracked while they are being established as well as
+        # after they are registered.  ESC cancellation must be able to close a
+        # server that is still blocked in initialize/tools-list.
+        self._active_connections: set[MCPServerConnection] = set()
+        self._cancel_requested = False
         self.event_bus = event_bus
         self.user_token = user_token
         self.session_id = session_id
@@ -585,7 +593,7 @@ class MCPIntegration:
 
         if (
             "command" not in config
-            or not config["command"]
+            or not isinstance(config["command"], str)
             or not config["command"].strip()
         ):
             errors.append(f"{server_name}: Missing or empty 'command' field")
@@ -606,6 +614,12 @@ class MCPIntegration:
             except ValueError as e:
                 errors.append(f"{server_name}: Invalid command format: {e}")
 
+        if "args" in config and (
+            not isinstance(config["args"], list)
+            or any(not isinstance(arg, str) for arg in config["args"])
+        ):
+            errors.append(f"{server_name}: 'args' field must be an array of strings")
+
         # Check optional field types
         if "enabled" in config and not isinstance(config["enabled"], bool):
             errors.append(
@@ -616,6 +630,32 @@ class MCPIntegration:
             errors.append(f"{server_name}: 'env' field must be an object")
 
         return errors
+
+    @staticmethod
+    def _command_from_config(config: Dict[str, Any]) -> Optional[str]:
+        """Build the command line used to launch a configured MCP server.
+
+        Older configs put executable arguments directly in ``command`` while
+        newer configs keep them in an ``args`` array. Preserve the old form
+        and append the new form with shell-safe quoting so the subprocess
+        launcher receives both.
+        """
+        command = config.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return None
+
+        command = command.strip()
+        args = config.get("args")
+        if args is None or args == []:
+            return command
+        if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
+            return None
+
+        try:
+            command_parts = shlex.split(command)
+        except ValueError:
+            return None
+        return shlex.join([*command_parts, *args])
 
     def _load_config_from_dir(self, config_dir: Path, config_type: str):
         """Load MCP config from a specific directory.
@@ -686,6 +726,10 @@ class MCPIntegration:
             logger.info("MCP disabled for this process; skipping discovery")
             return {}
 
+        if getattr(self, "_cancel_requested", False):
+            logger.info("MCP discovery cancelled before it started")
+            return {}
+
         # Emit discovery start event
         if self.event_bus:
             await self.event_bus.emit_with_hooks(
@@ -701,10 +745,13 @@ class MCPIntegration:
 
         # Connect to discovered local servers
         for server_name, server_info in list(discovered.items()):
+            if getattr(self, "_cancel_requested", False):
+                logger.info("MCP discovery cancelled while connecting local servers")
+                break
             if server_info.get("status") == "local":
                 # Extract command from manifest
                 manifest = server_info.get("manifest", {})
-                command = manifest.get("command")
+                command = self._command_from_config(manifest)
 
                 if command:
                     # Connect and register tools
@@ -732,12 +779,17 @@ class MCPIntegration:
 
         # Connect to configured stdio servers using MCP protocol
         for server_name, server_config in self.mcp_servers.items():
+            if getattr(self, "_cancel_requested", False):
+                logger.info(
+                    "MCP discovery cancelled while connecting configured servers"
+                )
+                break
             if not server_config.get("enabled", True):
                 logger.debug(f"Skipping disabled MCP server: {server_name}")
                 continue
 
             if server_config.get("type") == "stdio":
-                command = server_config.get("command")
+                command = self._command_from_config(server_config)
                 if command:
                     tools = await self._connect_and_list_tools(server_name, command)
                     discovered[server_name] = {
@@ -761,7 +813,7 @@ class MCPIntegration:
 
         return discovered
 
-    async def reload_mcp_servers(self) -> Dict[str, int]:
+    async def reload_mcp_servers(self) -> Dict[str, Any]:
         """Reload MCP configuration and reconnect enabled servers.
 
         This is the explicit hot-reload path used by `/mcp reload`. It
@@ -772,24 +824,111 @@ class MCPIntegration:
             Summary counts for configured, discovered, and reconnected
             servers after the reload.
         """
+        self._cancel_requested = False
+
         if not self._mcp_enabled():
             await self.shutdown()
+            await self._refresh_native_tools_after_reload()
             return {
                 "configured": len(self.mcp_servers),
                 "discovered": 0,
                 "reconnected": 0,
+                "failed": 0,
+                "failed_servers": [],
+                "cancelled": False,
             }
 
         await self.shutdown()
         self.mcp_servers.clear()
         self._load_mcp_config()
-        discovered = await self.discover_mcp_servers()
+        try:
+            discovered = await self.discover_mcp_servers()
+        finally:
+            # Discovery replaces the MCP registry. Refresh the native API
+            # snapshot after every reload, including partial/failed reloads,
+            # so removed or newly discovered tools cannot remain stale in the
+            # next LLM request.
+            await self._refresh_native_tools_after_reload()
+
+        configured_enabled = {
+            name
+            for name, config in self.mcp_servers.items()
+            if config.get("enabled", True)
+        }
+        reconnected = {
+            name
+            for name in configured_enabled
+            if (
+                connection := self.server_connections.get(name)
+            ) is not None
+            and connection.initialized
+        }
+        failed_servers = sorted(configured_enabled - reconnected)
+        cancelled = self._cancel_requested
+        self._cancel_requested = False
 
         return {
             "configured": len(self.mcp_servers),
             "discovered": len(discovered) if isinstance(discovered, dict) else 0,
-            "reconnected": len(self.server_connections),
+            "reconnected": len(reconnected),
+            "failed": len(failed_servers),
+            "failed_servers": failed_servers,
+            "cancelled": cancelled,
         }
+
+    async def _refresh_native_tools_after_reload(self) -> None:
+        """Refresh the native tool schema snapshot after MCP state changes.
+
+        ``discover_mcp_servers`` updates ``tool_registry`` but native API
+        requests consume the separate snapshot held by ``NativeToolsHandler``.
+        The LLM service is registered on the event bus after construction, so
+        resolving it here keeps all reload callers (tool, slash command, and
+        state service) on the same refresh path without coupling MCP to the
+        concrete handler class.
+        """
+        if self.event_bus is None or not hasattr(self.event_bus, "get_service"):
+            return
+
+        try:
+            llm_service = self.event_bus.get_service("llm_service")
+        except Exception as exc:
+            logger.debug("Unable to resolve LLM service after MCP reload: %s", exc)
+            return
+        if llm_service is None:
+            return
+
+        refresh = getattr(llm_service, "_load_native_tools", None)
+        if not callable(refresh):
+            native_tools = getattr(llm_service, "_native_tools", None)
+            refresh = getattr(native_tools, "load_tools", None)
+        if not callable(refresh):
+            return
+
+        try:
+            await refresh()
+            logger.info("Refreshed native tool schemas after MCP reload")
+        except Exception as exc:
+            # MCP connectivity remains useful even if the optional native
+            # schema refresh fails; the next request can retry loading it.
+            logger.warning("Failed to refresh native tools after MCP reload: %s", exc)
+
+    async def cancel_active_connections(self) -> None:
+        """Stop in-flight MCP work so an ESC request returns promptly."""
+        self._cancel_requested = True
+
+        connections: list[MCPServerConnection] = []
+        for connection in [
+            *self.server_connections.values(),
+            *getattr(self, "_active_connections", set()),
+        ]:
+            if not any(existing is connection for existing in connections):
+                connections.append(connection)
+
+        if connections:
+            await asyncio.gather(
+                *(connection.close() for connection in connections),
+                return_exceptions=True,
+            )
 
     def _push_env_mcp_connect(self, server_name: str, tool_count: int) -> None:
         """Push a capability env event for MCP server connection."""
@@ -909,6 +1048,7 @@ class MCPIntegration:
             cwd=self.workspace,
             extra_env=extra_env,
         )
+        self._active_connections.add(connection)
 
         # Fall back to the ambient env when the caller didn't pass an explicit
         # token/id. A mentiko chain-run agent is launched via application.py,
@@ -927,6 +1067,7 @@ class MCPIntegration:
             ]
 
         if not await connection.connect():
+            self._active_connections.discard(connection)
             logger.warning(f"Failed to connect to MCP server: {server_name}")
             if self.event_bus:
                 await self.event_bus.emit_with_hooks(
@@ -942,6 +1083,7 @@ class MCPIntegration:
         if not await connection.initialize():
             logger.warning(f"Failed to initialize MCP server: {server_name}")
             await connection.close()
+            self._active_connections.discard(connection)
             if self.event_bus:
                 await self.event_bus.emit_with_hooks(
                     EventType.MCP_SERVER_ERROR,
@@ -960,6 +1102,14 @@ class MCPIntegration:
 
         # List tools
         tools = await connection.list_tools()
+
+        # list_tools owns request timeout cleanup. A timed-out or cancelled
+        # connection has already been closed and must not be registered as
+        # successfully reconnected just because it returned an empty list.
+        if not connection.initialized:
+            await connection.close()
+            self._active_connections.discard(connection)
+            return []
 
         if not isinstance(tools, list):
             logger.warning("MCP server %s returned a non-list tool set", server_name)
@@ -1021,6 +1171,7 @@ class MCPIntegration:
 
         # Keep connection open for tool calls
         self.server_connections[server_name] = connection
+        self._active_connections.discard(connection)
 
         return valid_tools
 
@@ -1088,9 +1239,10 @@ class MCPIntegration:
         # For stdio servers, we can query capabilities
         if server_config.get("type") == "stdio":
             try:
-                result = await self._execute_server_command(
-                    server_config.get("command", ""), "--list-tools"
-                )
+                command = self._command_from_config(server_config)
+                if not command:
+                    return capabilities or ["unknown"]
+                result = await self._execute_server_command(command, "--list-tools")
                 if result:
                     # Parse tool list from output
                     tools = result.split("\n")
@@ -1169,7 +1321,7 @@ class MCPIntegration:
         if not connection or not connection.initialized:
             # Try to reconnect
             server_config = self.mcp_servers.get(server_name, {})
-            command = server_config.get("command")
+            command = self._command_from_config(server_config)
             if command:
                 await self._connect_and_list_tools(server_name, command)
                 connection = self.server_connections.get(server_name)
@@ -1236,7 +1388,7 @@ class MCPIntegration:
         Returns:
             Tool execution result
         """
-        command = server_config.get("command", "")
+        command = self._command_from_config(server_config) or ""
         if not command:
             return {"error": "No command specified for stdio server"}
 
@@ -1539,5 +1691,6 @@ class MCPIntegration:
                 logger.warning(f"Error closing MCP connection {server_name}: {e}")
 
         self.server_connections.clear()
+        self._active_connections.clear()
         self.tool_registry.clear()
         logger.info("MCP Integration shutdown complete")

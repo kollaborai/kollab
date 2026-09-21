@@ -293,12 +293,20 @@ class TerminalLLMChat:
         if not profile_name:
             try:
                 from kollabor_ai.loadout_manager import LoadoutManager
-                default_loadout = LoadoutManager(self.profile_manager, config=self.config).get_default()
+
+                default_loadout = LoadoutManager(
+                    self.profile_manager, config=self.config
+                ).get_default()
                 if default_loadout:
-                    loadout_manager = LoadoutManager(self.profile_manager, config=self.config)
+                    loadout_manager = LoadoutManager(
+                        self.profile_manager, config=self.config
+                    )
                     loadout, _ = loadout_manager.resolve(default_loadout)
                     if loadout:
-                        update_kwargs = {"model": loadout.model, "save_to_config": False}
+                        update_kwargs = {
+                            "model": loadout.model,
+                            "save_to_config": False,
+                        }
                         if loadout.temperature is not None:
                             update_kwargs["temperature"] = loadout.temperature
                         if loadout.effort:
@@ -311,7 +319,9 @@ class TerminalLLMChat:
                     else:
                         applied = False
                     if loadout and applied:
-                        self.profile_manager.set_active_profile(loadout.provider_profile, persist=False)
+                        self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
                         logger.info("Applied default loadout '%s'", loadout.name)
             except Exception as exc:
                 logger.warning("Could not apply default loadout: %s", exc)
@@ -460,7 +470,9 @@ class TerminalLLMChat:
                 if pool:
                     entry = pool.find(startup_identity)
                     desired_bundle = (getattr(entry, "agent_type", "") or "").strip()
-                    active_name = getattr(self.agent_manager, "active_agent_name", "") or ""
+                    active_name = (
+                        getattr(self.agent_manager, "active_agent_name", "") or ""
+                    )
                     if desired_bundle and desired_bundle != active_name:
                         if self.agent_manager.set_active_agent(desired_bundle):
                             self._startup_agent_reconciled = True
@@ -751,6 +763,47 @@ class TerminalLLMChat:
                 logger.info(
                     "LocalStateService initialized and registered as event bus service"
                 )
+
+                # === Goal layer (goal-command-harnesses spec) ===
+                # GoalService owns policy/state; GoalTurnDriver runs turns on
+                # the existing queue-processor path. Attach clients get the
+                # goal_service proxy only; the driver lives in the daemon.
+                if self.config.get("kollabor.goals.enabled", True):
+                    try:
+                        import socket
+
+                        from kollabor.goals.driver import GoalTurnDriver
+                        from kollabor.goals.service import GoalService
+                        from kollabor.state.goal_store import open_default_store
+
+                        self._goal_service = GoalService(
+                            open_default_store(),
+                            daemon_id=f"{socket.gethostname()}:{os.getpid()}",
+                        )
+
+                        def _publish_goal_state(**fields):
+                            from kollabor_tui.display_tap import publish_semantic
+
+                            # resolve_tap needs an event bus / renderer / tap
+                            # reachable from source — a literal string resolves
+                            # nothing and the event never reaches the socket
+                            publish_semantic(
+                                self.event_bus, "goal.state_changed", **fields
+                            )
+
+                        self._goal_service.set_state_publisher(_publish_goal_state)
+                        self.event_bus.register_service(
+                            "goal_service", self._goal_service
+                        )
+                        self._goal_driver = GoalTurnDriver(
+                            self._goal_service, self.llm_service
+                        )
+                        self.event_bus.register_service(
+                            "goal_driver", self._goal_driver
+                        )
+                        logger.info("goal service + driver registered")
+                    except Exception as e:
+                        logger.error(f"goal layer unavailable: {e}")
             except Exception as e:
                 logger.error(
                     f"failed to initialize LocalStateService: {e}", exc_info=True
@@ -1943,6 +1996,56 @@ class TerminalLLMChat:
                         )
                         if hasattr(self, "render_loop") and self.render_loop:
                             self.render_loop.request_render()
+
+                elif etype == "goal.state_changed":
+                    # Goal layer state from the daemon (spec 10.2): mirror
+                    # locally, surface lifecycle changes, request a render.
+                    goal_fields = (
+                        "goal_id",
+                        "status",
+                        "kind",
+                        "turn_count",
+                        "tokens_used",
+                        "token_budget",
+                        "last_reason",
+                        "objective",
+                        "conversation_uid",
+                    )
+                    state = getattr(self, "_remote_goal_state", None)
+                    if not isinstance(state, dict):
+                        state = {}
+                        self._remote_goal_state = state
+                    state.update({k: event.get(k) for k in goal_fields})
+                    if event.get("kind") in (
+                        "created",
+                        "paused",
+                        "resumed",
+                        "blocked",
+                        "usage_limited",
+                        "budget_limited",
+                        "complete",
+                        "cleared",
+                        "error",
+                        "reconcile_paused",
+                        "artifact_missing",
+                    ):
+                        reason = (
+                            f" — {event.get('last_reason')}"
+                            if event.get("last_reason")
+                            else ""
+                        )
+                        coordinator.display_message_sequence(
+                            [
+                                (
+                                    "system",
+                                    f"goal {event.get('goal_id', '?')} "
+                                    f"{event.get('status', '')}{reason}",
+                                    {"display_type": "info"},
+                                ),
+                            ]
+                        )
+                    if hasattr(self, "render_loop") and self.render_loop:
+                        self.render_loop.request_render()
 
                 elif etype == "permission_request":
                     if self._rpc_client is not None:

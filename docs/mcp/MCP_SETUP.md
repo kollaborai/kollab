@@ -1,7 +1,7 @@
 ---
 title: "MCP (Model Context Protocol) Setup Guide"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-09-20
 status: active
 ---
 # MCP (Model Context Protocol) Setup Guide
@@ -43,6 +43,10 @@ Edit `mcp_settings.json` and set `"enabled": true` for the servers you want to u
 ### 3. Restart Kollab
 
 Restart the application for MCP servers to be discovered and tools to be loaded.
+If Kollab is already running, use `/mcp reload` to reload the configuration and
+reconnect enabled servers. Use `/mcp` to open the manager or `/mcp show` to
+inspect current status. See [the command reference](../reference/commands.md)
+for all `/mcp` subcommands and manager keys.
 
 ## Configuration Structure
 
@@ -308,6 +312,14 @@ tail -f ~/.kollab/projects/*/logs/kollab.log
 # "Discovered 5 tools from filesystem server"
 ```
 
+You can also inspect the running session directly:
+
+```text
+/mcp
+/mcp show
+/mcp tools [server]
+```
+
 ### Test MCP Tools
 
 Start Kollab and ask the LLM to use MCP tools:
@@ -327,7 +339,7 @@ You: Search for "python async tutorial" using Brave Search
 **Solutions**:
 1. Check configuration file syntax: `cat ~/.kollab/mcp/mcp_settings.json | python -m json.tool`
 2. Verify `"enabled": true` for desired servers
-3. Restart Kollab
+3. Run `/mcp reload`, then check `/mcp show`
 4. Check logs for errors: `tail -f ~/.kollab/projects/*/logs/kollab.log`
 
 ### Issue: Server Fails to Start

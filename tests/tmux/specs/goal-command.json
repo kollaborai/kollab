@@ -1,0 +1,127 @@
+{
+  "name": "goal-command-surface",
+  "description": "Verifies the /goal command surface registers and renders daemon-side state (status, show, history, pause-without-goal) without dispatching any provider turn",
+  "config": {
+    "command": "bash -c 'KOLLAB_NO_KEYRING=1 python main.py --no-daemon'",
+    "app_init_sleep": 5,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 30
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Ready|\u25c8|kollab|\u276f",
+      "description": "app started"
+    },
+    {
+      "action": "section",
+      "label": "bare /goal shows empty status"
+    },
+    {
+      "action": "slash_command",
+      "command": "goal"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "no active goal"
+    },
+    {
+      "action": "section",
+      "label": "/goal show renders empty status"
+    },
+    {
+      "action": "slash_command",
+      "command": "goal show"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "no active goal"
+    },
+    {
+      "action": "section",
+      "label": "/goal history reports empty history"
+    },
+    {
+      "action": "slash_command",
+      "command": "goal history"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "no finished goals"
+    },
+    {
+      "action": "section",
+      "label": "/goal pause with no goal is clean, not a crash"
+    },
+    {
+      "action": "slash_command",
+      "command": "goal pause"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "no active goal"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "goal command error"
+    },
+    {
+      "action": "section",
+      "label": "unknown option rejected without guessing"
+    },
+    {
+      "action": "slash_command",
+      "command": "goal --frobnicate do things"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "unknown option"
+    }
+  ]
+}

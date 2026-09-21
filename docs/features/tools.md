@@ -1,7 +1,7 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-modified: 2026-08-06
+modified: 2026-09-20
 status: active
 ---
 # Tool Calling
@@ -428,7 +428,7 @@ File edit with diff:
 
 MCP tool result:
 ```
-[mcp:filesystem::read_file]
+[mcp:filesystem:read_file]
 Contents of /path/to/file.txt...
 ```
 

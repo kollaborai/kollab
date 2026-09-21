@@ -4,6 +4,7 @@ from .agent import AgentCommandHandler
 from .artifact import ArtifactCommandHandler
 from .context import ContextCommandHandler
 from .directory import DirectoryCommandHandler
+from .goal import GoalCommandHandler
 from .loadout import LoadoutCommandHandler
 from .login import LoginCommandHandler
 from .model import ModelCommandHandler
@@ -22,4 +23,5 @@ __all__ = [
     "LoginCommandHandler",
     "SetupCommandHandler",
     "LoadoutCommandHandler",
+    "GoalCommandHandler",
 ]

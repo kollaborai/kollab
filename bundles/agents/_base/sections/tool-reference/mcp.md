@@ -30,23 +30,37 @@ common servers:
   memory:      npx -y @modelcontextprotocol/server-memory
 
 slash commands:
-  /mcp                    show server status
-  /mcp show <server>      show server details and available tools
-  /mcp add                add new server (interactive)
-  /mcp remove <server>    remove server
+  /mcp                    open the interactive MCP manager
+  /mcp setup              open the interactive MCP manager
+  /mcp show               show server status
+  /mcp status             show server status (compatibility alias)
+  /mcp list               show server status (alias)
+  /mcp servers            show server status (alias)
+  /mcp tools [server]     show available tools
+  /mcp test <server>      test a server connection
+  /mcp enable <server>    enable a server in config
+  /mcp disable <server>   disable a server in config
+  /mcp reload             reload config and reconnect enabled servers; report failures
+  aliases: /mcps, /servers
+
+  there is no /mcp add or /mcp remove subcommand. Inside the manager:
+  g toggles global MCP, space toggles the selected server, a adds an
+  available server, d deletes a configured server, t tests, r reloads and
+  reports failures,
+  / filters, and esc exits.
 
 tool execution:
-  MCP tools appear in the tool list prefixed with the server name.
+  MCP tools appear in the tool list as mcp:server_name:tool_name.
   they integrate with the permission system -- agent prompts for approval
   based on the current /permissions setting.
 
-  example: mcp:filesystem::read_file reads a file via the filesystem server.
+  example: mcp:filesystem:read_file reads a file via the filesystem server.
 
 adding a new server:
   1. edit mcp_settings.json (global or project)
   2. add server entry with command, set enabled: true
   3. set any required env vars (API keys)
-  4. restart kollabor or use /mcp to verify connection
+  4. restart Kollab or use /mcp reload, then /mcp show to verify connection
 
 security:
   [ok] restrict filesystem paths to only what the agent needs
@@ -56,7 +70,7 @@ security:
 
 troubleshooting:
   - server not connecting? test command manually in shell
-  - tools not showing? check enabled: true and restart
+  - tools not showing? check enabled: true and run /mcp reload
   - permission denied? check /permissions setting and allowed paths
   - logs: ~/.kollab/projects/*/logs/kollab.log
   - requires node.js 18+: check with node --version

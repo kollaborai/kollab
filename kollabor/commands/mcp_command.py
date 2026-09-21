@@ -605,20 +605,37 @@ class MCPCommandHandler:
         reconnected = int(summary.get("reconnected", 0) or 0)
         configured = int(summary.get("configured", 0) or 0)
         discovered_count = int(summary.get("discovered", 0) or 0)
+        failed = int(summary.get("failed", 0) or 0)
+        failed_servers = summary.get("failed_servers", []) or []
+        cancelled = bool(summary.get("cancelled", False))
+        if not isinstance(failed_servers, list):
+            failed_servers = [str(failed_servers)]
+        failed = max(failed, len(failed_servers))
+        success = not failed and not cancelled
 
         lines: List[str] = []
-        lines.append("MCP Servers Reloaded")
+        lines.append(
+            "MCP Servers Reloaded" if success else "MCP Server Reload Incomplete"
+        )
         lines.append("=" * 40)
         lines.append("")
         lines.append(f"Reconnected {reconnected} server(s).")
         lines.append(f"Loaded {configured} configured server(s).")
         if discovered_count != configured:
             lines.append(f"Discovered {discovered_count} server definition(s).")
+        if failed:
+            lines.append(f"Failed {failed} server(s).")
+        if failed_servers:
+            lines.append(
+                f"Failed servers: {', '.join(str(name) for name in failed_servers)}"
+            )
+        if cancelled:
+            lines.append("Reload cancelled by user.")
 
         return CommandResult(
-            success=True,
+            success=success,
             message="\n".join(lines),
-            display_type="success",
+            display_type="success" if success else "error",
         )
 
     def _get_state_service(self) -> Any:
@@ -725,10 +742,9 @@ class MCPCommandHandler:
     ) -> CommandResult:
         """Enable or disable a specific MCP server via state_service.
 
-        Phase 4.5 step 7: state_service is the only path. Daemon writes
-        ~/.kollab/mcp/mcp_settings.json without hot-reloading the
-        server subprocesses -- users see a "Restart to apply" message.
-        Hot-reload is phase 4.6 work.
+        StateService writes ~/.kollab/mcp/mcp_settings.json without
+        restarting server subprocesses. `/mcp reload` applies the saved
+        change to the current runtime; restarting Kollab is also supported.
 
         Args:
             server_name: Name of server to toggle
@@ -779,9 +795,9 @@ class MCPCommandHandler:
     def _format_toggle_result(self, server_name: str, enable: bool) -> CommandResult:
         """Render the /mcp enable|disable success output.
 
-        Phase 4.5 step 7: ends with "Restart to apply" because hot-reload
-        is deferred to phase 4.6 -- a bare "Server is now connecting..."
-        would lie to the user about what just happened.
+        The config write is separate from reconnecting server subprocesses,
+        so the result names the explicit reload path instead of claiming the
+        server is already connected.
         """
         action_text = "enabled" if enable else "disabled"
         lines: List[str] = []
@@ -790,7 +806,7 @@ class MCPCommandHandler:
         lines.append("")
         lines.append(f"Server '{server_name}' has been {action_text}.")
         lines.append("")
-        lines.append("Restart kollab to apply this change.")
+        lines.append("Run /mcp reload to apply this change now, or restart Kollab.")
         return CommandResult(
             success=True, message="\n".join(lines), display_type="success"
         )

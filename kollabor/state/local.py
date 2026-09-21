@@ -265,6 +265,22 @@ class LocalStateService(StateService):
             metadata=metadata,
         )
 
+    def get_conversation_uid(self) -> str | None:
+        """Durable conversation identity for the goal layer (spec 6.5).
+
+        Survives `/resume` and session-ID rotation, unlike
+        `current_session_id` which is deliberately rotated on resume.
+        """
+        conv_mgr = getattr(self._llm_service, "conversation_manager", None)
+        getter = getattr(conv_mgr, "conversation_uid", None)
+        if getter is None and conv_mgr is not None:
+            meta = getattr(conv_mgr, "conversation_metadata", None) or {}
+            return meta.get("conversation_uid")
+        try:
+            return getter() if callable(getter) else getter
+        except Exception:
+            return None
+
     async def save_conversation(self, format: str = "transcript") -> str:
         """Format the conversation as a string.
 
@@ -2218,6 +2234,44 @@ class LocalStateService(StateService):
 
     # === Input ===
 
+    async def goal_command(self, text: str) -> dict[str, Any]:
+        """Execute one /goal command daemon-side (goal spec 5 + 10.2).
+
+        Attach clients route /goal input here via RPC: the daemon owns the
+        conversation identity, the goal store, and the driver, and its
+        goal.state_changed events stream back over the attach socket.
+        Returns the CommandResult fields for client-side rendering.
+        """
+        from datetime import datetime as _dt
+
+        from kollabor_events.models import SlashCommand
+
+        try:
+            registry = self._event_bus.get_service("command_registry")
+        except Exception:
+            registry = None
+        definition = (
+            registry.get_command("goal") if registry is not None else None
+        )
+        if definition is None or definition.handler is None:
+            return {"success": False, "message": "goal command unavailable", "display_type": "error"}
+        command = SlashCommand(
+            name="goal",
+            args=[],
+            raw_input=text,
+            timestamp=_dt.now(),
+        )
+        try:
+            result = await definition.handler(command)
+        except Exception as exc:
+            logger.warning("daemon-side goal command failed: %s", exc)
+            return {"success": False, "message": str(exc), "display_type": "error"}
+        return {
+            "success": bool(getattr(result, "success", False)),
+            "message": str(getattr(result, "message", "") or ""),
+            "display_type": str(getattr(result, "display_type", "info") or "info"),
+        }
+
     async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
@@ -2232,6 +2286,14 @@ class LocalStateService(StateService):
         llm = self._llm_service
         if llm is None:
             return {"accepted": False, "reason": "no llm service"}
+
+        # Goal commands are daemon-side state operations (goal spec 5):
+        # control subcommands must stay available while a turn is
+        # processing, and image-bearing /goal input must still reach
+        # command parsing with its attachments promoted durably.
+        goal_handled = self._try_goal_command(text, message)
+        if goal_handled is not None:
+            return goal_handled
 
         if getattr(llm, "is_processing", False):
             return {"accepted": False, "reason": "turn already in flight"}
@@ -2295,6 +2357,96 @@ class LocalStateService(StateService):
             asyncio.get_running_loop().create_task(coro)
 
         return {"accepted": True, "reason": ""}
+
+    def _goal_service(self):
+        event_bus = getattr(self, "_event_bus", None)
+        if event_bus is None:
+            return None
+        try:
+            return event_bus.get_service("goal_service")
+        except Exception:
+            return None
+
+    def _stage_goal_attachments(self, message) -> list[dict[str, Any]]:
+        """Promote pasted images into durable goal artifact storage (9.2).
+
+        The EphemeralImageStore is process-local; a goal must never
+        acknowledge creation with an attachment that dies with the process.
+        """
+        svc = self._goal_service()
+        if svc is None:
+            return []
+        refs = []
+        parts = message if isinstance(message, list) else []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "image_url":
+                continue
+            url = (part.get("image_url") or {}).get("url", "")
+            if not isinstance(url, str) or not url.startswith("data:image/"):
+                continue
+            try:
+                refs.append(svc.promote_image_attachment(url))
+            except Exception as exc:
+                logger.warning("goal attachment promotion failed: %s", exc)
+        if refs:
+            uid = self.get_conversation_uid()
+            if uid:
+                try:
+                    svc.stage_attachments(uid, refs)
+                except Exception as exc:
+                    logger.warning("goal attachment staging failed: %s", exc)
+        return refs
+
+    def _try_goal_command(self, text: str, message) -> dict[str, Any] | None:
+        """Route /goal input ahead of the is_processing gate.
+
+        Control subcommands (show/pause/resume/clear/history and bare
+        /goal) are pure state operations and work during a busy turn;
+        image-bearing /goal creates parse from the text projection with
+        attachments promoted before acknowledgement. Returns an RPC result
+        dict when handled, None to fall through to the normal path.
+        """
+        lowered = text.strip().lower()
+        is_goal = lowered.startswith("/goal ") or lowered.startswith("/goals ") or (
+            lowered in ("/goal", "/goals")
+        )
+        if not is_goal:
+            return None
+        words = text.strip().split(" ", 1)
+        sub = words[1].split(" ", 1)[0].lower() if len(words) > 1 else ""
+        is_control = sub in ("show", "pause", "resume", "clear", "history") or sub == ""
+        has_images = contains_image_content(message)
+        if not is_control and not has_images:
+            # text-only create: the normal slash path handles it
+            return None
+
+        llm = self._llm_service
+        busy = bool(getattr(llm, "is_processing", False))
+        if busy and not is_control:
+            return None  # create waits for the queue like any turn
+
+        if has_images:
+            self._stage_goal_attachments(message)
+
+        event_bus = getattr(self, "_event_bus", None)
+        parser = executor = None
+        if event_bus is not None:
+            try:
+                parser = event_bus.get_service("slash_parser")
+                executor = event_bus.get_service("command_executor")
+            except Exception:
+                parser = executor = None
+        if parser is None or executor is None:
+            return None
+        create_task = getattr(llm, "create_background_task", None)
+        command_coro = self._execute_slash_command(text, parser, executor)
+        if callable(create_task):
+            create_task(command_coro, name="rpc_goal_command")
+        else:
+            asyncio.get_running_loop().create_task(command_coro)
+        return {"accepted": True, "reason": "goal command"}
 
     async def _execute_hub_message(self, text: str, target: str, content: str) -> None:
         """Send one chat mention through Hub and publish a web turn."""

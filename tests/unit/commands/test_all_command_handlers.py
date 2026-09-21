@@ -760,6 +760,28 @@ class TestMCPCommandHandler(unittest.TestCase):
         assert result.success
         assert "Loaded 1 configured server(s)." in result.message
 
+    def test_mcp_reload_partial_failure_is_not_reported_as_success(self):
+        state_service = MagicMock()
+        state_service.reload_mcp_servers = AsyncMock(
+            return_value={
+                "configured": 2,
+                "discovered": 2,
+                "reconnected": 1,
+                "failed": 1,
+                "failed_servers": ["zai-mcp-server"],
+            }
+        )
+        app = MagicMock()
+        app.event_bus = _make_event_bus({"state_service": state_service})
+
+        handler = self._make_handler(mcp_integration=MagicMock(), app=app)
+        result = _safe_run(handler.handle_mcp(_make_slash_command("reload")))
+
+        _assert_result(result)
+        assert not result.success
+        assert "Reload Incomplete" in result.message
+        assert "zai-mcp-server" in result.message
+
 
 # ---------------------------------------------------------------------------
 # Plugin: HubPlugin (/hub)
