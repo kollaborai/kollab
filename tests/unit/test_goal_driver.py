@@ -278,6 +278,65 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.store.get(goal_id).status, "paused")
         self.assertEqual(self.store.get(goal_id).turn_count, 1)
 
+    def test_yielded_goal_wakes_after_interrupting_turn_settles(self):
+        """Settle-driven wake (10.3): user input mid-goal yields the loop;
+        when the queue drains, qp.on_turn_settled -> wake_yielded re-kicks
+        the goal and it completes a second turn."""
+        goal_id = self._create(auto_turn_limit=2)
+        driver, coord = self._make_driver(
+            turn_script=[[FakeResult("read", "part-1")], [FakeResult("read", "part-2")]]
+        )
+        original_continue = coord._continue_conversation
+
+        async def turn_then_user():
+            await original_continue()
+            # user message lands right after turn 1 settles
+            await coord._queue_processor.processing_queue.put("user msg")
+
+        coord._continue_conversation = turn_then_user
+        asyncio.run(driver.start(goal_id))
+        rec = self.store.get(goal_id)
+        self.assertEqual(rec.turn_count, 1)  # yielded, not stopped
+        self.assertEqual(rec.status, "active")
+        self.assertIn(goal_id, driver._yielded_goals)
+
+        # the interrupting user turn settles -> hook fires -> wake re-kicks
+        coord._continue_conversation = original_continue
+
+        async def run_wake():
+            # the interrupting user turn was processed (queue drained)
+            # before qp fires on_turn_settled
+            await coord._queue_processor.processing_queue.get()
+            driver.wake_yielded()  # qp's on_turn_settled fires here
+            await asyncio.sleep(0.05)  # let the background wake task run
+
+        asyncio.run(run_wake())
+        rec = self.store.get(goal_id)
+        self.assertEqual(rec.turn_count, 2)  # second turn ran
+        self.assertEqual(rec.status, "budget_limited")  # auto limit reached
+
+    def test_usage_flows_from_session_stats_to_tokens_used(self):
+        """Bug: finish_turn got no usage, tokens_used stayed NULL, the
+        budget gate could never fire. Driver must snapshot qp.session_stats
+        deltas and hand them to finish_turn."""
+        goal_id = self._create(token_budget=40.0, auto_turn_limit=5)
+        driver, coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])
+        qp = coord._queue_processor
+        qp.session_stats = {"total_input_tokens": 0, "total_output_tokens": 0}
+        # fake turn that spends tokens
+        original_continue = coord._continue_conversation
+
+        async def spending_turn():
+            await original_continue()
+            qp.session_stats["total_input_tokens"] += 40
+
+        coord._continue_conversation = spending_turn
+        asyncio.run(driver.start(goal_id))
+        rec = self.store.get(goal_id)
+        self.assertEqual(rec.tokens_used, 40.0)  # real spend recorded
+        self.assertEqual(rec.status, "budget_limited")
+        self.assertIn("token budget reached", rec.last_reason or "")
+
     def test_attachment_promotion_and_missing_pause(self):
         # promote → create with ref → artifact present: turn runs;
         # then delete artifact, resume → turn pauses hard

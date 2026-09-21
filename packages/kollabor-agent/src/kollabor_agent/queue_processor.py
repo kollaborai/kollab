@@ -568,6 +568,16 @@ class QueueProcessor:
                     self.message_display_service.display_cancellation_message()
             else:
                 logger.info("Finished processing queue")
+                # Settle-driven wake (goal-command spec 10.3): goal loops
+                # that yielded to user input wait for exactly this moment
+                # — queue drained, no continuation pending. Idempotent
+                # and cheap when no goal layer is attached.
+                on_settle = getattr(self, "on_turn_settled", None)
+                if on_settle is not None:
+                    try:
+                        on_settle()
+                    except Exception as settle_exc:
+                        logger.debug(f"on_turn_settled hook error: {settle_exc}")
 
             # Ensure render state is clean so the input box reappears.
             # Multi-tool sequences can leave writing_messages or the
