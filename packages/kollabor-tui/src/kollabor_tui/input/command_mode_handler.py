@@ -85,6 +85,7 @@ class CommandModeHandler:
         # Callbacks for operations that require access to parent InputHandler
         self._update_display_callback: Optional[Callable] = None
         self._exit_modal_callback: Optional[Callable] = None
+        self._expand_paste_placeholders_callback: Optional[Callable] = None
 
         # Callbacks for modal mode handling (delegated to ModalController)
         self._handle_modal_keypress_callback: Optional[
@@ -103,6 +104,10 @@ class CommandModeHandler:
             callback: Async function to call for display updates.
         """
         self._update_display_callback = callback
+
+    def set_expand_paste_placeholders_callback(self, callback: Callable) -> None:
+        """Set callback that expands [Pasted #N ...] placeholders to content."""
+        self._expand_paste_placeholders_callback = callback
 
     def set_exit_modal_callback(self, callback: Callable) -> None:
         """Set callback for exiting modal mode.
@@ -883,6 +888,19 @@ class CommandModeHandler:
                     logger.warning("No command to execute")
                     await self.exit_command_mode()
                     return
+
+            # Expand paste placeholders before parsing — a pasted command
+            # argument (e.g. /goal <long objective>) arrives as
+            # "[Pasted #N X lines, Y chars]" and must not leak into the
+            # command itself (key_press_handler._handle_enter already
+            # expands its own dispatch path).
+            if self._expand_paste_placeholders_callback:
+                try:
+                    command_string = self._expand_paste_placeholders_callback(
+                        command_string
+                    )
+                except Exception as expand_exc:
+                    logger.warning(f"Paste expansion failed: {expand_exc}")
 
             # Parse the command
             command = self.slash_parser.parse_command(command_string)

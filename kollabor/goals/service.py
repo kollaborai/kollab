@@ -252,6 +252,14 @@ class GoalService:
         record = self.store.get(goal_id)
         if not record.is_unfinished:
             raise GoalError(f"goal {record.short_id} is {record.status}")
+        # a user pause supersedes any completion held for batch settle
+        # (8.5): it must not silently commit after the pause — this holds
+        # for both the idle and in-flight (pause_requested) paths
+        if record.pending_completion:
+            self.discard_pending_completion(goal_id)
+            # discard bumps record_version — re-read before the CAS
+            # transition below
+            record = self.store.get(goal_id)
         if record.status == "active":
             in_flight = self._goal_turn_in_flight(goal_id)
             if in_flight:
@@ -811,7 +819,12 @@ class GoalService:
 
         cited: List[GoalEvidence] = []
         for ev in control.evidence:
-            ref = ev.get("ref") or ""
+            # evidence refs arrive as bare strings from the goal_report tag
+            # ("tool_type:output") or as {"ref": ...} dicts; accept both
+            if isinstance(ev, dict):
+                ref = str(ev.get("ref") or "").strip()
+            else:
+                ref = str(ev).strip()
             bound = self._bind_evidence_ref(ref, recorded)
             if bound is not None:
                 cited.append(bound)
@@ -965,6 +978,52 @@ class GoalService:
         if blocker:
             lines.append(blocker)
         lines.append(f"evidence recorded: {evidence_n} (repeats do not count)")
+        # citeable refs (8.5): show the model its own recorded evidence so
+        # goal_report cites the exact tool_type:output form, first try
+        recent_refs = []
+        try:
+            recent_evs = self.store.evidence_for(record.goal_id)[-5:]
+        except GoalStoreError:
+            recent_evs = []
+        for ev in recent_evs:
+            ref_txt = str(getattr(ev, "ref", "") or "").strip()
+            if ref_txt:
+                recent_refs.append(ref_txt)
+        # fall back to refs merged from prior progress reports
+        if not recent_refs:
+            for ev in (record.last_evidence or [])[-5:]:
+                if isinstance(ev, dict):
+                    ref_txt = str(ev.get("ref", "") or "").strip()
+                else:
+                    ref_txt = str(ev).strip()
+                if ref_txt:
+                    recent_refs.append(ref_txt)
+        if recent_refs:
+            lines.append(
+                "recent evidence refs (cite verbatim, tool_type:output):\n  "
+                + "\n  ".join(recent_refs)
+            )
+        # last report outcome so the model knows whether to re-report
+        if record.last_reason:
+            tag = "held for batch settle" if record.pending_completion else "note"
+            lines.append(f"last goal_report outcome ({tag}): {record.last_reason[:200]}")
+        # early warning (10.2): nudge before limits bite, not at the stop
+        warn = []
+        if record.auto_turn_limit:
+            turns_left = max(record.auto_turn_limit - record.turn_count, 0)
+            if turns_left <= max(1, record.auto_turn_limit // 5):
+                warn.append(
+                    f"turns nearly exhausted ({turns_left} left) — wrap up and report"
+                )
+        if record.token_budget is not None:
+            spent = record.tokens_used or 0.0
+            if spent >= record.token_budget * 0.8:
+                warn.append(
+                    f"token budget {int(spent)}/{int(record.token_budget)} (~80%+) — "
+                    "wrap up and report"
+                )
+        if warn:
+            lines.append("WARNING: " + "; ".join(warn))
         if record.task_ids:
             lines.append(f"linked tasks: {', '.join(record.task_ids)}")
         lines.append(
