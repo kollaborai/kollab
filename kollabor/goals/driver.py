@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from kollabor.goals.service import (
     BoundaryContext,
@@ -46,6 +46,7 @@ class GoalTurnDriver:
         self.service = service
         self.coord = coordinator
         self._running_goals: set[str] = set()
+        self._yielded_goals: set[str] = set()
         self._tool_seq = 0
 
         # single reporting surface (9.1) through the unified tool pipeline
@@ -58,6 +59,9 @@ class GoalTurnDriver:
         qp = getattr(coordinator, "_queue_processor", None)
         if qp is not None:
             qp.on_tool_batch = self._on_tool_batch
+            # settle-driven wake (10.3): qp calls this once the queue
+            # drains and no continuation is pending
+            qp.on_turn_settled = self.wake_yielded
 
     # ------------------------------------------------------------------
     # public entry
@@ -93,6 +97,25 @@ class GoalTurnDriver:
         finally:
             self._running_goals.discard(goal_id)
             self.service.clear_dispatched(goal_id)
+
+    def wake_yielded(self) -> None:
+        """Settle-driven wake (spec 10.3): after the interrupting turn
+        settles (queue drained + no continuation), re-kick goal loops that
+        yielded to user input. schedule() re-runs the full boundary
+        checklist — user input still wins over the wake."""
+        for goal_id in list(self._yielded_goals):
+            if goal_id in self._running_goals:
+                continue
+            try:
+                record = self.service.store.get(goal_id)
+            except GoalStoreError:
+                self._yielded_goals.discard(goal_id)
+                continue
+            if record.status != "active":
+                self._yielded_goals.discard(goal_id)
+                continue
+            self._yielded_goals.discard(goal_id)
+            self.schedule(goal_id)
 
     # ------------------------------------------------------------------
     # the loop
@@ -132,7 +155,25 @@ class GoalTurnDriver:
 
             attempt = self.service.maybe_continue(goal_id, outcome, ctx)
             if attempt is None:
+                # not a stop state: record eligibility only when the goal
+                # is still active — the settle-driven wake (10.3) re-runs
+                # this loop after the application dispatches its own turn
+                try:
+                    still = self.service.store.get(goal_id)
+                except GoalStoreError:
+                    still = None
+                if still is not None and still.status == "active":
+                    self._yielded_goals.add(goal_id)
                 return
+            self._yielded_goals.discard(goal_id)
+
+            # usage snapshot (8.6): qp settles authoritative per-turn token
+            # totals into session_stats as the turn runs — capture the
+            # baseline so the delta gates token budgets on real spend
+            qp = getattr(self.coord, "_queue_processor", None)
+            stats = getattr(qp, "session_stats", None) or {}
+            pre_in = int(stats.get("total_input_tokens", 0) or 0)
+            pre_out = int(stats.get("total_output_tokens", 0) or 0)
 
             self.service.note_dispatched(goal_id, attempt)
             turn_status, error = await self._run_one_turn(goal_id, attempt)
@@ -145,8 +186,19 @@ class GoalTurnDriver:
                 goal_id=goal_id,
                 error=error,
             )
+            # usage accounting (8.6): qp settles authoritative per-turn
+            # token totals into session_stats after each turn — snapshot
+            # the delta so token budgets gate on real spend
+            stats = getattr(qp, "session_stats", None) or {}
+            delta_in = int(stats.get("total_input_tokens", 0) or 0) - pre_in
+            delta_out = int(stats.get("total_output_tokens", 0) or 0) - pre_out
+            usage: List[Dict[str, Any]] = []
+            if delta_in or delta_out:
+                usage = [{"tokens": float(delta_in + delta_out)}]
             try:
-                self.service.finish_turn(goal_id, attempt, real_outcome)
+                self.service.finish_turn(
+                    goal_id, attempt, real_outcome, request_usage=usage
+                )
             except GoalStoreError as exc:
                 logger.warning("finish_turn failed for %s: %s", goal_id, exc)
 
