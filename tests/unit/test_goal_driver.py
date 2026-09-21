@@ -20,8 +20,12 @@ class FakeQueueProcessor:
     def __init__(self):
         self.processing_queue = asyncio.Queue()
         self.is_processing = False
-        self.turn_completed = True
+        # mirrors the real queue: turn_completed inits False and only a
+        # completed turn flips it True (queue_processor.py:239). The goal
+        # driver must open the HUD drain itself on a fresh conversation.
+        self.turn_completed = False
         self.cancel_processing = False
+        self.last_turn_error = None
         self.on_tool_batch = None
 
 

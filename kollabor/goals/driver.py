@@ -205,14 +205,15 @@ class GoalTurnDriver:
         error: Optional[str] = None
         try:
             qp.is_processing = True
-            # Leave turn_completed as-is for the first continuation so
-            # _continue_conversation drains the steering HUD entry into
-            # this turn (the hub path sets False to suppress mid-chain
-            # HUD; we want exactly one context item, on the first link).
-            # The queue sets turn_completed=False when tools need follow-up
-            # and True at natural completion — the loop below respects
-            # either, and the HUD queue is empty so later links cannot
-            # re-inject.
+            # Open the HUD drain deterministically: _continue_conversation
+            # only drains pending HUD when turn_completed is True, and the
+            # queue inits it False (queue_processor.py:239) — a fresh
+            # conversation would otherwise send a system-only request,
+            # which every provider rejects (1214 on z.ai). The queue is
+            # idle here (the boundary check guaranteed it), so True is
+            # honest. The hub path sets False for the opposite reason:
+            # it must NOT inject HUD mid-chain.
+            qp.turn_completed = True
             await self.coord._continue_conversation()
             chain_turns = 0
             while not qp.turn_completed and not qp.cancel_processing:
