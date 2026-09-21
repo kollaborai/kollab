@@ -168,6 +168,21 @@ class EngineSession:
                     e,
                 )
 
+        # Session-scoped MCP servers: the request asked for these, so the
+        # daemon must actually run them. Without this, mcp_server_names was
+        # stored and reported but never applied -- every session came up with
+        # whatever the daemon's global settings happened to enable.
+        if self.mcp_server_names:
+            try:
+                await self._apply_mcp_servers()
+            except Exception as e:
+                logger.warning(
+                    "session %s: could not apply MCP servers %s: %s",
+                    self.session_id,
+                    self.mcp_server_names,
+                    e,
+                )
+
         self._event_task = asyncio.create_task(
             self._track_events(), name=f"session-track-{self.session_id}"
         )
@@ -206,6 +221,28 @@ class EngineSession:
             self.daemon.unsubscribe(queue)
 
     # === conversation ===
+
+    async def _apply_mcp_servers(self) -> None:
+        """Enable the session's requested MCP servers on the live daemon.
+
+        Mirrors the /sessions/{id}/mcp/{name}/connect route: enable each
+        server in the daemon's settings, then one hot-reload reconnects the
+        whole set. Unknown server names are surfaced in a warning instead of
+        failing session creation -- a bad name should degrade the tool set,
+        not take the session down.
+        """
+        for server_name in self.mcp_server_names:
+            try:
+                await self.state.enable_mcp_server(server_name)
+            except ValueError as e:
+                logger.warning(
+                    "session %s: requested MCP server %r unavailable: %s",
+                    self.session_id,
+                    server_name,
+                    e,
+                )
+        await self.state.reload_mcp_servers()
+
 
     async def refresh_history(self) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror."""
