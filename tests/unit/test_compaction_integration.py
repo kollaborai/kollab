@@ -236,9 +236,28 @@ class TestCompactionIntegration(unittest.IsolatedAsyncioTestCase):
                 plugin._pending_compaction, "compaction should have staged a result"
             )
             self.assertEqual(plugin._compaction_round, 1)
+            plugin.renderer.message_coordinator.display_message_sequence.assert_not_called()
+
+            # A message can arrive while the background compaction is running.
+            # The durable marker and the display-only event must use the same
+            # counts from the eventual atomic swap.
+            history.append(_msg("user", "message sent during compaction"))
+            pre_swap_len = len(history)
 
             # Phase 2: apply on next pre-request
             await plugin._apply_pending_compaction({}, MagicMock())
+
+            display_call = (
+                plugin.renderer.message_coordinator.display_message_sequence.call_args
+            )
+            self.assertIsNotNone(display_call)
+            displayed = display_call.args[0]
+            self.assertEqual(len(displayed), 1)
+            self.assertEqual(displayed[0][0], "system")
+            self.assertIn("Context compacted (round 1)", displayed[0][1])
+            self.assertTrue(displayed[0][2]["context_compaction"])
+            self.assertEqual(displayed[0][2]["pre_message_count"], pre_swap_len)
+            self.assertEqual(displayed[0][2]["post_message_count"], len(history))
 
             self.assertIsNone(
                 plugin._pending_compaction, "pending should be cleared after apply"
@@ -261,6 +280,10 @@ class TestCompactionIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[0].role, "system")
         self.assertEqual(history[1].role, "user")
         self.assertIn("Previous Context Summary", history[1].content)
+        self.assertTrue(history[1].metadata["context_compaction"])
+        self.assertEqual(history[1].metadata["compaction_round"], 1)
+        self.assertEqual(history[1].metadata["pre_message_count"], pre_swap_len)
+        self.assertEqual(history[1].metadata["post_message_count"], compacted_len)
 
         # No tool result should appear without its owning assistant
         for i, msg in enumerate(history):
