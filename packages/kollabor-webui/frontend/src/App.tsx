@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppSidebar } from "@/components/shell/AppSidebar";
+import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SessionToolbar } from "@/components/shell/SessionToolbar";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -12,6 +13,7 @@ import {
 } from "@/components/ui/sidebar";
 import {
   EngineApi,
+  type AgentBundleEntry,
   type AgentPoolEntry,
   DEFAULT_SLASH_COMMANDS,
   type Profile,
@@ -179,8 +181,11 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
+  const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
+  const [profilesOpen, setProfilesOpen] = useState(false);
+  const [selectedBundle, setSelectedBundle] = useState("default");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
@@ -218,6 +223,12 @@ export default function App() {
     const result = await api.listSessions();
     const next = result.sessions || [];
     setSessions(next);
+    // keep the profile pickers (sidebar + new-session form + this dialog)
+    // in sync after any CRUD operation
+    api
+      .listProfiles()
+      .then((p) => setProfiles(p.profiles || []))
+      .catch(() => {});
     return next;
   }, []);
 
@@ -325,16 +336,18 @@ export default function App() {
       setBusy(true);
       setBusyMessage("Connecting to the engine…");
       await api.loadConfig();
-      const [result, profileResult, agentResult] = await Promise.all([
+      const [result, profileResult, agentResult, bundleResult] = await Promise.all([
         loadSessions(),
         api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
         refreshAgentPool(),
+        api.listAgentBundles().catch(() => ({ bundles: [] })),
       ]);
       if (!mounted || operation !== operationRef.current) return;
       const nextProfiles = profileResult.profiles || [];
       setProfiles(nextProfiles);
       const nextAgents = agentResult || [];
       setAgents(nextAgents);
+      setBundles(bundleResult.bundles || []);
       setSelectedProfile(
         profileResult.active || nextProfiles[0]?.name || "default",
       );
@@ -374,6 +387,7 @@ export default function App() {
     try {
       const session = await api.createSession({
         profile: selectedProfile || "default",
+        agent: selectedBundle !== "default" ? selectedBundle : undefined,
         identity: selectedIdentity || undefined,
         approval_mode: "trust_all",
       });
@@ -472,12 +486,15 @@ export default function App() {
         sessions={sessions}
         profiles={profiles}
         agents={agents}
+        bundles={bundles}
         selectedProfile={selectedProfile}
         selectedIdentity={selectedIdentity}
+        selectedBundle={selectedBundle}
         activeId={activeId}
         busy={busy}
         onProfileChange={setSelectedProfile}
         onIdentityChange={setSelectedIdentity}
+        onBundleChange={setSelectedBundle}
         onSettings={() => {
           // The active toolbar owns the settings dialog. Keep this callback
           // for the sidebar affordance; dispatching a click lets the same
@@ -486,9 +503,17 @@ export default function App() {
             '[aria-label="Session settings trigger"]',
           )?.click();
         }}
+        onManageProfiles={() => setProfilesOpen(true)}
         onSelectSession={(id) => void selectSession(id)}
         onCreate={() => void createSession()}
         onDelete={(id) => void deleteSession(id)}
+      />
+      <ProfilesDialog
+        api={api}
+        profiles={profiles}
+        open={profilesOpen}
+        onOpenChange={setProfilesOpen}
+        onSaved={loadSessions}
       />
       <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
         {activeSession && initialState ? (

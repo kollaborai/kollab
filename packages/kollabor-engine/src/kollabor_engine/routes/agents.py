@@ -61,3 +61,47 @@ async def list_agent_pool(
         "active": [agent["name"] for agent in agents if agent["active"]],
         "count": len(agents),
     }
+    return {
+        "agents": agents,
+        "available": [agent["name"] for agent in agents if agent["available"]],
+        "active": [agent["name"] for agent in agents if agent["active"]],
+        "count": len(agents),
+    }
+
+
+@router.get("/bundles")
+async def list_agent_bundles() -> Dict[str, Any]:
+    """List agent bundles the daemon can launch with (``--agent <name>``).
+
+    This is the bundle tier -- system prompts + agent.json metadata -- not the
+    gem identity pool above. Session creation accepts ``agent`` for any of
+    these names; the web UI needs the same list the CLI's ``/agent`` picker
+    shows. Local overrides global, matching AgentManager's resolution order.
+    """
+    try:
+        from kollabor_agent.agent_manager import AgentManager
+    except ImportError:
+        return {"bundles": [], "count": 0}
+
+    bundles: list = []
+    try:
+        manager = AgentManager()
+        for agent in manager.list_agents():
+            description = str(getattr(agent, "description", "") or "")
+            profile = getattr(agent, "profile", None)
+            bundles.append(
+                {
+                    "name": str(getattr(agent, "name", "") or ""),
+                    "description": description,
+                    "profile": profile,
+                    "skills": list(getattr(agent, "default_skills", []) or []),
+                }
+            )
+    except Exception:
+        bundles = []
+
+    bundles.sort(key=lambda bundle: bundle["name"])
+    return {"bundles": bundles, "count": len(bundles)}
+
+
+
