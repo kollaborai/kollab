@@ -25,6 +25,9 @@ rotating session id).
 Control subcommands are daemon-side state operations: they work while a turn
 is processing (routed ahead of the `is_processing` gate), and pause/clear
 record a durable stop intent immediately, applied at the next safe boundary.
+Attach clients execute `/goal` daemon-side through the `state.goal_command`
+RPC — the daemon owns the conversation identity, store, and driver, and
+`goal.state_changed` events stream back over the attach socket.
 `--` is the end-of-options delimiter for objectives beginning with `--`.
 
 ## How it works
@@ -38,6 +41,9 @@ record a durable stop intent immediately, applied at the next safe boundary.
 - **Bounds** (independent of any token budget): 40 goal turns / 2h active
   time by default; per-request token accounting; budgets are dispatch gates
   with documented in-flight overshoot; resumed budgets are total ceilings.
+  Provider errors pause the goal after one failed turn (the queue records
+  `last_turn_error`; the driver maps it to a typed error outcome) — a goal
+  never burns turns against a dead endpoint.
 - **Evidence**: the runtime records every tool result of a goal turn.
   Completion requires `goal_report` citing refs the runtime itself
   recorded (provenance), produced after the last mutating tool call of the
