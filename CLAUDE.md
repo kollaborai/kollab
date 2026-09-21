@@ -943,6 +943,7 @@ The `/llm` list merges `models.json` with the provider's **live** catalog (`mode
 - `/login` - OAuth login for providers (currently OpenAI)
 - `/mcp` - Open the MCP manager; subcommands are `setup`, `show`, `status`, `list`, `servers`, `tools [server]`, `test <server>`, `enable <server>`, `disable <server>`, and `reload`. Aliases: `/mcps`, `/servers`.
 - `/resume` - Resume a previous conversation
+- `/goal` (aliases: `/goals`) - Durable session goal (create|show|pause|resume|clear|history) with bounded continuation. Daemon-owned state in SQLite (`kollabor/state/goal_store.py`), policy in `kollabor/goals/service.py`, execution on the existing queue path (`kollabor/goals/driver.py`), one `goal_report` tool via the unified pipeline (`kollabor/goals/tooling.py`). Control subcommands work during a processing turn. See `docs/features/goal-command.md` and `docs/specs/goal-command-harnesses.md`.
 - `/config` - Fullscreen config editor modal. Press `/` to search/filter settings by label, help text, or config path. `Ctrl+S` prompts for Local (L) or Global (G) save target.
 - `/matrix` - Matrix rain effect
 - `/version` - Show version

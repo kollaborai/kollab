@@ -47,6 +47,7 @@ class SystemCommandsPlugin:
     _setup_handler: SetupCommandHandler | None
     _context_handler: ContextCommandHandler | None
     _loadout_handler: LoadoutCommandHandler | None
+    _goal_handler: "GoalCommandHandler | None"
 
     def __init__(
         self,
@@ -200,6 +201,14 @@ class SystemCommandsPlugin:
                     self.event_bus,
                 )
 
+            if getattr(self, "_goal_handler", None) is None:
+                from .handlers import GoalCommandHandler
+
+                self._goal_handler = GoalCommandHandler(
+                    self.command_registry,
+                    self.event_bus,
+                )
+
     @property
     def MODAL_ACTIONS(self) -> Set[str]:
         """Aggregate MODAL_ACTIONS from all handlers."""
@@ -248,6 +257,8 @@ class SystemCommandsPlugin:
             self._context_handler.register_commands()
         if self._loadout_handler:
             self._loadout_handler.register_commands()
+        if getattr(self, "_goal_handler", None):
+            self._goal_handler.register_commands()
 
     def register_commands(self):
         """Alias for register_all_commands for backward compatibility."""

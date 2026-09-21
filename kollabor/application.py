@@ -751,6 +751,35 @@ class TerminalLLMChat:
                 logger.info(
                     "LocalStateService initialized and registered as event bus service"
                 )
+
+                # === Goal layer (goal-command-harnesses spec) ===
+                # GoalService owns policy/state; GoalTurnDriver runs turns on
+                # the existing queue-processor path. Attach clients get the
+                # goal_service proxy only; the driver lives in the daemon.
+                if self.config.get("kollabor.goals.enabled", True):
+                    try:
+                        import socket
+
+                        from kollabor.goals.driver import GoalTurnDriver
+                        from kollabor.goals.service import GoalService
+                        from kollabor.state.goal_store import open_default_store
+
+                        self._goal_service = GoalService(
+                            open_default_store(),
+                            daemon_id=f"{socket.gethostname()}:{os.getpid()}",
+                        )
+                        self.event_bus.register_service(
+                            "goal_service", self._goal_service
+                        )
+                        self._goal_driver = GoalTurnDriver(
+                            self._goal_service, self.llm_service
+                        )
+                        self.event_bus.register_service(
+                            "goal_driver", self._goal_driver
+                        )
+                        logger.info("goal service + driver registered")
+                    except Exception as e:
+                        logger.error(f"goal layer unavailable: {e}")
             except Exception as e:
                 logger.error(
                     f"failed to initialize LocalStateService: {e}", exc_info=True

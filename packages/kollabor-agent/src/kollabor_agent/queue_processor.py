@@ -1481,6 +1481,16 @@ class QueueProcessor:
             else:
                 self._last_tool_error_sig = None
 
+            # Goal evidence provenance hook (goal-command spec 8.5): the
+            # runtime records every tool result of the batch so the model
+            # can only cite evidence the runtime itself observed.
+            on_goal_batch = getattr(self, "on_tool_batch", None)
+            if on_goal_batch is not None and all_results:
+                try:
+                    on_goal_batch(all_results)
+                except Exception as hook_exc:
+                    logger.debug(f"on_tool_batch hook error: {hook_exc}")
+
             # Step 10: Determine continuation
             # If tools executed, the LLM MUST see their results back. Natural
             # turn completion happens when the model returns no tool calls.
