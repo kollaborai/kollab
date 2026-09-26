@@ -1640,6 +1640,12 @@ class QueueProcessor:
     # Shared helpers (used by both native and XML tool paths)
     # ------------------------------------------------------------------
 
+    # Minimum chars the in-flight tool-output batch always retains, even when
+    # the derived context budget hits zero. Large enough for the one-line
+    # spill pointer per result (see _bounded_omission); small enough to be a
+    # rounding error against any real window.
+    _TOOL_BATCH_POINTER_FLOOR_CHARS = 2000
+
     def _tool_history_limit_chars(
         self,
         *,
@@ -1703,11 +1709,17 @@ class QueueProcessor:
             # Keep the recent tool-history aggregate bounded by the existing
             # per-result ceiling by default. This catches a chain of five
             # individually-valid reads before the provider has to trim owners.
-            return (
+            bounded = (
                 min(derived, self._tool_output_max_chars)
                 if self._tool_output_max_chars > 0
                 else derived
             )
+            # Floor the in-flight batch budget at a pointer reserve: even with
+            # the context window exhausted, every result must keep at least a
+            # one-line spill pointer so the model can tell "output omitted"
+            # apart from "tool produced nothing" (zero-budget batch mode
+            # previously blanked live tool output entirely).
+            return max(bounded, self._TOOL_BATCH_POINTER_FLOOR_CHARS)
         # Unknown provider window: still protect the aggregate batch. A zero
         # per-result setting explicitly disables this fallback.
         return self._tool_output_max_chars or None
