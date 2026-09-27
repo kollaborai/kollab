@@ -6,7 +6,7 @@ Related: [network design](agent-network-discovery-and-relaying.md), [scenario wa
 
 Protocol reuse: [Grok Bot, Buzz and A2A comparison](agent-network-protocol-landscape.md). The recommendation is A2A for tasks/cards, with Kollab-specific discovery, membership and communication policy. A narrow A2A 1.0 workspace adapter and Card-signing profile are now implemented; deployment and evidence boundaries are tracked in the [implementation ledger](agent-network-implementation-status.md).
 
-## Implementation status (2026-09-26)
+## Implementation status (updated 2026-09-27)
 
 Implemented in the working tree:
 
@@ -21,7 +21,7 @@ Unreleased simplification: accept only signed `kollab-discovery/2` documents. Le
 
 Dated evidence: the discovery, endpoint, plugin-discovery and DNS-liveness validation run passed 74 checks with one existing skipped test and caught a publisher lock collision before deployment. The publisher runs independently of workspace startup. At the recorded check, both public discovery URLs returned identical signed JSON with `application/json` and `Cache-Control: no-store`; `discover("kollabor.ai")` succeeded and repeated acquisition reported `pinned-key`. This verifies signed identity publication, not private admission or an agent task exchange.
 
-The [portable publication guide](../operations/kollabor-ai-discovery-publication.md) records operator commands and rollback boundaries. The [implementation ledger](agent-network-implementation-status.md) records the separate pairing, signing and local HTTP task-exchange evidence. The raw Ed25519 descriptor signature is not an A2A JWS signature. The deployed identity-only publisher advertises no A2A service.
+The [portable publication guide](../operations/kollabor-ai-discovery-publication.md) records operator commands and rollback boundaries. The [implementation ledger](agent-network-implementation-status.md) records the separate pairing, signing and local HTTP task-exchange evidence. The raw Ed25519 descriptor signature is not an A2A JWS signature. The deployed publisher advertises the encrypted relay and no A2A service. An HTTP check at 2026-09-27 06:07 UTC returned identical discovery aliases at revision 256 with control endpoint `https://kollabor.ai/relay/v1`; relay health reported two ready workers. This checks advertised state and health, not a model/tool exchange.
 
 ## 1. Baseline before this implementation slice
 
@@ -157,7 +157,7 @@ Required rules:
 - `coordinator` retains its existing JSON name. For a public directory node its key is the persistent service signer, independent of transient workspace coordinator elections. Owner/group issuers are separate keys.
 - `schema`, all addresses, roles, versions, and timestamps are signed. To sign, remove only top-level `signature`, canonicalize the entire remaining object with RFC 8785 JCS, encode as UTF-8, and sign those bytes with Ed25519. Verify using the declared key plus the external trust checks below. Reject an invalid 32-byte key or 64-byte signature through a maintained cryptographic library. The `schema` separates this payload type from records and credentials; never verify it using the legacy attestation concatenation. [JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785.html)
 - Integers are nonnegative JSON integers no greater than `2^53-1`. `revision` increases for every content change, including renewal, within an authority/signer/schema tuple. Times are Unix seconds. Manifest validity is at most 300 seconds with at most 60 seconds of tolerated future clock skew; expiry is not extended for skew. Cache the highest verified revision; reject known rollback and quarantine equal-revision differing content.
-- `endpoints.registry` identifies this discovery document, not a roster API. Optional `endpoints.agent_card` must be exactly the same HTTPS origin plus `/.well-known/agent-card.json`; generic interfaces, capabilities and skills exist only in that standard Card. The receiver serves this locator only alongside an actual A2A service. `endpoints.control` remains an optional base for future generalized control operations. Absence of both optional fields means identity-only publication. A successful fetch never invents a connection route.
+- `endpoints.registry` identifies this discovery document, not a roster API. Optional `endpoints.agent_card` must be exactly the same HTTPS origin plus `/.well-known/agent-card.json`; generic interfaces, capabilities and skills exist only in that standard Card. The receiver serves this locator only alongside an actual A2A service. `endpoints.control` advertises the implemented same-origin relay base `/relay/v1` when the publisher health probe verifies readiness; the client derives its supported transport paths from that verified base. Absence of both optional fields means identity-only publication. A successful fetch never invents a connection route.
 - `bootstrap` has at most eight public HTTPS discovery URLs. Each referral starts a fresh verification under its own authority; the publisher does not transfer trust to it. Recursive expansion is bounded and must respect address policy.
 - Roles describe implemented services only. Advertising `relay` requires an actual forwarding implementation and negotiated transport support. `protocols` must reflect the wire protocol; never interpret the current raw TCP stream as WebSocket or an arbitrary HTTP endpoint as MCP.
 - Omit `socket`, local filesystem paths, process IDs, current tasks, private members, and secrets from public exports. Do not serialize `AgentRecord.to_dict()` directly to the public network.
@@ -193,11 +193,11 @@ The receiver rechecks membership/grant validity before local tool execution. Loc
 
 ## 6. Walkthrough: a new laptop finds my existing servers
 
-There are two distinct stages: public contact discovery and private device admission. The deployed `kollabor.ai` publisher currently provides only the first. It cannot infer your servers from your name or discover a private family directory on its own.
+There are two distinct stages: public contact discovery and private device admission. The deployed `kollabor.ai` publisher provides the first and advertises encrypted forwarding. Private admission remains an endpoint responsibility. It cannot infer your servers from your name or discover a private family directory on its own.
 
 ### Available now: one explicitly configured destination
 
-1. **Find a contact.** `/connect kollabor.ai` follows its existing TXT URL, verifies the signed v2 identity and records a durable key pin. It reports no advertised Card. To reach an actual workspace receiver, use the operator's separately configured HTTPS origin whose locator advertises its Card.
+1. **Find a contact.** `/connect kollabor.ai` follows its existing TXT URL, verifies the signed v2 identity and records a durable key pin. It connects to the advertised public relay after verifying its locator and reports no advertised A2A Card. Native relay conversations use separate invitation, key approval and workspace conversation grants. To use the A2A receiver instead, select the operator's HTTPS origin whose locator advertises its Card.
 2. **Create the laptop key.** The laptop runs the local `create-device-key` operator command. Keep the private seed on that laptop and send only the public key to the owner through a trusted channel. The [pairing walkthrough](agent-device-pairing.md) gives the exact artifact/CLI sequence.
 3. **Bind the invitation.** The owner creates a short-lived signed pairing challenge for that exact public key and workspace. Transfer the pinned owner public key independently. The receiver loads the signed challenge and may expose its bounded HTTP pairing inbox. An arbitrary device cannot replace the intended key by being first to respond.
 4. **Prove possession and approve locally.** The laptop signs the challenge. Submitting the proof yields pending status only. The owner reviews the fingerprint and explicitly approves it locally, producing a signed membership credential. Install that credential at the receiver and deliver it to the laptop. The owner signing seed stays on the owner's machine.
@@ -218,11 +218,11 @@ DNS tells the laptop where to start. Pairing binds its key to the owner. A scope
 ## 7. Implementation seams and remaining work
 
 1. **Resolver — implemented:** `dns/discovery.py` handles TXT, bounded HTTPS, signed locators and optional signed Cards. Durable pins are accepted before Card lookup. Discovered publishers never enter the messaging registry automatically.
-2. **Publisher — deployed:** `discovery_publish.py` runs independently of workspace startup. It advertises the canonical `.json` identity URL with no service roles. The deployed route patch serves both `.json` and the TXT-selected alias. DNS records remain unchanged.
+2. **Publisher — deployed:** `discovery_publish.py` runs independently of workspace startup. It advertises the canonical `.json` identity URL and the health-gated relay control endpoint with `rendezvous` and `relay` roles. The deployed route patch serves both `.json` and the TXT-selected alias. DNS records remain unchanged.
 3. **Signing and A2A — implemented:** `dns/a2a_signing.py` pins the Card signer to the locator. `a2a_adapter.py` binds one receiver to one workspace and uses the official SDK for Task/result exchange. Generic interfaces and skills belong only in the standard Card.
 4. **Admission — implemented:** `dns/private_directory.py` separates owner and device keys, pending proof, local approval, membership, conversation grants and revocation. Request proofs cover the exact body and configured target. Historical Hub approvals do not become these credentials.
-5. **Local roster — proposed:** a same-user metadata catalog above project-scoped Hub storage. Do not disable project scoping to obtain visibility; that would merge unrelated workspace state and message flows.
-6. **Replication and routing — deferred:** authenticated multi-server directory/revocation sync, receiver deployment, NAT traversal and application E2EE forwarding need concrete scenarios. The older direct TCP/TLS Hub transport retains its separate identity model; these changes do not upgrade it to A2A or apply private-directory grants to it.
+5. **Local roster — current source:** `local_directory.py` provides a bounded same-user metadata catalog above project-scoped Hub storage. Cross-workspace directed messaging and live installed acceptance remain required. Project scoping still separates state and message flows.
+6. **Replication and routing — required remaining work:** central E2EE forwarding is deployed, while authenticated distributed records/revocation, LAN discovery, alternate bootstrap and direct/multi-hop route selection remain acceptance requirements. The older direct TCP/TLS Hub transport retains its separate identity model; it still needs the same human communication boundary. See the full implementation ledger rather than treating this as deferred scope.
 
 ## 8. What changed on kollabor.ai
 
@@ -230,7 +230,7 @@ The independent identity publisher and HTTP routes were deployed on 2026-09-26. 
 
 The [portable publication guide](../operations/kollabor-ai-discovery-publication.md) gives the DNS, HTTPS route, publisher, relay and rollback contract without deployment-specific host paths or addresses. Public output omits local sockets and private records. The main website remained HTTP 200 and the ACME probe retained its baseline result.
 
-The deployed domain advertises no A2A Card, private directory or relay. Those roles must be added only alongside a real deployed service and its independent acceptance evidence. Preserve the persistent publisher key and revision state during future upgrades. An optional future TXT change to `.json` should retain the alias for cached records.
+The initial publication had no service advertisement. The subsequent deployed relay is advertised at `/relay/v1`; no A2A Card or private directory is publicly advertised. Any additional service must have its own deployment and acceptance evidence. Preserve the persistent publisher key and revision state during future upgrades. An optional future TXT change to `.json` should retain the alias for cached records.
 
 ## 9. Acceptance evidence required
 

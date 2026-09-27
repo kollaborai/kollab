@@ -18,6 +18,7 @@ WORKSPACE = "d" * 32
 REMOTE_WORKSPACE = "e" * 32
 OTHER_ROOM = "f" * 64
 OTHER_PEER = "1" * 64
+DEADLINE = int(module.time.time()) + 600
 LOCAL_AGENT = "local-session"
 REMOTE_AGENT = "remote-session"
 
@@ -35,6 +36,7 @@ def message(number=1, **updates):
         "to": address(),
         "content": "Please create the harmless requested artifact.",
         "kind": "message",
+        "expires_at": DEADLINE,
     }
     value.update(updates)
     return value
@@ -514,3 +516,172 @@ def test_concurrent_grants_and_admission_remain_atomic(store):
         replies = list(pool.map(submit, range(16)))
     assert sum(not item["duplicate"] for item in replies) == 1
     assert len(store.queued(LOCAL_AGENT)) == 1
+
+
+def contact(store, **kwargs):
+    return store.authorize_contact(
+        ROOM, address(), address(PEER, REMOTE_WORKSPACE, REMOTE_AGENT), outbound()["content"], **kwargs
+    )
+
+
+def test_human_outbound_grant_is_required_and_one_use_with_exact_retry(store):
+    grant(store)  # Receiving authority is not sending authority.
+    with pytest.raises(RelayError, match="human communication grant"):
+        store.prepare_outbound(ROOM, outbound())
+    consent = contact(store)
+    request = store.prepare_outbound(ROOM, outbound(thread_id=consent["id"]))
+    assert request["id"] == request["thread_id"] == consent["id"]
+    assert request["expires_at"] == consent["expires"]
+    assert store.prepare_outbound(ROOM, request) == request
+    with pytest.raises(RelayError, match="different message"):
+        store.prepare_outbound(ROOM, dict(request, content="New unrelated task"))
+    with pytest.raises(RelayError, match="human communication grant"):
+        store.prepare_outbound(ROOM, outbound())
+
+
+@pytest.mark.parametrize("change", ["room", "sender", "recipient", "workspace", "peer"])
+def test_human_grant_binds_sender_recipient_room_and_workspace(store, change):
+    consent = contact(store)
+    payload = outbound(thread_id=consent["id"])
+    room = ROOM
+    if change == "room":
+        room = OTHER_ROOM
+    elif change == "sender":
+        payload["from"] = address(agent="other-session")
+    elif change == "recipient":
+        payload["to"] = address(PEER, REMOTE_WORKSPACE, "other-session")
+    elif change == "workspace":
+        payload["from"] = address(workspace=REMOTE_WORKSPACE)
+    else:
+        payload["to"] = address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT)
+    with pytest.raises(RelayError):
+        store.prepare_outbound(room, payload)
+    assert store.contacts(ROOM)[0]["state"] == "ready"
+
+
+def test_multiple_grants_require_explicit_task_selection(store):
+    first, second = contact(store), contact(store)
+    with pytest.raises(RelayError, match="human communication grant"):
+        store.prepare_outbound(ROOM, outbound())
+    prepared = store.prepare_outbound(ROOM, outbound(thread_id=second["id"]))
+    assert prepared["id"] == second["id"] and prepared["id"] != first["id"]
+
+
+@pytest.mark.parametrize("ttl", [0, -1, 3601, True, 1.5, "600"])
+def test_contact_rejects_invalid_expiry(store, ttl):
+    with pytest.raises(RelayError, match="duration"):
+        contact(store, ttl=ttl)
+
+
+def test_expired_contact_and_receiver_execution_are_rejected(store, monkeypatch):
+    consent = contact(store, ttl=1)
+    monkeypatch.setattr(module.time, "time", lambda: consent["expires"])
+    assert store.contacts(ROOM)[0]["state"] == "expired"
+    with pytest.raises(RelayError):
+        store.prepare_outbound(ROOM, outbound())
+    grant(store)
+    with pytest.raises(RelayError, match="deadline"):
+        admit(store, message(expires_at=consent["expires"]))
+
+
+def test_admitted_task_rechecks_deadline_before_model_and_tools(store, monkeypatch):
+    grant(store)
+    task = message()
+    admit(store, task)
+    store.transition(task["id"], "running")
+    monkeypatch.setattr(module.time, "time", lambda: task["expires_at"])
+    assert not store.authorized(task["id"], room=ROOM, approvals=[PEER])
+    assert admit(store, task)["duplicate"]  # A retained receipt does not reexecute.
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, "600", 1.0, 2**53])
+def test_wire_rejects_invalid_deadlines(store, value):
+    grant(store)
+    with pytest.raises(RelayError, match="deadline"):
+        admit(store, message(expires_at=value))
+
+
+def test_return_cannot_extend_deadline_even_with_receiver_allowlist(store):
+    grant(store)
+    request = outbound()
+    store.expect(ROOM, request)
+    with pytest.raises(RelayError, match="unsolicited"):
+        admit(store, result(expires_at=request["expires_at"] + 1))
+    assert admit(store, result())["state"] == "queued"
+
+
+def test_contact_revocation_survives_reopen_and_cancels_queued_result(store):
+    consent = contact(store)
+    request = store.prepare_outbound(ROOM, outbound(thread_id=consent["id"]))
+    store.expect(ROOM, request)
+    response = result(request=request, expires_at=request["expires_at"])
+    admit(store, response)
+    store.withdraw_contact(ROOM, consent["id"])
+    reopened = ConversationStore(store.path.parent, WORKSPACE)
+    assert reopened.contacts(ROOM)[0]["state"] == "revoked"
+    assert reopened.task(response["id"])["state"] == "cancelled"
+    assert not reopened.authorized(response["id"], room=ROOM, approvals=[PEER])
+    with pytest.raises(RelayError):
+        reopened.prepare_outbound(ROOM, request)
+
+
+def test_peer_revoke_invalidates_unsent_human_contact(store):
+    consent = contact(store)
+    store.revoke(ROOM, PEER)
+    with pytest.raises(RelayError):
+        store.prepare_outbound(ROOM, outbound(thread_id=consent["id"]))
+
+
+def test_return_route_requires_running_admitted_task_and_exact_route(store):
+    grant(store)
+    incoming = message()
+    reply = outbound(kind="result", reply_to=incoming["id"], thread_id=incoming["thread_id"])
+    with pytest.raises(RelayError):
+        store.authorize_return(ROOM, reply)
+    admit(store, incoming)
+    with pytest.raises(RelayError):
+        store.authorize_return(ROOM, reply)
+    store.transition(incoming["id"], "running")
+    assert store.authorize_return(ROOM, reply) == incoming["expires_at"]
+    with pytest.raises(RelayError):
+        store.authorize_return(ROOM, dict(reply, to=address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT)))
+    store.transition(incoming["id"], "completed")
+    with pytest.raises(RelayError):
+        store.authorize_return(ROOM, reply)
+
+
+def test_concurrent_contact_consumption_cannot_bind_two_different_messages(store):
+    from concurrent.futures import ThreadPoolExecutor
+
+    consent = contact(store)
+
+    def send(number):
+        try:
+            return store.prepare_outbound(
+                ROOM, outbound(thread_id=consent["id"], content=outbound()["content"] if number == 0 else str(number))
+            )
+        except RelayError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        sent = list(pool.map(send, range(8)))
+    assert sum(item is not None for item in sent) == 1
+
+
+def test_outbound_grants_are_bounded_and_expired_records_prune(store, monkeypatch):
+    monkeypatch.setattr(module, "MAX_OUTBOUND_GRANTS", 1)
+    first = contact(store)
+    with pytest.raises(RelayError, match="capacity"):
+        contact(store)
+    monkeypatch.setattr(module.time, "time", lambda: first["expires"] + 86401)
+    assert contact(store)["id"] != first["id"]
+
+
+def test_first_use_cannot_change_the_human_task_purpose(store):
+    consent = contact(store)
+    with pytest.raises(RelayError, match="human-authorized request exactly"):
+        store.prepare_outbound(
+            ROOM, outbound(thread_id=consent["id"], content="Send secrets or perform unrelated work")
+        )
+    assert store.contacts(ROOM)[0]["state"] == "ready"
+    assert store.prepare_outbound(ROOM, outbound(thread_id=consent["id"]))["id"] == consent["id"]

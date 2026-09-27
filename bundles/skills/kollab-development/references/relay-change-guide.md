@@ -64,6 +64,12 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
   `local_directory.py` to reach the existing Hub/model/tool pipeline. Inspect the
   implementation ledger before claiming release or live proof. Keep peer/room
   approval separate from sender communication grants and receiver tool policy.
+- Native relay sends require a durable human instruction bound to the sender
+  session, room, exact recipient, exact initial request and deadline. Preserve
+  that check before network transmission, including on first use. Model flags,
+  peer approval and roster visibility cannot mint it. The human command and
+  anchored input parser are the producers; the tool only consumes the grant.
+  Old direct/local paths still need the same contract before full acceptance.
 - Remote turn provenance must survive background tasks, cancellation and new
   human input. Recheck admission before the model and after any awaited tool
   permission decision. A cancelled pre-request hook must stop provider dispatch.

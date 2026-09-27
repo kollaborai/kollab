@@ -166,6 +166,15 @@ status are tracked in the [implementation ledger](../specs/agent-network-impleme
 /connect ping <64-hex-key>          request an encrypted presence response
 /connect rotate                    replace the room capability and clear local approvals
 /connect disconnect                close the connection and disable reconnect on launch
+/connect agents [local|peer-key]    list authorized remote agents or quiet local presence
+/connect allow <peer-key> <name>    permit incoming conversations for a local agent
+/connect deny <peer-key> [name]     revoke incoming authority and cancel affected work
+/connect grants                    list receiving and human sending grants
+/connect authorize <address> <request>  authorize one exact initial request for hub_msg
+/connect send <address> <request>   authorize and send that exact human request
+/connect withdraw <grant-id>       withdraw local sending and correlated-return authority
+/connect task <address> <id>        inspect the receiving task state
+/connect cancel <address> <id>      cancel the remote task
 ```
 
 Privately transfer the invitation file to the joining computer. Do not paste its
@@ -173,6 +182,16 @@ contents into chat or a command. Joining pins the inviter; the inviter approves
 the joining key before replying to its pings. Room membership permits peer-key
 visibility and ciphertext routing. Workspace tools require separate receiver
 membership, grants, and local permissions. Peer traffic never starts an LLM turn.
+
+Conversation commands above are current development source for the corrected
+release; Kollab 0.9.0 does not include them. A remote address is the complete
+`relay:<key>:<workspace-id>:<agent-id>` from the directory. Receiving permission
+is independent of presence approval and normal tool permissions. Sending grants
+are bound to the exact human request, recipient and sending session, with a
+ten-minute deadline. The normal `hub_msg` tool uses the grant ID as `thread_id`
+and cannot rewrite the authorized request. A receipt is admission, not completion.
+See the [network implementation ledger](../specs/agent-network-implementation-status.md)
+for remaining conversation and live acceptance requirements.
 
 `/connect invite` already writes its source file with mode `0600`. Check the
 receiving copy after transfer and use `chmod 600 <invitation-file>` in that

@@ -287,6 +287,20 @@ inherits whatever is already there:
 pip install kollab
 ```
 
+On an externally managed system Python (including Arch), use an isolated
+environment. If `pipx` and `uv` are unavailable, Python itself is sufficient:
+
+```bash
+python3 -m venv ~/.local/share/kollab/venv
+~/.local/share/kollab/venv/bin/python -m pip install --upgrade kollab
+~/.local/share/kollab/venv/bin/kollab --login openai
+```
+
+This uses the published package without changing system Python. To run `kollab`
+by name in the current shell, activate the environment with
+`source ~/.local/share/kollab/venv/bin/activate`. For OpenAI account login, use
+`--login openai` at launch or `/login openai` inside the app.
+
 Homebrew packaging is prepared separately after a release wheel is published and
 the formula SHA is available. Maintainer notes live in
 [homebrew-tap/README.md](homebrew-tap/README.md).

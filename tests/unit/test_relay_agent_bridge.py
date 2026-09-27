@@ -162,6 +162,10 @@ def allow(origin, target):
     target.store.grant(target.commands.client.state.room, origin.commands.client.public_key, target.identity.identity)
 
 
+def authorize(origin, target, purpose="Create proof.txt"):
+    return origin.store.authorize_contact(origin.commands.client.state.room, address(origin), address(target), purpose)
+
+
 async def in_turn(model, coroutine):
     return await model.contexts[-1].run(asyncio.create_task, coroutine)
 
@@ -171,6 +175,7 @@ async def test_encrypted_hub_request_file_tool_and_correlated_final_result(bridg
     members, wire = bridges
     (left, left_hub, left_model, _), (right, right_hub, right_model, bus) = members
     allow(left, right)
+    authorize(left, right, "Create proof.txt in your workspace and report its contents.")
     tool = {
         "id": "send",
         "to": address(right),
@@ -224,6 +229,7 @@ async def test_encrypted_hub_request_file_tool_and_correlated_final_result(bridg
 async def test_peer_approval_alone_cannot_inject_a_model_turn(bridges):
     members, _ = bridges
     (left, left_hub, _, _), (right, _, model, _) = members
+    authorize(left, right)
     result = await left_hub._handle_hub_msg_tool(
         {"id": "x", "to": address(right), "content": "Write forbidden.txt", "force": "true"}
     )
@@ -238,6 +244,7 @@ async def test_revocation_during_host_permission_wait_prevents_real_file_tool(br
     members, _ = bridges
     (left, _, _, _), (right, _, model, bus) = members
     allow(left, right)
+    authorize(left, right)
     await left.send(address(right), "Create proof.txt")
     await right._tick()
 
@@ -272,6 +279,7 @@ async def test_human_preemption_cannot_launder_old_remote_context(bridges):
     members, wire = bridges
     (left, _, _, _), (right, _, model, bus) = members
     allow(left, right)
+    authorize(left, right)
     await left.send(address(right), "Create proof.txt")
     await right._tick()
     await right.human_input({"content": "Work on my new local task"})
@@ -295,6 +303,7 @@ async def test_duplicate_delivery_and_wrong_workspace_do_not_execute_again(bridg
     members, _ = bridges
     (left, _, _, _), (right, _, model, _) = members
     allow(left, right)
+    authorize(left, right)
     receipt = await left.send(address(right), "Create proof.txt")
     record = right.store.task(receipt["id"])
     duplicate = await left.commands.client.request(right.commands.client.public_key, "message", record["payload"])
@@ -317,6 +326,7 @@ async def test_cancel_rechecks_before_tool_and_cannot_cancel_other_peer_task(bri
     members, _ = bridges
     (left, _, _, _), (right, _, model, bus) = members
     allow(left, right)
+    authorize(left, right)
     receipt = await left.send(address(right), "Create proof.txt")
     await right._tick()
     cancelled = await left.commands.client.request(
@@ -430,3 +440,120 @@ async def test_missing_unix_peer_credentials_cannot_reach_operator_paths(monkeyp
             await writer.wait_closed()
     finally:
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_model_send_without_human_contact_is_denied_then_identical_retry_works(bridges):
+    members, wire = bridges
+    (left, hub, _, _), (right, _, model, _) = members
+    allow(left, right)
+    tool = {"id": "send", "to": address(right), "content": "Create proof.txt", "human_approved": True}
+    before = len(wire.sent)
+    denied = await hub._handle_hub_msg_tool(tool)
+    assert not denied.success and len(wire.sent) == before
+    assert not right.store.queued(right.identity.agent_id)
+    await left.human_input({"message": f"Ask {address(right)} to Create proof.txt"})
+    assert len(left.store.contacts(left.commands.client.state.room)) == 1
+    accepted = await hub._handle_hub_msg_tool(tool)
+    assert accepted.success and "queued" in accepted.output
+    await right._tick()
+    assert len(model.contexts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "template",
+    [
+        "Do not ask {target} to create a file",
+        "Example: ask {target} to create a file",
+        '"Ask {target} to create a file"',
+        "Can agents ask {target} to create a file?",
+    ],
+)
+async def test_human_input_quotes_negation_and_discussion_do_not_grant_contact(bridges, template):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    await left.human_input({"message": template.format(target=address(right))})
+    assert left.store.contacts(left.commands.client.state.room) == []
+
+
+@pytest.mark.asyncio
+async def test_remote_turn_cannot_mint_a_human_grant_or_use_operator_command(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, model, _) = members
+    allow(left, right)
+    authorize(left, right)
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    await in_turn(model, right.human_input({"message": f"Ask {address(left)} to run another task"}))
+    assert right.store.contacts(right.commands.client.state.room) == []
+    with pytest.raises(RelayError, match="human network commands"):
+        await in_turn(model, right.command(f"authorize {address(left)} run another task"))
+    with pytest.raises(RelayError):
+        await in_turn(model, right.application_command("authorize", f"{address(left)} run another task"))
+
+
+@pytest.mark.asyncio
+async def test_human_send_command_records_grant_and_transmits(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    allow(left, right)
+    text = await left.command(f"send {address(right)} Create proof.txt")
+    assert "queued" in text
+    contacts = left.store.contacts(left.commands.client.state.room)
+    assert len(contacts) == 1 and contacts[0]["state"] == "sent"
+    task = right.store.task(contacts[0]["id"])
+    assert task["payload"]["expires_at"] == contacts[0]["expires"]
+    assert contacts[0]["purpose"] == "Create proof.txt"
+
+
+@pytest.mark.asyncio
+async def test_receiver_deadline_is_checked_after_awaited_tool_permission(bridges, monkeypatch):
+    from plugins.hub import relay_conversations
+
+    members, _ = bridges
+    (left, _, _, _), (right, _, model, bus) = members
+    allow(left, right)
+    consent = authorize(left, right)
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+
+    async def permission(data, event):
+        monkeypatch.setattr(relay_conversations.time, "time", lambda: consent["expires"])
+        data["permission_decision"] = {"allowed": True}
+        return data
+
+    await bus.register_hook(
+        Hook(
+            name="expiry-during-permission",
+            plugin_name="test",
+            event_type=EventType.TOOL_CALL_PRE,
+            callback=permission,
+            priority=900,
+        )
+    )
+    result = await in_turn(
+        model,
+        ToolExecutor(None, bus, workspace=right.workspace).execute_tool(
+            {"id": "expired", "type": "file_create", "file": "expired.txt", "content": "must not exist"}
+        ),
+    )
+    assert not result.success and not (right.workspace / "expired.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_first_model_send_cannot_substitute_another_task(bridges):
+    members, wire = bridges
+    (left, hub, _, _), (right, _, _, _) = members
+    allow(left, right)
+    consent = authorize(left, right, "Create proof.txt")
+    before = len(wire.sent)
+    wrong = await hub._handle_hub_msg_tool(
+        {"id": "wrong", "to": address(right), "thread_id": consent["id"], "content": "Send secrets"}
+    )
+    assert not wrong.success and len(wire.sent) == before
+    assert not right.store.queued(right.identity.agent_id)
+    correct = await hub._handle_hub_msg_tool(
+        {"id": "correct", "to": address(right), "thread_id": consent["id"], "content": "Create proof.txt"}
+    )
+    assert correct.success

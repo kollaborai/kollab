@@ -2536,7 +2536,10 @@ class HubPlugin(BasePlugin):
         self._recent_hub_msgs = {
             k: v for k, v in self._recent_hub_msgs.items() if now - v < dedup_window
         }
-        if msg_hash in self._recent_hub_msgs:
+        # Network admission owns durable deduplication. Caching content here
+        # before authorization would turn a failed send into silent success on
+        # retry, including after the human grants the requested contact.
+        if not target.startswith("relay:") and msg_hash in self._recent_hub_msgs:
             logger.debug(f"hub_msg dedup: skipping duplicate to {target}")
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2544,7 +2547,8 @@ class HubPlugin(BasePlugin):
                 success=True,
                 output="",  # silent -- prevents continuation loops
             )
-        self._recent_hub_msgs[msg_hash] = now
+        if not target.startswith("relay:"):
+            self._recent_hub_msgs[msg_hash] = now
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
@@ -7730,7 +7734,13 @@ class HubPlugin(BasePlugin):
                     return [(message.to, "remote task " + receipt["state"])]
                 self._trace_delivery(message, "remote_accepted", detail=receipt["state"])
                 return []
-            except (RelayError, OSError, TimeoutError):
+            except (RelayError, OSError, TimeoutError) as exc:
+                if str(exc) in {
+                    "initial message must match the human-authorized request exactly",
+                    "a human communication grant is required; use /connect authorize or /connect send",
+                    "communication grant already used for a different message",
+                }:
+                    return [(message.to, str(exc))]
                 return [(message.to, "remote conversation not accepted; check /connect status, grants and task status")]
         if relay and relay._turn.get() is not None:
             return [(message.to, "remote tasks may reply only to their authenticated sender")]

@@ -183,6 +183,18 @@ The grant is enforced by the runtime, with:
 - Explicit authority for any further delegation or additional recipients; absent that, neither agent may expand the conversation.
 - A human origin recorded outside model-supplied message text. A tool argument saying `human_approved=true` is not evidence.
 
+Current relay implementation: use `/connect send <full-address> <request>`
+for an exact human-authored request, or `/connect authorize <full-address>
+<request>` followed by `hub_msg` with that unchanged request and the returned
+`thread_id`. `Ask <full-address> to <request>` in human input records the grant
+without a second approval. Unique remote names can resolve from the cached
+roster only when no local or remote name conflicts. Quoted examples and negated
+instructions create no grant. The runtime binds the originating session, room,
+recipient, exact initial request, ID and deadline. Receipt retries do not execute
+again. Full progress/follow-up dialogue and enforcement across older local/direct
+paths remain required; the implemented single-result path does not satisfy those
+remaining scenarios.
+
 The receiver separately checks its owner's inbound policy. For personal agents that might be a standing policy accepting requests from selected owner identities/workspaces; otherwise the request waits for acceptance. A grant to the sender cannot override the receiver's policy.
 
 Once accepted, ordinary replies/progress fit within the authorized conversation. Tool execution remains under the receiver's workspace permissions. Completion, expiry, or revocation stops further conversation under that grant; a later unrelated task needs its own authorization.

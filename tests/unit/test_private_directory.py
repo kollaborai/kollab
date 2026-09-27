@@ -233,9 +233,16 @@ def test_pairing_proof_must_match_owner_challenge_and_device_signature(tmp_path)
         bytes(intended_device_key.verify_key)
     )
 
+    # Change signature bytes while preserving canonical base64url. Replacing
+    # the final character can instead change only padding bits and randomly
+    # exercise the compact-JWS parser rather than signature verification.
+    header, body, signature = challenge.token.split(".")
+    changed = bytearray(base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4)))
+    changed[0] ^= 1
+    tampered = ".".join((header, body, base64.urlsafe_b64encode(changed).decode().rstrip("=")))
     with pytest.raises(CredentialError, match="signature"):
         verify_pairing_proof(
-            challenge.token[:-1] + ("A" if challenge.token[-1] != "A" else "B"),
+            tampered,
             "x.y.z",
             owner_public_key=bytes(owner_key.verify_key),
             now=NOW + 1,

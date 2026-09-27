@@ -10,12 +10,14 @@ import asyncio
 import collections
 import json
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from kollabor_agent.execution_context import remote_task_id
+from kollabor_ai.message_content import content_to_text
 
 from .local_directory import LocalAgentDirectory
 from .models import HubMessage, MessageScope
@@ -165,10 +167,14 @@ class RelayAgentBridge:
         return await local_relay_rpc(record["socket_path"], method, params, auth=self._auth())
 
     async def command(self, value: str) -> str:
+        if self._turn.get() is not None:
+            raise RelayError("remote model turns cannot issue human network commands")
         result = await self._owner_call("relay.command", {"value": value, "agent_id": self.identity.agent_id})
         return result["text"]
 
     async def _rpc_command(self, params):
+        if self._turn.get() is not None:
+            raise RelayError("remote model turns cannot issue human network commands")
         if self.commands is None:
             raise RelayError("workspace relay owner changed; retry")
         if set(params) != {"value", "agent_id"} or not isinstance(params["value"], str):
@@ -192,13 +198,20 @@ class RelayAgentBridge:
         sender = str(RelayAddress(client.public_key, client.state.workspace_id, agent.agent_id))
         destination = RelayAddress.parse(params["to"])
         payload = {k: params[k] for k in ("id", "thread_id", "reply_to", "content", "kind")}
-        payload.update({"from": sender, "to": str(destination)})
+        payload.update({"from": sender, "to": str(destination), "expires_at": int(time.time()) + TASK_TIMEOUT})
         validate_message(payload, peer_key=client.public_key, workspace_id=destination.workspace_id)
         if destination.key == client.public_key:
             raise RelayError("use the local agent name for same-workspace messages")
-        self._state()
+        state = self._state().state
+        if state.room != client.state.room or destination.key not in state.approvals:
+            raise RelayError("peer is not approved in the current room")
         if payload["kind"] == "message":
+            payload = self.store.prepare_outbound(state.room, payload)
             self.store.expect(client.state.room, payload)
+        else:
+            payload["expires_at"] = self.store.authorize_return(state.room, payload)
+            if not self.store.authorized(payload["reply_to"], room=state.room, approvals=state.approvals):
+                raise RelayError("return authority has been revoked")
         try:
             receipt = await client.request(destination.key, "message", payload)
             if receipt.get("id") != payload["id"] or receipt.get("state") not in {"queued", "running"} | TERMINAL:
@@ -389,6 +402,8 @@ class RelayAgentBridge:
         return {"agents": rows[:MAX_DIRECTORY], "truncated": len(rows) > MAX_DIRECTORY or len(peers) > MAX_REMOTE_PEERS}
 
     async def application_command(self, head, rest, source_agent=None):
+        if self._turn.get() is not None:
+            raise RelayError("remote model turns cannot issue human network commands")
         client = self.commands.client
         self._state()
         parts = rest.split()
@@ -408,16 +423,40 @@ class RelayAgentBridge:
             self.store.revoke(client.state.room, parts[0], parts[1] if len(parts) == 2 else None)
             return "conversation grant revoked; affected work cancelled"
         if head == "grants":
-            return json.dumps(self.store.grants(client.state.room), indent=2)
+            sender = str(
+                RelayAddress(client.public_key, client.state.workspace_id, source_agent or self.identity.agent_id)
+            )
+            return json.dumps(
+                {
+                    "receiving": self.store.grants(client.state.room),
+                    "sending": self.store.contacts(client.state.room, sender),
+                },
+                indent=2,
+            )
         if head == "agents":
             result = await self._rpc_directory({"peer": rest})
             return json.dumps(result, indent=2)
-        if head == "send":
+        if head in {"authorize", "send"}:
             target, sep, content = rest.partition(" ")
             if not sep:
-                return "usage: /connect send <full relay agent address> <message>"
-            receipt = await self.send(target, content, source_agent=source_agent)
+                return f"usage: /connect {head} <full relay agent address> <purpose or message>"
+            destination = RelayAddress.parse(target)
+            if destination.key not in client.state.approvals:
+                raise RelayError("approve the peer before authorizing contact")
+            agent = self._local_agent(source_agent or self.identity.agent_id)
+            sender = str(RelayAddress(client.public_key, client.state.workspace_id, agent.agent_id))
+            grant = self.store.authorize_contact(client.state.room, sender, target, content, ttl=TASK_TIMEOUT)
+            if head == "authorize":
+                return f"communication authorized: {grant['id']}; expires at {grant['expires']}; recipient {target}"
+            receipt = await self.send(target, content, thread_id=grant["id"], source_agent=source_agent)
             return "remote receipt: " + json.dumps(receipt, sort_keys=True)
+        if head == "withdraw":
+            if len(parts) != 1:
+                return "usage: /connect withdraw <communication grant id>"
+            self.store.withdraw_contact(client.state.room, parts[0])
+            return (
+                "communication withdrawn; late replies cannot start work here; use /connect cancel to stop remote work"
+            )
         if head in {"task", "cancel"}:
             if len(parts) != 2:
                 return f"usage: /connect {head} <full relay agent address> <message id>"
@@ -474,8 +513,7 @@ class RelayAgentBridge:
             return
         handler = getattr(llm, "_message_handler", None)
         if handler is not None and (
-            time.monotonic() < getattr(handler, "_hub_continue_paused_until", 0)
-            or handler._user_is_typing()
+            time.monotonic() < getattr(handler, "_hub_continue_paused_until", 0) or handler._user_is_typing()
         ):
             return
         if self._local_pending:
@@ -541,6 +579,9 @@ class RelayAgentBridge:
         return True
 
     async def human_input(self, data, event=None):
+        if self._turn.get() is not None:
+            # A peer cannot turn its own instructions into operator input.
+            return data
         self._human_until = time.monotonic() + 2
         await self._stop_active("interrupted", "human input took priority")
         # Clear reply routing before the next human turn. A stale remote result
@@ -548,6 +589,25 @@ class RelayAgentBridge:
         self.active = None
         self.plugin._active_thread_id = ""
         self.plugin._active_thread_msg_id = ""
+        # Recognize only an explicit, anchored instruction from human input.
+        # Quoted examples, negations and model-provided approval flags never
+        # mint authority. Ambiguous names require the complete directory address.
+        text = content_to_text(data.get("message") or "").strip()
+        match = re.fullmatch(r"(?:please\s+)?(?:ask|tell)\s+(\S+)\s+to\s+(.+)", text, re.IGNORECASE | re.DOTALL)
+        if match:
+            target, purpose = match.groups()
+            try:
+                if not target.startswith("relay:"):
+                    directory = await self._owner_call("relay.directory", {"peer": "", "cached": True})
+                    matches = {r["address"] for r in directory["agents"] if r["name"] == target}
+                    if len(matches) != 1 or any(a.name == target for a in self.directory.agents()):
+                        return data
+                    target = matches.pop()
+                # The command is issued here before model execution, never
+                # inferred from a generated tool's arguments.
+                await self.command(f"authorize {target} {purpose}")
+            except (RelayError, OSError):
+                logger.debug("human network instruction could not be authorized")
         return data
 
     async def guard_model(self, data, event=None):
@@ -613,6 +673,18 @@ class RelayAgentBridge:
                 "Use your normal tools in this workspace. Your final answer will return to the sender automatically.",
             ]
         try:
+            state = self._state().state
+            sender = str(
+                RelayAddress(self._state().key.verify_key.encode().hex(), state.workspace_id, self.identity.agent_id)
+            )
+            for grant in self.store.contacts(state.room, sender):
+                if grant["state"] == "ready":
+                    lines.append(
+                        f"Human contact instruction {grant['id']} to {grant['recipient']} "
+                        f"until {grant['expires']}: {grant['purpose']}. "
+                        f"Use hub_msg with thread_id={grant['id']} and the exact human request as content; "
+                        "do not rewrite or extend it."
+                    )
             result = await self._owner_call("relay.directory", {"peer": "", "cached": True})
             for row in result["agents"]:
                 lines.append(f"remote {row['name']} ({row['state']}): {row['address']}")

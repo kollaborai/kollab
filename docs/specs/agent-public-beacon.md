@@ -87,17 +87,32 @@ claim that the deployed service and both installed hosts have passed this flow.
    complete `relay:<key>:<workspace-id>:<agent-id>` address. Names are labels and
    may repeat on different computers. `/connect agents local` shows the private
    machine-wide roster without opening conversations.
-4. Direct the sender to use its ordinary `hub_msg` tool, or submit
-   `/connect send <full-address> <request>`. Admission returns a task ID and state.
+4. Submit `/connect send <full-address> <request>` to authorize and send the
+   exact request. Alternatively, `/connect authorize <full-address> <request>`
+   records the human instruction for the ordinary `hub_msg` tool. It must send
+   that exact request, with the returned grant ID as `thread_id`. The human input
+   `Ask <full-address> to <request>` creates the same grant before model execution.
+   Admission returns a task ID and state.
    `/connect task <full-address> <task-id>` reads its state;
    `/connect cancel <full-address> <task-id>` cancels that sender's work.
 5. The receiver runs its normal model and permitted tools in its own workspace.
    Its final response follows the authenticated return address and request ID.
    A returned result does not automatically generate another network reply.
 
-Before release, outbound human authorization must also enforce task, recipient,
-purpose, expiry and reply scope in runtime. Prompt guidance and the current
-receiver allowlist are incomplete implementations of that contract.
+The native relay send boundary now requires a durable human instruction bound
+to the local session, room, exact destination and exact initial request. It is
+one-use with byte-identical retries under the same ID and a ten-minute default
+deadline (the store accepts at most one hour). The authenticated payload carries
+that deadline; admission, queued work, model turns, awaited tool approvals and
+return routing check it. A correlated result cannot extend it. Quoted/negated
+instructions and model-supplied approval flags do not authorize a contact.
+`/connect grants` lists receiving and sending grants. `/connect withdraw <id>`
+withdraws local send/return authority; use `/connect cancel` to cancel remote work.
+
+The full contract still requires authorization across older direct/local paths,
+progress and follow-up conversation lifecycles, and live installed acceptance.
+The current exact initial request and single-result exchange is one implemented
+boundary within that contract, not completion of the whole network.
 
 ## Self-host and rollout evidence
 

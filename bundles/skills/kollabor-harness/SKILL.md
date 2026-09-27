@@ -198,6 +198,16 @@ send it work. The receiving human separately authorizes conversations with
 `/connect allow <sender-public-key> <local-agent-name>`; local tool permissions
 continue to apply. Never use `force` to override network authorization.
 
+The runtime records a human instruction before the model runs. Use its exact
+request text as `hub_msg` content and its grant ID as `thread_id`; rewriting or
+extending the first request is rejected. `/connect send <address> <request>`
+authorizes and sends directly. `/connect authorize <address> <request>` records
+it for the tool. Human input `Ask <full-address> to <request>` does the same;
+quoted examples, negations and ambiguous names do not. Grants expire after ten
+minutes by default and cannot authorize another recipient, session or task.
+`/connect withdraw <grant-id>` withdraws local authority, while `/connect cancel`
+stops the admitted remote task. A generated approval flag cannot mint a grant.
+
 A receipt means the receiving endpoint accepted a task, not that it completed
 the work. Use `/connect task <full-address> <message-id>` for status and
 `/connect cancel <full-address> <message-id>` for cancellation. Work arriving from

@@ -180,7 +180,7 @@ class RelayCommands:
 
         head, _, rest = value.partition(" ")
         rest = rest.strip()
-        if head in {"allow", "deny", "grants", "agents", "send", "task", "cancel"}:
+        if head in {"allow", "deny", "grants", "agents", "authorize", "withdraw", "send", "task", "cancel"}:
             if self.agent_bridge is None:
                 return "connect: agent conversations require a running Kollab Hub session"
             return await self.agent_bridge.application_command(head, rest, source_agent=source_agent)
@@ -273,6 +273,8 @@ class RelayCommands:
                 "/connect agents [local|peer public key] | grants\n"
                 "/connect allow <peer public key> <local agent name>\n"
                 "/connect deny <peer public key> [local agent name]\n"
+                "/connect authorize <full relay agent address> <human task purpose>\n"
+                "/connect withdraw <communication grant id>\n"
                 "/connect send <full relay agent address> <message>\n"
                 "/connect task|cancel <full relay agent address> <message id>"
             )

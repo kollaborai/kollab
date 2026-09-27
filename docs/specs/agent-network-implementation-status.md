@@ -45,11 +45,39 @@ human input, while stale remote tools retain their revoked provenance. Scoped
 Ruff and diff whitespace checks pass. Skipped tests and live deployment/provider
 acceptance remain outside this result.
 
+Current authorization change: `/connect authorize`, `/connect send` and an
+anchored human `Ask <address> to <request>` input record a private bounded grant.
+The first model send must carry that exact request, including on first use;
+substituting another task fails before transport. Quoted/negated instructions,
+ambiguous names and generated approval flags do not mint grants. Same-ID retries
+are idempotent. `expires_at` travels inside authenticated encryption and is
+checked at admission and again before model/tools/return delivery. Withdrawal
+revokes local return authority and cancels queued results. The native Hub tool
+now uses durable admission deduplication instead of caching a failed send as a
+successful duplicate. Focused ledger/bridge checks passed 130 tests. The subsequent full unit run
+passed 3,576 tests and 201 subtests with 64 skips in 33.07 seconds. Scoped Ruff
+and diff whitespace checks also passed. A random signature-tampering fixture
+was corrected to change decoded signature bytes while retaining canonical JWS
+encoding. Bridge tests still use a controlled model; live provider access below
+is a separate, narrower proof.
+
+Installation evidence (2026-09-27): alzan-prod uses Arch's externally managed
+Python 3.13. A private environment at
+`/home/almazan/.local/share/kollab/venv` successfully installed all ten published
+0.9.0 packages; `pip check` passed and a fresh interactive zsh resolves `kollab`.
+After the human's OpenAI login, a real provider request in
+`/home/almazan/kollab-relay-proof.q5GZCg` returned `KOLLAB_PROVIDER_READY` with
+exit 0. This proves provider access for the installed baseline, not the unreleased
+relay model/tool conversation. The public discovery/health check at 06:07 UTC
+returned identical aliases (revision 256) and 2/2 ready relay workers.
+
 Required remaining work, retained explicitly:
 
-1. Complete runtime-enforced outbound human grants with recipient, purpose,
-   task/conversation, expiry and reply scope across every messaging entrypoint.
-   The current prompt guidance and receiver allowlist do not satisfy this item.
+1. Extend runtime-enforced human grants across the remaining direct/local
+   messaging entrypoints. The native relay send boundary now binds the exact
+   initial human request, sender session, recipient, room, task ID, expiry and
+   one-use return route. This does not complete every messaging path or the full
+   progress/follow-up conversation lifecycle.
 2. Finish progress, expiry, reconnect/recovery and concurrent-session acceptance
    coverage, including actual daemon/attach lifecycle and local cross-workspace
    directed messaging. A machine roster alone is not that messaging path.
