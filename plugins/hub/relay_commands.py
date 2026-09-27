@@ -1,4 +1,4 @@
-"""Human-operated beacon commands; never inject peer traffic into an LLM."""
+"""Human-operated discovery, pairing and authorized conversation commands."""
 
 from __future__ import annotations
 
@@ -17,11 +17,12 @@ from .dns.discovery_store import DiscoveryStore
 
 
 class RelayCommands:
-    def __init__(self, workspace: Path, *, config: Any = None, state_dir: Path | None = None):
+    def __init__(self, workspace: Path, *, config: Any = None, state_dir: Path | None = None, agent_bridge=None):
         from .relay_client import RelayClient
 
         self.client = RelayClient(workspace=workspace, state_dir=state_dir)
         self.config = config
+        self.agent_bridge = agent_bridge
         self._lock = asyncio.Lock()
         self._closed = False
         # Public discovery pins remain separate from transport invitations.
@@ -112,13 +113,13 @@ class RelayCommands:
         self._closed = True
         await self.client.close()
 
-    async def run(self, value: str) -> str:
+    async def run(self, value: str, *, source_agent=None) -> str:
         if not isinstance(value, str) or len(value) > 4096:
             return "connect: command is too large"
         value = value.strip()
         async with self._lock:
             try:
-                return await self._run(value)
+                return await self._run(value, source_agent=source_agent)
             except (DiscoveryError, OSError, ValueError, TimeoutError) as exc:
                 # Client errors must never include invite/private state material.
                 if value.partition(" ")[0] == "join":
@@ -140,7 +141,9 @@ class RelayCommands:
                 "dns_unavailable": "the relay domain could not be resolved",
                 "timeout": "the relay discovery request timed out; retry when reachable",
                 "unavailable": "relay discovery is unavailable; check network and TLS configuration",
-            }.get(exc.code, "relay discovery failed verification; check the publisher and local discovery configuration")
+            }.get(
+                exc.code, "relay discovery failed verification; check the publisher and local discovery configuration"
+            )
             return "connect: " + hint
         if isinstance(exc, TimeoutError):
             return "connect: relay connection timed out; use /connect status to inspect reconnect state"
@@ -153,19 +156,34 @@ class RelayCommands:
                 return "connect: invitation must be a regular file, not a symbolic link"
             return "connect: could not read the invitation or save local relay state"
         hint = {
-            "cannot join your own invitation": "this invitation belongs to this workspace; join it from the other computer's Kollab session",
-            "invitation must be an owned private regular file": "invitation must be a regular file owned by this user with private permissions; run chmod 600 on the receiving file",
+            "cannot join your own invitation": (
+                "this invitation belongs to this workspace; join it from the other computer's Kollab session"
+            ),
+            "invitation must be an owned private regular file": (
+                "invitation must be a regular file owned by this user with private permissions; "
+                "run chmod 600 on the receiving file"
+            ),
             "invitation file is too large": "invitation exceeds the 4096-byte limit; transfer the original file again",
-            "invalid invitation path quoting": "provide one invitation file path; use matching quotes around a path containing spaces",
+            "invalid invitation path quoting": (
+                "provide one invitation file path; use matching quotes around a path containing spaces"
+            ),
             "Unsupported advertised relay control URL": "the publisher advertises an unsupported relay endpoint",
-        }.get(str(exc), "invalid invitation or relay configuration; transfer the original invitation file and check /connect status")
+        }.get(
+            str(exc),
+            "invalid invitation or relay configuration; "
+            "transfer the original invitation file and check /connect status",
+        )
         return "connect: " + hint
 
-    async def _run(self, value: str) -> str:
+    async def _run(self, value: str, *, source_agent=None) -> str:
         from .relay_client import parse_invite
 
         head, _, rest = value.partition(" ")
         rest = rest.strip()
+        if head in {"allow", "deny", "grants", "agents", "send", "task", "cancel"}:
+            if self.agent_bridge is None:
+                return "connect: agent conversations require a running Kollab Hub session"
+            return await self.agent_bridge.application_command(head, rest, source_agent=source_agent)
         if head == "status":
             return self.format_status()
         if head == "peers":
@@ -193,6 +211,9 @@ class RelayCommands:
             if not rest:
                 return f"usage: /connect {head} <full 64-hex peer public key>"
             getattr(self.client, head)(rest)
+            if head == "revoke" and self.agent_bridge is not None:
+                self.agent_bridge._state()
+                self.agent_bridge.store.revoke(self.client.state.room, rest)
             return (
                 f"peer presence {'approved' if head == 'approve' else 'revoked'}: {rest}\n"
                 "Workspace tool permissions are separate."
@@ -248,7 +269,12 @@ class RelayCommands:
         if head == "help":
             return (
                 "/connect [domain] | status | peers | invite | join <private file>\n"
-                "/connect approve|revoke|ping <peer public key> | rotate | disconnect"
+                "/connect approve|revoke|ping <peer public key> | rotate | disconnect\n"
+                "/connect agents [local|peer public key] | grants\n"
+                "/connect allow <peer public key> <local agent name>\n"
+                "/connect deny <peer public key> [local agent name]\n"
+                "/connect send <full relay agent address> <message>\n"
+                "/connect task|cancel <full relay agent address> <message id>"
             )
         value = value or self.client.state.origin or "https://kollabor.ai"
         result, ca, cidrs, is_card = await self._discover(value)

@@ -259,6 +259,7 @@ class HubPlugin(BasePlugin):
         self._endpoint_uri: str = ""  # advertised off-box A2A URI (if enabled)
         self._endpoint_setup_error: str = ""  # config/bootstrap rejection reason
         self._relay_commands = None
+        self._relay_agent = None
         self._relay_startup_task = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
         self._work_queue: Optional[WorkQueue] = None
@@ -374,7 +375,7 @@ class HubPlugin(BasePlugin):
                     "enabled": True,
                     "heartbeat_interval": 5,
                     "identity": "",
-                    "auto_help": True,
+                    "auto_help": False,
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
@@ -2632,7 +2633,11 @@ class HubPlugin(BasePlugin):
                 parts.append(f"{ident}: {reason}")
             output = (
                 f"[hub_msg] rejected: {'; '.join(parts)}. "
-                f'send with force="true" to break through.'
+                + (
+                    "Network grants and receiver permissions must authorize delivery."
+                    if target.startswith("relay:") or (self._relay_agent and self._relay_agent._turn.get())
+                    else 'send with force="true" to break through.'
+                )
             )
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2642,6 +2647,9 @@ class HubPlugin(BasePlugin):
                 error=output,
                 metadata=metadata,
             )
+        elif msg.metadata.get("relay_receipt"):
+            receipt = msg.metadata["relay_receipt"]
+            output = f"remote task {receipt['id']}: {receipt['state']}; acceptance is not completion"
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
         elif self._presence:
@@ -3720,6 +3728,21 @@ class HubPlugin(BasePlugin):
         if not self.event_bus or not self._is_enabled():
             return
 
+        # These guards share the normal model/tool pipeline. The final tool
+        # guard runs after an awaited host permission prompt, so revocation
+        # during that prompt cannot authorize a stale remote request.
+        for name, event_type, callback, priority in (
+            ("hub_relay_human", EventType.USER_INPUT_PRE, self._relay_human_input, 1001),
+            ("hub_relay_model", EventType.LLM_REQUEST_PRE, self._relay_guard_model, 1001),
+            ("hub_relay_tool", EventType.TOOL_CALL_PRE, self._relay_guard_tool, 1),
+        ):
+            await self.event_bus.register_hook(
+                Hook(
+                    name=name, plugin_name=self.name, event_type=event_type,
+                    callback=callback, priority=priority, error_action="stop", retry_attempts=0,
+                )
+            )
+
         # Inject roster into system prompt before each LLM call
         roster_hook = Hook(
             name="hub_roster_inject",
@@ -4519,8 +4542,8 @@ class HubPlugin(BasePlugin):
                     logger.error(f"--org launch failed: {e}", exc_info=True)
 
             self._started = True
-            # Only the owning daemon joins the beacon. Saved opt-in state may
-            # reconnect without publishing local Hub records or waking models.
+            # Elect one transport owner for this workspace; every local agent
+            # keeps its own model, permissions and durable receiving queue.
             self._relay_startup_task = asyncio.create_task(self._resume_relay())
         except Exception as e:
             logger.error(f"Hub startup failed: {e}", exc_info=True)
@@ -6112,6 +6135,12 @@ class HubPlugin(BasePlugin):
         is_human_elsewhere: bool,
         llm_service: Any,
     ) -> HubWakeDecision:
+        relay = getattr(self, "_relay_agent", None)
+        if relay and message is relay._injecting_message:
+            # Durable relay admission already deduplicates IDs and checks the
+            # recipient's grant. Content heuristics must not strand an admitted
+            # request merely because it says "thanks" or resembles old text.
+            return HubWakeDecision("wake", True, "authorized remote conversation")
         if not is_intended:
             return HubWakeDecision("observe", False, "not intended")
         if is_human_elsewhere:
@@ -6332,6 +6361,11 @@ class HubPlugin(BasePlugin):
 
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
+        relay = getattr(self, "_relay_agent", None)
+        if relay and await relay.defer_local(message):
+            return
+        if not relay and (message.from_identity or "").startswith("relay:"):
+            return
         # Dedup check
         msg_id = getattr(message, "id", "") or ""
         if msg_id and msg_id in self._seen_messages:
@@ -6937,13 +6971,12 @@ class HubPlugin(BasePlugin):
     async def _inject_roster_context(self, context, event=None):
         """Inject hub roster into conversation history before LLM calls.
 
-        This is the SOCIAL LAYER. The LLM sees who else is working,
-        what they're doing, and can proactively offer help.
+        The LLM sees who is available; presence alone does not authorize contact.
 
         Injects roster as the first system message in conversation_history
         (the actual list the API call uses), updating it each turn.
         """
-        if not self._identity or not self._roster:
+        if not self._identity:
             return context
 
         # Build roster block
@@ -6973,9 +7006,14 @@ class HubPlugin(BasePlugin):
 
         lines.append("")
 
-        auto_help = True
+        auto_help = False
         if self.config:
-            auto_help = self.config.get("plugins.hub.auto_help", True)
+            auto_help = self.config.get("plugins.hub.auto_help", False)
+
+        lines.append("Only contact other agents when directed by the human or an authorized task.")
+        relay = getattr(self, "_relay_agent", None)
+        if relay:
+            lines.extend(await relay.harness_context())
 
         lines.append("to message an agent, ALWAYS use this exact format:")
         lines.append('<hub_msg to="identity">your message</hub_msg>')
@@ -7589,7 +7627,11 @@ class HubPlugin(BasePlugin):
             and not has_pending_tool_work
             and turn_completed is not False
         ):
-            await self._maybe_route_to_coordinator(cleaned)
+            if not (getattr(self, "_relay_agent", None) and self._relay_agent.active):
+                await self._maybe_route_to_coordinator(cleaned)
+
+        if getattr(self, "_relay_agent", None):
+            await self._relay_agent.finish_response(data)
 
         return data
 
@@ -7669,6 +7711,30 @@ class HubPlugin(BasePlugin):
             A list of (recipient_identity, rejection_reason) tuples.
             Empty list means all recipients accepted.
         """
+        relay = getattr(self, "_relay_agent", None)
+        if (message.to or "").startswith("relay:"):
+            from .relay_state import ID, RelayError
+
+            if not relay:
+                return [(message.to, "network conversation service is not ready")]
+            if message.scope != MessageScope.DIRECT.value or message.action != "message":
+                return [(message.to, "remote routing accepts direct conversation messages only")]
+            try:
+                receipt = await relay.send(
+                    message.to, message.content,
+                    thread_id=message.thread_id if ID.fullmatch(message.thread_id or "") else "",
+                    reply_to=message.reply_to if ID.fullmatch(message.reply_to or "") else "",
+                )
+                message.metadata["relay_receipt"] = receipt
+                if receipt["state"] in {"rejected", "failed", "cancelled", "interrupted"}:
+                    return [(message.to, "remote task " + receipt["state"])]
+                self._trace_delivery(message, "remote_accepted", detail=receipt["state"])
+                return []
+            except (RelayError, OSError, TimeoutError):
+                return [(message.to, "remote conversation not accepted; check /connect status, grants and task status")]
+        if relay and relay._turn.get() is not None:
+            return [(message.to, "remote tasks may reply only to their authenticated sender")]
+
         assert self._presence is not None
         rejections: List[Tuple[str, str]] = []
         self._trace_delivery(message, "route_started", detail=message.action)
@@ -8129,7 +8195,7 @@ class HubPlugin(BasePlugin):
         self.command_registry.register_command(
             CommandDefinition(
                 name="connect",
-                description="Connect to a beacon, pair peer presence, or inspect signed discovery",
+                description="Discover, pair, authorize and message agents across networks",
                 category=CommandCategory.CUSTOM,
                 plugin_name=self.name,
                 handler=self._handle_connect_command,
@@ -8155,17 +8221,12 @@ class HubPlugin(BasePlugin):
                 return "beacon: daemon connection command failed; no viewer connection opened"
         return await self._run_connect_command(value)
 
-    def _get_relay_commands(self):
-        if self._relay_commands is None:
-            from .project_scope import resolve_project_root
-            from .relay_commands import RelayCommands
-
-            self._relay_commands = RelayCommands(resolve_project_root(), config=self.config)
-        return self._relay_commands
-
     async def _run_connect_command(self, value: str) -> str:
         try:
-            return await self._get_relay_commands().run(value)
+            if self._identity is not None and self._rpc_server is not None:
+                await self._start_relay_agent()
+                return await self._relay_agent.command(value)
+            return "connect: wait for the local Hub session to finish starting"
         except ImportError:
             return "beacon dependencies missing; install the current Kollab package"
         except (OSError, ValueError):
@@ -8173,9 +8234,41 @@ class HubPlugin(BasePlugin):
 
     async def _resume_relay(self) -> None:
         try:
-            await self._get_relay_commands().resume()
+            await self._start_relay_agent()
         except Exception:
             logger.warning("Beacon state could not be restored; use /connect to retry")
+
+    async def _start_relay_agent(self):
+        if self._relay_agent is not None:
+            return
+        from .project_scope import resolve_project_root
+        from .relay_agent import RelayAgentBridge
+
+        bridge = RelayAgentBridge(self, resolve_project_root())
+        # Publish before the first await so simultaneous startup/commands do
+        # not create two workspace owners inside the same process.
+        self._relay_agent = bridge
+        try:
+            await bridge.start()
+        except BaseException:
+            await bridge.close()
+            self._relay_agent = None
+            raise
+
+    async def _relay_human_input(self, data, event=None):
+        if self._relay_agent:
+            return await self._relay_agent.human_input(data, event)
+        return data
+
+    async def _relay_guard_model(self, data, event=None):
+        if self._relay_agent:
+            return await self._relay_agent.guard_model(data, event)
+        return data
+
+    async def _relay_guard_tool(self, data, event=None):
+        if self._relay_agent:
+            return await self._relay_agent.guard_tool(data, event)
+        return data
 
     async def _handle_hub_command(self, command_or_args=None, **kwargs) -> str:
         """Handle /hub slash command.
@@ -10750,7 +10843,7 @@ class HubPlugin(BasePlugin):
                 await relay_start
             except asyncio.CancelledError:
                 pass
-        relay = getattr(self, "_relay_commands", None)
+        relay = getattr(self, "_relay_agent", None) or getattr(self, "_relay_commands", None)
         if relay:
             await relay.close()
 

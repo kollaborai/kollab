@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
     QueueProcessor,
     _tool_results_requiring_followup,
@@ -113,6 +114,34 @@ class TestQueueProcessor(unittest.TestCase):
     def tearDown(self):
         """Clean up."""
         self.loop.close()
+
+    def test_cancelled_pre_request_never_calls_provider(self):
+        self.event_bus.emit_with_hooks.return_value = {"cancelled": True}
+        with self.assertRaises(asyncio.CancelledError):
+            self.loop.run_until_complete(self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="remote-task",
+            ))
+        self.streaming_handler.call_llm.assert_not_awaited()
+        self.api_service.call_llm.assert_not_awaited()
+
+    def test_human_queue_drain_does_not_inherit_remote_task_context(self):
+        async def scenario():
+            token = remote_task_id.set("previous-remote-task")
+            observed = []
+
+            async def process(messages):
+                observed.append(remote_task_id.get())
+                self.processor.turn_completed = True
+
+            try:
+                self.processor.processing_queue.put_nowait("human input")
+                await self.processor.process_queue(MagicMock(), process, AsyncMock())
+                self.assertEqual(observed, [None])
+                self.assertEqual(remote_task_id.get(), "previous-remote-task")
+            finally:
+                remote_task_id.reset(token)
+
+        self.loop.run_until_complete(scenario())
 
     def test_init(self):
         """Test QueueProcessor initialization."""

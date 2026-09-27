@@ -59,9 +59,16 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
   device-key `Box` encryption.
 - Keep secrets in private files/state, not CLI arguments, URLs, prompts or logs.
   Preserve signer keys, origin pins and monotonic revisions across updates.
-- As currently implemented, native encrypted client payloads support ping/pong.
-  Do not label that general agent chat, task execution or a workspace bridge.
-  If extending it, specify and implement the authorization boundary at both ends.
+- The 0.9.0 baseline supports encrypted ping/pong. Current conversation work uses
+  `relay_agent.py`, `relay_conversations.py`, `relay_owner.py`, and
+  `local_directory.py` to reach the existing Hub/model/tool pipeline. Inspect the
+  implementation ledger before claiming release or live proof. Keep peer/room
+  approval separate from sender communication grants and receiver tool policy.
+- Remote turn provenance must survive background tasks, cancellation and new
+  human input. Recheck admission before the model and after any awaited tool
+  permission decision. A cancelled pre-request hook must stop provider dispatch.
+- Only verified same-user Unix connections may invoke operator RPC. Peer-key
+  authentication on the off-box listener never authorizes daemon administration.
 - Preserve explicit origin checks, backend URL restrictions, private metrics,
   proxy-source handling, bounded frames/queues/deadlines and replay rejection.
 - Shared leases and quotas must hold across workers. A standalone managed sidecar

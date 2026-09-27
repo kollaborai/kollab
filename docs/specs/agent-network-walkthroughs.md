@@ -1,11 +1,11 @@
 # Kollab Agent Network: Scenario Walkthroughs
 
-Status: scenario contracts, updated 2026-09-27 UTC. Signed discovery and encrypted-presence relaying are deployed; a narrow device-pairing and workspace A2A receiver is implemented locally. Broader networking scenarios remain proposed.
+Status: required scenario contracts, updated 2026-09-27 UTC. Signed discovery and encrypted presence have deployment evidence. Current source adds a normal Hub conversation bridge and quiet local roster; live provider/two-host proof and the remaining peer-network contracts are unfinished. Command spellings below are proposals unless listed as implemented in the beacon contract.
 Parent: [discovery, identity, and relaying design](agent-network-discovery-and-relaying.md).
 
 Concrete discovery contract: [existing DNS shape, versioned lookup, and new-laptop enrollment](agent-domain-discovery-contract.md).
 
-These examples describe the feature to build. The wider network commands and example output below remain proposed. `/hub dns connect` performs signed publisher discovery; `/connect` additionally attaches to an explicitly advertised compatible relay. Neither enrolls an owner identity or opens an agent conversation. See the contract for implementation evidence. Marco confirmed `kollabor.ai` as the correct existing domain. Both public identity URLs now serve signed v2 JSON; the broader peer network remains unimplemented. Actual receiver setup commands live in the [A2A operations guide](../operations/agent-a2a-workspace.md). Angle-bracket values are placeholders; short identities shown in output are display abbreviations, never routing keys.
+These examples describe the feature to finish. `/hub dns connect` performs signed publisher discovery; `/connect <domain>` attaches to an advertised compatible relay without authorizing workspace access. The [beacon conversation walkthrough](agent-public-beacon.md#agent-conversation-commands-in-current-source) covers implemented `/connect agents`, `allow`, `send`, `task` and `cancel` commands and their remaining authorization/release gates. `kollabor.ai` is the correct public domain. Receiver commands for the separate narrow A2A adapter live in the [A2A operations guide](../operations/agent-a2a-workspace.md). Angle-bracket values are placeholders; abbreviated identities are display labels, never routing keys.
 
 Open-source requirement: all examples must also work on an operator's own domain or private peer network, using free/open-source software without a Kollabor account, paid API, proprietary relay SDK, or dependency on `kollabor.ai`. Discovery requires no model calls. Machine, bandwidth, and domain/hosting costs remain the operator's choices.
 

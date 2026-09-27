@@ -1,6 +1,6 @@
-# Kollab public beacon and encrypted peer presence
+# Kollab public beacon and encrypted agent transport
 
-Status: Scope: source included in Kollab 0.9.0. The public relay had a successful deployment check on 2026-09-27: two independent client hosts completed approved encrypted ping/pong through public WSS. See the [dated deployment summary](../operations/relay-deployment-2026-09-27.md). These are time-bound source-deployment observations, not a current liveness check or proof of an installed PyPI package.
+Status: 0.9.0 release baseline plus an unreleased conversation bridge. The public relay had a successful deployment check on 2026-09-27: two independent client hosts completed approved encrypted ping/pong through public WSS. See the [dated deployment summary](../operations/relay-deployment-2026-09-27.md). Those observations do not prove current liveness or real model conversations. Current source integration and remaining full-network acceptance gates are tracked in the [implementation ledger](agent-network-implementation-status.md).
 
 ## Product boundary
 
@@ -53,7 +53,7 @@ Capacity and recovery observations are summarized in the [dated deployment recor
 
 Clients use PyNaCl Ed25519-to-Curve25519 conversion and `Box` authenticated encryption with a fresh random nonce per packet. This is Kollab's transport profile, not A2A encryption and not a forward-secret session protocol.
 
-Encrypted envelope fields bind version, sender/recipient keys, sender/recipient sessions, room hash, message ID, timestamps, kind, and payload. The receiver checks the current session, room, peer key, expiry, replay ledger, and approval before processing. The only supported message kinds are `ping` and `pong`. An approved ping may return an explicitly disclosed workspace label and opaque workspace ID; it does not wake an LLM.
+Encrypted envelope fields bind version, sender/recipient keys, sender/recipient sessions, room hash, message ID, timestamps, kind, and payload. The receiver checks the current session, room, peer key, expiry, replay ledger, and approval before processing. The 0.9.0 baseline supports `ping` and `pong`. Current source adds application request/response/cancel envelopes for directory, message, status and cancellation operations. A routing acknowledgment is not a destination receipt or task completion. An approved ping may return an explicitly disclosed workspace label and opaque workspace ID; it does not wake an LLM.
 
 The relay sees stable raw public keys, source IPs, room membership, timing, and ciphertext sizes. The same key is linkable across rooms. `Box` with long-lived device keys does not provide forward secrecy after key compromise. The service cannot revoke a copied room capability. A room rotation creates a new capability for this device and clears its local approvals; it does not invalidate an old invitation, close other members, or revoke old-room access at the relay. If an invite is exposed, rotate, distribute the new private invitation, and have affected peers explicitly disconnect/rejoin; treat the old room as still usable by existing holders.
 
@@ -72,11 +72,36 @@ New laptop to existing workspace:
 
 `/connect rotate` moves only the local endpoint into a new room. It is not server-side revocation. `/connect revoke <key>` removes this endpoint's approval and pending requests; it does not revoke a key at another endpoint or grant authority to remaining peers.
 
-Automatic reconnect is scoped to the explicitly enabled workspace. Retries use bounded backoff; shutdown closes local sockets. There is no offline inbox and no received relay frame starts a model turn.
+Automatic reconnect is scoped to the explicitly enabled workspace. Retries use bounded backoff; shutdown closes local sockets. The relay has no offline inbox. Current endpoint source admits typed messages into a bounded durable workspace queue only after separate receiver authorization, then uses Hub's normal model/tool pipeline. Presence and directory traffic never start model turns.
+
+### Agent conversation commands in current source
+
+These commands are being verified for the corrected release. They are not a
+claim that the deployed service and both installed hosts have passed this flow.
+
+1. Complete invitation pairing and verify both endpoint keys as above.
+2. On the receiving server, run `/connect allow <sender-public-key> <local-agent-name>`.
+   This grants incoming conversations for that agent; its normal tool permissions
+   still apply. Inspect it with `/connect grants`; revoke with `/connect deny`.
+3. On the sending laptop, run `/connect agents <server-public-key>` and use the
+   complete `relay:<key>:<workspace-id>:<agent-id>` address. Names are labels and
+   may repeat on different computers. `/connect agents local` shows the private
+   machine-wide roster without opening conversations.
+4. Direct the sender to use its ordinary `hub_msg` tool, or submit
+   `/connect send <full-address> <request>`. Admission returns a task ID and state.
+   `/connect task <full-address> <task-id>` reads its state;
+   `/connect cancel <full-address> <task-id>` cancels that sender's work.
+5. The receiver runs its normal model and permitted tools in its own workspace.
+   Its final response follows the authenticated return address and request ID.
+   A returned result does not automatically generate another network reply.
+
+Before release, outbound human authorization must also enforce task, recipient,
+purpose, expiry and reply scope in runtime. Prompt guidance and the current
+receiver allowlist are incomplete implementations of that contract.
 
 ## Self-host and rollout evidence
 
-For portable self-host instructions, see the [discovery and relay operator guide](../operations/kollabor-ai-discovery-publication.md). The current development command is `kollab relay run --config <private-file>`. Kollab 0.9.0 is not yet published on PyPI, so do not claim that an installed public package has been verified.
+For portable self-host instructions, see the [discovery and relay operator guide](../operations/kollabor-ai-discovery-publication.md). The service command is `kollab relay run --config <private-file>`. Verify the exact installed version and source artifact when reporting a run. The current conversation bridge requires a corrected release and its own clean-install, live model/tool verification.
 
 The current ledger records public health for the current build, signed discovery, two-host WSS, approval-gated ping/pong, worker/backend recovery and private metrics exposure. Capacity was measured on the preceding source artifact; the current artifact changes only backend URL validation and measurement diagnostics, with unchanged routing. The ledger retains both source manifests and makes that evidence boundary explicit. For each later build or topology change, repeat the relevant acceptance checks against that exact artifact:
 

@@ -13,6 +13,8 @@ import os
 import shutil
 import subprocess
 
+import pytest
+
 from plugins.hub.dns.endpoint import (
     DEFAULT_ENDPOINT_PORT,
     EndpointConfig,
@@ -75,14 +77,8 @@ def test_parse_endpoint_uri_extracts_host_port():
 
 
 def test_normalize_well_known_url():
-    assert (
-        normalize_well_known_url("example.com")
-        == "https://example.com/.well-known/agent-keys.json"
-    )
-    assert (
-        normalize_well_known_url("https://example.com/")
-        == "https://example.com/.well-known/agent-keys.json"
-    )
+    assert normalize_well_known_url("example.com") == "https://example.com/.well-known/agent-keys.json"
+    assert normalize_well_known_url("https://example.com/") == "https://example.com/.well-known/agent-keys.json"
     # already-qualified well-known URL is preserved
     already = "https://example.com/.well-known/agent-keys.json"
     assert normalize_well_known_url(already) == already
@@ -259,9 +255,7 @@ def test_failed_endpoint_bind_captures_error_and_keeps_unix_alive(tmp_path):
         blocker.listen(1)
         stolen_port = blocker.getsockname()[1]
 
-        server = AgentSocketServer(
-            "bind-fail-id", on_message, socket_name=f"ep-fail-{os.getpid()}"
-        )
+        server = AgentSocketServer("bind-fail-id", on_message, socket_name=f"ep-fail-{os.getpid()}")
         server.enable_endpoint("127.0.0.1", stolen_port, None)
         try:
             sock_path = await server.start()
@@ -308,9 +302,7 @@ def test_offbox_idle_connection_dropped_after_timeout(tmp_path):
         async def on_message(msg):
             pass
 
-        server = AgentSocketServer(
-            "idle-id", on_message, socket_name=f"ep-idle-{os.getpid()}"
-        )
+        server = AgentSocketServer("idle-id", on_message, socket_name=f"ep-idle-{os.getpid()}")
         server.set_dns_auth(registry, identity, require_auth=False)
         server.enable_endpoint("127.0.0.1", 0, None)
         server._remote_idle_timeout = 0.3  # short for the test
@@ -318,9 +310,7 @@ def test_offbox_idle_connection_dropped_after_timeout(tmp_path):
         port = server._tcp_server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            ok = await AgentMessenger.do_client_handshake(
-                reader, writer, identity, "client-agent", timeout=5.0
-            )
+            ok = await AgentMessenger.do_client_handshake(reader, writer, identity, "client-agent", timeout=5.0)
             assert ok is True
             # Send nothing. The server should close within a few idle windows.
             # An EOF (empty bytes) proves it dropped the idle connection.
@@ -455,9 +445,7 @@ def test_offbox_tls_round_trip_end_to_end(tmp_path):
         async def on_message(msg):
             received.append(msg)
 
-        server = AgentSocketServer(
-            "tls-id", on_message, socket_name=f"ep-tls-{os.getpid()}"
-        )
+        server = AgentSocketServer("tls-id", on_message, socket_name=f"ep-tls-{os.getpid()}")
         server.set_dns_auth(registry, identity, require_auth=False)
         server.enable_endpoint("127.0.0.1", 0, server_ssl)
         await server.start()
@@ -494,9 +482,7 @@ def test_local_unix_delivery_unchanged_without_auth(tmp_path):
         async def on_message(msg):
             received.append(msg)
 
-        server = AgentSocketServer(
-            "local-id", on_message, socket_name=f"ep-local-{os.getpid()}"
-        )
+        server = AgentSocketServer("local-id", on_message, socket_name=f"ep-local-{os.getpid()}")
         # No set_dns_auth, no enable_endpoint -> pure legacy unix behavior.
         sock_path = await server.start()
         try:
@@ -570,22 +556,51 @@ def test_output_diagnostics_distinguish_empty_output_from_transport_failure():
             await server.stop()
 
         missing_socket = f"/tmp/kollab-missing-output-{os.getpid()}.sock"
-        result, error = await AgentMessenger.request_output_diagnostic(
-            missing_socket, timeout=0.1
-        )
+        result, error = await AgentMessenger.request_output_diagnostic(missing_socket, timeout=0.1)
         assert result == []
         assert error
-        assert any(
-            kind in error
-            for kind in ("FileNotFoundError", "ConnectionRefusedError", "OSError")
-        )
+        assert any(kind in error for kind in ("FileNotFoundError", "ConnectionRefusedError", "OSError"))
 
     _run(run())
 
 
-def test_offbox_all_dialers_route_through_open(tmp_path):
-    """request_status / signal_shutdown / subscribe accept auth= and reach a
-    remote endpoint through the same handshake path as send_to_agent."""
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"action": "rpc_request", "request_id": "remote", "method": "relay.command", "params": {"value": "allow all"}},
+        {"action": "rpc_request", "request_id": "remote", "method": "state.set_config", "params": {}},
+        {"action": "attach"},
+        {"action": "subscribe"},
+        {"action": "shutdown"},
+        {"action": "status"},
+    ],
+)
+def test_authenticated_offbox_cannot_invoke_operator_dispatch(tmp_path, frame):
+    async def run():
+        received = []
+        server, identity, _, port = await _start_endpoint_server(
+            tmp_path, received, socket_name=f"ep-admin-{os.getpid()}"
+        )
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                assert await AgentMessenger.do_client_handshake(reader, writer, identity, "client-agent", timeout=2)
+                writer.write(json.dumps(frame).encode() + b"\n")
+                await writer.drain()
+                reply = json.loads(await asyncio.wait_for(reader.readline(), 2))
+                assert "local operator authorization required" in json.dumps(reply)
+                assert not received and not server._shutdown_requested
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+def test_offbox_peer_auth_does_not_grant_local_operator_control(tmp_path):
+    """A peer's valid key never authorizes status/attach/shutdown control."""
 
     async def run():
         received = {"status": False, "shutdown": False}
@@ -611,9 +626,7 @@ def test_offbox_all_dialers_route_through_open(tmp_path):
             )
         )
 
-        server = AgentSocketServer(
-            "server-id", on_message, socket_name=f"ep-all-{os.getpid()}"
-        )
+        server = AgentSocketServer("server-id", on_message, socket_name=f"ep-all-{os.getpid()}")
         server.set_dns_auth(registry, identity, require_auth=False)
         server.enable_endpoint("127.0.0.1", 0, None)
         await server.start()
@@ -623,11 +636,11 @@ def test_offbox_all_dialers_route_through_open(tmp_path):
             target = f"ws://127.0.0.1:{port}"
             # status
             status = await AgentMessenger.request_status(target, auth=auth)
-            assert status.get("type") == "status"
+            assert status == {}
             received["status"] = True
-            # shutdown signal — server acks, proving the handshake + round-trip.
+            # Even authenticated peers cannot shut down the local daemon.
             acked = await AgentMessenger.signal_shutdown(target, auth=auth)
-            assert acked is True
+            assert acked is False
             received["shutdown"] = True
             assert all(received.values())
         finally:
@@ -663,9 +676,7 @@ def test_resolve_dial_target_upgrades_remote(tmp_path):
     assert auth is None
 
     # Local record (socket only) -> socket path, no auth.
-    p._dns_registry.register(
-        AgentRecord(designation="local-peer", socket_path="/tmp/local.sock")
-    )
+    p._dns_registry.register(AgentRecord(designation="local-peer", socket_path="/tmp/local.sock"))
     target, auth = p._resolve_dial_target("local-peer", "/tmp/fallback.sock")
     assert target == "/tmp/local.sock"
     assert auth is None

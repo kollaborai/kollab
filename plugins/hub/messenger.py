@@ -664,8 +664,35 @@ class AgentSocketServer:
                     msg_data = json.loads(line.decode().strip())
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
+                if not isinstance(msg_data, dict):
+                    continue
 
                 action = msg_data.get("action", "")
+
+                # A verified peer key grants peer messaging, never operator
+                # access to the local daemon. The same dispatcher backs the
+                # off-box listener and Unix attach/RPC transport, so enforce
+                # this boundary here before any administrative handler runs.
+                local_operator = (
+                    not require_auth
+                    and peer_cred is not None
+                    and peer_cred[1] == os.getuid()
+                )
+                remote_admin = require_auth and action not in ("message", "ping")
+                local_admin = action not in ("message", "ping")
+                if remote_admin or (local_admin and not local_operator):
+                    if action == "rpc_request":
+                        rejection = {
+                            "action": "rpc_reply",
+                            "request_id": msg_data.get("request_id", ""),
+                            "error": "local operator authorization required",
+                            "error_kind": "handler",
+                        }
+                    else:
+                        rejection = {"type": "error", "msg": "local operator authorization required"}
+                    writer.write((json.dumps(rejection) + "\n").encode())
+                    await writer.drain()
+                    return
 
                 if action == "message":
                     msg = HubMessage.from_dict(msg_data)

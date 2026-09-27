@@ -11,6 +11,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
+from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_ai.cost_calculator import calculate_cost
 from kollabor_ai.message_content import (
@@ -412,6 +413,19 @@ class QueueProcessor:
         process_message_batch_fn: Callable,
         continue_conversation_fn: Callable,
     ):
+        """Drain local input without inheriting a scheduling peer's authority."""
+        token = remote_task_id.set(None)
+        try:
+            return await self._drain_queue(task_manager, process_message_batch_fn, continue_conversation_fn)
+        finally:
+            remote_task_id.reset(token)
+
+    async def _drain_queue(
+        self,
+        task_manager,
+        process_message_batch_fn: Callable,
+        continue_conversation_fn: Callable,
+    ):
         """Process queued messages.
 
         Args:
@@ -703,7 +717,7 @@ class QueueProcessor:
         get_token_io_state().start_waiting()
 
         # Emit LLM_REQUEST_PRE directly (POST emitted separately after API call)
-        await self.event_bus.emit_with_hooks(
+        pre_request = await self.event_bus.emit_with_hooks(
             EventType.LLM_REQUEST_PRE,
             {
                 "model": getattr(self.api_service, "model", "unknown"),
@@ -712,6 +726,11 @@ class QueueProcessor:
             },
             "llm_service",
         )
+        if pre_request and pre_request.get("cancelled", False):
+            # Security hooks may revoke a queued remote conversation while it
+            # waits for the model. A cancelled pre-request must not reach the
+            # provider; tool guards alone are too late for this boundary.
+            raise asyncio.CancelledError("Model request denied by pre-request hook")
 
         response = None
         parent_uuid = current_parent_uuid

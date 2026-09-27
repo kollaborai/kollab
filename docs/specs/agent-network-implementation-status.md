@@ -1,6 +1,74 @@
 # Agent network implementation status
 
-Updated: 2026-09-27 UTC. Scope: source included in Kollab 0.9.0. The initial discovery/A2A slice and later public relay deployment have separate dated evidence below; deployment observations came from a source artifact, not a published package. Broader network features remain outside these claims.
+Updated: 2026-09-27 UTC. The full networking design remains the acceptance contract. The 0.9.0 release baseline delivered discovery and encrypted presence, and did not satisfy the requested agent-to-agent workflow. Historical evidence below retains its original scope. The current conversation bridge is unreleased work; neither it nor the full network is declared complete.
+
+## Active implementation: normal agent conversations
+
+The working branch connects encrypted application requests to the existing Hub
+message handler, model continuation hook, normal tool executor, and final reply
+parser. Each workspace elects one local transport owner using a private file
+lock; its other sessions use same-user Unix RPC and retain their own receiving
+queues, model context and tool permissions. Remote RPC frames cannot invoke those
+local operator methods.
+
+Implemented source boundaries:
+
+- `relay_client.py`: authenticated encrypted directory/message/status/cancel
+  requests, bounded handlers and pending requests, peer/session/request binding.
+- `relay_conversations.py`: private transactional admission, replay receipts,
+  exact reply correlation, independent receiver grants, terminal states, queue
+  limits, revocation and dead-session recovery.
+- `relay_agent.py` and `plugin.py`: Hub routing, serial receiver queues,
+  context-bound model/tool guards, final reply delivery, human preemption,
+  quiet directory context and `/connect` conversation commands.
+- `local_directory.py`: bounded same-user cross-workspace presence view; remote
+  publication omits paths, sockets, process IDs, task text and other workspaces.
+- `queue_processor.py`: cancelled pre-request hooks stop before provider calls.
+  The previous producer ignored the cancellation result.
+
+Current evidence: 177 transport/directory/ownership/ledger tests passed before
+bridge integration. A later focused run passed 151 checks across the bridge,
+conversation ledger, endpoint and model queue. The eight bridge checks use actual
+endpoint encryption, Hub event hooks, the normal file tool, and temporary
+workspaces; their model is a controlled continuation recorder. They cover a
+correlated round trip, rejection without a receiver grant, revocation during a
+permission wait, stale context after human preemption, duplicate/wrong-workspace
+input, cancellation, spoofed relay identity, and quiet directory access. This is
+not live provider or two-host proof.
+
+The subsequent full unit run (`python -m pytest -q tests/unit`) passed **3,539
+tests and 201 subtests, with 64 skips**, in 31.55 seconds. Bridge coverage now has
+14 checks, including a real Unix-socket command forwarding/owner-takeover case
+that preserves the workspace key, and rejection when local peer credentials are
+unavailable. The queue also clears inherited remote provenance when draining new
+human input, while stale remote tools retain their revoked provenance. Scoped
+Ruff and diff whitespace checks pass. Skipped tests and live deployment/provider
+acceptance remain outside this result.
+
+Required remaining work, retained explicitly:
+
+1. Complete runtime-enforced outbound human grants with recipient, purpose,
+   task/conversation, expiry and reply scope across every messaging entrypoint.
+   The current prompt guidance and receiver allowlist do not satisfy this item.
+2. Finish progress, expiry, reconnect/recovery and concurrent-session acceptance
+   coverage, including actual daemon/attach lifecycle and local cross-workspace
+   directed messaging. A machine roster alone is not that messaging path.
+3. Integrate owner enrollment/private-directory authority with normal native
+   conversations and the human-visible unknown-visitor acceptance flow.
+4. Finish direct/forwarded route selection, alternate bootstrap, LAN discovery,
+   distributed signed-record exchange, route changes and loop bounds from the
+   parent design. Central forwarding alone proves only part of those scenarios.
+5. Run the real Mac → alzan-prod model/tool/artifact/reply flow through the public
+   relay, plus its negative authorization tests; retain evidence at both ends.
+6. Repeat scale, operational and recovery measurements for the final artifact.
+   The historical 1,024-client runs and configured limits do not establish
+   million-connection capacity.
+7. Publish the corrected release, install from PyPI into clean environments,
+   update the two verification hosts and repeat the critical installed flow.
+
+All 18 parent acceptance scenarios remain applicable, with the conversation-feed
+scenario conditional as originally specified. This list records gaps to finish;
+it does not move them outside the goal.
 
 ## Deployed follow-on: public encrypted-presence relay
 

@@ -1,10 +1,10 @@
 # Kollab Agent Network: Discovery, Identity, and Relaying
 
-Status: working design draft reconstructed from Marco's conversations.
+Status: full implementation acceptance contract reconstructed from Marco's conversations; work in progress.
 Created: 2026-09-26.
-Implementation status: signed discovery and the public encrypted-presence relay are deployed on kollabor.ai. The same Kollab app runs managed workers with shared Valkey presence/routing; actual two-server communication and worker/backend recovery passed. Capacity measurements are recorded, including the high-rate client-error boundary; million-connection capacity is unproven. See the [current beacon contract](agent-public-beacon.md), [deployment record](../operations/relay-deployment-2026-09-27.md) and [evidence ledger](agent-network-implementation-status.md). Owner/device pairing, private-directory and A2A workspace adapters are included in Kollab 0.9.0 with local evidence. The machine-wide cross-workspace catalog and DHT remain proposed.
+Implementation status: signed discovery and encrypted-presence forwarding have dated deployment evidence on kollabor.ai. The same Kollab app runs managed workers with shared Valkey state. The two-host result was ping/pong, not a model/tool conversation. Current source adds the machine-wide catalog and the normal Hub conversation bridge; live model execution, complete human grant enforcement and broader peer discovery/routing remain required. Capacity measurements include a high-rate error boundary; million-connection capacity is unproven. See the [beacon contract](agent-public-beacon.md), [deployment record](../operations/relay-deployment-2026-09-27.md) and [implementation ledger](agent-network-implementation-status.md).
 
-Scenario guide: [setup, encryption, admission, and local-agent walkthroughs](agent-network-walkthroughs.md). Except for `/connect` and `/hub dns connect`, its network commands are proposed UX. This design describes Kollab 0.9.0 and proposed follow-on work. The publication runbook records the deployed discovery slice and its rollback paths.
+Scenario guide: [setup, encryption, admission, and local-agent walkthroughs](agent-network-walkthroughs.md). The beacon contract names commands implemented in current source; other scenario commands remain proposed spellings for required behavior. This design remains the full completion contract. The publication runbook records the deployed discovery slice and its rollback paths.
 
 Detailed contract: [domain-to-agent discovery and new-laptop enrollment](agent-domain-discovery-contract.md). It records the current source, live public DNS/HTTPS observations, and required publication alignment. The canonical URL is `/.well-known/agent-keys.json`, matching the current client; the extensionless path remains a compatibility alias.
 
@@ -211,7 +211,7 @@ The original inspected direct-endpoint path provides direct remote connectivity.
 
 The later [domain-contract inspection](agent-domain-discovery-contract.md#1-what-already-exists) confirmed the public `_agent.kollabor.ai` TXT and extensionless HTTPS identity document. The current client's `.json` URL returned 404, so publication must be aligned with source. No private enrollment, remote handshake, multi-machine connectivity, forwarding, or external service integration was exercised.
 
-## Proposed acceptance scenarios
+## Required acceptance scenarios
 
 1. **Household discovery:** two independently installed instances on one LAN discover each other without a separately installed central service. Discovery alone does not grant private-group membership.
 2. **New device enrollment:** a new computer joins through any supported starting peer; after the selected ownership/pairing flow, it can find the user's existing agents. An unrelated anonymous participant cannot obtain the same private roster.
@@ -232,7 +232,7 @@ The later [domain-contract inspection](agent-domain-discovery-contract.md#1-what
 17. **Bootstrap independence:** peers continue discovering through remaining known contacts when one bootstrap disappears. A fresh installation without any reachable contact reports bootstrap failure. The implementation does not assume a complete global roster or instantaneous convergence.
 18. **Open-source independence:** the same functionality operates with an operator's own domain and free/open-source dependencies, without a Kollabor account, paid service, proprietary SDK, or automatic publication to `kollabor.ai`.
 
-These are proposed checks for a future implementation, not reported test results. A single central-relay demonstration would prove only part of the desired design.
+These are required checks, not reported test results. The [implementation ledger](agent-network-implementation-status.md) records current evidence and missing work. A single central-relay demonstration proves only part of this design; discovery or ping/pong alone never completes the requested workflow.
 
 ## Decisions needed to make this implementation-ready
 
