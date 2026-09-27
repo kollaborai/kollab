@@ -2,6 +2,25 @@
 
 Updated: 2026-09-27 UTC. The full networking design remains the acceptance contract. The 0.9.0 release baseline delivered discovery and encrypted presence, and did not satisfy the requested agent-to-agent workflow. Historical evidence below retains its original scope. The current conversation bridge is unreleased work; neither it nor the full network is declared complete.
 
+## Required enrollment UX clarification
+
+The human wants `/connect` to accept a code in a private input screen, without
+transferring an invitation file. The code opens a pending request to a trusted
+agent. Under a prior human instruction (for example, accept two new servers),
+that agent can approve through a runtime-enforced, expiring enrollment delegation.
+The approved device then receives configuration encrypted to its own key, with
+only the selected network/profile and explicitly authorized credential categories.
+Provider-token sharing and its real revocation limits are part of this contract.
+See [the canonical enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
+
+Status: specified, not implemented or published. The installed 0.9.0 flow still
+uses private invitation files. An uncommitted automatic-admission code draft was
+removed after this clarification; it did not implement the approval boundary and
+would have exposed codes through ordinary command history. No pairing-code service
+or credential distribution was deployed. Private code input/display, authenticated
+pending requests, agent notification/decision, atomic admission budgets, encrypted
+configuration provisioning and their end-to-end tests remain required work.
+
 ## Active implementation: normal agent conversations
 
 The working branch connects encrypted application requests to the existing Hub
@@ -82,7 +101,10 @@ Required remaining work, retained explicitly:
    coverage, including actual daemon/attach lifecycle and local cross-workspace
    directed messaging. A machine roster alone is not that messaging path.
 3. Integrate owner enrollment/private-directory authority with normal native
-   conversations and the human-visible unknown-visitor acceptance flow.
+   conversations, private `/connect` code entry, delegated trusted-agent approval,
+   device-encrypted configuration provisioning and the human-visible
+   unknown-visitor acceptance flow. Enrollment codes alone do not admit devices
+   or release tokens; models cannot enlarge their human-issued delegation.
 4. Finish direct/forwarded route selection, alternate bootstrap, LAN discovery,
    distributed signed-record exchange, route changes and loop bounds from the
    parent design. Central forwarding alone proves only part of those scenarios.

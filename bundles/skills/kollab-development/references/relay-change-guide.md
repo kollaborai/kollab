@@ -53,6 +53,14 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
 - Room admission, peer approval, human ownership and workspace/tool authority are
   separate checks. Discovery and an online roster must not start unsolicited model
   turns or grant file/shell access. Keep human-directed communication explicit.
+- `/connect` code enrollment is a required pending-request flow, not automatic
+  admission. A trusted agent may approve only within a durable human-issued
+  delegation bound to its identity, networks/profile, device count and expiry.
+  Read `docs/specs/agent-device-pairing.md` before implementing it. Keep code input
+  and display outside command arguments, logs and model/chat history, including
+  the web and attach/daemon paths. Provision only approved configuration to the
+  verified device key. Never put credential values in tool responses or infer
+  provider-token revocation from removal of network membership.
 - Use TLS for transport and endpoint authenticated encryption for private payloads.
   Relay TLS termination alone is not end-to-end encryption. Check nonce/session/
   recipient binding and replay handling. Do not claim forward secrecy from static

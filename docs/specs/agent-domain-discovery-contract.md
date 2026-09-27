@@ -193,6 +193,15 @@ The receiver rechecks membership/grant validity before local tool execution. Loc
 
 ## 6. Walkthrough: a new laptop finds my existing servers
 
+The required onboarding UX now uses `/connect` with private code entry and a
+trusted agent's delegated approval, followed by device-encrypted configuration
+delivery. A domain locates the service; it does not identify the human or confer
+private-network membership. See the current
+[product walkthrough](agent-network-walkthroughs.md#scenario-2-connect-a-new-computer-and-join-my-family-directory)
+and [enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
+That UX is not yet implemented; the source-level sequence below describes the
+existing pairing primitives and must not be mistaken for the final user flow.
+
 There are two distinct stages: public contact discovery and private device admission. The deployed `kollabor.ai` publisher provides the first and advertises encrypted forwarding. Private admission remains an endpoint responsibility. It cannot infer your servers from your name or discover a private family directory on its own.
 
 ### Available now: one explicitly configured destination

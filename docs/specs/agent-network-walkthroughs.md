@@ -65,6 +65,39 @@ Local startup alone must instead report external reachability as unverified. DNS
 
 ## Scenario 2: Connect a new computer and join my family directory
 
+Required product flow, clarified 2026-09-27 UTC (not yet implemented):
+
+1. On the existing computer, tell the trusted Kollab agent: "I'm connecting two
+   new servers to my family network. Give me the codes and accept them."
+2. Kollab records a bounded human delegation for that agent, the selected network
+   and configuration profile, two new devices and a ten-minute window. The
+   runtime displays one private, single-use code per server.
+3. On each new server, launch Kollab in its workspace and run `/connect`. Its
+   private screen uses `kollabor.ai` by default, permits a self-hosted domain,
+   and accepts the code without adding it to the chat or model context.
+4. The new server proves code possession and possession of its own locally
+   generated device key. The relay delivers a pending enrollment notification
+   to the designated trusted agent. It has not joined the private roster yet.
+5. The agent accepts the request under the earlier instruction. The runtime
+   checks scope, proof, count and expiry before issuing access. A claimed name
+   such as "David" is only a label; the model cannot waive the key proof.
+6. The approved server receives a signed configuration bundle encrypted to its
+   device key, including only the expressly authorized credential categories.
+   It installs private state and acknowledges the matching bundle digest.
+7. Existing servers become discoverable under the new membership. Human-directed
+   messaging and each destination workspace's tool permissions remain separate.
+
+For two networks, select both exact networks and scopes in the human delegation;
+each device receives only that selection. Repeated requests cannot consume extra
+allowance or turn one code into two device enrollments. Expired/rejected requests
+receive no private configuration. Secrets remain outside model context on both
+the issuing and receiving sides. Full security and acceptance requirements are
+in [code enrollment and delegated approval](agent-device-pairing.md#code-enrollment-and-delegated-approval).
+
+The currently installed `/connect invite` still requires a private file; that is
+an implementation gap, not the intended final experience. Existing lower-level
+discovery/pairing mechanisms and broader directory proposals follow:
+
 On the new computer, launch Kollab in the workspace to connect:
 
 ```text

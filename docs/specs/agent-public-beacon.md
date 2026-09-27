@@ -61,6 +61,21 @@ The relay sees stable raw public keys, source IPs, room membership, timing, and 
 
 `/connect <domain>` verifies signed discovery and the durable origin pin before connecting to the exact same-origin relay route. Discovery alone creates no peer approval. The client stores its stable device key and per-workspace room state under a private user state directory outside the project.
 
+### Required code-based onboarding (not yet released)
+
+The intended `/connect` experience is private code entry followed by an enrollment
+request to a trusted agent. That agent may approve it under a prior human
+instruction with a fixed device allowance, selected networks/profile and expiry.
+Only after runtime-validated approval does the destination receive its encrypted,
+device-bound configuration. A code alone must not disclose the room capability,
+private directory or provider tokens. See the canonical
+[delegated enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
+Code input and output stay outside chat/model history, command arguments and logs.
+This replaces file transfer as the required product UX; it is not implemented in
+the installed 0.9.0 package. The instructions below describe its current behavior.
+
+### Current installed invitation-file flow
+
 New laptop to existing workspace:
 
 1. On the existing workspace, run `/connect <domain>` and confirm `/connect status` says online.
