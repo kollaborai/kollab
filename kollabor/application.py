@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from kollabor.user_input_source import UserInputSource
+
 from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import get_agent_tool_scope
@@ -1105,6 +1107,10 @@ class TerminalLLMChat:
             logger.info("Executing guaranteed cleanup")
             await self.cleanup()
 
+    async def _submit_cli_initial_message(self, message: str) -> Dict[str, Any]:
+        """Submit a CLI-provided initial prompt through user-input hooks."""
+        return await self.llm_service.submit_human_input(message, source=UserInputSource.CLI_INITIAL)
+
     async def _deferred_startup(self, initial_message: str | None = None) -> None:
         """Run heavy initialization in background after render loop starts.
 
@@ -1308,7 +1314,7 @@ class TerminalLLMChat:
             if initial_message:
                 logger.info(f"Sending initial message: {initial_message[:50]}...")
                 await asyncio.sleep(0.1)
-                await self.llm_service.process_user_input(initial_message)
+                await self._submit_cli_initial_message(initial_message)
 
         except asyncio.CancelledError:
             logger.info("Deferred startup cancelled")
@@ -1384,7 +1390,12 @@ class TerminalLLMChat:
 
             # Send input to LLM and wait for response
             # The LLM service will handle the response display
-            await self.llm_service.process_user_input(piped_input)
+            submission = await self.llm_service.submit_human_input(
+                piped_input, source=UserInputSource.PIPE
+            )
+            if submission.get("status") in {"cancelled", "rejected"}:
+                logger.warning("Pipe input was not submitted (%s)", submission["status"])
+                return
 
             # Wait for processing to start (max 10 seconds)
             start_timeout = 10

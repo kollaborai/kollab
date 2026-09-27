@@ -23,6 +23,8 @@ import re
 from datetime import datetime
 from typing import Any
 
+from kollabor.user_input_source import UserInputSource
+
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai.message_content import contains_image_content, content_to_text
 from kollabor_ai.model_registry import supports_vision
@@ -2358,7 +2360,7 @@ class LocalStateService(StateService):
                 asyncio.get_running_loop().create_task(command_coro)
             return {"accepted": True, "reason": "slash command"}
 
-        coro = llm.process_user_input(message)
+        coro = llm.submit_human_input(message, source=UserInputSource.STATE_RPC)
         create_task = getattr(llm, "create_background_task", None)
         if callable(create_task):
             create_task(coro, name="rpc_send_message")

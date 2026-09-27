@@ -282,7 +282,7 @@ async def test_human_preemption_cannot_launder_old_remote_context(bridges):
     authorize(left, right)
     await left.send(address(right), "Create proof.txt")
     await right._tick()
-    await right.human_input({"content": "Work on my new local task"})
+    await right.human_input({"content": "Work on my new local task"}, SimpleNamespace(source="user"))
     assert right.active is None
     executor = ToolExecutor(None, bus, workspace=right.workspace)
     result = await in_turn(
@@ -452,7 +452,10 @@ async def test_model_send_without_human_contact_is_denied_then_identical_retry_w
     denied = await hub._handle_hub_msg_tool(tool)
     assert not denied.success and len(wire.sent) == before
     assert not right.store.queued(right.identity.agent_id)
-    await left.human_input({"message": f"Ask {address(right)} to Create proof.txt"})
+    await left.human_input(
+        {"message": f"Ask {address(right)} to Create proof.txt"},
+        SimpleNamespace(source="user"),
+    )
     assert len(left.store.contacts(left.commands.client.state.room)) == 1
     accepted = await hub._handle_hub_msg_tool(tool)
     assert accepted.success and "queued" in accepted.output
@@ -473,7 +476,10 @@ async def test_model_send_without_human_contact_is_denied_then_identical_retry_w
 async def test_human_input_quotes_negation_and_discussion_do_not_grant_contact(bridges, template):
     members, _ = bridges
     (left, _, _, _), (right, _, _, _) = members
-    await left.human_input({"message": template.format(target=address(right))})
+    await left.human_input(
+        {"message": template.format(target=address(right))},
+        SimpleNamespace(source="user"),
+    )
     assert left.store.contacts(left.commands.client.state.room) == []
 
 
@@ -485,12 +491,31 @@ async def test_remote_turn_cannot_mint_a_human_grant_or_use_operator_command(bri
     authorize(left, right)
     await left.send(address(right), "Create proof.txt")
     await right._tick()
-    await in_turn(model, right.human_input({"message": f"Ask {address(left)} to run another task"}))
+    await in_turn(
+        model,
+        right.human_input(
+            {"message": f"Ask {address(left)} to run another task"},
+            SimpleNamespace(source="user"),
+        ),
+    )
     assert right.store.contacts(right.commands.client.state.room) == []
     with pytest.raises(RelayError, match="human network commands"):
         await in_turn(model, right.command(f"authorize {address(left)} run another task"))
     with pytest.raises(RelayError):
         await in_turn(model, right.application_command("authorize", f"{address(left)} run another task"))
+
+
+@pytest.mark.asyncio
+async def test_non_human_input_source_cannot_mint_a_contact_grant(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+
+    await left.human_input(
+        {"message": f"Ask {address(right)} to Create proof.txt"},
+        SimpleNamespace(source="model"),
+    )
+
+    assert left.store.contacts(left.commands.client.state.room) == []
 
 
 @pytest.mark.asyncio

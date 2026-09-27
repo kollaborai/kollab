@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_ai.message_content import content_to_text
 
@@ -579,6 +580,11 @@ class RelayAgentBridge:
         return True
 
     async def human_input(self, data, event=None):
+        source = getattr(event, "source", None)
+        if source not in HUMAN_USER_INPUT_SOURCES:
+            # A generic event, model callback or remote turn is not proof of
+            # operator intent and must not mint outbound contact authority.
+            return data
         if self._turn.get() is not None:
             # A peer cannot turn its own instructions into operator input.
             return data

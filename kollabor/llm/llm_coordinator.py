@@ -9,6 +9,8 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional, cast
 
+from kollabor.user_input_source import UserInputSource
+
 from kollabor_agent import BackgroundTaskManager, NativeToolsHandler
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.queue_processor import QueueProcessor
@@ -1511,6 +1513,60 @@ class LLMService:
                 len(tool_injection_results) if tool_injection_results else 0
             ),
         }
+
+    async def submit_human_input(
+        self,
+        message: MessageContent,
+        *,
+        source: UserInputSource,
+        pre_displayed: bool = False,
+    ) -> Dict[str, Any]:
+        """Submit trusted human input through the canonical hook pipeline.
+
+        RPC, initial CLI and pipe producers use this method so they receive the
+        same pre/main/post phases exactly once. Internal/model-origin callers
+        cannot select an arbitrary source string here.
+        """
+        if not isinstance(source, UserInputSource):
+            return {"status": "rejected", "reason": "invalid_input_source"}
+
+        emit = getattr(self.event_bus, "emit_with_hooks", None)
+        if not callable(emit):
+            return {"status": "rejected", "reason": "input_pipeline_unavailable"}
+
+        try:
+            outcome = await emit(
+                EventType.USER_INPUT,
+                {
+                    "message": message,
+                    "message_pre_displayed": pre_displayed,
+                },
+                source.value,
+            )
+        except Exception as exc:
+            # Do not include user content or exception text in logs/results.
+            logger.error("Human input event dispatch failed (%s)", type(exc).__name__)
+            return {"status": "rejected", "reason": "input_dispatch_failed"}
+
+        if not isinstance(outcome, dict):
+            return {"status": "rejected", "reason": "invalid_event_result"}
+
+        pre_result = outcome.get("pre") or {}
+        if pre_result.get("cancelled"):
+            return {"status": "cancelled", "phase": "pre_user_input"}
+
+        main_result = outcome.get("main") or {}
+        if main_result.get("cancelled"):
+            return {"status": "cancelled", "phase": "user_input"}
+
+        for hook_result in main_result.get("hook_results", []):
+            if hook_result.get("hook_key") != "llm_core.process_user_input":
+                continue
+            result = hook_result.get("result")
+            if isinstance(result, dict):
+                return result
+
+        return {"status": "submitted"}
 
     # --- MessageHandler delegation methods ---
 
