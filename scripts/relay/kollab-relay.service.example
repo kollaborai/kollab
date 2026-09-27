@@ -1,0 +1,25 @@
+[Unit]
+Description=Kollab relay runtime and managed backend
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Set these paths and user for the service account that owns relay.json.
+User=kollab
+WorkingDirectory=/opt/kollab/current
+ExecStart=/opt/kollab/current/.venv/bin/python kollabor_cli_main.py relay run --config /etc/kollab/relay.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+KillMode=mixed
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/kollab/relay
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -561,6 +561,10 @@ class StateService(Protocol):
 
     # === Hub writes (phase 4.6 — attach mode msg/broadcast) ===
 
+    async def hub_connect(self, command: str) -> str:
+        """Run beacon commands on the daemon that owns workspace identity."""
+        ...
+
     async def hub_send_msg(self, target: str, content: str) -> str:
         """Send a hub message to a specific agent via the daemon.
 

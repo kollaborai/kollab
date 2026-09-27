@@ -1,7 +1,7 @@
 ---
 title: "Documentation"
 created: 2026-02-24
-modified: 2026-08-06
+modified: 2026-09-26
 status: active
 ---
 # Documentation
@@ -41,6 +41,14 @@ status: active
 - [Overview](plugins/overview.md) - What plugins can do
 - [Development Guide](plugins/development.md) - How to write a plugin
 - [Hooks Reference](plugins/hooks-reference.md) - Event types, priorities, context objects
+
+## Agent Networking
+
+- [Public Beacon](specs/agent-public-beacon.md) - `/connect`, private invitations, encrypted peer presence, and self-hosted relay runtime
+- [Implementation Ledger](specs/agent-network-implementation-status.md) - Verified behavior, deployment evidence, and remaining boundaries
+- [Domain Discovery](specs/agent-domain-discovery-contract.md) - Signed descriptors and origin pins, separate from workspace authorization
+- [Agent DNS Reference](architecture/reference/agent-dns-reference.md) - Local identity registry and historical direct TCP/TLS transport
+- [A2A Workspace Receiver](operations/agent-a2a-workspace.md) - Explicit receiver setup, device membership, and scoped tool grants
 
 ## Architecture
 

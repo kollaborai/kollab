@@ -1,0 +1,6 @@
+interface:
+  display_name: "Kollab Development"
+  short_description: "Change Kollab's current app and relay correctly"
+  default_prompt: "Use $kollab-development to change Kollab's current implementation, update its docs, and report concrete evidence."
+policy:
+  allow_implicit_invocation: true

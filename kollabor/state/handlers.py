@@ -427,6 +427,15 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             return {"error": str(e)}
         return {"text": text}
 
+    async def _hub_connect(params: dict[str, Any]) -> dict[str, Any]:
+        command = params.get("command", "")
+        if not isinstance(command, str) or len(command) > 4096:
+            return {"error": "invalid beacon command"}
+        try:
+            return {"text": await state_service.hub_connect(command)}
+        except Exception:
+            return {"error": "beacon command failed"}
+
     async def _hub_send_msg(params: dict[str, Any]) -> dict[str, Any]:
         target = params.get("target", "")
         content = params.get("content", "")
@@ -538,6 +547,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_hub_whoami_text": _get_hub_whoami_text,
         "state.get_hub_work_text": _get_hub_work_text,
         # Phase 4.6: hub writes (msg/broadcast from attach client)
+        "state.hub_connect": _hub_connect,
         "state.hub_send_msg": _hub_send_msg,
         "state.list_hub_agents": _list_hub_agents,
         "state.send_hub_user_message": _send_hub_user_message,

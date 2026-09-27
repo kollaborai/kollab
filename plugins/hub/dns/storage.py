@@ -14,7 +14,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..presence import get_hub_dir
 from .models import AgentRecord, ReputationScore
 
 logger = logging.getLogger(__name__)
@@ -35,7 +34,7 @@ def _sanitize_designation(designation: str) -> str:
     return designation
 
 
-def _locked_atomic_write(path: Path, data: dict) -> None:
+def _locked_atomic_write(path: Path, data: dict, *, compact: bool = False) -> None:
     """Write JSON atomically with flock for multi-process safety.
 
     Uses a unique temp file (not fixed .tmp suffix) and flock on
@@ -52,11 +51,24 @@ def _locked_atomic_write(path: Path, data: dict) -> None:
             dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
         )
         try:
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(data, f, indent=2)
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(
+                    data,
+                    f,
+                    ensure_ascii=not compact,
+                    indent=None if compact else 2,
+                    separators=(",", ":") if compact else None,
+                )
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
+            # Pins and publisher revision counters must survive a crash after
+            # replacement, not merely be atomically visible to other readers.
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         except BaseException:
             try:
                 os.unlink(tmp_path)
@@ -71,6 +83,8 @@ def _locked_atomic_write(path: Path, data: dict) -> None:
 
 def get_dns_dir() -> Path:
     """Get the DNS directory, creating if needed."""
+    from ..presence import get_hub_dir
+
     d = get_hub_dir() / "dns"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -251,85 +265,6 @@ class DNSStorage:
         except OSError as e:
             logger.warning(f"failed to load coordinator public key: {e}")
             return None
-
-    # --- Well-Known Export ---
-
-    def write_well_known(self, record: "AgentRecord") -> Optional[Path]:
-        """Write /.well-known/agent-keys JSON for AID compliance.
-
-        Writes to the active hub dns/well-known/agent-keys.json.
-        Serve this file via nginx at /.well-known/agent-keys on your domain.
-
-        Format follows AID spec: public key + AID + supported protocols.
-        Remote meshes fetch this to verify attestations signed by this coordinator.
-        """
-        import time
-
-        well_known_dir = self._dns_dir / "well-known"
-        well_known_dir.mkdir(parents=True, exist_ok=True)
-        out_path = well_known_dir / "agent-keys.json"
-
-        payload: Dict[str, Any] = {
-            "v": "aid1",
-            "authority": record.authority,
-            "coordinator": {
-                "designation": record.designation,
-                "aid": record.aid,
-                "public_key": record.public_key,
-                "key_type": "ed25519",
-                "protocols": record.protocols,
-            },
-            "endpoints": {
-                "registry": f"https://{record.authority}/.well-known/agent-keys",
-                "socket": record.socket_path or "",
-                "endpoint": record.endpoint_uri or "",
-            },
-            "published_at": time.time(),
-        }
-
-        if record.attestation:
-            payload["coordinator"]["attestation"] = {
-                "issuer": record.attestation.issuer,
-                "signature": record.attestation.signature,
-                "issued_at": record.attestation.issued_at,
-            }
-
-        try:
-            _locked_atomic_write(out_path, payload)
-            logger.info(f"wrote well-known agent-keys to {out_path}")
-            self._sync_well_known(out_path)
-            return out_path
-        except OSError as e:
-            logger.warning(f"failed to write well-known agent-keys: {e}")
-            return None
-
-    def _sync_well_known(self, out_path: Path) -> None:
-        """Rsync well-known file to arch server if configured.
-
-        Reads KOLLAB_WELL_KNOWN_RSYNC env var:
-          almazan@192.168.68.172:<active-hub-dir>/dns/well-known/
-        Fires and forgets — failure is non-fatal, just logged.
-        """
-        import subprocess
-
-        dest = os.environ.get("KOLLAB_WELL_KNOWN_RSYNC", "")
-        if not dest:
-            return
-        try:
-            result = subprocess.run(
-                ["rsync", "-q", str(out_path), dest],
-                timeout=10,
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                logger.info(f"synced well-known to {dest}")
-            else:
-                logger.warning(
-                    f"rsync well-known failed (rc={result.returncode}): "
-                    f"{result.stderr.decode().strip()}"
-                )
-        except Exception as e:
-            logger.warning(f"rsync well-known error: {e}")
 
     # --- Reputation Events (append-only for non-coordinators) ---
 

@@ -2,10 +2,12 @@
 title: "Agent DNS: Discovery, Identity & Trust"
 doc_type: architecture-reference
 created: 2026-04-11
-modified: 2026-06-28
+modified: 2026-09-26
 status: reference
 ---
 # Agent DNS: Discovery, Identity & Trust
+
+Update, 2026-09-26: public discovery follows the [domain discovery contract](../../specs/agent-domain-discovery-contract.md): signed descriptors go into a separate cache and grant no workspace access. Automatic coordinator publication/import has been removed. The [public beacon](../../specs/agent-public-beacon.md) adds outbound WSS connections and encrypted peer presence; the [implementation ledger](../../specs/agent-network-implementation-status.md) records verification and deployment status. The local registry and historical direct TCP/TLS endpoint described below remain separate from both the beacon and standard A2A workspace receiver.
 
 ## Overview
 
@@ -18,91 +20,68 @@ aligned with emerging standards:
 - **ANS** (Agent Name Service) — structured capability matching
 - **MIT NANDA** — federable agent index
 
-## Public DNS Configuration
+## Public DNS configuration (updated 2026-09-26)
 
-The kollabor agent mesh is discoverable via standard DNS lookups.
+The retained `_agent.kollabor.ai` TXT record selects
+`https://kollabor.ai/.well-known/agent-keys`. Its old `p=mcp,socket` hint is not
+authoritative and is ignored by the new resolver. Both that path and canonical
+`/.well-known/agent-keys.json` now return identical signed `kollab-discovery/2`
+identity documents with `Cache-Control: no-store`.
 
-### Discovery Record (deployed)
+The persistent service signer is independent of workspace coordinator elections.
+A separate systemd publisher on Arch renews the document every 60 seconds; each
+signature expires after 300 seconds. nginx on the VPS forwards only these public
+paths to the static listener at `10.0.0.5:9077` over WireGuard. The listener binds
+to that WireGuard address. Actual public output is under
+`/home/almazan/.kollabor-cli/hub/dns/well-known`; private keys remain outside the
+served directory.
 
-```
-$ dig _agent.kollabor.ai TXT
+Lookup verifies TXT selection, HTTPS origin, the full document signature, expiry
+and durable origin/key/revision pins. It stores metadata outside `AgentRegistry`.
+No peer is approved, dialed, enrolled or allowed to message by discovery.
 
-_agent.kollabor.ai. 300 IN TXT "v=aid1;u=https://kollabor.ai/.well-known/agent-keys;p=mcp,socket;s=kollabor agent mesh"
-```
+Identity-only publication advertises no directory, relay or A2A service. A
+healthy relay may advertise its same-origin control URL and protocol; `/connect`
+then opens an outbound WSS connection. Public availability must be checked
+against the current signed descriptor and implementation ledger. A separate
+running A2A receiver can publish an optional canonical `agent_card` locator;
+its standard Agent Card describes its actual interfaces and skills.
+See the [discovery contract](../../specs/agent-domain-discovery-contract.md),
+[workspace receiver](../../operations/agent-a2a-workspace.md) and
+[implementation ledger](../../specs/agent-network-implementation-status.md).
 
-| Field | Value | Description |
-|-------|-------|-------------|
-| `v` | `aid1` | AID protocol version |
-| `u` | `https://kollabor.ai/.well-known/agent-keys` | Agent key/identity endpoint |
-| `p` | `mcp,socket` | Supported protocols |
-| `s` | `kollabor agent mesh` | Description |
-| `k` | (pending) | Ed25519 public key (to be added) |
+## Beacon connection and authorization
 
-### Well-Known Endpoint (deployed)
+`/connect <domain>` and `/hub dns connect <domain>` use the same command handler.
+It validates TXT/HTTPS discovery, the full signature and persistent origin/key
+pin before connecting to a compatible advertised relay. Identity-only domains
+remain discovery contacts. Neither command adds a remote `AgentRegistry` record
+or approves direct Hub messaging.
 
-```
-$ curl https://kollabor.ai/.well-known/agent-keys
-HTTP/2 200
-content-type: application/json
-cache-control: public, max-age=300
-```
+`/connect invite` saves a private invitation file for transfer to another
+computer. `/connect join <local-file-path>` verifies the publisher and pins the
+inviter's key. The inviter approves the joining peer locally. Room membership
+permits pseudonymous public-key presence and ciphertext routing; local peer
+approval gates encrypted ping/presence and workspace-label disclosure. It does
+not authorize A2A tasks, workspace tools, or LLM turns. Attach-mode commands run
+on the owning daemon through StateService RPC.
 
-Returns coordinator designation, Ed25519 public key, and attestation.
-Only public material is published — private keys never leave the
-originating host.
+See the [beacon contract](../../specs/agent-public-beacon.md) for key handling,
+room rotation, restart behavior, quotas and the managed relay runtime.
 
-### Publish Chain
+The following transport/registry sections describe the existing local Hub and
+older direct TCP/TLS endpoint. They do not inherit the new A2A receiver's
+membership and conversation-grant guarantees.
 
-```
-Internet
-    |
-    v
-kollabor.ai VPS (50.116.8.243)
-  nginx /etc/nginx/sites-enabled/kollabor.ai
-    |  location = /.well-known/agent-keys
-    |  proxy_pass http://10.0.0.5:9077/agent-keys.json
-    v
-WireGuard tunnel (VPS 10.0.0.1 <-> arch 10.0.0.5)
-    |
-    v
-Arch server (10.0.0.5, internal-only)
-  serves ~/.kollab/hub/dns/well-known/agent-keys.json
-```
-
-The arch server is not reachable from the public internet. In the
-default deployment the well-known endpoint is the only DNS/HTTPS surface
-exposed and there is no public socket listener, so the mesh accepts no
-inbound traffic from outside the host. An optional off-box endpoint
-(`plugins.hub.endpoint_enabled`, default off) can bind a TCP/TLS listener
-that accepts authenticated inbound connections — see "Off-Box Endpoint".
-
-### Resolution Flow
-
-```
-External Agent
-    |
-    v
-dig _agent.kollabor.ai TXT  -->  discovers mesh endpoint
-    |
-    v
-GET https://kollabor.ai/.well-known/agent-keys  -->  coordinator pubkey + attestation
-    |
-    v
-Verify attestation signature against published public key
-    |
-    v
-Connect via authenticated transport + Ed25519 handshake
-(optional off-box endpoint — see "Off-Box Endpoint" below)
-```
-
-## Off-Box Endpoint
+## Historical direct off-box endpoint
 
 By default the mesh speaks only over local Unix domain sockets. An optional
 TCP/TLS endpoint lets a remote agent on another machine complete the **same**
 Ed25519 handshake and deliver messages over the network. It is implemented in
 `plugins/hub/dns/endpoint.py` and wired in `plugins/hub/messenger.py` +
-`plugins/hub/plugin.py`. See `docs/specs/hub-remote-endpoint.md` for the full
-design.
+`plugins/hub/plugin.py`. See the [direct endpoint reference](../../specs/hub-remote-endpoint.md)
+for the full design. Its legacy `ws://`, `wss://` and `a2a://` URI labels carry
+raw streams; they do not implement WebSocket framing or the standard A2A API.
 
 **Key property:** the handshake and message loop are transport-neutral (they
 operate on `asyncio` stream pairs), so enabling off-box access adds a listener
@@ -124,19 +103,17 @@ handshake regardless of the local-socket `require_auth` setting, and refuses to
 bind a plaintext port unless `endpoint_allow_insecure` is set — you cannot
 accidentally publish an unauthenticated, unencrypted port.
 
-**Federation:** the server verifies an inbound handshake against its own
-registry, so a remote agent must be imported first.
-`/hub dns connect <authority>` fetches that mesh's
-`/.well-known/agent-keys.json` (which now publishes the advertised
-`endpoint_uri`) and registers the remote coordinator's designation, public key,
-and endpoint locally. `resolve_address()` then returns the remote `wss://` URI
-and an outbound `send_to_agent(..., auth=...)` dials it.
+**Admission:** the direct server verifies an inbound handshake against its own
+registry. A usable remote record must already exist through a separately
+authorized setup. Public discovery cannot create it: `register_well_known()`
+rejects imports, and `/hub dns connect` uses the separate discovery/relay flow.
+`resolve_address()` can still select an existing remote endpoint record.
 
-> Note: only the off-box endpoint is end-to-end authenticated today. Setting the
-> local-socket `plugins.hub.require_auth` makes the unix server *challenge*, but
-> the local delivery callers do not yet send the client handshake — so remote is
-> the supported authenticated path. Auto-routing local delivery through registry
-> resolution is a tracked follow-up.
+> Direct-transport limitation: setting local-socket `plugins.hub.require_auth`
+> makes the Unix server challenge, while `_resolve_dial_target()` returns no
+> client authentication for a local socket. This option therefore requires
+> separate caller wiring. The forced handshake on the direct TCP/TLS endpoint
+> and the beacon's own registration protocol are separate paths.
 
 ## Architecture
 
@@ -151,7 +128,11 @@ plugins/hub/dns/
   storage.py         filesystem persistence for keys and records
   capabilities.py    capability tracking with evidence levels
   reputation.py      trust scoring with exponential decay
-  endpoint.py        off-box TCP/TLS listener config + federation bootstrap (well-known fetch/import)
+  endpoint.py        direct TCP/TLS config, URI helpers, and rejected legacy import guard
+  discovery.py       bounded TXT/HTTPS signed descriptor retrieval
+  discovery_store.py persistent origin/key/revision pins outside AgentRegistry
+  discovery_publish.py explicit service publication with a persistent signing key
+  private_directory.py owner-approved device membership and scoped receiver grants
 ```
 
 ### Data Models
@@ -243,9 +224,12 @@ went offline.
 Approved and rejected trust records survive liveness refresh. Liveness refresh
 may mark an endpoint stale, but it cannot silently erase approval state.
 
-Remote agents must use signed envelopes. Unknown remote agents are quarantined
-until explicitly approved. Local same-project agents are allowed by default
+The delivery policy below applies to the local Hub/direct transport. Remote
+senders require its signed-envelope and approval checks; unknown remote senders
+are quarantined by that policy. Local same-project agents are allowed by default
 with a warning when DNS freshness is missing, unless strict local mode is on.
+These checks are not enrollment via public discovery, and the beacon never
+passes peer ciphertext into this message or wake path.
 
 Delivery is handled outside DNS:
 
@@ -275,6 +259,9 @@ The important question is not "did the peer speak?" It is:
 5. did wake classification decide `wake`, `observe`, or `buffer`?
 
 ### Standards Export
+
+These are legacy local-record serialization helpers, not the public v2
+descriptor schema or an automatic publication path.
 
 #### AID DNS TXT Format
 
@@ -321,38 +308,31 @@ Pool configuration: `plugins/hub/organizations/pool.json`
 | Socket permissions | deployed | `0o600` on socket files, owner-only |
 | Peer UID check | deployed | `SO_PEERCRED` (linux) / `getpeereid()` (macOS) rejects cross-user connects |
 | Ed25519 keypairs | deployed | Persistent per-designation keys via PyNaCl (libsodium) |
-| Coordinator attestations | deployed | Signed and written at startup; published to well-known |
+| Coordinator attestations | local registry | Local identity attestations; no automatic public publication |
 | AID DNS TXT record | deployed | `_agent.kollabor.ai` live; points at well-known endpoint |
-| `/.well-known/agent-keys` | deployed | Public coordinator pubkey + attestation, served over TLS via VPS → WireGuard → arch; now also publishes the advertised `endpoint_uri` |
+| Public descriptor | implemented | Full signed `kollab-discovery/2` document; no local socket path or automatic peer admission; deployment evidence is in the implementation ledger |
 | Ed25519 handshake on socket | wired | `messenger.py` `_do_handshake` (server) + `do_client_handshake` (client) verify a signed nonce against the registry public key. Always enforced on the off-box endpoint |
 | Off-box TCP/TLS endpoint | available (opt-in) | `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the same handler; forces the handshake; refuses plaintext without `endpoint_allow_insecure`. Default off |
-| Federation import | wired | `/hub dns connect <authority>` fetches + imports a remote mesh's well-known keys so the inbound handshake can verify it |
-| Coordinator gatekeeper | partial | `approval_state` is set on registration/import; delivery policy reads it, but message-accept does not yet hard-gate on it independently of the handshake |
+| Discovery and relay connection | implemented | `/connect` and `/hub dns connect` verify an origin pin and connect only to an advertised compatible relay; no messaging-registry import |
+| Direct transport approval | separate boundary | Existing registry/delivery policy applies; the historical transport does not gain owner-signed workspace grants from discovery |
 | DNS TXT `k=` field | pending | Mesh public key in TXT record itself (currently only in well-known) |
 
-### What Is (and Isn't) Publicly Exposed
+### Public and private surfaces
 
-**Exposed on the internet:**
-- The `_agent.kollabor.ai` TXT record
-- `GET https://kollabor.ai/.well-known/agent-keys` (coordinator pubkey,
-  attestation signature, protocol list)
-- Coordinator designation name (`koordinator`)
-- Coordinator socket path string (currently included in the JSON —
-  informational only; path refers to an internal host with no public
-  listener)
+The public descriptor contains its service identity, signature and explicitly
+advertised routes. It excludes local socket paths, workspace paths, private
+keys, conversation content, vault data and the private workspace directory.
+Publication is independent of workspace coordinator elections.
 
-**Not exposed on the internet:**
-- Private keys (stay in `~/.kollab/hub/dns/keys/` on originating
-  host; never synced to arch or VPS)
-- Any socket listener — peer traffic goes over Unix domain sockets on
-  the originating host only
-- Conversation content, vault data, crystallized memories, or any
-  agent-originated content
+When the beacon is deployed, clients connect outward over WSS. The relay sees
+IPs, stable public keys, room membership, timing and ciphertext sizes. Invitation
+holders can see peer keys in their room; approved endpoints disclose their
+workspace label inside encrypted ping/presence responses. This profile does not
+promise unlinkability or forward secrecy. Public route availability and exact
+deployment changes belong in the [implementation ledger](../../specs/agent-network-implementation-status.md)
+and [publication runbook](../../operations/kollabor-ai-discovery-publication.md).
 
-**CORS:** `Access-Control-Allow-Origin: *` on the well-known endpoint.
-Acceptable for a discovery document that contains only public key
-material; tighten to specific origins if more restrictive browser-side
-access control is needed.
+The historical direct listener remains opt-in and is not opened by `/connect`.
 
 ### Threat Model
 
@@ -360,10 +340,10 @@ access control is needed.
 |--------|------------|
 | Local process impersonation (same host, other user) | Peer UID check (deployed) |
 | Local process impersonation (same host, same user) | Out of scope — same trust boundary as rest of `$HOME` |
-| External agent spoofing | Attestation + coordinator approval (gatekeeper not wired yet) |
+| External agent spoofing | Publisher origin pins, device key possession and explicit endpoint approval serve different boundaries; discovery alone grants no access |
 | Private key exfiltration | Keys stay on originating host; never published |
-| Public info disclosure | Pubkey + attestation are public by design; socket path is informational |
-| DNS MITM | DNSSEC (future) + public key in TXT record (pending) |
+| Public info disclosure | Service metadata is public; local socket/workspace paths are excluded; relay metadata limits are explicit above |
+| DNS tampering | HTTPS origin validation plus signed descriptor verification and durable origin/key/revision pins; TXT hints alone are not authority |
 | Unauthorized cert issuance | CAA record (recommended) |
 | Email spoofing | SPF/DMARC records (recommended) |
 
@@ -404,11 +384,12 @@ The hub socket protocol enables external tools to participate in the mesh:
 - **External schedulers** can trigger agent tasks
 - **Telegram/Slack bridges** enable human-to-agent communication
 
-External tools authenticate via the Ed25519 handshake. The default
-surface is peer-UID-gated Unix sockets (local only) plus a public-key-only
-DNS + well-known discovery record. Inbound mesh traffic from off-box is
-possible once the optional endpoint (`plugins.hub.endpoint_enabled`) is
-turned on: it binds a TCP/TLS listener that forces the handshake, and a
-remote mesh is imported with `/hub dns connect <authority>`. The endpoint
-is off by default, so out of the box the mesh still accepts no inbound
-traffic from outside the host.
+The default Hub transport uses peer-UID-gated local Unix sockets. The optional
+direct endpoint (`plugins.hub.endpoint_enabled`) binds a TCP/TLS listener that
+forces a key-possession handshake against existing registry records. It is off
+by default. `/hub dns connect` does not populate those records.
+
+The beacon's outbound WSS presence path is separate from these message hooks.
+Remote workspace tasks use the explicitly configured
+[A2A receiver](../../operations/agent-a2a-workspace.md), with receiver-enforced
+membership, purpose/workspace grants and ordinary local tool permissions.

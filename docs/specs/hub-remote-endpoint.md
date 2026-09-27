@@ -1,12 +1,13 @@
-# Hub Remote A2A Endpoint
+# Hub Direct TCP/TLS Endpoint (Historical Transport)
+
+Status update, 2026-09-26: this is Kollab's existing raw TCP/TLS stream transport. Its legacy A2A and `ws`/`wss` labels do not implement the standard A2A API or WebSocket framing. The [public beacon](agent-public-beacon.md) supplies the separate outbound WSS presence path. Public discovery follows the [signed discovery contract](agent-domain-discovery-contract.md) and cannot admit direct messaging peers or authorize workspace tools. Current verification and deployment state is recorded in the [implementation ledger](agent-network-implementation-status.md).
 
 Off-box transport for the hub mesh. Lets a remote agent on another machine
 complete the **same** Ed25519 challenge-response handshake the local mesh
 already uses, then deliver messages over TCP/TLS instead of a unix socket.
 
-This is the bridge from the local agent mesh to the internet-scale,
-cross-org version aligned with AID / ARDP / ANS (see
-`plugins/hub/dns/__init__.py`).
+This document describes the direct transport's implementation and limits. It
+does not specify the beacon protocol or the standard A2A workspace receiver.
 
 ## The key insight: the handshake never forks
 
@@ -19,22 +20,23 @@ is **not** a change to the handshake or the wire protocol. It is purely:
 2. A scheme branch in the **dial** (client side).
 3. Populating the advertised `endpoint_uri`.
 
-TLS secures the channel (privacy + server cert); Ed25519 proves the agent
-identity. They are complementary, not redundant.
+TLS secures the channel and validates the server certificate. The Ed25519
+handshake proves possession of the key already stored for a registry identity;
+it does not establish workspace membership or a tool grant.
 
 ## What changed
 
 | Site | Change |
 |------|--------|
-| `dns/endpoint.py` (new) | `EndpointConfig`, URI helpers (`is_remote_uri`, `parse_endpoint_uri`), `build_server_ssl_context` / `build_client_ssl_context`, and the federation bootstrap (`fetch_well_known` / `register_well_known`). |
+| `dns/endpoint.py` (new) | `EndpointConfig`, URI helpers (`is_remote_uri`, `parse_endpoint_uri`), `build_server_ssl_context` / `build_client_ssl_context`, and URI normalization. Discovery now lives in `dns/discovery.py`; direct import is disabled. |
 | `messenger.py` `AgentSocketServer.start()` | After the unix bind, optionally `asyncio.start_server(...)` with the **same** `_handle_connection` callback, wrapped to force `require_auth=True`. Bind failures are captured in `_endpoint_bind_error` for operability. |
 | `messenger.py` `_handle_connection(..., require_auth=False)` | New param; auth gate is now `self._auth_enabled or require_auth`; the same-host UID peer-cred check is skipped for remote connections (meaningless off-box — the handshake is the gate). |
 | `messenger.py` `enable_endpoint()` / `stop()` | Configure + tear down the TCP listener. |
 | `messenger.py` `AgentMessenger._open()` | Shared dial helper: unix path vs `wss://`/`ws://`/`a2a://` URI, runs `do_client_handshake` when remote/auth-required. **All seven** client dialers (`send_to_agent`, `ping_agent`, `request_context`, `request_output`, `request_status`, `signal_shutdown`, `subscribe`) route through it with optional `auth=`/`ssl_ctx=` kwargs (defaults preserve exact local behavior). |
 | `plugin.py` `_resolve_dial_target()` (new) | Single seam for transparent remote delivery: resolves a designation via the registry; if it has an `endpoint_uri`, returns the remote URI + an `auth` dict; otherwise returns the local socket path with `auth=None`. Callers keep passing `agent.socket_path`; the registry decides whether to go off-box. |
-| `plugin.py` `_start_hub` | Build `EndpointConfig`; if enabled, build the server TLS context, `enable_endpoint(...)`, and populate `record.endpoint_uri` + add `"a2a"` to protocols so discovery exporters advertise it. Captures config-level rejection in `_endpoint_setup_error`. |
-| `dns/storage.py` `write_well_known` | Publishes `endpoints.endpoint` = the advertised URI. |
-| `plugin.py` `/hub dns` | New `endpoint` (status, surfaces bind/setup errors) and `connect <authority>` (federation import) subcommands. |
+| `plugin.py` `_start_hub` | Build `EndpointConfig`; if enabled, build the server TLS context, `enable_endpoint(...)`, and populate the local `record.endpoint_uri` plus legacy `"a2a"` protocol label. These local fields do not publish a standard A2A service. Captures config-level rejection in `_endpoint_setup_error`. |
+| `dns/discovery_publish.py` | Explicit signed service publication; no local socket or raw-stream route is exported. |
+| `plugin.py` `/hub dns` | `endpoint` shows direct listener status and setup errors; `connect <domain>` delegates to the signed discovery/beacon `/connect` command. |
 
 **`_do_handshake` and the wire protocol are unchanged.** The off-box read
 loop gains an idle-timeout guard (remote peers that go idle are dropped;
@@ -60,48 +62,24 @@ Turning the endpoint on without a TLS cert and without `endpoint_allow_insecure`
 is refused at startup — you cannot accidentally publish an unauthenticated,
 unencrypted port.
 
-## Federation flow (how a remote agent becomes reachable)
+## Discovery and admission
 
-The server verifies an inbound handshake against **its own registry**
-(`resolve(designation).public_key`). So a remote agent must be imported
-locally first:
+`/connect <domain>` and `/hub dns connect <domain>` share strict TXT/HTTPS discovery, full-document signature verification and persistent origin/key pins. Their cache is separate from `AgentRegistry`; discovering a publisher does not make it a direct messaging peer. The former `register_well_known()` automatic approval path rejects imports. A discovered key grants no workspace membership or tool access.
 
-1. Remote coordinator publishes `/.well-known/agent-keys.json` — already
-   produced by `DNSStorage.write_well_known` and rsynced off-box via
-   `KOLLAB_WELL_KNOWN_RSYNC`.
-2. Local side runs `/hub dns connect <authority>` →
-   `fetch_well_known` + `register_well_known` import the remote coordinator's
-   designation, public key, and `endpoint_uri` (attestation verified if present).
-3. `AgentRegistry.resolve_address(designation)` now returns the remote
-   `wss://…` URI, and an outbound `send_to_agent` dials it + handshakes.
+If the verified descriptor advertises a compatible relay, these commands open
+an outbound WSS connection. A private invitation permits room-key presence and
+ciphertext routing; local peer approval gates encrypted ping/presence responses.
+The [beacon contract](agent-public-beacon.md) defines that flow. It does not use
+this raw-stream listener or inject peer traffic into Hub message/LLM hooks.
 
-This is the AID/ANS discovery loop: publish identity → fetch + register →
-authenticated handshake.
+Public publication uses the explicit `plugins.hub.dns.discovery_publish` command and its persistent service key. Workspace coordinator startup no longer writes or rsyncs the public file. See the [publication runbook](../operations/kollabor-ai-discovery-publication.md).
 
-## Trust model (read this before federating)
-
-Federation is **trust-on-first-use (TOFU)** layered on transport security.
-Know exactly what each layer proves:
-
-- **The Ed25519 handshake** proves *key possession* — the peer holds the
-  private key whose public half is registered locally. It is NOT a statement
-  about *who* that key belongs to.
-- **The self-attestation** in `/.well-known/agent-keys.json` is signed by the
-  key itself. It proves the same thing (possession), not identity — anyone can
-  generate a keypair, self-attest it, and publish a well-known file claiming
-  any designation they like. `register_well_known` verifies the attestation
-  only to detect corruption/transit tampering, not to bind name → identity.
-- **The identity binding comes from the transport**: `fetch_well_known` fetches
-  over HTTPS, and you typed the authority (`/hub dns connect <host>`) yourself.
-  So "this really is `obsidian@example.com`" rests on TLS + DNS resolving
-  `example.com` to the operator you think it is. There is **no third-party
-  attestation, no web-of-trust, no certificate transparency** today.
-
-Consequence: importing a remote coordinator marks it `approved` and lets it
-authenticate inbound and receive messages. Only federate with authorities you
-control or already trust out-of-band. If a well-known endpoint is ever
-compromised, rotate the keys at the source and re-`connect`; stale imported
-records are not auto-expired yet (see "Not yet done").
+The direct transport still uses designation-indexed registry records and a
+nonce signature. Owner/device membership and scoped receiver grants are
+implemented separately by the [A2A workspace receiver](../operations/agent-a2a-workspace.md);
+they are not retrofitted onto this listener. The beacon supplies its own
+encrypted online forwarding path. Neither implementation adds durable offline
+delivery or automatic workspace authorization to the historical transport.
 
 ## Testing
 
@@ -132,8 +110,8 @@ client TLS path end-to-end; it is skipped when `openssl` is unavailable.
 
 - Cert provisioning helper (the deploy toolkit could mint a mesh CA + per-agent
   certs).
-- `/hub dns connect` is one-shot; a background refresh / expiry of imported
-  remote keys is not automated yet (stale records after a key rotation must be
-  re-`connect`ed manually — see "Trust model").
+- A replacement admission flow for this historical direct transport. Public
+  discovery rejects silent publisher-key changes and never imports a direct
+  messaging peer; beacon approval and A2A receiver membership remain separate.
 - A keepalive/idle policy for the `attach` live-stream path (the read-loop
   timeout above does not cover a peer that attaches and lingers).
