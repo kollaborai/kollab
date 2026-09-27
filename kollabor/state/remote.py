@@ -768,6 +768,14 @@ class RemoteStateService(StateService):
 
     # === Hub writes (phase 4.6 — attach mode msg/broadcast) ===
 
+    async def hub_connect(self, command: str) -> str:
+        result = await self._rpc.call(
+            "state.hub_connect", {"command": command}, timeout=max(self._timeout, 50.0)
+        )
+        if not isinstance(result, dict) or result.get("error"):
+            raise ValueError("daemon beacon command failed")
+        return str(result.get("text", ""))
+
     async def hub_send_msg(self, target: str, content: str) -> str:
         """Ask the daemon to send a hub message to a specific agent."""
         logger.debug("state rpc: hub_send_msg target=%r", target)

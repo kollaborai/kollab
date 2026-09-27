@@ -155,11 +155,11 @@ Agent DNS is experimental, but it is one of the more forward-looking pieces of
 Kollab. It adds a discovery, identity, and trust layer on top of the hub so
 agents can be addressed by more than a process name.
 
-The DNS registry stores agent records with an ARDP-style identity such as
-`agent:lapis@kollabor.ai`, local socket or remote endpoint bindings,
-capability entries, public keys, approval state, trust score, and current
-runtime state. It can export AID-style TXT records and publish well-known
-agent key metadata for interoperability experiments.
+The local DNS registry stores agent records with an ARDP-style identity such as
+`agent:lapis@kollabor.ai`, socket or endpoint bindings, capabilities, public keys,
+approval state, trust score, and runtime state. Public domain discovery uses a
+separate signed descriptor cache with persistent origin/key pins. Discovering a
+domain does not import its keys into the messaging registry or authorize tools.
 
 ```text
 /hub dns resolve
@@ -181,9 +181,40 @@ An optional off-box endpoint (`plugins.hub.endpoint_enabled`) binds a TCP/TLS
 listener that shares the same Ed25519 handshake, so a remote agent on another
 machine can authenticate and deliver messages over the network. It is disabled
 by default, always requires the handshake, and refuses to bind a plaintext port
-without an explicit opt-in. `/hub dns connect <authority>` imports a remote
-mesh's published keys so the inbound handshake can verify it. See
-`docs/specs/hub-remote-endpoint.md`.
+without an explicit opt-in. This historical direct stream transport is separate
+from the WSS relay and the standard A2A workspace receiver. See the
+[direct endpoint reference](docs/specs/hub-remote-endpoint.md).
+
+### Connect workspaces through a beacon
+
+In the current source, `/connect <domain>` verifies signed discovery and pins
+the publisher key, then opens an outbound WSS connection only when the document
+advertises a compatible relay. `/hub dns connect <domain>` is an alias. An
+identity-only publisher remains a discovery contact without a relay connection.
+
+```text
+/connect <beacon-domain>
+/connect invite
+# Privately copy the generated invitation file to the second computer.
+/connect join /absolute/path/to/invitation.txt
+/connect peers
+/connect approve <peer-public-key>
+/connect ping <peer-public-key>
+/connect disconnect
+```
+
+Joining pins the inviter; the inviter approves the joining peer's key locally.
+Invitation rooms expose peer-key presence to their members. Approved peers can
+exchange encrypted ping/presence responses; this does not start an LLM turn or
+grant workspace access. `/connect` in attach mode operates on the daemon's
+identity and connection. Self-host the service with
+`kollab relay run --config /private/relay.json`.
+
+See the [public beacon contract](docs/specs/agent-public-beacon.md) for setup,
+limits and key handling, and the
+[implementation ledger](docs/specs/agent-network-implementation-status.md) for
+verification and deployment status. Workspace task authorization is a separate
+[A2A receiver flow](docs/operations/agent-a2a-workspace.md).
 
 ## Browser UI and Local Engine
 
@@ -461,6 +492,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/save` | Save conversation output |
 | `/hub` | Manage the agent hub |
 | `/hub dns` | Resolve agents, inspect trust, find capabilities, and show Agent DNS keys |
+| `/connect` | Verify domain discovery, join an advertised beacon, and approve encrypted peer presence |
 | `/terminal` | Manage terminal sessions |
 | `/permissions` | Configure tool approval modes |
 | `/login` | Run provider login flows |

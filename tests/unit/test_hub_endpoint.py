@@ -163,7 +163,7 @@ def test_build_client_ssl_context_returns_context():
 # --- Federation import (well-known) ------------------------------------------
 
 
-def test_register_well_known_imports_remote_coordinator(tmp_path):
+def test_register_well_known_does_not_admit_discovered_coordinator(tmp_path):
     storage = DNSStorage(tmp_path / "dns")
     registry = AgentRegistry(storage)
     payload = {
@@ -177,16 +177,10 @@ def test_register_well_known_imports_remote_coordinator(tmp_path):
         },
         "endpoints": {"endpoint": "wss://remote.example.com:8765"},
     }
-    designation = register_well_known(payload, registry)
-    assert designation == "obsidian"
-    record = registry.resolve("obsidian")
-    assert record is not None
-    assert record.public_key == "ab" * 32
-    assert record.endpoint_uri == "wss://remote.example.com:8765"
-    # imported remote coordinators are trusted (approved) so the handshake works
-    assert record.is_approved is True
-    # resolve_address prefers the remote endpoint over an (absent) socket
-    assert registry.resolve_address("obsidian") == "wss://remote.example.com:8765"
+    # A domain descriptor is not an enrollment credential, even over HTTPS.
+    assert register_well_known(payload, registry) is None
+    assert registry.resolve("obsidian") is None
+    assert registry.resolve_address("obsidian") is None
 
 
 def test_register_well_known_rejects_missing_key(tmp_path):

@@ -821,9 +821,10 @@ class FileOperationsExecutor:
                     "error": f"Parent directory does not exist: {parent_dir}",
                 }
 
-        # Write file
+        # Exclusive creation preserves the no-overwrite contract even when
+        # another process creates the file after the preflight exists check.
         try:
-            with open(filepath, "w", encoding="utf-8") as f:
+            with open(filepath, "x", encoding="utf-8") as f:
                 f.write(content)
 
             # Set permissions (644 = rw-r--r--)

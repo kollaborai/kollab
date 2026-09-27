@@ -3,10 +3,23 @@
 This file gives coding agents a fast, practical map of the Kollab repo.
 Use it as an execution guide before making changes.
 
+## required maintenance skill
+
+Before changing Kollab itself, read
+`bundles/skills/kollab-development/SKILL.md`. This applies to every model,
+including Luna and delegated agents. Include that path in implementation handoffs.
+For relay/DNS/service work, also read its `references/relay-change-guide.md`.
+
+Kollab is in active development with no established legacy-support obligation.
+Update the current implementation and canonical docs directly;
+do not invent V2 product tracks, legacy implementations, or compatibility obligations
+for nonexistent users. Preserve actual protocol contracts and private persistent
+state. Temporary rollback artifacts require an explicit retention/cleanup condition.
+
 ## project snapshot
 
 - name: `kollab`
-- version: `1.0.1`
+- version: see `pyproject.toml`
 - python: `>=3.12`
 - type: terminal AI chat + plugin system + agent runtime
 - architecture: monorepo with extracted workspace packages under `packages/*`

@@ -1,0 +1,82 @@
+# Signed discovery and relay service operations
+
+Status: Scope: source included in Kollab 0.9.0. The public deployment observations in [the dated relay record](relay-deployment-2026-09-27.md) came from a source artifact, not a published PyPI installation; they do not establish current service liveness.
+
+This guide covers signed public discovery and the optional encrypted-presence relay. Discovery establishes a publisher identity and service locator. It does not enroll a device, approve a peer, authorize a conversation, grant workspace access, or start an agent task.
+
+## Package and dependencies
+
+Kollab 0.9.0 installed with plain `pip install kollab` includes the relay client, service, supervisor, and Redis client dependency. A2A server/signing support remains optional: install `kollab[a2a]` only when operating the separate A2A receiver. Upgrade older installations with `pip install --upgrade kollab`. The dated deployment summary describes a source deployment, independently of package installation checks.
+
+## Run the relay service
+
+Use a stable HTTPS origin with a valid certificate and an operator-controlled service host. Create a private runtime directory owned by the service account with mode `0700`; keep the config file at mode `0600`. The runtime directory and config parent must not be shared writable or symbolic-link paths. The sample selects Kollab's managed, single-host Valkey sidecar, which requires Docker:
+
+```json
+{
+  "origin": "https://example.org",
+  "node_prefix": "relay-main",
+  "bind_host": "127.0.0.1",
+  "base_port": 9078,
+  "workers": 2,
+  "health_port": 9080,
+  "state_dir": "/var/lib/kollab/relay/state",
+  "trusted_proxies": [],
+  "backend": {
+    "mode": "managed",
+    "port": 16379,
+    "memory_mb": 256
+  }
+}
+```
+
+Adapt the absolute state path and ports to the host. Keep `bind_host` on loopback or another private interface. The supervisor creates and owns only its labeled sidecar; it does not delete containers, volumes, or backend data. Run it under the host's service manager:
+
+```sh
+kollab relay run --config /var/lib/kollab/relay/config.json
+```
+
+For multiple supervisors or hosts, configure a shared Redis-compatible backend and give each supervisor a distinct, stable `node_prefix`. Put the backend URL in a private file and use `{"mode":"external","url_file":"/absolute/private/backend-url","cluster":false}` for the `backend` object; do not put credentials inline in JSON, command arguments, URLs, or logs. Set `cluster` to `true` only for a Redis/Valkey Cluster that supports the required sharded Pub/Sub commands. Do not use `--dev-in-memory` for cross-worker routing.
+
+Configure the HTTPS reverse proxy for the same origin:
+
+- Serve `GET /.well-known/agent-keys.json` from the publisher output with `application/json` and `Cache-Control: no-store`.
+- Forward `GET /relay/v1/health` to the supervisor's private health listener.
+- Forward WebSocket upgrades at `/relay/v1/ws` to the private worker listeners.
+- Do not publish `/relay/v1/metrics`. Keep worker listeners and metrics private.
+
+The `origin` in the service config, TLS endpoint, discovery publisher, and advertised relay URL must match exactly. Add a reverse-proxy address to `trusted_proxies` only when the relay must use `X-Real-IP`; use the exact immediate peer address. The relay does not trust `X-Forwarded-For`.
+
+## Publish signed discovery
+
+Choose a public output directory served only at the discovery route and a separate private state directory. The publisher stores its stable signing key and monotonic revision state in the private directory; preserve both across upgrades and keep that directory outside every served path.
+
+Run the publisher from the same Python environment as Kollab:
+
+```sh
+python -m plugins.hub.dns.discovery_publish \
+  --origin https://example.org \
+  --state-dir /var/lib/kollab/discovery-state \
+  --output /srv/www/.well-known/agent-keys.json \
+  --watch \
+  --relay-control https://example.org/relay/v1 \
+  --relay-health http://127.0.0.1:9080/relay/v1/health
+```
+
+`--relay-control` and `--relay-health` must be supplied together. The health URL must be a private literal HTTP address at `/relay/v1/health`; the publisher advertises relay roles only when that endpoint reports the expected protocol, readiness, and origin. If it is unavailable, publication remains identity-only. `--watch` renews every 60 seconds; each signed descriptor expires after 300 seconds. Run the command under a service manager for continuous renewal.
+
+For a new domain, publish one `_agent.<domain>` TXT record whose `u` value selects the same-origin HTTPS discovery document, for example:
+
+```text
+_agent.example.org TXT "v=aid1;u=https://example.org/.well-known/agent-keys.json"
+```
+
+If an existing domain's TXT record selects another documented alias, serve the same signed document there and preserve the current selection unless a separate DNS change is planned. Do not point TXT at a different origin. Clients can then run `/connect example.org`; an explicit HTTPS discovery URL is also supported. Discovery records a verified publisher key pin but does not itself join a room or approve a peer. Follow [the public beacon contract](../specs/agent-public-beacon.md) for invitation, approval, ping/pong, and revocation semantics.
+
+## Verify and update safely
+
+Check DNS selection, the public signed document, health readiness, and the native WebSocket route from outside the service host. Confirm public metrics are unavailable. These are separate checks; a valid discovery signature does not prove relay availability, and HTTP health does not prove a second client can connect.
+
+On relay removal, stop the service and publish an identity-only descriptor by removing both relay flags or by keeping the watched health check unavailable. The descriptor then stops advertising relay roles and expires within five minutes. Preserve the publisher key and revision state. Remove only the relay proxy routes; leave unrelated site routes and DNS records alone unless separately authorized.
+
+Deployment results and dated limits are in the [public relay record](relay-deployment-2026-09-27.md). It intentionally omits private host paths, addresses, raw logs, and raw evidence files.

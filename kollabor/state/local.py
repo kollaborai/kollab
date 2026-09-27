@@ -2173,6 +2173,15 @@ class LocalStateService(StateService):
 
     # === Hub writes (phase 4.6 — attach mode msg/broadcast) ===
 
+    async def hub_connect(self, command: str) -> str:
+        hub = self._resolve_hub_plugin()
+        if hub is None:
+            return "beacon: Hub is not running in this daemon"
+        handler = getattr(hub, "_run_connect_command", None)
+        if handler is None:
+            return "beacon: update the daemon to use /connect"
+        return str(await handler(command))
+
     async def hub_send_msg(self, target: str, content: str) -> str:
         """Delegate to HubPlugin._handle_msg_command."""
         hub = self._resolve_hub_plugin()

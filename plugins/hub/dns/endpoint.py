@@ -17,15 +17,12 @@ Layering:
 
 Standards alignment (see ``dns/__init__.py``): the advertised
 ``endpoint_uri`` is published in the agent's DNS record via
-``AgentRecord.to_aid_txt`` / ``to_ardp_json`` / ``DNSStorage.write_well_known``
+``AgentRecord.to_aid_txt`` / ``to_ardp_json``
 and resolved by peers through ``AgentRegistry.resolve_address``.
 """
 
-import json
 import logging
 import ssl
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 from urllib.parse import urlparse
@@ -157,100 +154,23 @@ def build_client_ssl_context(ca: str = "") -> ssl.SSLContext:
     return ctx
 
 
-# --- Federation bootstrap (AID/ANS discovery) ---------------------------------
+# --- Discovery entry points --------------------------------------------------
 
 
 def normalize_well_known_url(url: str) -> str:
-    """Turn a bare authority or partial URL into a full well-known URL.
+    """Normalize using the same origin rules as /connect."""
+    from .discovery import normalize_target
 
-    ``example.com`` -> ``https://example.com/.well-known/agent-keys.json``
-    A URL that already points at ``/.well-known/`` is returned unchanged.
+    return normalize_target(url).url
+
+
+def register_well_known(payload: dict, registry: Any, identity_manager: Any = None) -> Optional[str]:
+    """Reject the former import-implies-approved operation.
+
+    A discovery descriptor is not an enrollment credential. Keep this guard
+    for direct callers while the unreleased registry API is replaced; it
+    must never mutate the local messaging registry, even for a signed file.
+    /connect stores verified descriptors in DiscoveryStore instead.
     """
-    base = url if url.startswith(("http://", "https://")) else f"https://{url}"
-    if "/.well-known/" in base:
-        return base
-    return base.rstrip("/") + "/.well-known/agent-keys.json"
-
-
-def fetch_well_known(url: str, ca: str = "", timeout: float = 10.0) -> Optional[dict]:
-    """Fetch + parse a remote ``/.well-known/agent-keys.json`` (AID format).
-
-    Network I/O — run via ``asyncio.to_thread`` if called from an event
-    loop. Returns the parsed payload dict, or ``None`` on any failure.
-    """
-    fetch_url = normalize_well_known_url(url)
-    ctx = build_client_ssl_context(ca)
-    try:
-        req = urllib.request.Request(fetch_url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            data = resp.read()
-        payload = json.loads(data)
-        return payload if isinstance(payload, dict) else None
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"endpoint: well-known fetch failed for {fetch_url}: {e}")
-        return None
-
-
-def register_well_known(
-    payload: dict, registry: Any, identity_manager: Any = None
-) -> Optional[str]:
-    """Import a remote coordinator from an AID well-known payload.
-
-    Builds an ``AgentRecord`` for the remote coordinator (designation,
-    authority, public key, endpoint URI) and registers it locally so the
-    inbound Ed25519 handshake can verify the remote's signature.
-
-    When ``identity_manager`` is supplied and the payload carries a
-    self-attestation, the attestation is verified before the key is
-    trusted; a failed verification aborts the import (returns ``None``).
-
-    Returns the imported designation, or ``None``.
-    """
-    from .models import AgentRecord, Attestation
-
-    coord = payload.get("coordinator", {}) if isinstance(payload, dict) else {}
-    designation = coord.get("designation", "")
-    public_key = coord.get("public_key", "")
-    if not designation or not public_key:
-        logger.warning("endpoint: well-known payload missing designation/public_key")
-        return None
-
-    endpoints = payload.get("endpoints", {}) or {}
-    endpoint_uri = coord.get("endpoint_uri", "") or endpoints.get("endpoint", "")
-
-    record = AgentRecord(
-        designation=designation,
-        runtime=coord.get("runtime", "kollab"),
-        authority=payload.get("authority", "") or designation,
-        endpoint_uri=endpoint_uri,
-        public_key=public_key,
-        protocols=coord.get("protocols", ["a2a"]),
-        is_coordinator=True,
-        approval_state="approved",  # remote coordinators are trusted on import
-    )
-
-    att = coord.get("attestation")
-    if att:
-        attestation = Attestation(
-            subject=designation,
-            issuer=att.get("issuer", designation),
-            public_key=public_key,
-            signature=att.get("signature", ""),
-            issued_at=att.get("issued_at", 0.0),
-        )
-        if identity_manager is not None and not identity_manager.verify_attestation(
-            attestation
-        ):
-            logger.warning(
-                f"endpoint: attestation verification failed for {designation} — "
-                "refusing import"
-            )
-            return None
-        record.attestation = attestation
-
-    registry.register(record)
-    logger.info(
-        f"endpoint: imported remote coordinator {designation} "
-        f"({endpoint_uri or 'no endpoint'}) from well-known"
-    )
-    return designation
+    logger.warning("domain discovery cannot admit agents; use /connect for discovery")
+    return None

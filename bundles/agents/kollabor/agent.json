@@ -2,7 +2,9 @@
   "description": "Kollabor project specialist - deep knowledge of the kollab codebase",
   "tools": ["*"],
   "skills": [
-    "debugging"
+    "debugging",
+    "kollab-development"
   ],
+  "default_skills": ["kollab-development"],
   "vault_enabled": true
 }

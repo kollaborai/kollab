@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-27
+
 ### Added
+
+- Added `/connect` with signed domain discovery, persistent publisher pins, private
+  invitation files, explicit peer approval, and encrypted cross-network ping/pong.
+  Attached clients use the daemon's connection and identity.
+- Added `kollab relay run` and `kollab relay serve` to the app. The managed runtime
+  supervises workers and an optional Valkey sidecar, with shared admission limits,
+  expiring presence, ciphertext routing, bounded queues, and readiness reporting.
+  Client and relay Python dependencies are included in `pip install kollab`.
+- Added optional A2A workspace read/create receivers with signed device membership,
+  scoped grants, local permission checks, and authenticated task results.
+- Added the Kollab development skill and relay maintenance guide to the bundled
+  maintainer agent.
 
 - Added the `/goal` command: durable session goals with bounded continuation,
   a SQLite-backed goal store with crash recovery, model-declared completion
@@ -19,8 +33,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Explain invitation file, ownership/permission, publisher verification, and
+  self-invitation failures without displaying invitation contents. Quoted paths
+  work, and joining your own invitation no longer closes the existing connection.
+- Keep public discovery identities separate from workspace coordinator elections
+  and local message-routing records. Discovery does not grant workspace access.
+- Use exclusive file creation so a concurrent writer cannot be overwritten after
+  the existing-file check.
+
 - Opened the goal HUD drain gate on fresh conversations so goal turns render
   when no prior turn has completed.
+
+### Networking scope
+
+- Relay clients exchange approved encrypted presence responses. General agent
+  conversations and remote model/tool execution over the relay are not implemented.
+- Private invitations must be transferred to the receiving computer. The receiving
+  file must be owned by its user and have private permissions. Device keys and
+  existing discovery pins are preserved across app updates.
 
 ### Documentation
 

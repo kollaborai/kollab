@@ -1,7 +1,7 @@
 ---
 title: "Kollab Command Reference"
 created: 2026-04-06
-modified: 2026-09-20
+modified: 2026-09-26
 status: active
 ---
 # Kollab Command Reference
@@ -142,10 +142,63 @@ interactive equivalents:
   /hub bridge setup /hub notify channel <...> /hub feed
   /hub dns resolve  /hub dns endpoint         /hub dns connect <authority>
 
-/hub dns exposes the agent DNS layer (discovery, identity, trust) and the
-off-box endpoint: `/hub dns endpoint` shows the A2A listener status, and
-`/hub dns connect <authority>` imports a remote mesh's published keys. see
-docs/architecture/reference/agent-dns-reference.md.
+/hub dns exposes the local identity registry and the historical direct
+TCP/TLS endpoint. `/hub dns endpoint` inspects that listener; its legacy
+"a2a endpoint" label does not indicate standard A2A or WebSocket support.
+`/hub dns connect <domain>` delegates to `/connect`: signed discovery and
+origin pinning, followed by an outbound WSS connection only to an advertised
+compatible relay. It does not import remote keys into the messaging registry.
+See [Agent DNS](../architecture/reference/agent-dns-reference.md).
+
+## Public beacon commands
+
+These commands are available in the current source. Deployment and verification
+status are tracked in the [implementation ledger](../specs/agent-network-implementation-status.md).
+
+```text
+/connect <domain>                  verify signed discovery and attach to an advertised relay
+/connect status                    show actual transport state and workspace public key
+/connect invite                    save a private invitation file; display its path only
+/connect join <local-file-path>     verify the invitation's origin, pin inviter, and join
+/connect peers                     list online keys and local approval state
+/connect approve <64-hex-key>       permit encrypted ping/presence with this peer
+/connect revoke <64-hex-key>        remove that local permission
+/connect ping <64-hex-key>          request an encrypted presence response
+/connect rotate                    replace the room capability and clear local approvals
+/connect disconnect                close the connection and disable reconnect on launch
+```
+
+Privately transfer the invitation file to the joining computer. Do not paste its
+contents into chat or a command. Joining pins the inviter; the inviter approves
+the joining key before replying to its pings. Room membership permits peer-key
+visibility and ciphertext routing. Workspace tools require separate receiver
+membership, grants, and local permissions. Peer traffic never starts an LLM turn.
+
+`/connect invite` already writes its source file with mode `0600`. Check the
+receiving copy after transfer and use `chmod 600 <invitation-file>` in that
+computer's terminal if needed. The joining user must own the file; symlinks are
+rejected. `/connect join` accepts a quoted path containing spaces. Join from the
+other computer: sessions in the same local workspace share a relay identity and
+cannot join their own invitation. Self-invitation rejection preserves the current
+connection. Join errors distinguish local file access, permissions, self-invitation
+and publisher verification without displaying invitation contents.
+
+In attach mode, `/connect` and its `/hub dns connect` alias run through
+`state.hub_connect` on the owning daemon. The viewer does not create another
+relay identity or connection. First use requires an explicit connection;
+subsequent launches may reconnect the enabled workspace.
+
+Run the service from the same application:
+
+```bash
+kollab relay run --config /private/relay.json
+kollab relay serve --help
+```
+
+`run` supervises workers with an external Valkey backend or an explicitly
+configured managed sidecar. `serve` runs one worker. Neither command launches an
+interactive assistant. See the [public beacon contract](../specs/agent-public-beacon.md)
+for the private config format, quotas, deployment, and recovery boundaries.
 
 
 ## --context Flag
@@ -191,6 +244,7 @@ fully migrated (works in attach mode):
   /save (all formats)
   /hub status /hub whoami /hub work
   /hub msg /hub broadcast          (StateService RPC)
+  /connect /hub dns connect        (daemon-owned relay via StateService RPC)
   /hub vault /hub vaults /hub tasks /hub cron
   /deepthought (read-only, stale in attach)
 

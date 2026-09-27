@@ -141,11 +141,30 @@ def _prepend_dev_workspace_paths(repo_root: Path = package_dir) -> None:
 
 _prepend_dev_workspace_paths()
 
-# Now import from our local core package
-from kollabor.cli import cli_main  # noqa: E402
+
+def cli_main():
+    """Run the interactive app or its headless, account-free relay service."""
+    if sys.argv[1:2] == ["relay"]:
+        if sys.argv[2:3] == ["run"]:
+            from plugins.hub.relay_runtime import main
+
+            return main(sys.argv[3:])
+        if sys.argv[2:3] != ["serve"]:
+            print("usage: kollab relay run --config <file> | serve --origin https://your-domain [options]")
+            if sys.argv[2:] and sys.argv[2] not in {"-h", "--help"}:
+                raise SystemExit(2)
+            return
+        from plugins.hub.relay_service import main
+
+        return main(sys.argv[3:])
+    # Server-only startup must not initialize a TUI, provider or workspace agent.
+    from kollabor.cli import cli_main as app_cli_main
+
+    return app_cli_main()
+
 
 # This is the entry point that setuptools will call
 __all__ = ["cli_main"]
 
 if __name__ == "__main__":
-    cli_main()
+    raise SystemExit(cli_main())

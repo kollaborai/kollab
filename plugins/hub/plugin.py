@@ -258,6 +258,8 @@ class HubPlugin(BasePlugin):
         self._socket_server: Optional[AgentSocketServer] = None
         self._endpoint_uri: str = ""  # advertised off-box A2A URI (if enabled)
         self._endpoint_setup_error: str = ""  # config/bootstrap rejection reason
+        self._relay_commands = None
+        self._relay_startup_task = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
@@ -406,6 +408,7 @@ class HubPlugin(BasePlugin):
                     "endpoint_tls_ca": "",
                     "endpoint_advertise_host": "",
                     "endpoint_allow_insecure": False,
+                    "discovery_private_origins": {},
                 }
             }
         }
@@ -4250,7 +4253,8 @@ class HubPlugin(BasePlugin):
                         self._dns_identity.publish_coordinator_key(
                             self._identity.identity
                         )
-                        self._dns_storage.write_well_known(record)
+                        # Public domain publication has its own stable service
+                        # signer; workspace elections must not rotate that key.
 
                     self._dns_registry.register(record)
 
@@ -4515,6 +4519,9 @@ class HubPlugin(BasePlugin):
                     logger.error(f"--org launch failed: {e}", exc_info=True)
 
             self._started = True
+            # Only the owning daemon joins the beacon. Saved opt-in state may
+            # reconnect without publishing local Hub records or waking models.
+            self._relay_startup_task = asyncio.create_task(self._resume_relay())
         except Exception as e:
             logger.error(f"Hub startup failed: {e}", exc_info=True)
         finally:
@@ -7786,15 +7793,14 @@ class HubPlugin(BasePlugin):
              fail under hairpin/NAT where the box can't reach its own public
              hostname.
           2. A record with only a remote ``endpoint_uri`` (imported via
-             ``/hub dns connect`` — no local socket) is upgraded to a remote
+             manual registry setup — no local socket) is upgraded to a remote
              handshake; ``auth`` is populated (identity manager + our
              designation + optional CA).
           3. Otherwise the ``fallback_socket`` is returned with ``auth=None``
              — byte-for-byte the legacy behavior.
 
-        Remote-imported peers never carry a ``socket_path`` (see
-        ``register_well_known``), so the socket-path test cleanly separates
-        co-located agents from remote ones.
+        Public discovery uses a separate cache and cannot add routes here.
+        Local socket paths come only from the local registry.
         """
         if designation and self._dns_registry:
             try:
@@ -8112,13 +8118,64 @@ class HubPlugin(BasePlugin):
                 SubcommandInfo("metrics", "", "Show loop prevention metrics"),
                 SubcommandInfo(
                     "dns",
-                    "resolve|find|trust|leaderboard|endorse|keys [args]",
+                    "resolve|find|trust|leaderboard|endorse|keys|endpoint|connect [args]",
                     "Agent DNS: identity, trust, capabilities",
                 ),
             ],
         )
         assert self.command_registry is not None
         self.command_registry.register_command(cmd)
+
+        self.command_registry.register_command(
+            CommandDefinition(
+                name="connect",
+                description="Connect to a beacon, pair peer presence, or inspect signed discovery",
+                category=CommandCategory.CUSTOM,
+                plugin_name=self.name,
+                handler=self._handle_connect_command,
+                mode=CommandMode.INSTANT,
+            )
+        )
+
+    async def _handle_connect_command(self, command_or_args=None, **kwargs) -> str:
+        """Route operator commands to the owning daemon, including attach mode."""
+        if isinstance(command_or_args, str):
+            value = command_or_args.strip()
+        else:
+            value = " ".join(getattr(command_or_args, "args", None) or []).strip()
+        if getattr(getattr(self, "_cli_args", None), "attach", None):
+            state = self.event_bus.get_service("state_service") if self.event_bus else None
+            handler = getattr(state, "hub_connect", None)
+            if handler is None:
+                return "beacon: attached daemon must be updated to support /connect"
+            try:
+                return await handler(value)
+            except Exception:
+                # Never create an alternate identity/connection in the viewer.
+                return "beacon: daemon connection command failed; no viewer connection opened"
+        return await self._run_connect_command(value)
+
+    def _get_relay_commands(self):
+        if self._relay_commands is None:
+            from .project_scope import resolve_project_root
+            from .relay_commands import RelayCommands
+
+            self._relay_commands = RelayCommands(resolve_project_root(), config=self.config)
+        return self._relay_commands
+
+    async def _run_connect_command(self, value: str) -> str:
+        try:
+            return await self._get_relay_commands().run(value)
+        except ImportError:
+            return "beacon dependencies missing; install the current Kollab package"
+        except (OSError, ValueError):
+            return "beacon: private connection state is unavailable or invalid"
+
+    async def _resume_relay(self) -> None:
+        try:
+            await self._get_relay_commands().resume()
+        except Exception:
+            logger.warning("Beacon state could not be restored; use /connect to retry")
 
     async def _handle_hub_command(self, command_or_args=None, **kwargs) -> str:
         """Handle /hub slash command.
@@ -8235,6 +8292,9 @@ class HubPlugin(BasePlugin):
 
     async def _handle_dns_command(self, args: str) -> str:
         """Handle /hub dns subcommands: resolve, find, trust, leaderboard, endorse, keys, endpoint, connect."""
+        parts = args.strip().split(maxsplit=1)
+        if parts and parts[0] == "connect":
+            return await self._handle_connect_command(parts[1] if len(parts) > 1 else "")
         if not _DNS_AVAILABLE:
             return "dns: PyNaCl not installed\nrun: pip install pynacl"
         if not self._dns_registry:
@@ -8401,32 +8461,6 @@ class HubPlugin(BasePlugin):
                 )
             return "\n".join(lines)
 
-        elif sub == "connect":
-            url = rest.strip()
-            if not url:
-                return "usage: /hub dns connect <authority|url>  (fetch + import remote keys)"
-            import asyncio as _asyncio
-
-            from .dns.endpoint import fetch_well_known, register_well_known
-
-            ca = ""
-            if self.config:
-                ca = self.config.get("plugins.hub.endpoint_tls_ca", "") or ""
-            payload = await _asyncio.to_thread(fetch_well_known, url, ca)
-            if not payload:
-                return f"dns connect: could not fetch well-known from '{url}'"
-            designation = register_well_known(
-                payload, self._dns_registry, self._dns_identity
-            )
-            if not designation:
-                return f"dns connect: invalid/unverified well-known from '{url}'"
-            record = self._dns_registry.resolve(designation)
-            endpoint = record.endpoint_uri if record else ""
-            return (
-                f"dns connect: imported '{designation}' "
-                f"({endpoint or 'no endpoint'}) — handshake now possible"
-            )
-
         else:
             return (
                 "dns subcommands:\n"
@@ -8437,7 +8471,7 @@ class HubPlugin(BasePlugin):
                 "  endorse <name> <cap>    endorse an agent's capability\n"
                 "  keys [name]             show public key + AID\n"
                 "  endpoint                show off-box A2A endpoint status\n"
-                "  connect <authority>     fetch + import a remote mesh's keys"
+                "  connect [authority]     beacon connection and approved peer presence"
             )
 
     def _get_orchestrator(self):
@@ -10708,6 +10742,17 @@ class HubPlugin(BasePlugin):
         if getattr(self, "_shutdown_in_progress", False):
             return
         self._shutdown_in_progress = True
+
+        relay_start = getattr(self, "_relay_startup_task", None)
+        if relay_start:
+            relay_start.cancel()
+            try:
+                await relay_start
+            except asyncio.CancelledError:
+                pass
+        relay = getattr(self, "_relay_commands", None)
+        if relay:
+            await relay.close()
 
         # Save working memory before dying
         if self._vault and self._identity:
