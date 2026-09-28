@@ -367,7 +367,20 @@ class ConnectAltView(AltView):
             cursor += 1
 
         if self._focus == "domain":
-            self.domain = "".join(field)
+            text = "".join(field)
+            marker = text.find("K1-")
+            if marker >= 0:
+                # A code typed or pasted into the domain field moves to the
+                # private field so it is never rendered in clear text.
+                self._clear_code_input()
+                self._code_chars.extend(list(text[marker:])[:_MAX_CODE_LENGTH])
+                self._code_cursor = len(self._code_chars)
+                for index in range(marker, len(field)):
+                    field[index] = "\0"
+                text = text[:marker]
+                cursor = min(cursor, len(text))
+                self._focus = "code"
+            self.domain = text
         setattr(self, cursor_attr, cursor)
         self._validation_error = ""
         self.request_render()
