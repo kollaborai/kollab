@@ -6179,6 +6179,24 @@ def _pair_endpoints(
         )
     local_peers = local_record.get("peers", {})
     remote_peers = remote_record.get("peers", {})
+    # `/connect peers` lists only peers online right now. When both sides
+    # already hold approvals, give a restarting peer time to reconnect instead
+    # of mistaking the existing pair for unrelated relay membership.
+    deadline = time.monotonic() + 60
+    while (
+        local_status.approved_peers
+        and remote_status.approved_peers
+        and not (
+            local_peers.get(remote_status.public_key) is True
+            and remote_peers.get(local_status.public_key) is True
+        )
+        and time.monotonic() < deadline
+    ):
+        time.sleep(2)
+        local_record = preflight_endpoint(runner, local)
+        remote_record = preflight_endpoint(runner, remote)
+        local_peers = local_record.get("peers", {})
+        remote_peers = remote_record.get("peers", {})
     if (
         local_peers.get(remote_status.public_key) is True
         and remote_peers.get(local_status.public_key) is True

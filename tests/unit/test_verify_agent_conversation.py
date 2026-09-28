@@ -399,6 +399,49 @@ def test_pairing_reuses_an_existing_mutually_approved_pair_without_claiming_owne
     assert result[-2:] == (False, False)
 
 
+def test_pairing_waits_for_an_approved_peer_that_is_still_reconnecting(
+    tmp_path, monkeypatch
+):
+    # Live run 6e67dffc: the remote pilot was restarting, so `/connect peers`
+    # (online peers only) omitted it and the approved pair looked foreign.
+    class RecordingRunner:
+        def command(self, *_args, **_kwargs):
+            raise AssertionError("an existing approved pair needs no mutation")
+
+    local = harness.Endpoint("local", tmp_path / "local", "lapis")
+    remote = harness.Endpoint(
+        "remote", tmp_path / "remote", "koordinator", "alzan-prod"
+    )
+
+    def record(label, key, peer_key, online):
+        value = _endpoint_record(label, key, origin="https://kollabor.ai")
+        value["relay"].update(state="online", approved_peers=1)
+        if online:
+            value["peers"][peer_key] = True
+        return value
+
+    refreshed = iter(
+        [
+            record("local", LOCAL_KEY, REMOTE_KEY, True),
+            record("remote", REMOTE_KEY, LOCAL_KEY, True),
+        ]
+    )
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(harness, "preflight_endpoint", lambda *_a: next(refreshed))
+
+    result = harness._pair_endpoints(
+        RecordingRunner(),
+        local,
+        remote,
+        record("local", LOCAL_KEY, REMOTE_KEY, False),
+        record("remote", REMOTE_KEY, LOCAL_KEY, True),
+        origin="https://kollabor.ai",
+        run_id="4" * 32,
+    )
+
+    assert result[-2:] == (False, False)
+
+
 def test_cleanup_revokes_only_pair_approvals_created_by_this_run(tmp_path):
     class RecordingRunner:
         def __init__(self):
