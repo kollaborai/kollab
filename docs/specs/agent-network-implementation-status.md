@@ -5,10 +5,12 @@ Runs `0428cb8f` and `b42ec1ab` (back to back) between the Mac and `alzan-prod` t
 covered pairing, attached `/connect status`, the core model/tool/file
 exchange, question/answer, follow-up, cancellation, reconnect, and rejection
 of unauthorized, revoked, replayed and wrong-workspace requests. This is source
-evidence, not a release. Still open: live code enrollment, installed-package
-acceptance, peer-mesh direct/LAN/multihop routes, and measured capacity.
-Code offers require the discovery domain's coordinator key, so on kollabor.ai
-only the beacon operator can issue codes; per-network issuers are not built. The
+evidence, not a release. The same checks then passed on a clean
+`pip install kollab==0.10.0` on both hosts (run `381f49e9`, 2026-09-28). Still
+open: live code enrollment, peer-mesh direct/LAN/multihop routes, and measured
+capacity.
+0.10.0 let only the discovery domain's coordinator issue codes; current source
+lets any trusted agent issue codes for its own network (#89). The
 defects fixed on the way are listed in
 [the goal tracker](../operations/agent-network-goal-wbs.md#live-acceptance-on-current-source-2026-09-28).
 

@@ -148,7 +148,7 @@ def _add_pending(bridge, issuer, *, round_id, now):
         issuer_key=client.public_key,
         room_capability=client.state.room,
         origin=ORIGIN,
-        publisher_principal_id=ISSUER,
+        issuer_principal_id=ISSUER,
         network_ids=NETWORKS,
         profile=PROFILE,
         envelope_key=envelope_key,

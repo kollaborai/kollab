@@ -863,8 +863,6 @@ def _validate_destination_recovery_record(record: Any, offer_id: str) -> dict[st
         or len(record["domain"]) > 253
         or not isinstance(record["origin"], str)
         or len(record["origin"]) > 512
-        or not isinstance(record["owner_key"], str)
-        or not re.fullmatch(r"[0-9a-f]{64}", record["owner_key"])
         or not isinstance(record["destination_key"], str)
         or not re.fullmatch(r"[0-9a-f]{64}", record["destination_key"])
         or not isinstance(record["workspace_id"], str)
@@ -882,6 +880,11 @@ def _validate_destination_recovery_record(record: Any, offer_id: str) -> dict[st
     issuer_key = record["issuer_relay_key"]
     if issuer_key is not None and (
         not isinstance(issuer_key, str) or not re.fullmatch(r"[0-9a-f]{64}", issuer_key)
+    ):
+        raise EnrollmentProtocolError("invalid_response")
+    owner_key = record["owner_key"]
+    if owner_key is not None and (
+        not isinstance(owner_key, str) or not re.fullmatch(r"[0-9a-f]{64}", owner_key)
     ):
         raise EnrollmentProtocolError("invalid_response")
     for name, maximum in (
@@ -918,7 +921,12 @@ def _validate_destination_recovery_record(record: Any, offer_id: str) -> dict[st
     ):
         raise EnrollmentProtocolError("invalid_response")
     rank = _DESTINATION_RECOVERY_STATUSES[record["status"]]
-    if rank >= 1 and (record["challenge_envelope"] is None or record["expires_at"] is None or issuer_key is None):
+    if rank >= 1 and (
+        record["challenge_envelope"] is None
+        or record["expires_at"] is None
+        or issuer_key is None
+        or owner_key is None
+    ):
         raise EnrollmentProtocolError("invalid_response")
     if rank >= 2 and record["proof_envelope"] is None:
         raise EnrollmentProtocolError("invalid_response")
@@ -952,20 +960,17 @@ def _store_destination_recovery(
 
 
 async def _discover_destination(commands, domain: str):
+    """Locate the relay. The issuer key comes from the code-authenticated
+    challenge, not the discovery document (agent-device-pairing.md step 4)."""
     try:
         discovery, ca, private_cidrs, _is_card = await commands._discover(domain)
         relay_url = commands._relay_url(discovery)
         control = discovery.manifest["endpoints"].get("control")
-        owner_key = bytes.fromhex(discovery.manifest["coordinator"]["public_key"])
     except Exception as exc:
         raise EnrollmentProtocolError("unavailable") from exc
-    if (
-        not relay_url
-        or control != discovery.origin + "/relay/v1"
-        or len(owner_key) != 32
-    ):
+    if not relay_url or control != discovery.origin + "/relay/v1":
         raise EnrollmentProtocolError("unavailable")
-    return discovery, ca, private_cidrs, owner_key
+    return discovery, ca, private_cidrs
 
 
 def _decode_destination_challenge(
@@ -1323,12 +1328,11 @@ async def _drive_destination_enrollment(
         or record["workspace_id"] != client.state.workspace_id
     ):
         raise EnrollmentProtocolError("conflict")
-    discovery, ca, private_cidrs, owner_key = await _discover_destination(commands, record["domain"])
-    if (
-        discovery.origin != record["origin"]
-        or owner_key.hex() != record["owner_key"]
-    ):
+    discovery, ca, private_cidrs = await _discover_destination(commands, record["domain"])
+    if discovery.origin != record["origin"]:
         raise EnrollmentProtocolError("conflict")
+    # Pinned from the first code-authenticated challenge; None before it.
+    owner_key = bytes.fromhex(record["owner_key"]) if record["owner_key"] else None
 
     rank = _DESTINATION_RECOVERY_STATUSES[record["status"]]
     decision = invite = scope = None
@@ -1494,17 +1498,24 @@ async def _drive_destination_enrollment(
                                 "pairing_challenge", "provisioning_scope", "owner_signature",
                             },
                         )
+                        claimed_owner = raw_challenge.get("owner_key")
                         if (
-                            raw_challenge.get("owner_key") != record["owner_key"]
+                            not isinstance(claimed_owner, str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", claimed_owner)
+                            or (record["owner_key"] is not None and claimed_owner != record["owner_key"])
                             or raw_challenge.get("origin") != record["origin"]
                             or not isinstance(raw_challenge.get("issuer_relay_key"), str)
                             or not re.fullmatch(r"[0-9a-f]{64}", raw_challenge["issuer_relay_key"])
                         ):
                             raise EnrollmentProtocolError("invalid_response")
-                        record["issuer_relay_key"] = raw_challenge["issuer_relay_key"]
+                        # Only the agent that created this code can encrypt its
+                        # challenge, so the code authenticates the issuer key.
+                        owner_key = bytes.fromhex(claimed_owner)
                         # The signed challenge is persisted only after its owner
                         # signature and expiry have been checked below.
                         verify_enrollment_payload(owner_key, raw_challenge)
+                        record["owner_key"] = claimed_owner
+                        record["issuer_relay_key"] = raw_challenge["issuer_relay_key"]
                         expiry = raw_challenge["expires_at"]
                         if (
                             isinstance(expiry, bool)
@@ -1628,7 +1639,7 @@ async def enroll_device(commands, domain: str, private_code: str) -> dict[str, s
         else:
             if not _destination_state_empty(client):
                 raise EnrollmentProtocolError("conflict")
-            discovery, _ca, _private_cidrs, owner_key = await _discover_destination(commands, domain)
+            discovery, _ca, _private_cidrs = await _discover_destination(commands, domain)
             round_id = secrets.token_hex(16)
             request_envelope = encrypt_enrollment_envelope(
                 envelope_key,
@@ -1648,7 +1659,7 @@ async def enroll_device(commands, domain: str, private_code: str) -> dict[str, s
                 "created_at": int(time.time()),
                 "domain": domain,
                 "origin": discovery.origin,
-                "owner_key": owner_key.hex(),
+                "owner_key": None,
                 "issuer_relay_key": None,
                 "destination_key": client.public_key,
                 "workspace_id": client.state.workspace_id,
@@ -1722,7 +1733,7 @@ class _ActiveEnrollmentOffer:
     issuer_key: str
     room_capability: str
     origin: str
-    publisher_principal_id: str
+    issuer_principal_id: str
     network_ids: tuple[str, ...]
     profile: str | None
     envelope_key: EnrollmentEnvelopeKey
@@ -1888,7 +1899,7 @@ class EnrollmentIssuer:
             "room_capability": offer.room_capability,
             "origin": offer.origin,
             "domain": recovery_domain,
-            "publisher_principal_id": offer.publisher_principal_id,
+            "issuer_principal_id": offer.issuer_principal_id,
             "network_ids": list(offer.network_ids),
             "profile": offer.profile,
             "credential_categories": list(offer.credential_categories),
@@ -2106,7 +2117,7 @@ class EnrollmentIssuer:
             "room_capability",
             "origin",
             "domain",
-            "publisher_principal_id",
+            "issuer_principal_id",
             "network_ids",
             "profile",
             "credential_categories",
@@ -2201,7 +2212,7 @@ class EnrollmentIssuer:
             or not re.fullmatch(r"[0-9a-f]{64}", recovery["room_capability"])
             or not isinstance(recovery["origin"], str)
             or not isinstance(recovery["domain"], str)
-            or not isinstance(recovery["publisher_principal_id"], str)
+            or not isinstance(recovery["issuer_principal_id"], str)
             or not isinstance(recovery["issuer_workspace_id"], str)
             or not re.fullmatch(r"[0-9a-f]{32}", recovery["issuer_workspace_id"])
             or not isinstance(recovery["owner_public_key"], str)
@@ -2295,7 +2306,7 @@ class EnrollmentIssuer:
             or delegation.human_action_id != recovery["human_action_id"]
             or delegation.authorized_agent_id != str(identity.agent_id)
             or delegation.authorized_session_id != recovery["session_id"]
-            or record.issuer != recovery["publisher_principal_id"]
+            or record.issuer != recovery["issuer_principal_id"]
             or record.device_key_fingerprint
             != _device_key_fingerprint(destination_key)
             or record.workspace_id != request["workspace_id"]
@@ -2400,13 +2411,10 @@ class EnrollmentIssuer:
             raise EnrollmentProtocolError("conflict")
 
         discovery, ca, private_cidrs, is_card = await bridge.commands._discover(recovery["domain"])
-        coordinator = discovery.manifest["coordinator"]
         if (
             is_card
             or discovery.origin != recovery["origin"]
-            or discovery.publisher_principal_id != recovery["publisher_principal_id"]
-            or coordinator.get("designation") != designation
-            or coordinator.get("public_key") != recovery["owner_public_key"]
+            or recovery["issuer_principal_id"] != public_key_id(bytes.fromhex(recovery["owner_public_key"]))
             or bridge.commands._relay_url(discovery) is None
         ):
             raise EnrollmentProtocolError("conflict")
@@ -2422,7 +2430,7 @@ class EnrollmentIssuer:
             issuer_key=recovery["issuer_key"],
             room_capability=recovery["room_capability"],
             origin=recovery["origin"],
-            publisher_principal_id=recovery["publisher_principal_id"],
+            issuer_principal_id=recovery["issuer_principal_id"],
             network_ids=tuple(recovery["network_ids"]),
             profile=recovery["profile"],
             envelope_key=EnrollmentEnvelopeKey(offer_id, key_bytes),
@@ -2636,7 +2644,7 @@ class EnrollmentIssuer:
             or offer.issuer_key != client.public_key
             or offer.room_capability != client.state.room
             or offer.origin != client.state.origin
-            or offer.publisher_principal_id != record.issuer
+            or offer.issuer_principal_id != record.issuer
             or offer.network_ids != record.network_ids
             or offer.profile != record.configuration_profile
             or record.workspace_id != live.workspace_id
@@ -2792,20 +2800,20 @@ class EnrollmentIssuer:
                 raise EnrollmentProtocolError("unavailable")
         except ValueError as exc:
             raise EnrollmentProtocolError("unavailable") from exc
-        coordinator = discovery.manifest["coordinator"]
-        designation = coordinator["designation"]
-        expected_owner_key = coordinator["public_key"]
         manager = getattr(bridge.plugin, "_dns_identity", None)
         identity = bridge.identity
+        designation = getattr(identity, "identity", None)
         if (
             manager is None
             or getattr(identity, "is_coordinator", False) is not True
-            or identity.identity != designation
+            or not isinstance(designation, str)
+            or not designation
         ):
             raise EnrollmentProtocolError("unauthorized")
+        # The issuing agent's key owns its private network; the discovery
+        # domain only locates the relay.
         owner_private_hex, owner_public_hex = manager.get_or_create_keypair(designation)
-        if owner_public_hex != expected_owner_key:
-            raise EnrollmentProtocolError("unauthorized")
+        issuer_principal_id = public_key_id(bytes.fromhex(owner_public_hex))
 
         offer_id = secrets.token_hex(16)
         code: EnrollmentCode | None = None
@@ -2820,7 +2828,7 @@ class EnrollmentIssuer:
             "origin:"
             + hashlib.sha256(b"kollab-relay-network-origin-v1\0" + discovery.origin.encode("ascii")).hexdigest()
         )
-        network_ids = tuple(sorted({origin_id, discovery.publisher_principal_id, room_id}))
+        network_ids = tuple(sorted({origin_id, issuer_principal_id, room_id}))
         profile_manager = _profile_manager(getattr(bridge, "plugin", None))
         profile = getattr(identity, "profile", None) if profile_manager is None else None
         if isinstance(profile, str) and profile:
@@ -2845,7 +2853,7 @@ class EnrollmentIssuer:
                 human_action_id=human_action_id,
                 authorized_agent_id=str(identity.agent_id),
                 authorized_session_id=session_id,
-                issuer=discovery.publisher_principal_id,
+                issuer=issuer_principal_id,
                 network_ids=network_ids,
                 configuration_profile=profile,
                 credential_categories=credential_categories,
@@ -2887,7 +2895,7 @@ class EnrollmentIssuer:
                 issuer_key=client.public_key,
                 room_capability=client.state.room,
                 origin=discovery.origin,
-                publisher_principal_id=discovery.publisher_principal_id,
+                issuer_principal_id=issuer_principal_id,
                 network_ids=network_ids,
                 profile=profile,
                 envelope_key=envelope_key,
@@ -2973,7 +2981,7 @@ class EnrollmentIssuer:
         store = EnrollmentDelegationStore(bridge.owner.state_dir / "enrollment-delegations.json")
         directory = PrivateDirectory(
             client.state_dir / "private-directory.json",
-            owner_public_key=bytes.fromhex(offer.discovery.manifest["coordinator"]["public_key"]),
+            owner_public_key=bytes(offer.owner_signing_key.verify_key),
             workspace_id=client.state.workspace_id,
         )
         relay_signing_key = client._store.key
@@ -3091,7 +3099,7 @@ class EnrollmentIssuer:
                                 offer.human_action_id,
                                 agent_id=str(bridge.identity.agent_id),
                                 session_id=offer.session_id,
-                                issuer=offer.publisher_principal_id,
+                                issuer=offer.issuer_principal_id,
                                 network_ids=offer.network_ids,
                                 configuration_profile=offer.profile,
                                 credential_categories=offer.credential_categories,
@@ -3136,7 +3144,7 @@ class EnrollmentIssuer:
                                 "round_id": round_id,
                                 "phase": "challenge",
                                 "destination_key": destination_key,
-                                "owner_key": offer.discovery.manifest["coordinator"]["public_key"],
+                                "owner_key": bytes(offer.owner_signing_key.verify_key).hex(),
                                 "issuer_relay_key": offer.issuer_key,
                                 "origin": offer.origin,
                                 "expires_at": min(challenge.expires_at, offer.expires_at),
@@ -3197,7 +3205,7 @@ class EnrollmentIssuer:
                             challenge_token,
                             proof_token,
                             owner_public_key=bytes.fromhex(
-                                offer.discovery.manifest["coordinator"]["public_key"]
+                                bytes(offer.owner_signing_key.verify_key).hex()
                             ),
                         )
                     else:
@@ -3228,7 +3236,7 @@ class EnrollmentIssuer:
                                 device_key_fingerprint=_device_key_fingerprint(destination_key),
                                 agent_id=str(bridge.identity.agent_id),
                                 session_id=offer.session_id,
-                                issuer=offer.publisher_principal_id,
+                                issuer=offer.issuer_principal_id,
                                 network_ids=offer.network_ids,
                                 configuration_profile=offer.profile,
                                 credential_categories=offer.credential_categories,
@@ -3373,7 +3381,7 @@ class EnrollmentIssuer:
                         and recovery["expected_install_digest"] != expected_install_digest
                     ):
                         return
-                    owner_public_key = offer.discovery.manifest["coordinator"]["public_key"]
+                    owner_public_key = bytes(offer.owner_signing_key.verify_key).hex()
                     room_fingerprint = hashlib.sha256(
                         b"kollab-relay-enrollment-recovery-room-v1\0" + bytes.fromhex(offer.room_capability)
                     ).hexdigest()
@@ -3446,7 +3454,7 @@ class EnrollmentIssuer:
                                 "round_id": round_id,
                                 "phase": "decision",
                                 "destination_key": destination_key,
-                                "owner_key": offer.discovery.manifest["coordinator"]["public_key"],
+                                "owner_key": bytes(offer.owner_signing_key.verify_key).hex(),
                                 "issuer_relay_key": offer.issuer_key,
                                 "origin": offer.origin,
                                 "status": "approved",
@@ -3643,7 +3651,7 @@ class EnrollmentIssuer:
                 "round_id": round_id,
                 "phase": "decision",
                 "destination_key": destination_key,
-                "owner_key": offer.discovery.manifest["coordinator"]["public_key"],
+                "owner_key": bytes(offer.owner_signing_key.verify_key).hex(),
                 "issuer_relay_key": offer.issuer_key,
                 "origin": offer.origin,
                 "status": "rejected",

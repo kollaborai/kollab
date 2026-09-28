@@ -72,6 +72,17 @@ Getting there took 23 runs. Runtime defects found and fixed on the way:
 The relay behind `kollabor.ai` runs release `20260928-789c657`, which adds the
 enrollment mailbox routes (`/relay/v1/enrollment/`, POST only).
 
+## Clean-install acceptance on 0.10.0 (2026-09-28)
+
+Kollab 0.10.0 was published to PyPI from tag `v0.10.0` (`d490b61`). Both hosts
+installed it into fresh virtual environments with `pip install kollab==0.10.0`,
+and the pilots were relaunched from those installs (daemon command lines point
+at the new venvs; both report `kollab 0.10.0`). Run
+`381f49e978d64a7db2911126057fd4bb` passed every check: pairing, the core
+model/tool/file exchange, ui-command, follow-up, question/answer, cancel,
+reconnect, receiver-guard rejection of unauthorized, revoked and
+wrong-workspace requests, and replay deduplication.
+
 ## Evidence already recorded
 
 - The 0.9.0 deployment proved encrypted relay ping/pong, not an agent

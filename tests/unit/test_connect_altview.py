@@ -484,5 +484,6 @@ async def test_offer_callback_failure_never_renders_exception_text(caplog):
     await view.render_frame(0.0)
 
     assert "Could not create a device code." in renderer.text()
+    assert "/connect status shows kollabor.ai online" in renderer.text()
     assert secret not in renderer.text()
     assert secret not in caplog.text

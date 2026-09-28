@@ -527,6 +527,9 @@ class ConnectOfferAltView(AltView):
             self._render_code(top + 3, width)
         else:
             self._write_line(2, top + 4, "Could not create a device code.", width)
+            self._write_line(
+                2, top + 5, f"Check that /connect status shows {self._domain} online, then retry.", width
+            )
             self._write_line(2, top + 7, "Enter or Esc: close", width)
         return True
 

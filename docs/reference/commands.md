@@ -188,9 +188,9 @@ Deployment and verification status are tracked in the
 /connect cancel <address> <id>      cancel the remote task
 ```
 
-Only the agent holding the discovery domain's coordinator key can create an
-offer; on kollabor.ai that is the beacon operator. An offer authorizes one new
-device for five minutes. Its membership credential
+Any agent connected to the relay can create an offer for its own private
+network; the new device verifies the issuer's key through the code exchange. An
+offer authorizes one new device for five minutes. Its membership credential
 is scoped to `conversation:send`. Enter the displayed K1 code only in the private
 enrollment form. Never place the code in slash-command text, chat, shell input,
 logs, or model context. Code and device-key proof create a durable pending
