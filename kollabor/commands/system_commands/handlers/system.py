@@ -1305,15 +1305,25 @@ Platform: {version_info['platform']}"""
                     f"\033[2;36mRestarting...\033[0m"
                 )
 
-            # Kill owned daemon so the new code loads on relaunch
+            # Stop the owned daemon so a fresh one starts on the new code. This
+            # client runs as `--attach <identity>` for that daemon, so relaunch
+            # the command the user typed instead of re-attaching to nothing.
+            relaunch_args = sys.argv[1:]
             daemon_pid = os.environ.pop("KOLLAB_DAEMON_PID", "")
-            if daemon_pid:
-                try:
-                    import signal as _sig
+            if daemon_pid.isdigit():
+                import json
 
-                    os.kill(int(daemon_pid), _sig.SIGTERM)
-                except (ValueError, OSError, ProcessLookupError):
-                    pass
+                from ....daemon import LAUNCH_ARGS_ENV, stop_daemon
+
+                await asyncio.to_thread(stop_daemon, int(daemon_pid))
+                try:
+                    relaunch_args = json.loads(os.environ.get(LAUNCH_ARGS_ENV, "[]"))
+                except ValueError:
+                    relaunch_args = []
+                if not isinstance(relaunch_args, list) or not all(
+                    isinstance(arg, str) for arg in relaunch_args
+                ):
+                    relaunch_args = []
 
             # Restore terminal before execv
             try:
@@ -1325,7 +1335,7 @@ Platform: {version_info['platform']}"""
 
             # Re-launch kollab with the same arguments
             # execv replaces the current process entirely
-            argv = [sys.executable, "-m", "kollabor_cli_main"] + sys.argv[1:]
+            argv = [sys.executable, "-m", "kollabor_cli_main", *relaunch_args]
             os.execv(sys.executable, argv)
 
             # Should never reach here

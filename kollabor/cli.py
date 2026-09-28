@@ -2007,9 +2007,10 @@ def cli_main() -> None:
     # an attach client. Ctrl+Z detaches; daemon keeps running.
     # Use --no-daemon for single-process mode.
     elif _should_use_daemon():
+        import json
         import os
 
-        from kollabor.daemon import fork_daemon
+        from kollabor.daemon import LAUNCH_ARGS_ENV, fork_daemon
 
         try:
             daemon_pid, socket_path = fork_daemon(sys.argv)
@@ -2022,6 +2023,7 @@ def cli_main() -> None:
             # Client only needs --attach <identity>. All other args
             # (--agent, --llm, query text) already went to the daemon.
             identity = os.path.basename(socket_path).replace(".sock", "")
+            os.environ[LAUNCH_ARGS_ENV] = json.dumps(sys.argv[1:])
             sys.argv = [sys.argv[0], "--attach", identity]
 
             # Store daemon PID so cleanup knows to kill it on ctrl+c
