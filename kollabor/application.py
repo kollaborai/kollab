@@ -1734,12 +1734,17 @@ class TerminalLLMChat:
                 [
                     (
                         "system",
-                        f"cannot connect to {identity}: {e}",
+                        f"cannot connect to {identity}: {e}. "
+                        "Start it by running kollab in its project.",
                         {"display_type": "error"},
                     ),
                 ]
             )
             self._startup_ready.set()
+            # Nothing to attach to: exit like a lost daemon does, instead of
+            # leaving a window that cannot reach any agent.
+            self.running = False
+            self.create_background_task(self.shutdown(), "attach_client_shutdown")
             return
 
         # Send attach request (interactive - we want to send input)
