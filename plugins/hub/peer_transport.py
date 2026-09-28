@@ -1083,26 +1083,42 @@ class PeerMeshRuntime:
         tls_id = self.secure_transport.link_session_id(peer_key)
         if tls_id is None:
             raise PeerRouteError("peer exchange has no authenticated TLS session")
-        now = int(time.time())
         current_link = self._ensure_router().link_between(
             local.peer_id, remote.peer_id
         )
-        revision = (
-            current_link.revision
-            if current_link is not None and current_link.session_id == tls_id
-            else self.link_store.next_revision(
+        now = int(time.time())
+        forwarding_allowed = bool(
+            "forwarder" in local.roles and "forwarder" in remote.roles
+        )
+        if (
+            current_link is not None
+            and current_link.session_id == tls_id
+            and current_link.forwarding_allowed == forwarding_allowed
+            and current_link.expires_at - now > PEER_RECORD_TTL_MAX // 2
+        ):
+            # Re-proposing an unchanged live link must reproduce the prior
+            # statement exactly: a fresh timestamp under the same revision
+            # changes the signed digest and trips the peer's equivocation
+            # guard on the ~15 s refresh, tearing down a healthy session.
+            # Past half its lifetime the link is renewed as a new revision.
+            revision = current_link.revision
+            issued_at = current_link.issued_at
+            expires_at = current_link.expires_at
+        else:
+            revision = self.link_store.next_revision(
                 local.scope, local.peer_id, remote.peer_id
             )
-        )
+            issued_at = now
+            expires_at = min(now + PEER_RECORD_TTL_MAX, local.expires_at, remote.expires_at)
         payload = PeerLink.signing_payload(
             scope=local.scope,
             peer_a=local.peer_id,
             peer_b=remote.peer_id,
             session_id=tls_id,
             revision=revision,
-            issued_at=now,
-            expires_at=min(now + PEER_RECORD_TTL_MAX, local.expires_at, remote.expires_at),
-            forwarding_allowed=bool("forwarder" in local.roles and "forwarder" in remote.roles),
+            issued_at=issued_at,
+            expires_at=expires_at,
+            forwarding_allowed=forwarding_allowed,
         )
         signer, signature = PeerLink.sign_statement(self._signing_key, payload)
         if signer != local.peer_id:

@@ -171,6 +171,36 @@ async def mesh_network(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_link_refresh_reuses_statement_until_half_life(mesh_network, monkeypatch):
+    # Re-signing an unchanged link with a new timestamp under the same revision
+    # was rejected as equivocation on the periodic refresh, tearing down the
+    # healthy session (the source of this file's intermittent failures).
+    import plugins.hub.peer_transport as peer_transport
+
+    clients, states, _, _, _ = mesh_network
+    mesh = states["origin"]["mesh"]
+    relay_key = clients["relay"].public_key
+    records = mesh.router.record_snapshot()
+    local = records[mesh.local_peer_id]
+    remote = records[peer_id_for_key(relay_key)]
+    link = mesh.router.link_between(mesh.local_peer_id, remote.peer_id)
+    assert link is not None
+    real_time = time.time
+
+    monkeypatch.setattr(peer_transport.time, "time", lambda: real_time() + 1)
+    again = mesh._make_link_signature(local, remote, relay_key)["payload"]
+    assert (again["revision"], again["issued_at"], again["expires_at"]) == (
+        link.revision,
+        link.issued_at,
+        link.expires_at,
+    )
+
+    monkeypatch.setattr(peer_transport.time, "time", lambda: link.expires_at - 10)
+    renewed = mesh._make_link_signature(local, remote, relay_key)["payload"]
+    assert renewed["revision"] > link.revision
+
+
+@pytest.mark.asyncio
 async def test_relay_peer_with_mesh_link_keeps_native_relay_path(mesh_network):
     # Live regression: once peers exchanged mesh records, secure requests to a
     # relay-connected peer went through peer.forward and failed; without a
