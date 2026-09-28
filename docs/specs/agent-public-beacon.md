@@ -1,6 +1,6 @@
 # Kollab public beacon and encrypted agent transport
 
-Status: 0.9.0 release baseline plus unreleased conversation and partial enrollment source. The public relay had a successful deployment check on 2026-09-27: two independent client hosts completed approved encrypted ping/pong through public WSS. See the [dated deployment summary](../operations/relay-deployment-2026-09-27.md). Those observations do not prove current liveness or real model conversations. Current source separates `/connect <domain>` public discovery/relay attachment from bare `/connect` private code entry. One-device/five-minute offers, proof handling, redacted request listing and explicit local accept/reject commands are present; device configuration, provider credentials, roster access, workspace grants, and tool permissions remain unprovisioned. Current source integration and remaining full-network acceptance gates are tracked in the [implementation ledger](agent-network-implementation-status.md).
+Status: 0.9.0 release baseline plus Kollab 0.10.0's conversation and partial enrollment source. The public relay had a successful deployment check on 2026-09-27: two independent client hosts completed approved encrypted ping/pong through public WSS. See the [dated deployment summary](../operations/relay-deployment-2026-09-27.md). Those observations do not prove current liveness or real model conversations. Current source separates `/connect <domain>` public discovery/relay attachment from bare `/connect` private code entry. One-device/five-minute offers, proof handling, redacted request listing and explicit local accept/reject commands are present. When a supported active profile is available, acceptance also delivers allowlisted profile settings and one provider credential in a device-sealed bundle; roster access, workspace grants, and tool permissions remain unprovisioned. Current source integration and remaining full-network acceptance gates are tracked in the [implementation ledger](agent-network-implementation-status.md).
 
 ## Product boundary
 
@@ -23,7 +23,7 @@ Public routes:
 - `GET /relay/v1/ws`: native-client WebSocket endpoint. The reverse proxy terminates TLS and forwards WebSocket upgrades.
 - `/relay/v1/metrics`: aggregate Prometheus text on each worker listener. This endpoint has no application authentication. Keep worker listeners loopback/private and do not add a public proxy route for metrics.
 
-Unreleased enrollment source registers these POST routes in
+Kollab 0.10.0's enrollment source registers these POST routes in
 `plugins/hub/relay_service.py`:
 `/relay/v1/enrollment/offers`,
 `/relay/v1/enrollment/offers/{offer_id}/request`,
@@ -62,7 +62,7 @@ Room membership and connection quotas use shared, expiring leases. Room records 
 - Supervisor health is 200 only when its shared backend is ready, at least one configured worker is healthy, and the supervisor's own readiness check is fresh. It reports degraded state when fewer than all workers are ready. A restart/rebind after Cluster reshard or failover is recovery behavior to verify operationally, not a guarantee of zero interruption.
 - `/relay/v1/metrics` exposes finite aggregate counters and gauges without peer, room, or source-IP labels. It is unauthenticated; keep it private at the listener/network layer and do not proxy it publicly.
 
-Current unreleased source adds these private enrollment gauges to each worker's
+Kollab 0.10.0 adds these private enrollment gauges to each worker's
 metrics response: `relay_enrollment_admission_metrics_available`,
 `relay_enrollment_rate_buckets_tracked`,
 `relay_enrollment_rate_buckets_limit`,
@@ -79,9 +79,9 @@ the configured-limit gauges remain available. A public edge check at
 `2026-09-27 10:11:58 UTC` returned HTTP 404 with `application/json` for
 `GET https://kollabor.ai/relay/v1/metrics`. That confirms the public proxy hid
 the route at that time, not that the private worker listener is reachable or
-that this unreleased source is deployed.
+that this source is deployed.
 
-The current unreleased enrollment source adds separate admission budgets; these
+Kollab 0.10.0's enrollment source adds separate admission budgets; these
 are not verified against the public deployment. Ordinary source-IP/endpoint
 buckets allow 10 requests per 60-second bucket; issuer and reply polling buckets
 allow 60. At most 65,536 active source-IP/endpoint buckets are admitted.
@@ -119,7 +119,7 @@ not slash-command arguments. The client stores its stable device key and
 per-workspace room state under a private user state directory outside the
 project.
 
-### Current unreleased code-enrollment source (partial; not released)
+### Code-enrollment source (Kollab 0.10.0, partial)
 
 `/connect offer [domain]` creates a single-device K1 offer that expires after
 five minutes. The issuer records a durable local delegation for the current
@@ -138,14 +138,14 @@ credential material explicitly authorized by the delegation. The destination
 checks the issuer, recipient, workspace audience, scope, revision and expiry,
 then persists its signed install acknowledgment before posting it. Bounded local
 recovery journals resume the same enrollment round and exact acknowledgment
-after a client restart. This remains unreleased source: local regression tests
+after a client restart. This ships in Kollab 0.10.0; local regression tests
 do not prove the enrollment POST routes are deployed or the flow works between
 the Mac and `alzan-prod`. Enrollment grants no private roster, workspace-tool
 permission or shell access.
 See the canonical [delegated enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
 
 The invitation-file flow below describes the published 0.9.0 baseline; the new
-code UI is unreleased. Keep code input/output out of chat/model history, command
+code UI ships in Kollab 0.10.0. Keep code input/output out of chat/model history, command
 arguments, logs, events and telemetry. Current public discovery and relay health
 do not establish that enrollment POST routes are deployed or usable.
 

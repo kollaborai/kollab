@@ -1,6 +1,6 @@
 # Kollab Domain-to-Agent Discovery Contract
 
-Status: the 0.9.0 release baseline includes signed discovery and encrypted presence, with dated deployment evidence on kollabor.ai. Current unreleased source uses `/connect <domain>` for public discovery/relay attachment; bare `/connect` and `/connect enroll [domain]` open private device-code entry. `/connect offer`, redacted request listing, and explicit local accept/reject commands are implemented. Code and device-key proof create a pending request, not approval. After explicit acceptance, the issuer sends a `conversation:send` credential, room invitation, and—when a supported active profile is available—allowlisted profile settings plus one provider credential in a device-sealed, workspace-scoped bundle. The destination installs atomically and returns a device-signed receipt before peer approval. This grants no workspace or tool permission, and network revocation does not revoke a copied provider credential. The in-flight mailbox key and worker are process-local; accepted delivery can still become unrecoverable if it fails before a receipt is durably recorded. A2A Cards, owner/device pairing, private directory access and the narrow workspace receiver remain development-build implementations with local evidence. Broader peer networking remains incomplete; see the implementation ledger and [dated public deployment summary](../operations/relay-deployment-2026-09-27.md) for evidence boundaries.
+Status: the 0.9.0 release baseline includes signed discovery and encrypted presence, with dated deployment evidence on kollabor.ai. Kollab 0.10.0 uses `/connect <domain>` for public discovery/relay attachment; bare `/connect` and `/connect enroll [domain]` open private device-code entry. `/connect offer`, redacted request listing, and explicit local accept/reject commands are implemented. Code and device-key proof create a pending request, not approval. After explicit acceptance, the issuer sends a `conversation:send` credential, room invitation, and—when a supported active profile is available—allowlisted profile settings plus one provider credential in a device-sealed, workspace-scoped bundle. The destination installs atomically and returns a device-signed receipt before peer approval. This grants no workspace or tool permission, and network revocation does not revoke a copied provider credential. The in-flight mailbox key and worker are process-local; accepted delivery can still become unrecoverable if it fails before a receipt is durably recorded. A2A Cards, owner/device pairing, private directory access and the narrow workspace receiver remain development-build implementations with local evidence. Broader peer networking remains incomplete; see the implementation ledger and [dated public deployment summary](../operations/relay-deployment-2026-09-27.md) for evidence boundaries.
 
 Related: [network design](agent-network-discovery-and-relaying.md), [scenario walkthroughs](agent-network-walkthroughs.md), [existing remote endpoint](hub-remote-endpoint.md).
 
@@ -18,7 +18,7 @@ Implemented in the working tree:
 - `plugins.hub.discovery_private_origins` maps explicitly selected HTTPS origins to CIDR lists for private-address discovery. Loopback, link-local, multicast, reserved and IP-literal destinations remain rejected. The default is public addresses only.
 - Free dependencies: dnspython for DNS and the dependency-free `rfc8785` canonicalizer, alongside existing aiohttp and PyNaCl. No hosted service, login or LLM call is required.
 
-Unreleased simplification: accept only signed `kollab-discovery/2` documents. Legacy input produces `legacy_document`; there is no unsigned import or automatic extensionless fallback. The existing TXT-selected extensionless URL is still followed exactly. Origin pins are durable; cached descriptors are not used as an offline substitute for a fresh explicit lookup. No negative cache is implemented. DNS uses the configured resolver; this client does not independently validate DNSSEC signatures.
+Simplification: accept only signed `kollab-discovery/2` documents. Legacy input produces `legacy_document`; there is no unsigned import or automatic extensionless fallback. The existing TXT-selected extensionless URL is still followed exactly. Origin pins are durable; cached descriptors are not used as an offline substitute for a fresh explicit lookup. No negative cache is implemented. DNS uses the configured resolver; this client does not independently validate DNSSEC signatures.
 
 Dated evidence: the discovery, endpoint, plugin-discovery and DNS-liveness validation run passed 74 checks with one existing skipped test and caught a publisher lock collision before deployment. The publisher runs independently of workspace startup. At the recorded check, both public discovery URLs returned identical signed JSON with `application/json` and `Cache-Control: no-store`; `discover("kollabor.ai")` succeeded and repeated acquisition reported `pinned-key`. This verifies signed identity publication, not private admission or an agent task exchange.
 
@@ -99,11 +99,11 @@ Published 0.9.0 baseline discovery entry points (Hub plugin enabled):
 /connect https://kollabor.ai/.well-known/agent-keys.json
 ```
 
-Current unreleased source keeps public discovery on `/connect <domain>` and
+Kollab 0.10.0 keeps public discovery on `/connect <domain>` and
 `/hub dns connect <domain>`. Bare `/connect` and `/connect enroll [domain]`
 open private code entry; `/connect offer [domain]` opens a private issuer view.
-Private enrollment discovery runs after code submission. The added enrollment
-commands are not included in PyPI 0.9.0; see the current source status and
+Private enrollment discovery runs after code submission. The enrollment
+commands ship in Kollab 0.10.0; see the current source status and
 enrollment limits above.
 
 `/hub dns connect` uses this same resolver and admission boundary. Neither command inserts discovered publishers into the live agent registry.
@@ -205,7 +205,7 @@ The receiver rechecks membership/grant validity before local tool execution. Loc
 ## 6. Walkthrough: a new laptop finds my existing servers
 
 The required onboarding UX uses `/connect` private code entry, trusted-agent
-approval, and device-encrypted configuration delivery. Current unreleased source
+approval, and device-encrypted configuration delivery. Kollab 0.10.0
 implements private entry/offer and device-key proof, then waits for an explicit
 local `/connect accept` or `/connect reject`. Acceptance issues a narrow
 `conversation:send` membership credential and, when a supported active profile
@@ -219,7 +219,7 @@ identify the human or confer private-network membership.
 See the current
 [product walkthrough](agent-network-walkthroughs.md#scenario-2-connect-a-new-computer-and-join-my-family-directory)
 and [enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
-These are partial unreleased enrollment behaviors, not completed product flow.
+These are partial enrollment behaviors in Kollab 0.10.0, not completed product flow.
 
 There are two distinct stages: public contact discovery and private device admission. The deployed `kollabor.ai` publisher provides the first and advertises encrypted forwarding. Private admission remains an endpoint responsibility. It cannot infer your servers from your name or discover a private family directory on its own.
 

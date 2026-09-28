@@ -128,5 +128,5 @@ A newer direct read at 09:44 UTC returned identical aliases at revision 472
 and health with two of two workers ready; see the [implementation ledger](agent-network-implementation-status.md)
 for DNS/HTTPS fields and limits. The ranked research actions above are historical
 recommendations, not permission to defer the accepted networking goal. The active
-Hub bridge and enrollment work remains unreleased, and full network acceptance
+Hub bridge and enrollment work ships in Kollab 0.10.0, and full network acceptance
 scenarios remain required.
