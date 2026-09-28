@@ -4188,6 +4188,9 @@ class HubPlugin(BasePlugin):
                 self._socket_server._rpc_server = self._rpc_server  # type: ignore[assignment]
                 if self.event_bus:
                     self.event_bus.register_service("rpc_server", self._rpc_server)
+                    voice = self.event_bus.get_service("voice_plugin")
+                    if voice is not None:
+                        voice.register_rpc()
 
                 async def _rpc_ping(params: dict) -> dict:
                     """Phase 1 proof-of-life handler."""

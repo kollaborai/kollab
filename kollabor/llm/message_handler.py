@@ -169,6 +169,17 @@ class MessageHandler:
                     }
                 return {"status": "startup_hold", "requeued": True}
 
+        if data.get("source") == "voice" and data.get("voice"):
+            plugin = self._coordinator.event_bus.get_service("voice_plugin")
+            if plugin is None:
+                return {"status": "rejected", "reason": "Voice admission is unavailable"}
+            return await plugin.admit(
+                data,
+                lambda: self._coordinator.process_user_input(
+                    message, pre_displayed=pre_displayed, voice=data["voice"]
+                ),
+            )
+
         result = await self._coordinator.process_user_input(
             message, pre_displayed=pre_displayed
         )
@@ -324,7 +335,12 @@ class MessageHandler:
 
                 # Build display sequence
                 if display_messages and role in ("user", "assistant", "system"):
-                    display_sequence.append((role, content_to_text(content), {}))
+                    visible = content_to_text(content)
+                    if role == "assistant":
+                        from kollabor_ai.response_channels import display_response_text
+
+                        visible = display_response_text(visible)
+                    display_sequence.append((role, visible, {}))
 
             # CRITICAL FIX: Display messages BEFORE hiding loading indicator
             # The loading indicator must remain active until messages are fully rendered.

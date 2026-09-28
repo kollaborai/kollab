@@ -211,6 +211,23 @@ class TestMessageHandler(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("No messages provided", result["error"])
 
+    def test_replayed_assistant_channels_keep_raw_history_and_only_display_text(self):
+        raw = "<display_text>Visible code example.</display_text><spoken_text>Brief narration.</spoken_text>"
+        data = {
+            "messages": [{"role": "assistant", "content": raw}],
+            "options": {"show_loading": False, "log_messages": False},
+        }
+        result = self.loop.run_until_complete(
+            self.handler.handle_add_message(data, MagicMock())
+        )
+        self.assertTrue(result["success"])
+        stored = self.coordinator._add_conversation_message.call_args.args[0]
+        self.assertEqual(stored.content, raw)
+        display = self.coordinator.message_display_service.message_coordinator
+        display.display_message_sequence.assert_called_once_with(
+            [("assistant", "Visible code example.", {})]
+        )
+
     def test_handle_llm_continue(self):
         """Test TRIGGER_LLM_CONTINUE handler."""
         self.coordinator.conversation_history.append(

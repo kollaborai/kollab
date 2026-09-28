@@ -15,6 +15,7 @@ pythonpath = [
     "packages/kollabor-engine/src",
     "packages/kollabor-rpc/src",
     "packages/kollabor-webui/src",
+    "packages/kollabor-voice/src",
 ]
 
 [project]
@@ -90,6 +91,9 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
 ]
+# Compatibility extra. /voicemode installs audio support in its own runtime;
+# the main application and command client need no audio dependencies.
+voice = []
 
 [dependency-groups]
 dev = [
@@ -112,11 +116,12 @@ kollab = "kollabor_cli_main:cli_main"
 
 [tool.setuptools]
 py-modules = ["kollabor_cli_main"]
-packages = {find = {where = [".", "packages/kollabor-ai/src", "packages/kollabor-tui/src", "packages/kollabor-events/src", "packages/kollabor-config/src", "packages/kollabor-agent/src", "packages/kollabor-plugins/src", "packages/kollabor-engine/src", "packages/kollabor-rpc/src"], include = ["kollabor*", "plugins*", "bundles*", "fonts*"]}}
+packages = {find = {where = [".", "packages/kollabor-ai/src", "packages/kollabor-tui/src", "packages/kollabor-events/src", "packages/kollabor-config/src", "packages/kollabor-agent/src", "packages/kollabor-plugins/src", "packages/kollabor-engine/src", "packages/kollabor-rpc/src", "packages/kollabor-voice/src"], include = ["kollabor*", "plugins*", "bundles*", "fonts*"]}}
 include-package-data = true
 
 [tool.setuptools.package-data]
 kollabor = ["py.typed", "updates/CHANGELOG.md"]
+kollabor_voice = ["manifest.json"]
 plugins = ["**/*.json", "**/*.yaml", "**/*.yml"]
 bundles = ["**/*"]
 fonts = ["*.ttf", "*.otf", "LICENSE", "README.md"]

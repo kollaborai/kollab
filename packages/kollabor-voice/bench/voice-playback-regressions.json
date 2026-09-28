@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "description": "Synthetic playback and interruption probes inspected during integration debugging. Regression evidence, not a blind acceptance set. Expected is the intended final routing; defer requires separate main-agent validation.",
+  "cases": [
+    {"text":"I will check the readme now.","assistant_playback":["I will check the readme now."],"context":"","expected":"ignore"},
+    {"text":"Should I run the tests?","assistant_playback":["Should I run the tests?"],"context":"","expected":"ignore"},
+    {"text":"It is Leah, a local classifier.","assistant_playback":["It is Laya, a local classifier."],"context":"","expected":"ignore"},
+    {"text":"The first check passed.","assistant_playback":["The first check passed."],"context":"","expected":"ignore"},
+    {"text":"Stop, I need to ask you something.","assistant_playback":["The first check passed."],"context":"","expected":"respond"},
+    {"text":"The first check passed. Stop and check the microphone.","assistant_playback":["The first check passed."],"context":"","expected":"respond"},
+    {"text":"Yes, run the tests.","assistant_playback":["Should I run the tests?"],"context":"","expected":"respond"},
+    {"text":"Carla, could you close the door?","assistant_playback":["I will check the readme now."],"context":"","expected":"ignore"}
+  ]
+}

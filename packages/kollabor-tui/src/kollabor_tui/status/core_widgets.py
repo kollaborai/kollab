@@ -111,6 +111,7 @@ class WidgetContext:
         profile_manager: Any = None,
         agent_manager: Any = None,
         config: Any = None,
+        config_service: Any = None,
         tmux_plugin: Any = None,
         background_tasks_plugin: Any = None,
         terminal_plugin: Any = None,
@@ -122,6 +123,7 @@ class WidgetContext:
         self.profile_manager = profile_manager
         self.agent_manager = agent_manager
         self.config = config
+        self.config_service = config_service if config_service is not None else config
         self.tmux_plugin = tmux_plugin
         self.background_tasks_plugin = background_tasks_plugin
         self.terminal_plugin = terminal_plugin

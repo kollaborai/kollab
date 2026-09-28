@@ -183,6 +183,17 @@ def test_oauth_request_does_not_auto_expose_hosted_image_tool_for_unknown_model(
     assert HOSTED_IMAGE_GENERATION_INSTRUCTIONS not in request.get("instructions", "")
 
 
+def test_explicit_tool_free_observer_cannot_receive_hosted_image_tool():
+    provider = _oauth_provider()
+    request = provider._prepare_request(
+        [{"role": "user", "content": "Decide whether to respond to this transcript"}],
+        tools=[],
+        stream=False,
+    )
+    assert not request.get("tools")
+    assert HOSTED_IMAGE_GENERATION_INSTRUCTIONS not in request.get("instructions", "")
+
+
 def test_hosted_tools_are_preserved_and_public_route_does_not_auto_add():
     hosted = {"type": "image_generation", "quality": "high"}
     function = {

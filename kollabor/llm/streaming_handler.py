@@ -55,6 +55,7 @@ class StreamingHandler:
         # Buffer for streaming chunks — displayed in thinking area as preview,
         # then flushed via display_complete_response when streaming ends.
         self._streaming_buffer: str = ""
+        self._display_stream_buffer: str = ""
 
     async def call_llm(
         self,
@@ -175,6 +176,7 @@ class StreamingHandler:
         self._thinking_formatter.reset()
         self._response_started = False
         self._streaming_buffer = ""
+        self._display_stream_buffer = ""
 
         # End streaming session in message display service if active
         if self.message_display_service.is_streaming_active():
@@ -208,7 +210,6 @@ class StreamingHandler:
             return
 
         # Structured mirror of the chunk for non-terminal attach clients
-        publish_semantic(self.renderer, "token", text=chunk)
 
         # Initialize streaming response if this is the first chunk
         if not self._response_started:
@@ -219,6 +220,14 @@ class StreamingHandler:
 
         # Accumulate into buffer
         self._streaming_buffer += chunk
+        from kollabor_ai.response_channels import display_stream_text
+
+        visible = display_stream_text(self._streaming_buffer)
+        if visible.startswith(self._display_stream_buffer):
+            delta = visible[len(self._display_stream_buffer):]
+            if delta:
+                publish_semantic(self.renderer, "token", text=delta)
+        self._display_stream_buffer = visible
 
         # Count tokens as they stream in (real-time, not fake animation)
         token_io = get_token_io_state()
@@ -234,7 +243,7 @@ class StreamingHandler:
 
         if native_tools:
             # Line-buffered preview: update on complete lines, show last 5.
-            lines = self._streaming_buffer.replace("\r\n", "\n").split("\n")
+            lines = visible.replace("\r\n", "\n").split("\n")
             complete_lines = lines[:-1]
             if not complete_lines:
                 return

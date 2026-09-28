@@ -1,0 +1,103 @@
+{
+  "fixtures_sha256": "2a7f6b57e32cbfe2f76af6154e989cd34a0de5fa56a8f1d622eeea1ab37ea652",
+  "head_sha256": "27caff23f9514f2fdd2f7067876bd6aa998b83ee7626bb83cfd8223fe0298a90",
+  "minimum_probability": 0.8,
+  "cold_import_and_load_seconds": 30.414241374994162,
+  "first_inference_ms": 151.49550000205636,
+  "warm_mean_ms": 31.06696457169684,
+  "count": 8,
+  "automatic": 3,
+  "deferred_to_agent": 5,
+  "automatic_correct": 3,
+  "automatic_errors": 0,
+  "results": [
+    {
+      "text": "I will check the readme now.",
+      "assistant_playback": [
+        "I will check the readme now."
+      ],
+      "context": "",
+      "expected": "ignore",
+      "decision": "defer",
+      "confidence": 0.6381150186061859,
+      "elapsed_ms": 151.49550000205636
+    },
+    {
+      "text": "Should I run the tests?",
+      "assistant_playback": [
+        "Should I run the tests?"
+      ],
+      "context": "",
+      "expected": "ignore",
+      "decision": "defer",
+      "confidence": 0.53081414103508,
+      "elapsed_ms": 34.69745896290988
+    },
+    {
+      "text": "It is Leah, a local classifier.",
+      "assistant_playback": [
+        "It is Laya, a local classifier."
+      ],
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9229372143745422,
+      "elapsed_ms": 32.1875000372529
+    },
+    {
+      "text": "The first check passed.",
+      "assistant_playback": [
+        "The first check passed."
+      ],
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.828666016459465,
+      "elapsed_ms": 32.69987500971183
+    },
+    {
+      "text": "Stop, I need to ask you something.",
+      "assistant_playback": [
+        "The first check passed."
+      ],
+      "context": "",
+      "expected": "respond",
+      "decision": "defer",
+      "confidence": 0.6105968058109283,
+      "elapsed_ms": 32.38995902938768
+    },
+    {
+      "text": "The first check passed. Stop and check the microphone.",
+      "assistant_playback": [
+        "The first check passed."
+      ],
+      "context": "",
+      "expected": "respond",
+      "decision": "defer",
+      "confidence": 0.6909371912479401,
+      "elapsed_ms": 27.69983297912404
+    },
+    {
+      "text": "Yes, run the tests.",
+      "assistant_playback": [
+        "Should I run the tests?"
+      ],
+      "context": "",
+      "expected": "respond",
+      "decision": "defer",
+      "confidence": 0.7461389899253845,
+      "elapsed_ms": 28.907416970469058
+    },
+    {
+      "text": "Carla, could you close the door?",
+      "assistant_playback": [
+        "I will check the readme now."
+      ],
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9984025926096365,
+      "elapsed_ms": 28.886709013022482
+    }
+  ]
+}

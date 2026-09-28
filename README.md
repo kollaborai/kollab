@@ -587,6 +587,7 @@ architecture guidance, see [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
 - [Reasoning Effort](docs/features/reasoning-effort.md)
 - [Setup Wizard](docs/features/setup-wizard.md)
 - [Agent System](docs/features/agents.md)
+- [Voice Mode](docs/features/voice-mode.md)
 - [Hub Quick Start](docs/guides/hub-quick-start.md)
 - [Tasks and Checkpoints](docs/features/tasks.md)
 - [Tool Calling](docs/features/tools.md)

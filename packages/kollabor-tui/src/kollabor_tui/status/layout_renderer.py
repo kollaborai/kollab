@@ -273,6 +273,10 @@ class StatusLayoutRenderer:
             rows_to_render = layout.get_visible_rows()
 
         if not rows_to_render:
+            # Voice status is reserved in simple mode so an old/empty layout
+            # cannot hide an active microphone or the most recent transcript.
+            if getattr(self, "simple_mode", False):
+                return self._render_voice_status_fallback(get_global_width())
             return []
 
         # Constrain width
@@ -322,6 +326,28 @@ class StatusLayoutRenderer:
                 lines.append(row_content)
 
         return lines
+
+    def _render_voice_status_fallback(self, width: int) -> List[str]:
+        """Render reserved voice status lines when the visible layout is empty."""
+        context = self._context
+        event_bus = getattr(context, "event_bus", None) if context else None
+        plugin = event_bus.get_service("voice_plugin") if event_bus else None
+        if plugin is None:
+            return []
+        try:
+            state = plugin.status() or {}
+        except Exception:
+            logger.debug("Voice status fallback unavailable", exc_info=True)
+            return []
+        if not state.get("visible"):
+            return []
+
+        voice_state = str(state.get("state") or "off").replace("_", " ").title()
+        transcript = state.get("last_transcript") or {}
+        text = str(transcript.get("text") or "").strip()
+        lines = [f"Voice {voice_state}", f"Heard: {text or 'none'}"]
+        max_width = max(1, int(width or self._terminal_width))
+        return [line[:max_width] for line in lines]
 
     def _render_row(
         self,
