@@ -11,8 +11,12 @@ code enrollment then passed on source for #89: a brand-new agent on the Mac,
 holding only a fake API key, issued a code through `https://kollabor.ai`; a
 brand-new device on `alzan-prod` entered it, the issuer accepted, and the device
 came online with the issuer approved and the sealed profile installed under the
-issuer's own network ID. Still open: that enrollment on a released package,
-peer-mesh direct/LAN/multihop routes, and measured capacity.
+issuer's own network ID. That enrollment then passed from the installed 0.10.1 package, including a
+device restart. A second self-hosted origin (selfhost.kollabor.ai) passed
+discovery, enrollment and the full conversation acceptance, and capacity was
+measured on the production topology (see the goal tracker). Still open:
+peer-mesh links beyond one relay room (LAN/direct bootstrap, relay-less
+operation, cross-room forwarding).
 0.10.0 let only the discovery domain's coordinator issue codes; current source
 lets any trusted agent issue codes for its own network (#89). The
 defects fixed on the way are listed in

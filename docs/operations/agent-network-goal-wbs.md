@@ -7,13 +7,12 @@ This is the execution tracker for the complete networking goal in
 It records evidence boundaries as well as implementation status. “Partial” and
 “in progress” are not completion claims.
 
-Current status: destination recovery source work passes its local regression
-sweep. Issuer terminal cleanup is implemented and the 195-test enrollment,
-RPC, relay bridge and peer-session sweep passes. Live process restart, full
-acceptance, release, and clean-install acceptance remain open.
+Current status (2026-09-28): released as Kollab 0.10.0 and 0.10.1. Clean-install
+acceptance passed on the public beacon and on a second, self-hosted origin.
+Enrollment works from any trusted agent. Open: peer-mesh links beyond one relay
+room (LAN/direct bootstrap, relay-less operation, cross-room forwarding).
 
-ETA: no defensible whole-goal estimate yet. The live acceptance and release
-gates have not been revalidated.
+ETA for the open mesh work: about two days including live proofs.
 
 ## Completion target
 
@@ -30,17 +29,17 @@ published release; and clean installed-package acceptance on the Mac and
 | --- | --- | --- | --- |
 | 1 | Preserve and baseline the shared candidate | Done: all Codex-session work committed on `codex/relay-agent-messaging`, backups kept under `backup/*` refs; draft PR #87 open with CI green  | Current branch, dirty state and protected ownership recorded; no unrelated work overwritten. |
 | 2 | Close source implementation blockers | In progress | Focused source changes and regressions for each listed blocker; no security boundary weakened. |
-| 2.1 | Issuer enrollment recovery | Source behavior and local regression sweep pass; live restart remains open | Exact approved request resumes only after rechecking owner, relay, origin, room, issuer workspace, recipient key, scope and expiry; it retries the same decision ciphertext. Expired/revoked incomplete rows revoke only the exact owner-signed credential after durable request/delegation checks. Completed peers are never revoked; receipted-but-unresolved and mismatched rows remain with fixed-code backoff. Confirm against a real relay process restart. |
-| 2.2 | Destination enrollment completion recovery | Source implementation and regressions pass; capped retry and redacted status added; live relay restart remains open | Persist the stable request before its first POST, then recover the same round through challenge, decision and ACK. Replay the exact signed ACK after a lost response/restart; finish credential import, invite join and attachment idempotently. Retry delay grows from 5 seconds to a 300-second cap; `/connect status` exposes only aggregate state and fixed error codes. |
+| 2.1 | Issuer enrollment recovery | Live on installed 0.10.1 (2026-09-28): device and issuer recover across a device restart. A relay restart ends in-flight enrollments because relay state is not durable; the issuer now says so (#94) | Exact approved request resumes only after rechecking owner, relay, origin, room, issuer workspace, recipient key, scope and expiry; it retries the same decision ciphertext. Expired/revoked incomplete rows revoke only the exact owner-signed credential after durable request/delegation checks. Completed peers are never revoked; receipted-but-unresolved and mismatched rows remain with fixed-code backoff. Confirm against a real relay process restart. |
+| 2.2 | Destination enrollment completion recovery | Live on installed 0.10.1 (2026-09-28): the new device was killed while its request was pending, restarted, and finished enrollment from its journal after the issuer accepted | Persist the stable request before its first POST, then recover the same round through challenge, decision and ACK. Replay the exact signed ACK after a lost response/restart; finish credential import, invite join and attachment idempotently. Retry delay grows from 5 seconds to a 300-second cap; `/connect status` exposes only aggregate state and fixed error codes. |
 | 2.3 | Agent conversation and authorization | Live-verified 2026-09-28 (run `0428cb8f`): human-granted send, receiver model and normal tools, correlated result, question/answer, follow-up, cancellation, reconnect; unauthorized, revoked, replay and wrong-workspace rejected at the receiver guard  | Normal Hub/model/tool path, correlated replies, Q&A, progress, errors, cancellation and deadlines work; verify duplicate, impersonation, replay, wrong-workspace, revoked and loop rejection. |
-| 2.4 | Peer route integration | Partial; lifecycle and local route tests pass, cross-host proof remains open | Same-host discovery, direct TLS connections, relay fallback and signed bounded forwarding are wired; live tests must still prove cross-host routing and that intermediaries cannot decrypt or invoke ordinary Hub hooks. |
-| 2.5 | Discovery, presence and reconnect reliability | Partial | Public/self-hosted DNS contract and quiet local discovery; authenticated expiring records, bounded propagation, truthful offline/revoked status, route changes and restart recovery. |
-| 2.6 | Shared-state and capacity limits | Partial | Classify prior load errors; measure the final topology, recovery and resource/backpressure limits; publish only demonstrated operating limits. |
+| 2.4 | Peer route integration | Partial. Live: relay-carried secure sessions between peers in one relay room. Not built: links with peers reachable only over LAN/direct, relay-less operation, and cross-room forwarding (the mesh only exchanges links with relay-roster peers) | Same-host discovery, direct TLS connections, relay fallback and signed bounded forwarding are wired; live tests must still prove cross-host routing and that intermediaries cannot decrypt or invoke ordinary Hub hooks. |
+| 2.5 | Discovery, presence and reconnect reliability | Partial. Live: public and self-hosted discovery (kollabor.ai and selfhost.kollabor.ai), quiet same-user roster across workspaces, reconnect. Open: LAN household discovery without a relay | Public/self-hosted DNS contract and quiet local discovery; authenticated expiring records, bounded propagation, truthful offline/revoked status, route changes and restart recovery. |
+| 2.6 | Shared-state and capacity limits | Measured 2026-09-28 on the production topology (2 workers + managed Valkey, same host), see Capacity below; prior 1,024-connection errors classified | Classify prior load errors; measure the final topology, recovery and resource/backpressure limits; publish only demonstrated operating limits. |
 | 3 | Focused regressions and candidate verification | Full unit suite green on the branch; CI (security-scan, standards-check, tests) green on PR #87  | Run focused and cross-cutting suites for touched behavior; retain exact commands and results. Unit and simulated transport evidence remain separate from live proof. |
 | 4 | Source-level two-host acceptance | Passed 2026-09-28: run `0428cb8f` through `https://kollabor.ai`, all eleven checks, current source on the Mac and `alzan-prod`  | Current source on Mac and `alzan-prod`: actual models, remote file operation, artifact/hash, correlated reply consumed by sender, follow-up answer, cancellation/reconnect and negative authorization cases. |
-| 5 | Synchronize canonical docs and operator guidance | Partial | Specs, implementation ledger, walkthroughs, command help, harness and development skill match the implementation and verified limits. |
-| 6 | Prepare and publish a corrected release | Open | Version all packages consistently, changelog and CI pass, normal tag/release/PyPI workflow completes. |
-| 7 | Installed-package acceptance | Open | Clean `pip install kollab` environments on Mac and `alzan-prod`; repeat cross-network model/tool/reply flow and required recovery/negative cases. |
+| 5 | Synchronize canonical docs and operator guidance | Seven walkthroughs exact and code-checked (PR #96); ledger and tracker updated with installed, self-hosted and capacity evidence | Specs, implementation ledger, walkthroughs, command help, harness and development skill match the implementation and verified limits. |
+| 6 | Prepare and publish a corrected release | Done: Kollab 0.10.0 and 0.10.1 published to PyPI and GitHub Releases (tags `v0.10.0`, `v0.10.1`) | Version all packages consistently, changelog and CI pass, normal tag/release/PyPI workflow completes. |
+| 7 | Installed-package acceptance | Done: clean `pip install kollab==0.10.1` on both hosts; runs `c947b361` (kollabor.ai) and `dbcd34d6` (selfhost.kollabor.ai) passed every check; enrollment from a fresh non-operator issuer passed | Clean `pip install kollab` environments on Mac and `alzan-prod`; repeat cross-network model/tool/reply flow and required recovery/negative cases. |
 | 8 | Final completion report | Open | Release identifiers, exact working commands, source and installed evidence, and measured limits; all unverified items named. |
 
 ## Live acceptance on current source (2026-09-28)
@@ -118,6 +117,68 @@ code field, and the second attempt exercised that path.
   accept, the issuer showed accepted but the device never received the bundle
   and both sides retried until expiry. A new code is required after a relay
   restart.
+
+## Self-hosted origin (2026-09-28)
+
+A second deployment, `https://selfhost.kollabor.ai`, ran entirely from
+`pip install kollab==0.10.1`: `kollab relay run` (2 workers + managed Valkey),
+the discovery publisher with its own signing key, a static well-known server,
+and a TLS proxy with the same routes as kollabor.ai (DNS A record, `_agent` TXT
+locator, Let's Encrypt certificate). From both hosts, signed discovery verified
+the new origin; code enrollment from a fresh fake-key issuer completed under
+its own origin ID; and run `dbcd34d61ae04ded8a73268bcb771268` passed every
+conversation check (fresh workspaces paired by the harness, real model and
+tool execution, the created file verified on the remote host).
+
+## Quiet local roster (2026-09-28)
+
+On the Linux host, `/connect agents local` listed agents from three workspace
+folders under one OS user, with coordinator role, workspace, process and online
+state. It is a local RPC: no model turn, broadcast or publication. Isolation
+from other OS users was not tested live.
+
+## Proxy fixes on kollabor.ai (2026-09-28)
+
+- `POST /relay/v1/contact/*` was not proxied (404), so unknown-contact requests
+  could not reach the relay. Added, POST only, on both origins.
+- The relay answers over-quota registrations with 503. The proxy listed
+  `http_503` in `proxy_next_upstream` with `max_fails=2`, so two such answers
+  marked both workers unavailable for 5 s and every other client failed too:
+  one client over its per-source quota could black out the relay. `http_503`
+  is no longer treated as an upstream failure; over-quota runs afterwards
+  produced relay 503s and no new "no live upstreams" events.
+
+## Capacity (2026-09-28)
+
+Measured with `scripts/relay/measure_capacity.py` against the self-hosted
+origin: same host and topology as production (2 relay workers, managed Valkey),
+per-source limit raised to 1,024 for the test only, because both generator
+hosts share one public IP. Closed-loop encrypted ping/pong; generators on the
+Mac and the Linux host.
+
+| Concurrent connections | Completed pings/s | p50 / p99 | Failed pings |
+| --- | --- | --- | --- |
+| 250 (one generator, Linux host) | ~248 | 141 / 273 ms | 0 of 11,211 |
+| 500 (one generator, Mac) | ~209 | 1.06 / 1.37 s (generator-bound) | 0 of 9,653 |
+| 1,000 (two generators, 500 each) | ~575 | 0.35–1.0 s / 2.6–3.2 s | 32 of 26,350 |
+| 1,000 (four generators) | ~595 | ~0.55 s / 3.2–4.4 s | 143 of 27,303 |
+
+At 1,000 connections one worker used about half a core, 84 MB peak RSS and
+~550 file descriptors; Valkey stayed near 11 MiB. Failures were ping deadlines,
+brief `peer_offline`/`relay_disconnected` drops and session changes, with every
+connection online again at the end: queueing in the two worker event loops,
+not crashes. The 31 unclassified errors from the 2026-09-27 1,024-connection run
+match this pattern. Production limits remain 16 connections per source, 16 per
+room and 512 per worker. No soak, multi-host backend or larger-worker-count
+result is claimed.
+
+## Relay runtime supervision (2026-09-28, #97)
+
+A supervisor killed without a clean stop left its workers running (own
+session) and renewing owner leases, so a new `kollab relay run` gave up after
+45 s. Workers now stop themselves when their supervisor PID disappears, and
+startup waits out a previous owner's lease. Live: after SIGKILL of the
+supervisor both workers exited and a restart was ready in 5 s.
 
 ## Evidence already recorded
 
