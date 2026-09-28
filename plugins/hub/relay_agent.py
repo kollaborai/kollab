@@ -2283,34 +2283,16 @@ class RelayAgentBridge:
         return data
 
     async def guard_tool(self, data, event=None):
-        event_context = self._correlated_event_context.get()
-        if event_context is not None:
-            tool_data = data.get("tool_data", data) if isinstance(data, dict) else {}
-            tool_type = str(
-                tool_data.get("type", tool_data.get("tool_name", ""))
-            ).replace("-", "_")
-            is_exact_answer = bool(
-                event_context["kind"] == "question"
-                and tool_type == "hub_msg"
-                and str(tool_data.get("kind", "") or "").strip().lower()
-                == "answer"
-                and str(tool_data.get("to", tool_data.get("target", ""))).strip()
-                == event_context["peer"]
-                and str(tool_data.get("thread_id", "")).strip()
-                == event_context["thread_id"]
-                and str(tool_data.get("reply_to", "")).strip()
-                == event_context["event_id"]
-            )
-            if not is_exact_answer:
-                reason = "correlated relay events cannot authorize tools"
-                if event is not None:
-                    event.cancelled = True
-                    event.cancel_reason = reason
-                data["permission_decision"] = {
-                    "allowed": False,
-                    "reason": reason,
-                }
-                return data
+        if self._correlated_event_context.get() is not None:
+            # A turn started by a relay event (result, progress or question)
+            # runs no tools. Answering a remote question needs the human:
+            # the question waits for a human-approved answer.
+            reason = "correlated relay events cannot authorize tools"
+            if event is not None:
+                event.cancelled = True
+                event.cancel_reason = reason
+            data["permission_decision"] = {"allowed": False, "reason": reason}
+            return data
         if self._turn.get() is not None:
             try:
                 self._authorize_active(turn_id=self._turn.get())

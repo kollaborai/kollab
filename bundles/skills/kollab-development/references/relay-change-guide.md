@@ -116,6 +116,9 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
   peer approval and roster visibility cannot mint it. The human command and
   anchored input parser are the producers; the tool only consumes the grant.
   Old direct/local paths still need the same contract before full acceptance.
+- A turn started by a relay event (result, progress or question) runs no tools,
+  including `hub_msg` answers: a remote question waits for the human-approved
+  answer, which is sent from a human turn (`guard_tool` in `relay_agent.py`).
 - Remote turn provenance must survive background tasks, cancellation and new
   human input. Recheck admission before the model and after any awaited tool
   permission decision. A cancelled pre-request hook must stop provider dispatch.

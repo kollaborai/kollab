@@ -947,7 +947,14 @@ async def test_question_answer_resumes_same_granted_thread_once(bridges):
         },
         plugin_handler_names=set(executor.plugin_handlers),
     )
-    reply = await in_turn(left_model, executor.execute_tool(answer_call))
+    # The turn that presented the question may not answer it on its own; the
+    # question waits for the human (live run f9ddba9d caught a model answer).
+    unapproved = await in_turn(left_model, executor.execute_tool(answer_call))
+    assert not unapproved.success
+    assert unapproved.metadata["permission_denied"]
+    assert left.store.event(question["id"])["state"] == "pending"
+    # The same exact answer from a human turn (no relay event context) is sent.
+    reply = await executor.execute_tool(answer_call)
     assert reply.success, reply.error
     assert not right.active.waiting_answer
     assert right.active.record["id"] == task_id
