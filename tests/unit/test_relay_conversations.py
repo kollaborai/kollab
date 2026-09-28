@@ -468,6 +468,31 @@ def test_cancel_revokes_result_already_queued_for_the_sender(store):
     assert store.outbound(reply["id"])["state"] == "revoked"
 
 
+def test_waiting_task_refuses_a_result_until_its_question_is_answered(store):
+    # Live run d5e2b978: the receiver model asked its question, then sent a
+    # result 6 s later and completed the task with the question unanswered.
+    grant(store)
+    incoming = message()
+    admit(store, incoming)
+    store.transition(incoming["id"], "running")
+    store.transition(incoming["id"], "waiting_answer")
+
+    def reply(number, kind):
+        return outbound(
+            number,
+            kind=kind,
+            reply_to=incoming["id"],
+            thread_id=incoming["thread_id"],
+            expires_at=incoming["expires_at"],
+            content=f"{kind} while waiting",
+        )
+
+    with pytest.raises(RelayError):
+        store.queue_outbound(ROOM, reply(180, "result"))
+    assert store.task(incoming["id"])["state"] == "waiting_answer"
+    store.queue_outbound(ROOM, reply(181, "error"))
+
+
 def test_peer_cannot_cancel_another_peers_task(store):
     grant(store)
     admit(store)

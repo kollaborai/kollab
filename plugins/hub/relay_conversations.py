@@ -379,7 +379,10 @@ class ConversationStore:
         allowed_states = {
             "progress": {"running"},
             "question": {"running", "waiting_answer"},
-            "result": {"running", "waiting_answer", "reply_pending"},
+            # A pending question pauses the task until the human-approved
+            # answer arrives; the receiver may give up with an error, but it
+            # cannot complete the task while its question is unanswered.
+            "result": {"running", "reply_pending"},
             "error": {"running", "waiting_answer", "reply_pending"},
         }.get(payload["kind"], set())
         if (
