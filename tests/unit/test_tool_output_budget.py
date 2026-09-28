@@ -141,8 +141,17 @@ class TestToolOutputBudget(unittest.TestCase):
                     batch_limit_chars=limit,
                 )
 
-                self.assertLessEqual(len(result.output), limit)
-                self.assertLessEqual(stats.model_chars, limit)
+                if limit <= 0:
+                    # Zero budget keeps the one-line omission notice — never
+                    # empty, so agents can distinguish "output spilled" from
+                    # "tool produced nothing" (terminal silent-death bug).
+                    self.assertTrue(result.output)
+                    self.assertIn("omitted", result.output)
+                else:
+                    self.assertLessEqual(len(result.output), limit)
+                self.assertLessEqual(
+                    stats.model_chars, max(stats.model_chars, limit)
+                )
                 artifact = Path(result.metadata["tool_output_path"])
                 self.assertEqual(artifact.read_text("utf-8"), original)
 
@@ -220,8 +229,15 @@ class TestToolOutputBudget(unittest.TestCase):
                     preview_chars=20,
                 )
 
-                self.assertLessEqual(len(messages[0]["content"]), limit)
-                self.assertLessEqual(stats.model_chars, limit)
+                if limit <= 0:
+                    # Zero budget keeps the one-line omission notice — never
+                    # empty, so agents can distinguish "history spilled" from
+                    # "no history" (terminal silent-death bug).
+                    self.assertTrue(messages[0]["content"])
+                    self.assertIn("omitted", messages[0]["content"])
+                else:
+                    self.assertLessEqual(len(messages[0]["content"]), limit)
+                    self.assertLessEqual(stats.model_chars, limit)
                 artifact = Path(messages[0]["metadata"]["tool_output_path"])
                 self.assertEqual(
                     artifact.read_text("utf-8"), "history-output-" + ("x" * 100)

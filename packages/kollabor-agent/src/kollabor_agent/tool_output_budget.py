@@ -43,11 +43,18 @@ def preview_text(text: str, max_chars: int) -> str:
 
 
 def _bounded_omission(limit: int, subject: str) -> str:
-    """Return an explicit omission notice that never exceeds ``limit``."""
-    limit = _as_positive_int(limit, 0)
-    if limit <= 0:
-        return ""
+    """Return an explicit omission notice that never exceeds ``limit``.
+
+    A zero/negative limit still yields the untruncated notice rather than an
+    empty string: an empty tool result is indistinguishable from "command
+    produced nothing" and has historically caused agents to conclude their
+    tools silently died (see queue_processor "Executed terminal (id): " logs).
+    The notice is one short line; the caller's ``remaining`` accounting treats
+    it as any other visible text.
+    """
     notice = f"[{subject} omitted; complete output is in artifact metadata]"
+    if limit <= 0:
+        return notice
     return notice[:limit]
 
 
@@ -313,6 +320,12 @@ def pack_tool_results(
                         if len(pointer_with_preview) <= remaining
                         else pointer_only
                     )
+                elif remaining <= 0:
+                    # No budget even for a pointer: keep the one-line
+                    # omission notice (never an empty string — see
+                    # _bounded_omission) so "output was here, got spilled"
+                    # stays distinguishable from "tool produced nothing".
+                    replacement = _bounded_omission(0, "tool output")
                 else:
                     replacement = _bounded_omission(remaining, "tool output")
                 setattr(result, attribute, replacement)
@@ -435,7 +448,7 @@ def pack_tool_history_messages(
             except Exception as exc:
                 logger.warning("Could not save historical tool output: %s", exc)
                 replacement = _bounded_omission(
-                    allowed_for_replacement, "historical tool output"
+                    max(allowed_for_replacement, 0), "historical tool output"
                 )
                 _set_message_content(
                     message,
@@ -457,6 +470,11 @@ def pack_tool_history_messages(
                 if len(with_preview) <= allowed_for_replacement
                 else pointer_only
             )
+        elif allowed_for_replacement <= 0:
+            # Zero budget even for a pointer: keep the one-line omission
+            # notice (never an empty string — see _bounded_omission) so the
+            # model can still tell "history spilled" from "no history".
+            replacement = _bounded_omission(0, "historical tool output")
         else:
             replacement = _bounded_omission(
                 allowed_for_replacement, "historical tool output"

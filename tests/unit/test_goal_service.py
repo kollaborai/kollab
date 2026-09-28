@@ -418,6 +418,89 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("goal_report", note)
         self.assertIn("not progress", note)
 
+    def test_goal_context_shows_citeable_refs_and_early_warning(self):
+        # recorded evidence refs surface verbatim for goal_report citing
+        att = self.service.maybe_continue(
+            self.rec.goal_id, outcome_ok(self.rec.goal_id), ctx()
+        )
+        self.service.note_tool_result(
+            goal_id=self.rec.goal_id,
+            attempt_id=att.attempt_id,
+            tool_result_id="t1",
+            kind="terminal",
+            ref="terminal:OK pytest green",
+            tool_seq=1,
+            turn_id="t1",
+        )
+        # near the turn limit -> wrap-up warning fires
+        self.store.update_fields(
+            self.rec.goal_id,
+            self.store.get(self.rec.goal_id).record_version,
+            turn_count=38,
+        )
+        note = self.service.render_goal_context(self.store.get(self.rec.goal_id))
+        self.assertIn("recent evidence refs", note)
+        self.assertIn("terminal:OK pytest green", note)
+        self.assertIn("WARNING", note)
+        self.assertIn("wrap up and report", note)
+
+    def test_multiline_ref_bind_first_line(self):
+        # a multi-line recorded ref (git log) must be citeable by its
+        # first line — wrapped citations cannot carry the newline
+        att = self.service.maybe_continue(
+            self.rec.goal_id, outcome_ok(self.rec.goal_id), ctx()
+        )
+        self.service.note_tool_result(
+            goal_id=self.rec.goal_id,
+            attempt_id=att.attempt_id,
+            tool_result_id="t1",
+            kind="terminal",
+            ref="terminal:8e3f97e fix one\nf746b32 fix two",
+            tool_seq=1,
+            turn_id="t1",
+        )
+        control = GoalControl(
+            goal_id=self.rec.goal_id,
+            expected_record_version=self.store.get(self.rec.goal_id).record_version,
+            kind="progress",
+            reason="mid",
+            evidence=[{"ref": "terminal:8e3f97e fix one", "claim": "first fix"}],
+        )
+        out = self.service.handle_goal_report(control, att)
+        self.assertTrue(out["accepted"], out)
+        self.assertIn("1 new evidence refs", out["detail"])
+
+    def test_pause_discards_held_completion(self):
+        # a completion held for batch settle must not silently commit
+        # after a user pause — pause() discards it first
+        self.store.insert_attempt(self.rec.goal_id, 5, self.rec.lease_epoch, 2)
+        att = self.service.maybe_continue(
+            self.rec.goal_id, outcome_ok(self.rec.goal_id), ctx()
+        )
+        self.service.note_tool_result(
+            goal_id=self.rec.goal_id,
+            attempt_id=att.attempt_id,
+            tool_result_id="t1",
+            kind="terminal",
+            ref="terminal:GOAL-EVIDENCE tests green",
+            tool_seq=1,
+            turn_id="t1",
+        )
+        control = GoalControl(
+            goal_id=self.rec.goal_id,
+            expected_record_version=self.store.get(self.rec.goal_id).record_version,
+            kind="complete",
+            reason="done",
+            evidence=["terminal:GOAL-EVIDENCE tests green"],
+        )
+        out = self.service.handle_goal_report(control, att)
+        self.assertTrue(out["accepted"])
+        self.assertIsNotNone(self.store.get(self.rec.goal_id).pending_completion)
+        # user pause (in-flight records intent; completion is discarded)
+        self.service.pause(self.rec.goal_id)
+        rec = self.store.get(self.rec.goal_id)
+        self.assertIsNone(rec.pending_completion)
+
     # -- attached-client events (10.2) ---------------------------------
 
     def test_state_events_published_on_lifecycle(self):
