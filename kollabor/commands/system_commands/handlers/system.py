@@ -1260,23 +1260,9 @@ Platform: {version_info['platform']}"""
             import sys
 
             from ....updates import run_auto_update
-            from ....version import __version__ as current_version
-
-            before_version = current_version
 
             # run_auto_update is blocking (subprocess calls) - run in thread
             result = await asyncio.to_thread(run_auto_update)
-
-            # Try to read the new version after update
-            try:
-                import importlib
-
-                import kollabor.version as ver_mod
-
-                importlib.reload(ver_mod)
-                after_version = ver_mod.__version__
-            except Exception:
-                after_version = before_version
 
             if not result.success:
                 message = (
@@ -1289,28 +1275,18 @@ Platform: {version_info['platform']}"""
                     success=False, message=message, display_type="error"
                 )
 
-            self.logger.info(
-                "Upgrade complete: %s -> %s via %s, restarting",
-                before_version,
-                after_version,
-                result.method,
-            )
+            if not result.changed:
+                return CommandResult(
+                    success=True, message=result.message, display_type="info"
+                )
 
-            # Show upgrade result before restarting
-            if after_version != before_version:
-                msg = (
-                    f"\033[1;32mUpgrade complete:\033[0m "
-                    f"v{before_version} -> v{after_version} "
-                    f"({result.method})\n"
+            self.logger.info("Upgrade complete, restarting: %s", result.message)
+            renderer = self.event_bus.get_service("renderer")
+            if renderer:
+                renderer.message_coordinator.display_raw_text(
+                    f"\033[1;32m{result.message}\033[0m\n"
                     f"\033[2;36mRestarting...\033[0m"
                 )
-            else:
-                msg = (
-                    f"\033[1;32mUpgrade complete:\033[0m "
-                    f"({result.method})\n"
-                    f"\033[2;36mRestarting...\033[0m"
-                )
-            self.renderer.message_coordinator.display_raw_text(msg)
 
             # Kill owned daemon so the new code loads on relaunch
             daemon_pid = os.environ.pop("KOLLAB_DAEMON_PID", "")
@@ -1324,7 +1300,6 @@ Platform: {version_info['platform']}"""
 
             # Restore terminal before execv
             try:
-                renderer = self.event_bus.get_service("renderer")
                 if renderer:
                     renderer.exit_raw_mode()
                     print("\033[?25h", end="", flush=True)  # show cursor

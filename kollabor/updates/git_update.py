@@ -1,11 +1,14 @@
 """Explicit source-checkout updater for Kollab.
 
-This module is intentionally only used by ``kollab --update``. Startup
-may check for newer versions, but it should not mutate a user's checkout.
+Used by ``kollab --update`` and ``/upgrade`` through ``run_auto_update``.
+Startup may check for newer versions, but it should not mutate a user's
+checkout.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -18,6 +21,18 @@ class UpdateResult:
 
     success: bool
     message: str
+    changed: bool = True
+
+
+def _has_pip() -> bool:
+    return importlib.util.find_spec("pip") is not None
+
+
+def pip_command(*args: str) -> tuple[str, ...]:
+    """pip for the running interpreter; uv-built environments ship without pip."""
+    if not _has_pip() and shutil.which("uv"):
+        return ("uv", "pip", *args, "--python", sys.executable)
+    return (sys.executable, "-m", "pip", *args)
 
 
 def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -115,6 +130,7 @@ def run_source_update(repo_root: Path | None = None) -> UpdateResult:
         return UpdateResult(
             True,
             f"Kollab is already up to date on `{branch}` ({local_sha[:8]}).",
+            changed=False,
         )
 
     ancestor_result = _run_git(git_root, "merge-base", "--is-ancestor", "HEAD", upstream)
@@ -132,7 +148,7 @@ def run_source_update(repo_root: Path | None = None) -> UpdateResult:
         detail = pull_result.stderr.strip() or pull_result.stdout.strip()
         return UpdateResult(False, f"Git update failed:\n{detail}")
 
-    install_result = _run_cmd(git_root, sys.executable, "-m", "pip", "install", "-e", ".")
+    install_result = _run_cmd(git_root, *pip_command("install", "-e", "."))
     if install_result.returncode != 0:
         detail = install_result.stderr.strip() or install_result.stdout.strip()
         return UpdateResult(
@@ -151,6 +167,6 @@ def run_source_update(repo_root: Path | None = None) -> UpdateResult:
             f"Kollab updated on `{branch}`.\n"
             f"  Before: {local_sha[:8]}\n"
             f"  After:  {new_sha[:8]}\n"
-            "  Refreshed editable install with pip."
+            "  Refreshed the editable install."
         ),
     )
