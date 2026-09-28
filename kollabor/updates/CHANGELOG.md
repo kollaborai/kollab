@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-09-28
+
 ### Fixed
 
 - An attach client that cannot reach its daemon at startup (a stale socket
