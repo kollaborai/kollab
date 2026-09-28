@@ -44,6 +44,7 @@ from .enrollment_codes import (
     parse_enrollment_code,
 )
 from .enrollment_delegations import (
+    DelegationSessionChangedError,
     EnrollmentDelegationStore,
     EnrollmentRequestRecord,
     sign_installation_receipt,
@@ -90,7 +91,8 @@ class EnrollmentProtocolError(ValueError):
     """A safe fixed enrollment-protocol failure code."""
 
     def __init__(self, code: str, *, retry_after_seconds: float | None = None):
-        self.code = code if code in _ALLOWED_ERRORS | {"transport", "invalid_response"} else "transport"
+        local_codes = {"transport", "invalid_response", "session_changed"}
+        self.code = code if code in _ALLOWED_ERRORS | local_codes else "transport"
         self.retry_after_seconds = retry_after_seconds
         super().__init__(self.code)
 
@@ -2683,6 +2685,8 @@ class EnrollmentIssuer:
                 agent_id=str(identity.agent_id),
                 session_id=session_id,
             )
+        except DelegationSessionChangedError as exc:
+            raise EnrollmentProtocolError("session_changed") from exc
         except Exception as exc:
             raise EnrollmentProtocolError("unauthorized") from exc
         expected_status = "approved" if decision == "accept" else "rejected"

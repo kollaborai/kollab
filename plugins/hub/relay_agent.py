@@ -710,6 +710,12 @@ class RelayAgentBridge:
         except Exception as exc:
             # Do not include tokens, paths, or raw protocol errors in the command result.
             code = getattr(exc, "code", None)
+            if code == "session_changed":
+                raise RelayError(
+                    "the relay connection restarted after this code was created, "
+                    "so this request can no longer be decided; create a new code "
+                    "with /connect offer"
+                ) from None
             if isinstance(code, str) and code.isidentifier():
                 raise RelayError(f"enrollment decision unavailable ({code})") from None
             raise RelayError("enrollment decision unavailable") from None
