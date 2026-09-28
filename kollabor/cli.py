@@ -614,8 +614,10 @@ Telegram bridge setup (run inside interactive mode):
 
     parser.add_argument(
         "--update",
+        "--upgrade",
+        dest="update",
         action="store_true",
-        help="Update this source checkout from Git and refresh the editable install",
+        help="Update Kollab (source checkout, pip, pipx, uv tool or Homebrew install)",
     )
 
     parser.add_argument(
@@ -934,9 +936,9 @@ async def async_main() -> None:
         return
 
     if args.update:
-        from .updates.git_update import run_source_update
+        from .updates import run_auto_update
 
-        result = run_source_update()
+        result = run_auto_update()
         print(result.message)
         if not result.success:
             sys.exit(1)
@@ -1925,6 +1927,7 @@ def _should_use_daemon() -> bool:
         "--version",
         "--reset-config",
         "--update",
+        "--upgrade",
         "--font-dir",
         "--login",
         "-p",

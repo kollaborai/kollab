@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from .git_update import _current_source_root, run_source_update
+from .git_update import _current_source_root, pip_command, run_source_update
 
 
 @dataclass
@@ -18,6 +18,16 @@ class AutoUpdateResult:
     success: bool
     message: str
     method: str
+    changed: bool = True
+
+
+# Installers that own an isolated environment; anything else is upgraded with
+# the running interpreter's own pip.
+_INSTALLER_COMMANDS = {
+    "uv": ("uv", "tool", "upgrade", "kollab"),
+    "pipx": ("pipx", "upgrade", "kollab"),
+    "brew": ("brew", "upgrade", "kollab"),
+}
 
 
 def _run_cmd(*args: str) -> subprocess.CompletedProcess[str]:
@@ -41,80 +51,58 @@ def _output(result: subprocess.CompletedProcess[str]) -> str:
     return text
 
 
-def _success(method: str, command: tuple[str, ...], output: str) -> AutoUpdateResult:
-    detail = f" via `{method}`"
-    if output:
-        return AutoUpdateResult(True, f"Kollab updated{detail}.\n{output}", method)
-    return AutoUpdateResult(True, f"Kollab updated{detail}.", method)
+def _installed_version() -> str:
+    try:
+        return version("kollab")
+    except PackageNotFoundError:
+        return "unknown"
 
 
-def _attempt_command(method: str, *command: str) -> AutoUpdateResult:
-    result = _run_cmd(*command)
-    if result.returncode == 0:
-        return _success(method, command, _output(result))
+def _install_method() -> str:
+    """Name the installer that owns the running interpreter.
 
-    detail = _output(result) or f"{' '.join(command)} exited {result.returncode}"
-    return AutoUpdateResult(False, detail, method)
-
-
-def _is_brew_formula_installed() -> bool:
-    if not shutil.which("brew"):
-        return False
-    result = _run_cmd("brew", "list", "--formula", "kollab")
-    return result.returncode == 0
+    Upgrading any other copy on PATH (a stale uv tool, a pipx venv) would
+    report success while the running Kollab stays old.
+    """
+    parts = Path(sys.prefix).resolve().parts
+    if "pipx" in parts and "venvs" in parts:
+        return "pipx"
+    if "uv" in parts and "tools" in parts:
+        return "uv"
+    if "Cellar" in parts:
+        return "brew"
+    return "pip"
 
 
 def run_auto_update(repo_root: Path | None = None) -> AutoUpdateResult:
-    """Update Kollab using the active install style when possible.
+    """Update the running Kollab install.
 
-    Source checkouts use the existing safe fast-forward updater. Installed
-    packages try common isolated installers first, then fall back to the
-    current Python environment.
+    Source checkouts use the safe fast-forward updater. Installed packages are
+    upgraded by the installer that owns the running interpreter.
     """
     root = (repo_root or _current_source_root()).resolve()
     if _looks_like_source_checkout(root):
-        source_result = run_source_update(repo_root=root)
-        return AutoUpdateResult(
-            source_result.success,
-            source_result.message,
-            "source",
-        )
+        source = run_source_update(repo_root=root)
+        return AutoUpdateResult(source.success, source.message, "source", source.changed)
 
-    failures: list[str] = []
-
-    if shutil.which("uv"):
-        result = _attempt_command("uv", "uv", "tool", "upgrade", "kollab")
-        if result.success:
-            return result
-        failures.append(f"uv: {result.message}")
-
-    if shutil.which("pipx"):
-        result = _attempt_command("pipx", "pipx", "upgrade", "kollab")
-        if result.success:
-            return result
-        failures.append(f"pipx: {result.message}")
-
-    if _is_brew_formula_installed():
-        result = _attempt_command("brew", "brew", "upgrade", "kollab")
-        if result.success:
-            return result
-        failures.append(f"brew: {result.message}")
-
-    result = _attempt_command(
-        "pip",
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "kollab",
+    method = _install_method()
+    command = _INSTALLER_COMMANDS.get(method) or pip_command(
+        "install", "--upgrade", "kollab"
     )
-    if result.success:
-        return result
-    failures.append(f"pip: {result.message}")
+    before = _installed_version()
+    try:
+        result = _run_cmd(*command)
+    except OSError as exc:
+        return AutoUpdateResult(False, f"`{command[0]}` could not run: {exc}", method)
+    if result.returncode != 0:
+        detail = _output(result) or f"{' '.join(command)} exited {result.returncode}"
+        return AutoUpdateResult(False, detail, method)
 
+    after = _installed_version()
+    if after == before:
+        return AutoUpdateResult(
+            True, f"Kollab is already up to date (v{after}).", method, changed=False
+        )
     return AutoUpdateResult(
-        False,
-        "Unable to auto-update Kollab.\n" + "\n".join(failures),
-        "none",
+        True, f"Kollab upgraded: v{before} -> v{after} (via {method}).", method
     )

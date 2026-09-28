@@ -1,9 +1,11 @@
+import os
 import subprocess
 from dataclasses import dataclass
 
 import pytest
 
 import kollabor.application as application_module
+import kollabor.updates.git_update as git_update
 from kollabor.application import TerminalLLMChat
 from kollabor.updates.version_check_service import ReleaseInfo
 
@@ -91,51 +93,96 @@ def test_auto_update_dispatches_to_source_checkout(tmp_path, monkeypatch):
     assert calls == [tmp_path]
 
 
-def test_auto_update_dispatches_to_uv_tool_when_installed_package(
-    tmp_path, monkeypatch
-):
-    import kollabor.updates.auto_update as auto_update
-
+def _fake_upgrade(monkeypatch, auto_update, *, prefix, which=None, versions=("0.10.1", "0.10.2")):
     calls = []
-
-    def fake_which(name):
-        return "/usr/bin/uv" if name == "uv" else None
+    remaining = list(versions)
 
     def fake_run_cmd(*args):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "upgraded\n", "")
+        return subprocess.CompletedProcess(args, 0, "done\n", "")
 
-    monkeypatch.setattr(auto_update.shutil, "which", fake_which)
+    monkeypatch.setattr(auto_update.sys, "prefix", prefix)
+    monkeypatch.setattr(auto_update.sys, "executable", f"{prefix}/bin/python")
+    monkeypatch.setattr(git_update.shutil, "which", lambda name: which if name == "uv" else None)
     monkeypatch.setattr(auto_update, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(auto_update, "_installed_version", lambda: remaining.pop(0))
+    return calls
+
+
+def test_auto_update_uses_uv_tool_when_running_from_one(tmp_path, monkeypatch):
+    import kollabor.updates.auto_update as auto_update
+
+    calls = _fake_upgrade(monkeypatch, auto_update, prefix="/home/u/.local/share/uv/tools/kollab", which="/usr/bin/uv")
 
     result = auto_update.run_auto_update(repo_root=tmp_path)
 
-    assert result.success is True
-    assert result.method == "uv"
+    assert (result.success, result.method, result.changed) == (True, "uv", True)
+    assert result.message == "Kollab upgraded: v0.10.1 -> v0.10.2 (via uv)."
     assert calls == [("uv", "tool", "upgrade", "kollab")]
 
 
-def test_auto_update_falls_back_to_current_python_pip(tmp_path, monkeypatch):
+def test_auto_update_upgrades_the_running_venv_even_when_uv_is_on_path(tmp_path, monkeypatch):
     import kollabor.updates.auto_update as auto_update
 
-    calls = []
-
-    monkeypatch.setattr(auto_update.shutil, "which", lambda name: None)
-    monkeypatch.setattr(auto_update.sys, "executable", "/venv/bin/python")
-
-    def fake_run_cmd(*args):
-        calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "upgraded\n", "")
-
-    monkeypatch.setattr(auto_update, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(git_update, "_has_pip", lambda: True)
+    calls = _fake_upgrade(monkeypatch, auto_update, prefix="/home/u/.local/share/kollab/venv", which="/usr/bin/uv")
 
     result = auto_update.run_auto_update(repo_root=tmp_path)
 
-    assert result.success is True
-    assert result.method == "pip"
-    assert calls == [
-        ("/venv/bin/python", "-m", "pip", "install", "--upgrade", "kollab")
-    ]
+    assert (result.success, result.method) == (True, "pip")
+    assert calls == [("/home/u/.local/share/kollab/venv/bin/python", "-m", "pip", "install", "--upgrade", "kollab")]
+
+
+def test_auto_update_uses_uv_pip_when_the_venv_has_no_pip(tmp_path, monkeypatch):
+    import kollabor.updates.auto_update as auto_update
+
+    monkeypatch.setattr(git_update, "_has_pip", lambda: False)
+    calls = _fake_upgrade(monkeypatch, auto_update, prefix="/venv", which="/usr/bin/uv")
+
+    auto_update.run_auto_update(repo_root=tmp_path)
+
+    assert calls == [("uv", "pip", "install", "--upgrade", "kollab", "--python", "/venv/bin/python")]
+
+
+def test_auto_update_reports_already_up_to_date_without_change(tmp_path, monkeypatch):
+    import kollabor.updates.auto_update as auto_update
+
+    monkeypatch.setattr(git_update, "_has_pip", lambda: True)
+    _fake_upgrade(monkeypatch, auto_update, prefix="/venv", versions=("0.10.2", "0.10.2"))
+
+    result = auto_update.run_auto_update(repo_root=tmp_path)
+
+    assert (result.success, result.changed) == (True, False)
+    assert result.message == "Kollab is already up to date (v0.10.2)."
+
+
+@pytest.mark.asyncio
+async def test_upgrade_command_reports_up_to_date_and_restarts_only_after_a_change(monkeypatch):
+    from types import SimpleNamespace
+
+    import kollabor.commands.system_commands.handlers.system as system_module
+    import kollabor.updates as updates
+    from kollabor.commands.system_commands.handlers.system import SystemCommandHandler
+
+    renderer = _DummyRenderer()
+    renderer.exit_raw_mode = lambda: None
+    handler = SimpleNamespace(
+        logger=system_module.logging.getLogger("test"),
+        event_bus=SimpleNamespace(get_service=lambda name: renderer if name == "renderer" else None),
+    )
+    execs = []
+    monkeypatch.setattr(os, "execv", lambda *args: execs.append(args))
+
+    current = updates.AutoUpdateResult(True, "Kollab is already up to date (v0.10.2).", "pip", changed=False)
+    monkeypatch.setattr(updates, "run_auto_update", lambda: current)
+    result = await SystemCommandHandler.handle_upgrade(handler, None)
+    assert (result.success, result.message, execs) == (True, "Kollab is already up to date (v0.10.2).", [])
+
+    upgraded = updates.AutoUpdateResult(True, "Kollab upgraded: v0.10.1 -> v0.10.2 (via pip).", "pip")
+    monkeypatch.setattr(updates, "run_auto_update", lambda: upgraded)
+    await SystemCommandHandler.handle_upgrade(handler, None)
+    assert "Kollab upgraded: v0.10.1 -> v0.10.2 (via pip)." in renderer.message_coordinator.messages[-1]
+    assert len(execs) == 1
 
 
 @pytest.mark.asyncio
