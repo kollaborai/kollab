@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DNS error, the private code form says how to get a code, `/connect <domain>`
   points to `/connect offer`, and `/connect help` lists every subcommand with
   its description.
+- `/upgrade`, `kollab --upgrade` and `kollab --update` now upgrade the install
+  that is running (uv tool, pipx, Homebrew, or the current environment's pip,
+  falling back to `uv pip` when pip is missing) instead of whichever installer
+  is on PATH. `/upgrade` no longer crashes after updating, and says "already
+  up to date" instead of restarting when nothing changed.
 - The command menu now lists every `/connect` subcommand with its arguments;
   typing `/conn` previously showed only the bare command. `/connect answer`
   and `/connect networks <extra>` are routed instead of being rejected with the

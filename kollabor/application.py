@@ -1573,7 +1573,7 @@ class TerminalLLMChat:
                     update_result: AutoUpdateResult = await asyncio.to_thread(
                         run_auto_update
                     )
-                    if update_result.success:
+                    if update_result.success and update_result.changed:
                         update_msg = (
                             f"\033[1;32mAuto-update complete:\033[0m "
                             f"v{release_info.version} is installed "
