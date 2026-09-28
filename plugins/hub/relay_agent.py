@@ -2374,6 +2374,8 @@ class RelayAgentBridge:
             "Discovery and peer approval do not grant tool access. Receiving workspace permissions always apply.",
             "Send a relay answer only after the human supplies it, using kind='answer' "
             "with the exact pending question's peer, thread_id, and event ID as reply_to.",
+            "After a relay send, results, progress and questions arrive in this "
+            "conversation on their own; do not poll with hub_status, hub_capture or cron jobs.",
         ]
         if (
             self.active

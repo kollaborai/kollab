@@ -3852,6 +3852,12 @@ def test_question_answer_trace_requires_actual_wires_and_native_receipts(tmp_pat
                                 "id": "call_scratchpad_refused",
                                 "input": {"content": "note"},
                             },
+                            # Live run a19dd678: read-only status polling.
+                            {
+                                "name": "hub_status",
+                                "id": "call_status_observed",
+                                "input": {},
+                            },
                         ]
                     },
                 }
@@ -4002,6 +4008,7 @@ def test_question_answer_trace_requires_actual_wires_and_native_receipts(tmp_pat
     assert sender["answer_receipt_state"] == "running"
     assert sender["unexpected_tool_call_count"] == 0
     assert sender["denied_unexpected_tool_call_count"] == 1
+    assert sender["sender_observation_call_count"] == 1
 
     receiver = inspect_side("receiver")
     assert receiver["receiver_initial_wire_requests"] == 1

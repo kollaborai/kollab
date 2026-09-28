@@ -2731,6 +2731,7 @@ question_wire_requests = 0
 answer_wire_requests = 0
 unexpected_tool_calls = 0
 denied_unexpected_tool_calls = 0
+sender_observation_calls = 0
 provider_turns = 0
 
 
@@ -2818,6 +2819,7 @@ report = {
     "file_tools_in_order": False,
     "unexpected_tool_call_count": 0,
     "denied_unexpected_tool_call_count": 0,
+    "sender_observation_call_count": 0,
 }
 
 raw_records = []
@@ -2895,6 +2897,15 @@ for record_index, (_name, _line_number, item) in enumerate(raw_records):
                 or "authority is no longer valid" in outcome
             ):
                 denied_unexpected_tool_calls += 1
+            elif side == "sender" and name in {
+                "hub_status",
+                "hub_capture",
+                "hub_work",
+                "hub_cron_list",
+            }:
+                # Read-only local Hub observation by the waiting sender;
+                # it changes nothing and touches no workspace or peer.
+                sender_observation_calls += 1
             else:
                 unexpected_tool_calls += 1
         target = values.get("to", values.get("target", ""))
@@ -2988,6 +2999,7 @@ report.update(
         "file_read_result_count": len(file_read_results),
         "unexpected_tool_call_count": unexpected_tool_calls,
         "denied_unexpected_tool_call_count": denied_unexpected_tool_calls,
+        "sender_observation_call_count": sender_observation_calls,
     }
 )
 report["trace_scan"] = trace_scan_status()
@@ -3036,6 +3048,7 @@ print(json.dumps(report))"""
         "file_read_result_count",
         "unexpected_tool_call_count",
         "denied_unexpected_tool_call_count",
+        "sender_observation_call_count",
     )
     evidence = {field: record.get(field, 0) for field in int_fields}
     for field in int_fields:
