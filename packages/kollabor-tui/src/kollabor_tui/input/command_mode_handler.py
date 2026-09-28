@@ -85,7 +85,9 @@ class CommandModeHandler:
         # Callbacks for operations that require access to parent InputHandler
         self._update_display_callback: Optional[Callable] = None
         self._exit_modal_callback: Optional[Callable] = None
-        self._expand_paste_placeholders_callback: Optional[Callable] = None
+        # NOTE: self._expand_paste_placeholders_callback is set above from the
+        # expand_paste_placeholders constructor arg; set_expand_paste_placeholders_callback()
+        # below lets callers (e.g. InputHandler) wire it up post-construction instead.
 
         # Callbacks for modal mode handling (delegated to ModalController)
         self._handle_modal_keypress_callback: Optional[
