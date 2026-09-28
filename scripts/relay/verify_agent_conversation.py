@@ -3454,7 +3454,9 @@ def _correlated_reply(
         and row.get("from") == remote_address
         and row.get("to") == local_address
         and row.get("thread_id") == task_id
-        and row.get("state") == "completed"
+        # A received result event is "received", then "delivered" once shown to
+        # the model (relay_conversations.py); tasks, not events, complete.
+        and row.get("state") in {"received", "delivered"}
         and isinstance(row.get("id"), str)
         and ID_RE.fullmatch(row["id"])
         and isinstance(row.get("content_sha256"), str)

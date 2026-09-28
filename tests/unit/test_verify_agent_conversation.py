@@ -1979,14 +1979,16 @@ def test_interactive_connect_submits_command_as_attached_operator_input(tmp_path
     assert "info: beacon: online" in result.stdout
 
 
-def test_correlated_reply_requires_completed_reply_with_valid_ids():
+def test_correlated_reply_requires_received_reply_with_valid_ids():
+    # Live run 32b1ee6c: the follow-up result arrived as "delivered" but the
+    # check demanded "completed", a state result events never take.
     task_id = "c" * 32
     reply_id = "d" * 32
     ledger = {
         "matches": [
             {
                 "id": reply_id,
-                "state": "completed",
+                "state": "delivered",
                 "reply_to": task_id,
                 "from": "remote-agent",
                 "to": "local-agent",
