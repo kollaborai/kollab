@@ -2728,6 +2728,7 @@ initial_sender_wire_requests = 0
 question_wire_requests = 0
 answer_wire_requests = 0
 unexpected_tool_calls = 0
+denied_unexpected_tool_calls = 0
 provider_turns = 0
 
 
@@ -2814,6 +2815,7 @@ report = {
     "file_read_result_count": 0,
     "file_tools_in_order": False,
     "unexpected_tool_call_count": 0,
+    "denied_unexpected_tool_call_count": 0,
 }
 
 raw_records = []
@@ -2882,7 +2884,17 @@ for record_index, (_name, _line_number, item) in enumerate(raw_records):
         if not isinstance(tool_id, str) or not tool_id or not isinstance(values, dict):
             continue
         if name not in {"hub_msg", "file_create", "file_read"}:
-            unexpected_tool_calls += 1
+            # A call the runtime refused did not run; keep it as evidence
+            # that the guard held instead of failing the exchange.
+            outcome = " ".join(tool_results.get(tool_id, [])).lower()
+            if (
+                "cannot authorize tools" in outcome
+                or "permission denied" in outcome
+                or "authority is no longer valid" in outcome
+            ):
+                denied_unexpected_tool_calls += 1
+            else:
+                unexpected_tool_calls += 1
         target = values.get("to", values.get("target", ""))
         content = values.get("message", values.get("content", ""))
         call_thread = values.get("thread_id", values.get("thread", ""))
@@ -2971,6 +2983,7 @@ report.update(
         "file_read_call_count": len(file_read_calls),
         "file_read_result_count": len(file_read_results),
         "unexpected_tool_call_count": unexpected_tool_calls,
+        "denied_unexpected_tool_call_count": denied_unexpected_tool_calls,
     }
 )
 report["trace_scan"] = trace_scan_status()
@@ -3018,6 +3031,7 @@ print(json.dumps(report))"""
         "file_read_call_count",
         "file_read_result_count",
         "unexpected_tool_call_count",
+        "denied_unexpected_tool_call_count",
     )
     evidence = {field: record.get(field, 0) for field in int_fields}
     for field in int_fields:

@@ -3842,7 +3842,13 @@ def test_question_answer_trace_requires_actual_wires_and_native_receipts(tmp_pat
                                     "reply_to": question_id,
                                     "message": answer_text,
                                 },
-                            }
+                            },
+                            # Live run f39552b9: an extra call the runtime refused.
+                            {
+                                "name": "scratchpad_append",
+                                "id": "call_scratchpad_refused",
+                                "input": {"content": "note"},
+                            },
                         ]
                     },
                 }
@@ -3856,7 +3862,16 @@ def test_question_answer_trace_requires_actual_wires_and_native_receipts(tmp_pat
                         f"Executed hub_msg ({answer_tool_id}): remote task "
                         f"{answer_id}: running; acceptance is not completion"
                     ),
-                }
+                },
+                {
+                    "type": "system",
+                    "subtype": "tool_result",
+                    "toolUseID": "call_scratchpad_refused",
+                    "content": (
+                        "Executed scratchpad_append (call_scratchpad_refused): "
+                        "correlated relay events cannot authorize tools"
+                    ),
+                },
             ]
             peer = receiver_address
         else:
@@ -3978,6 +3993,8 @@ def test_question_answer_trace_requires_actual_wires_and_native_receipts(tmp_pat
     assert sender["answer_call_count"] == 1
     assert sender["answer_receipt_id"] == answer_id
     assert sender["answer_receipt_state"] == "running"
+    assert sender["unexpected_tool_call_count"] == 0
+    assert sender["denied_unexpected_tool_call_count"] == 1
 
     receiver = inspect_side("receiver")
     assert receiver["receiver_initial_wire_requests"] == 1
