@@ -1,16 +1,17 @@
 # Kollab Domain-to-Agent Discovery Contract
 
-Status: Scope: source included in Kollab 0.9.0. Signed discovery and the encrypted-presence relay have dated deployment evidence on kollabor.ai; the relay activation preserved the existing publisher identity. A2A Cards, owner/device pairing, private directory access and the narrow workspace receiver remain development-build implementations with local evidence. Broader peer networking remains proposed; see the implementation ledger and [dated public deployment summary](../operations/relay-deployment-2026-09-27.md) for evidence boundaries.
+Status: the 0.9.0 release baseline includes signed discovery and encrypted presence, with dated deployment evidence on kollabor.ai. Current unreleased source uses `/connect <domain>` for public discovery/relay attachment; bare `/connect` and `/connect enroll [domain]` open private device-code entry. `/connect offer`, redacted request listing, and explicit local accept/reject commands are implemented. Code and device-key proof create a pending request, not approval. After explicit acceptance, the issuer sends a `conversation:send` credential, room invitation, and—when a supported active profile is available—allowlisted profile settings plus one provider credential in a device-sealed, workspace-scoped bundle. The destination installs atomically and returns a device-signed receipt before peer approval. This grants no workspace or tool permission, and network revocation does not revoke a copied provider credential. The in-flight mailbox key and worker are process-local; accepted delivery can still become unrecoverable if it fails before a receipt is durably recorded. A2A Cards, owner/device pairing, private directory access and the narrow workspace receiver remain development-build implementations with local evidence. Broader peer networking remains incomplete; see the implementation ledger and [dated public deployment summary](../operations/relay-deployment-2026-09-27.md) for evidence boundaries.
 
 Related: [network design](agent-network-discovery-and-relaying.md), [scenario walkthroughs](agent-network-walkthroughs.md), [existing remote endpoint](hub-remote-endpoint.md).
 
 Protocol reuse: [Grok Bot, Buzz and A2A comparison](agent-network-protocol-landscape.md). The recommendation is A2A for tasks/cards, with Kollab-specific discovery, membership and communication policy. A narrow A2A 1.0 workspace adapter and Card-signing profile are now implemented; deployment and evidence boundaries are tracked in the [implementation ledger](agent-network-implementation-status.md).
 
-## Implementation status (2026-09-26)
+## Implementation status (updated 2026-09-27)
 
 Implemented in the working tree:
 
-- `/connect` and `/hub dns connect` share `plugins/hub/dns/discovery.py`: strict origin normalization, `_agent` TXT selection, bounded HTTPS requests, validated numeric connection addresses, and complete JCS/Ed25519 document verification.
+- `/connect <domain>` and `/hub dns connect <domain>` perform signed public discovery and connect to a compatible advertised relay. Bare `/connect` and `/connect enroll [domain]` open private code entry; the private enrollment flow performs discovery after code submission. Discovery provides strict origin normalization, `_agent` TXT selection, bounded HTTPS requests, validated numeric connection addresses, and complete JCS/Ed25519 document verification. Public discovery does not enroll the device or grant workspace/tool access.
+- A fresh workspace attaches with a random empty relay room. No public roster is exposed, and other installations remain invisible until the human joins a shared invitation room. Public discovery alone does not create a contact route.
 - `discovery_store.py` stores verified documents under an origin hash in the project's DNS `discovered/` directory. These records never enter `AgentRegistry`. Durable pins reject changed keys, older revisions and conflicting content at the same revision. Expiry invalidates service information without erasing pins.
 - Discovery grants no membership, message permission or tool access. The old `register_well_known()` import operation now rejects without mutation. Existing locally registered Hub agents and the older direct transport remain separate; this slice does not retrofit group credentials or per-action authorization onto that transport.
 - `discovery_publish.py` is an explicit, independent publisher with a persistent service key and revision counter. It emits identity-only descriptors by default, renews every 60 seconds in watch mode and expires them after 300 seconds. The public beacon follow-on adds an optional same-origin relay control endpoint, advertised only while a configured local health probe confirms origin and protocol readiness. Workspace startup no longer exports or rsyncs a domain descriptor.
@@ -21,15 +22,18 @@ Unreleased simplification: accept only signed `kollab-discovery/2` documents. Le
 
 Dated evidence: the discovery, endpoint, plugin-discovery and DNS-liveness validation run passed 74 checks with one existing skipped test and caught a publisher lock collision before deployment. The publisher runs independently of workspace startup. At the recorded check, both public discovery URLs returned identical signed JSON with `application/json` and `Cache-Control: no-store`; `discover("kollabor.ai")` succeeded and repeated acquisition reported `pinned-key`. This verifies signed identity publication, not private admission or an agent task exchange.
 
-The [portable publication guide](../operations/kollabor-ai-discovery-publication.md) records operator commands and rollback boundaries. The [implementation ledger](agent-network-implementation-status.md) records the separate pairing, signing and local HTTP task-exchange evidence. The raw Ed25519 descriptor signature is not an A2A JWS signature. The deployed identity-only publisher advertises no A2A service.
+The [portable publication guide](../operations/kollabor-ai-discovery-publication.md) records operator commands and rollback boundaries. The [implementation ledger](agent-network-implementation-status.md) records the separate pairing, signing and local HTTP task-exchange evidence. The raw Ed25519 descriptor signature is not an A2A JWS signature. The deployed publisher advertises the encrypted relay and no A2A service. An HTTP check at 2026-09-27 06:07 UTC returned identical discovery aliases at revision 256 with control endpoint `https://kollabor.ai/relay/v1`; relay health reported two ready workers. This is historical advertised-state and health evidence, not a model/tool exchange. A later direct read at 09:44 UTC returned identical 921-byte aliases at revision 472 with the same control endpoint and principal; both GETs were HTTP 200 and SHA-256 `66dc9ebf58960cb8dd073f9c23f91b26697d091468c0f8e05e2f010a2e7ac920`. Health returned `ok`, not degraded, with two of two workers ready. Signature validation and model/tool exchange were not part of that direct check.
+
+Current public contract check at 2026-09-27 23:12 UTC: Cloudflare and Google DNS returned the same `_agent.kollabor.ai` TXT record and the A record resolved to `50.116.8.243`; queried AAAA and `_agent` SRV records had no answers. Both the TXT-selected extensionless URL and canonical `.json` URL returned HTTP 200 with identical 922-byte JSON, SHA-256 `a034afff5df3d3a5a4c31b6beac79dfdd484c21a75ca47c442e40968ac09c5b2`. The signed document reports revision 1280, `kollab-discovery/2`, a 300-second validity window, and the canonical relay control URL. Both signatures verified against the source validator. Relay health returned `ok`, 2/2 workers ready, `degraded=false`; public metrics and Agent Card paths returned 404. This check did not validate DNSSEC, live enrollment POSTs, WSS client interoperability, or the loaded proxy configuration's source hash. The companion site's local Nginx route edits were uncommitted, so they are not deployment proof.
 
 ## 1. Baseline before this implementation slice
 
 The domain is **kollabor.ai**, as confirmed by Marco. Retain the existing `_agent` TXT and discovery-document shape. The canonical URL for the contract is `/.well-known/agent-keys.json`, matching the current client. The extensionless URL is a compatibility alias. No SRV record or new discovery hostname is required.
 
-Current source baseline: checkout HEAD `9bb8085dc5592972f5a35eb72156821ca475e28e`. At the initial inspection, the DNS source files and `tests/unit/test_hub_endpoint.py` had no local diff; implementation changes listed above now supersede this baseline. `git blame` traces both the `.json` normalization and its explicit test expectation to `36e31f25` on 2026-07-02. The selected `kollab` executable is this checkout's `.venv/bin/kollab`. The later host inspection found a static file service rather than a running source publisher; the original producer revision remains unknown. Therefore the observed URL mismatch establishes deployment/publisher drift relative to current source; it does not establish that the current client URL is wrong.
+Historical source baseline for the initial comparison: checkout HEAD `9bb8085dc5592972f5a35eb72156821ca475e28e`. It no longer identifies the active source snapshot. At the 2026-09-27 23:12 UTC live check, the active release worktree was at HEAD `ee60e381721d1d9e98c8ea6d1a573f350fbca849`; the discovery implementation files had no working-tree diff. `git blame` traces both the `.json` normalization and its explicit test expectation to `36e31f25` on 2026-07-02. The selected `kollab` executable in the original comparison was that checkout's `.venv/bin/kollab`. The host's loaded proxy configuration was not matched to a source hash. The current live responses show that both aliases now agree; the earlier URL mismatch is historical deployment/publisher drift, not evidence that the current client URL is wrong.
 
-Read-only public observations:
+Read-only public observations from the initial source/deployment comparison
+(historical; current observation is recorded above):
 
 ```text
 dig +time=2 +tries=1 +short TXT _agent.kollabor.ai
@@ -64,9 +68,9 @@ The pre-change endpoint tests covered URL normalization, unsigned coordinator im
 
 The repository uses the MIT license. The network feature must remain usable with free, open-source software and self-hosted infrastructure: no paid directory API, hosted identity provider, account with Kollabor, subscription, or proprietary relay SDK may be required. Existing Ed25519/TLS capabilities should be reused. Select minimal, license-compatible dependencies for DNS parsing and protocol support; use maintained implementations rather than inventing cryptographic primitives.
 
-`kollabor.ai` is a worked example and optional bootstrap. Every domain, pinned peer, local discovery source, and service URL is configurable. A fresh install must not silently publish a workspace or depend on contacting the project's domain; an explicitly configured bootstrap or `/connect <domain>` opts into that contact. Runtime discovery and forwarding require no LLM calls. Self-hosting still uses the operator's machines, bandwidth, and any domain/hosting services they choose; no zero-infrastructure-cost claim is made.
+`kollabor.ai` is a worked example and optional bootstrap. Every domain, pinned peer, local discovery source, and service URL is configurable. A fresh install must not silently publish a workspace or depend on contacting the project's domain; an explicitly configured bootstrap opts into that contact. `/connect <domain>` selects public discovery directly; bare `/connect` and `/connect enroll [domain]` select private code entry. Runtime discovery and forwarding require no LLM calls. Self-hosting still uses the operator's machines, bandwidth, and any domain/hosting services they choose; no zero-infrastructure-cost claim is made.
 
-Keep scope tight: first align existing publication and import behavior, then add identity-safe admission and local roster visibility. Peer exchange, forwarding, and DHT integration are subsequent slices against these contracts, not reasons to replace the Hub or ship a large dependency stack upfront.
+Keep scope tight: signed publication, non-admitting public discovery, identity-safe local roster visibility, and the partial enrollment path now exist in source. Identity-safe admission/provisioning and peer exchange, forwarding, and distributed lookup remain separate acceptance gates; they do not justify replacing the Hub or adding a large dependency stack without a concrete need.
 
 Discovery may establish a contact address and an authenticated publisher. It must not grant membership, message permission, or tool authority.
 
@@ -87,13 +91,20 @@ message_authorization: none | scoped-grant
 
 ## 3. Exact domain lookup
 
-Implemented entry points (Hub plugin enabled):
+Published 0.9.0 baseline discovery entry points (Hub plugin enabled):
 
 ```text
 /connect kollabor.ai
 /connect https://kollabor.ai
 /connect https://kollabor.ai/.well-known/agent-keys.json
 ```
+
+Current unreleased source keeps public discovery on `/connect <domain>` and
+`/hub dns connect <domain>`. Bare `/connect` and `/connect enroll [domain]`
+open private code entry; `/connect offer [domain]` opens a private issuer view.
+Private enrollment discovery runs after code submission. The added enrollment
+commands are not included in PyPI 0.9.0; see the current source status and
+enrollment limits above.
 
 `/hub dns connect` uses this same resolver and admission boundary. Neither command inserts discovered publishers into the live agent registry.
 
@@ -157,7 +168,7 @@ Required rules:
 - `coordinator` retains its existing JSON name. For a public directory node its key is the persistent service signer, independent of transient workspace coordinator elections. Owner/group issuers are separate keys.
 - `schema`, all addresses, roles, versions, and timestamps are signed. To sign, remove only top-level `signature`, canonicalize the entire remaining object with RFC 8785 JCS, encode as UTF-8, and sign those bytes with Ed25519. Verify using the declared key plus the external trust checks below. Reject an invalid 32-byte key or 64-byte signature through a maintained cryptographic library. The `schema` separates this payload type from records and credentials; never verify it using the legacy attestation concatenation. [JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785.html)
 - Integers are nonnegative JSON integers no greater than `2^53-1`. `revision` increases for every content change, including renewal, within an authority/signer/schema tuple. Times are Unix seconds. Manifest validity is at most 300 seconds with at most 60 seconds of tolerated future clock skew; expiry is not extended for skew. Cache the highest verified revision; reject known rollback and quarantine equal-revision differing content.
-- `endpoints.registry` identifies this discovery document, not a roster API. Optional `endpoints.agent_card` must be exactly the same HTTPS origin plus `/.well-known/agent-card.json`; generic interfaces, capabilities and skills exist only in that standard Card. The receiver serves this locator only alongside an actual A2A service. `endpoints.control` remains an optional base for future generalized control operations. Absence of both optional fields means identity-only publication. A successful fetch never invents a connection route.
+- `endpoints.registry` identifies this discovery document, not a roster API. Optional `endpoints.agent_card` must be exactly the same HTTPS origin plus `/.well-known/agent-card.json`; generic interfaces, capabilities and skills exist only in that standard Card. The receiver serves this locator only alongside an actual A2A service. `endpoints.control` advertises the implemented same-origin relay base `/relay/v1` when the publisher health probe verifies readiness; the client derives its supported transport paths from that verified base. Absence of both optional fields means identity-only publication. A successful fetch never invents a connection route.
 - `bootstrap` has at most eight public HTTPS discovery URLs. Each referral starts a fresh verification under its own authority; the publisher does not transfer trust to it. Recursive expansion is bounded and must respect address policy.
 - Roles describe implemented services only. Advertising `relay` requires an actual forwarding implementation and negotiated transport support. `protocols` must reflect the wire protocol; never interpret the current raw TCP stream as WebSocket or an arbitrary HTTP endpoint as MCP.
 - Omit `socket`, local filesystem paths, process IDs, current tasks, private members, and secrets from public exports. Do not serialize `AgentRecord.to_dict()` directly to the public network.
@@ -193,11 +204,28 @@ The receiver rechecks membership/grant validity before local tool execution. Loc
 
 ## 6. Walkthrough: a new laptop finds my existing servers
 
-There are two distinct stages: public contact discovery and private device admission. The deployed `kollabor.ai` publisher currently provides only the first. It cannot infer your servers from your name or discover a private family directory on its own.
+The required onboarding UX uses `/connect` private code entry, trusted-agent
+approval, and device-encrypted configuration delivery. Current unreleased source
+implements private entry/offer and device-key proof, then waits for an explicit
+local `/connect accept` or `/connect reject`. Acceptance issues a narrow
+`conversation:send` membership credential and, when a supported active profile
+is available, sends its allowlisted preferences plus one displayed provider
+credential category in a device-sealed bundle. The new device installs it
+atomically and returns a signed receipt before the issuer approves the peer.
+Enrollment grants no workspace or tool permission; network revocation does not
+revoke copied provider credentials. The in-memory mailbox key and worker still
+cannot resume after process restart. A domain locates the service; it does not
+identify the human or confer private-network membership.
+See the current
+[product walkthrough](agent-network-walkthroughs.md#scenario-2-connect-a-new-computer-and-join-my-family-directory)
+and [enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
+These are partial unreleased enrollment behaviors, not completed product flow.
 
-### Available now: one explicitly configured destination
+There are two distinct stages: public contact discovery and private device admission. The deployed `kollabor.ai` publisher provides the first and advertises encrypted forwarding. Private admission remains an endpoint responsibility. It cannot infer your servers from your name or discover a private family directory on its own.
 
-1. **Find a contact.** `/connect kollabor.ai` follows its existing TXT URL, verifies the signed v2 identity and records a durable key pin. It reports no advertised Card. To reach an actual workspace receiver, use the operator's separately configured HTTPS origin whose locator advertises its Card.
+### Public discovery and relay bootstrap
+
+1. **Find a contact.** `/connect kollabor.ai` follows the signed discovery contract and records a durable key pin. When the descriptor advertises a compatible relay, it verifies the locator and attaches to the public relay; an identity-only descriptor does not imply a relay or A2A Card. Native relay conversations use separate invitation, peer approval and workspace conversation grants. Bare `/connect` opens private code entry instead. To use the A2A receiver, select the operator's HTTPS origin whose locator advertises its Card.
 2. **Create the laptop key.** The laptop runs the local `create-device-key` operator command. Keep the private seed on that laptop and send only the public key to the owner through a trusted channel. The [pairing walkthrough](agent-device-pairing.md) gives the exact artifact/CLI sequence.
 3. **Bind the invitation.** The owner creates a short-lived signed pairing challenge for that exact public key and workspace. Transfer the pinned owner public key independently. The receiver loads the signed challenge and may expose its bounded HTTP pairing inbox. An arbitrary device cannot replace the intended key by being first to respond.
 4. **Prove possession and approve locally.** The laptop signs the challenge. Submitting the proof yields pending status only. The owner reviews the fingerprint and explicitly approves it locally, producing a signed membership credential. Install that credential at the receiver and deliver it to the laptop. The owner signing seed stays on the owner's machine.
@@ -218,11 +246,11 @@ DNS tells the laptop where to start. Pairing binds its key to the owner. A scope
 ## 7. Implementation seams and remaining work
 
 1. **Resolver — implemented:** `dns/discovery.py` handles TXT, bounded HTTPS, signed locators and optional signed Cards. Durable pins are accepted before Card lookup. Discovered publishers never enter the messaging registry automatically.
-2. **Publisher — deployed:** `discovery_publish.py` runs independently of workspace startup. It advertises the canonical `.json` identity URL with no service roles. The deployed route patch serves both `.json` and the TXT-selected alias. DNS records remain unchanged.
+2. **Publisher — deployed:** `discovery_publish.py` runs independently of workspace startup. It advertises the canonical `.json` identity URL and the health-gated relay control endpoint with `rendezvous` and `relay` roles. The deployed route patch serves both `.json` and the TXT-selected alias. DNS records remain unchanged.
 3. **Signing and A2A — implemented:** `dns/a2a_signing.py` pins the Card signer to the locator. `a2a_adapter.py` binds one receiver to one workspace and uses the official SDK for Task/result exchange. Generic interfaces and skills belong only in the standard Card.
 4. **Admission — implemented:** `dns/private_directory.py` separates owner and device keys, pending proof, local approval, membership, conversation grants and revocation. Request proofs cover the exact body and configured target. Historical Hub approvals do not become these credentials.
-5. **Local roster — proposed:** a same-user metadata catalog above project-scoped Hub storage. Do not disable project scoping to obtain visibility; that would merge unrelated workspace state and message flows.
-6. **Replication and routing — deferred:** authenticated multi-server directory/revocation sync, receiver deployment, NAT traversal and application E2EE forwarding need concrete scenarios. The older direct TCP/TLS Hub transport retains its separate identity model; these changes do not upgrade it to A2A or apply private-directory grants to it.
+5. **Local roster — current source:** `local_directory.py` provides a bounded same-user metadata catalog above project-scoped Hub storage. Cross-workspace directed messaging and live installed acceptance remain required. Project scoping still separates state and message flows.
+6. **Replication and routing — required remaining work:** central E2EE forwarding is deployed, while authenticated distributed records/revocation, LAN discovery, alternate bootstrap and direct/multi-hop route selection remain acceptance requirements. The older direct TCP/TLS Hub transport retains its separate identity model; it still needs the same human communication boundary. See the full implementation ledger rather than treating this as deferred scope.
 
 ## 8. What changed on kollabor.ai
 
@@ -230,7 +258,7 @@ The independent identity publisher and HTTP routes were deployed on 2026-09-26. 
 
 The [portable publication guide](../operations/kollabor-ai-discovery-publication.md) gives the DNS, HTTPS route, publisher, relay and rollback contract without deployment-specific host paths or addresses. Public output omits local sockets and private records. The main website remained HTTP 200 and the ACME probe retained its baseline result.
 
-The deployed domain advertises no A2A Card, private directory or relay. Those roles must be added only alongside a real deployed service and its independent acceptance evidence. Preserve the persistent publisher key and revision state during future upgrades. An optional future TXT change to `.json` should retain the alias for cached records.
+The initial publication had no service advertisement. The subsequent deployed relay is advertised at `/relay/v1`; no A2A Card or private directory is publicly advertised. Any additional service must have its own deployment and acceptance evidence. Preserve the persistent publisher key and revision state during future upgrades. An optional future TXT change to `.json` should retain the alias for cached records.
 
 ## 9. Acceptance evidence required
 

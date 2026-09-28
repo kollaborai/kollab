@@ -91,7 +91,7 @@ Domain / known peer / same-user local roster
 
 Routing and end-to-end session protection support the permitted conversation. MCP remains useful for a destination agent's tool interfaces; exposing MCP tools is not required just to exchange A2A tasks.
 
-Do not build a second proprietary task/message schema alongside A2A. Keep the current identity-only descriptor isolated while choosing how it references or is replaced by signed Agent Cards. The group directory/enrollment boundary still needs an application profile; A2A's general authentication model is not a ready-made household enrollment protocol.
+Do not build a second proprietary task/message schema alongside A2A. Keep discovery and endpoint application protocols distinct. The deployed descriptor now advertises the native encrypted relay; its optional signed Agent Card still describes an actual A2A endpoint only when one is deployed. The group directory/enrollment boundary still needs an application profile; A2A's general authentication model is not a ready-made household enrollment protocol.
 
 ## New laptop walkthrough using these layers
 
@@ -103,7 +103,7 @@ Do not build a second proprietary task/message schema alongside A2A. Keep the cu
 6. Prefer direct connectivity. If forwarding is necessary, authenticate the intended destination and protect payloads end to end; a forwarder's availability does not confer authority.
 7. Submit an A2A task. The destination runs it through its existing workspace tools and permission path, then returns task state and artifacts through A2A.
 
-Domain discovery is deployed. Local device pairing, scoped private-directory access and a narrow A2A file-tool exchange are now implemented and exercised. This does not complete the multi-server roster, general coding-agent or forwarding portions of the walkthrough; see the implementation follow-through below.
+Domain discovery is deployed. Local device pairing, scoped private-directory access and a narrow A2A file-tool exchange are now implemented and exercised. The subsequent public relay supplies central encrypted forwarding. Neither that nor the local A2A proof completes general model/tool conversations, distributed discovery, or multi-hop routing; see the implementation follow-through below.
 
 ## Original ranked implementation sequence
 
@@ -119,3 +119,14 @@ The subsequent contract fixes the locator/Card link, owner/device credential for
 ## Implementation follow-through (2026-09-26)
 
 The ranked actions above are the original research recommendation. Subsequent implementation is recorded in the [evidence ledger](agent-network-implementation-status.md): the independent public discovery slice is deployed; thin locator/Card resolution and the explicit JWS profile are implemented; Python/Node and official Python SDK signature checks pass. The combined local validation covers device-bound pairing, private-directory access, receiver-side revocation/grants and a deterministic one-workspace A2A file-tool exchange. The Card defines generic interfaces/skills; Kollab credentials define admission and human-approved scope. This is local HTTP execution evidence, not a public A2A deployment or general LLM coding service. No full Buzz stack, paid Grok dependency or DHT was adopted.
+
+Historical relay follow-through observation (2026-09-27 06:07 UTC): signed
+discovery advertised `https://kollabor.ai/relay/v1`; public health reported two
+ready workers and both discovery aliases were identical at revision 256.
+A newer direct read at 09:44 UTC returned identical aliases at revision 472
+(SHA-256 `66dc9ebf58960cb8dd073f9c23f91b26697d091468c0f8e05e2f010a2e7ac920`)
+and health with two of two workers ready; see the [implementation ledger](agent-network-implementation-status.md)
+for DNS/HTTPS fields and limits. The ranked research actions above are historical
+recommendations, not permission to defer the accepted networking goal. The active
+Hub bridge and enrollment work remains unreleased, and full network acceptance
+scenarios remain required.

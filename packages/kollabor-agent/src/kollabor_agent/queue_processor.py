@@ -9,8 +9,9 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
+from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_ai.cost_calculator import calculate_cost
 from kollabor_ai.message_content import (
@@ -30,6 +31,8 @@ from .tool_output_budget import (
 )
 
 logger = logging.getLogger(__name__)
+
+CancellationOrigin = Literal["human", "remote_task", "external"]
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -237,7 +240,9 @@ class QueueProcessor:
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
-        self.cancel_processing = False
+        self._cancel_processing = False
+        self._cancel_generation = 0
+        self._cancel_origin: CancellationOrigin | None = None
         self.cancellation_message_shown = False
         # Last provider/turn error, for typed outcomes (goal spec 8.6):
         # the goal driver pauses on provider errors instead of burning
@@ -254,7 +259,6 @@ class QueueProcessor:
         self.processing_start_time: Optional[float] = None
         self.question_gate_active = False
         self._last_tool_error_sig: Optional[str] = None
-
         # Watchdog heartbeat: monotonic timestamp of the last real forward
         # progress (a turn executed, a message processed). The TurnWatchdog
         # compares now - last_progress_at against a stuck threshold to detect
@@ -262,6 +266,54 @@ class QueueProcessor:
         # Bumped by mark_progress(); starts "now" so a fresh processor is not
         # instantly flagged.
         self.last_progress_at = time.monotonic()
+
+    @property
+    def cancel_processing(self) -> bool:
+        """Whether the current queue drain has been cancelled."""
+        return self._cancel_processing
+
+    @cancel_processing.setter
+    def cancel_processing(self, value: bool) -> None:
+        # Direct legacy writes are treated as external cancellation requests.
+        # This still advances the generation, so they supersede a relay-owned
+        # token rather than being cleared by an older relay cancellation.
+        if value:
+            self.request_cancellation(origin="external")
+        else:
+            self._cancel_processing = False
+            self._cancel_origin = None
+
+    @property
+    def cancel_generation(self) -> int:
+        return self._cancel_generation
+
+    @property
+    def cancel_origin(self) -> CancellationOrigin | None:
+        return self._cancel_origin
+
+    def request_cancellation(self, *, origin: CancellationOrigin) -> int:
+        """Set the cancellation latch and return its supersession generation."""
+        if origin not in {"human", "remote_task", "external"}:
+            raise ValueError("invalid cancellation origin")
+        self._cancel_generation += 1
+        self._cancel_processing = True
+        self._cancel_origin = origin
+        return self._cancel_generation
+
+    def clear_remote_task_cancellation(self, generation: int) -> bool:
+        """Clear an idle relay cancellation only if no newer request replaced it."""
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or self.is_processing
+            or not self._cancel_processing
+            or self._cancel_origin != "remote_task"
+            or self._cancel_generation != generation
+        ):
+            return False
+        self._cancel_processing = False
+        self._cancel_origin = None
+        return True
 
     def mark_progress(self) -> None:
         """Record that forward progress just happened (watchdog heartbeat).
@@ -407,6 +459,19 @@ class QueueProcessor:
             self.dropped_messages += 1
 
     async def process_queue(
+        self,
+        task_manager,
+        process_message_batch_fn: Callable,
+        continue_conversation_fn: Callable,
+    ):
+        """Drain local input without inheriting a scheduling peer's authority."""
+        token = remote_task_id.set(None)
+        try:
+            return await self._drain_queue(task_manager, process_message_batch_fn, continue_conversation_fn)
+        finally:
+            remote_task_id.reset(token)
+
+    async def _drain_queue(
         self,
         task_manager,
         process_message_batch_fn: Callable,
@@ -703,7 +768,7 @@ class QueueProcessor:
         get_token_io_state().start_waiting()
 
         # Emit LLM_REQUEST_PRE directly (POST emitted separately after API call)
-        await self.event_bus.emit_with_hooks(
+        pre_request = await self.event_bus.emit_with_hooks(
             EventType.LLM_REQUEST_PRE,
             {
                 "model": getattr(self.api_service, "model", "unknown"),
@@ -712,6 +777,11 @@ class QueueProcessor:
             },
             "llm_service",
         )
+        if pre_request and pre_request.get("cancelled", False):
+            # Security hooks may revoke a queued remote conversation while it
+            # waits for the model. A cancelled pre-request must not reach the
+            # provider; tool guards alone are too late for this boundary.
+            raise asyncio.CancelledError("Model request denied by pre-request hook")
 
         response = None
         parent_uuid = current_parent_uuid

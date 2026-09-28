@@ -186,14 +186,71 @@ def test_owner_to_new_device_pairing_is_distinct_and_operator_approved(tmp_path)
     )
     assert credential.device_id == public_key_id(bytes(device_key.verify_key))
     assert len(owner_dir.members(now=NOW + 2)) == 1
-    with pytest.raises(AuthorizationError, match="consumed"):
+    repeated = owner_dir.approve_pairing(
+        challenge,
+        proof,
+        owner_key,
+        approved_by_human=True,
+        now=NOW + 3,
+    )
+    assert repeated.token == credential.token
+    assert repeated.credential_id == credential.credential_id
+    assert len(owner_dir.members(now=NOW + 3)) == 1
+
+    different_proof = prove_pairing(
+        challenge,
+        device_key,
+        owner_public_key=owner_public,
+        now=NOW + 3,
+    )
+    with pytest.raises(AuthorizationError, match="proof"):
         owner_dir.approve_pairing(
             challenge,
-            proof,
+            different_proof,
             owner_key,
             approved_by_human=True,
-            now=NOW + 3,
+            now=NOW + 4,
         )
+
+
+def test_revoke_issued_credential_rejects_device_and_owner_mismatch_without_mutation(
+    tmp_path,
+):
+    owner_key, owner_dir, _receiver, device_key, credential, _grant = _flow(tmp_path)
+    state_path = tmp_path / "owner" / "private.json"
+    original_state = state_path.read_bytes()
+    original_members = owner_dir.members(now=NOW + 4)
+
+    with pytest.raises(AuthorizationError, match="different device"):
+        owner_dir.revoke_issued_credential(
+            credential,
+            owner_key,
+            expected_device_public_key=bytes(new_device_signing_key().verify_key),
+            now=NOW + 4,
+        )
+    assert state_path.read_bytes() == original_state
+    assert owner_dir.members(now=NOW + 4) == original_members
+
+    with pytest.raises(AuthorizationError, match="pinned owner key"):
+        owner_dir.revoke_issued_credential(
+            credential,
+            SigningKey.generate(),
+            expected_device_public_key=bytes(device_key.verify_key),
+            now=NOW + 4,
+        )
+    assert state_path.read_bytes() == original_state
+    assert owner_dir.members(now=NOW + 4) == original_members
+
+    revocation = owner_dir.revoke_issued_credential(
+        credential,
+        owner_key,
+        expected_device_public_key=bytes(device_key.verify_key),
+        now=NOW + 5,
+    )
+    assert revocation is not None
+    assert revocation.target_type == "credential"
+    assert revocation.target_id == credential.credential_id
+    assert owner_dir.members(now=NOW + 5) == ()
 
 
 def test_pairing_proof_must_match_owner_challenge_and_device_signature(tmp_path):
@@ -233,9 +290,16 @@ def test_pairing_proof_must_match_owner_challenge_and_device_signature(tmp_path)
         bytes(intended_device_key.verify_key)
     )
 
+    # Change signature bytes while preserving canonical base64url. Replacing
+    # the final character can instead change only padding bits and randomly
+    # exercise the compact-JWS parser rather than signature verification.
+    header, body, signature = challenge.token.split(".")
+    changed = bytearray(base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4)))
+    changed[0] ^= 1
+    tampered = ".".join((header, body, base64.urlsafe_b64encode(changed).decode().rstrip("=")))
     with pytest.raises(CredentialError, match="signature"):
         verify_pairing_proof(
-            challenge.token[:-1] + ("A" if challenge.token[-1] != "A" else "B"),
+            tampered,
             "x.y.z",
             owner_public_key=bytes(owner_key.verify_key),
             now=NOW + 1,

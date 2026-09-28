@@ -627,6 +627,57 @@ class RelayRuntime:
             pid=worker.process.pid,
         )
 
+    async def _worker_owner_lease_expired(self, worker) -> bool:
+        """Allow a replacement only after Redis no longer fences the old owner."""
+        now = time.monotonic()
+        if not self.backend_ready or self.backend is None:
+            worker.retry_at = now + 3
+            return False
+
+        from .relay_backend import relay_owner_key
+
+        try:
+            ttl_ms = int(
+                await self.backend.pttl(
+                    relay_owner_key(self.config.node_id(worker.index))
+                )
+            )
+        except Exception as exc:
+            worker.retry_at = now + 3
+            self._log(
+                "worker_owner_lease_check_failed",
+                worker=f"{self.config.node_prefix}-{worker.index}",
+                error=type(exc).__name__,
+                retry_seconds=3,
+            )
+            return False
+
+        if ttl_ms == -2:
+            return True
+        if ttl_ms == -1:
+            delay = 30.0
+            event = "worker_owner_lease_persistent"
+        elif ttl_ms >= 0:
+            delay = max(0.1, (ttl_ms + 100) / 1000)
+            event = "worker_waiting_for_owner_lease"
+        else:
+            worker.retry_at = now + 3
+            self._log(
+                "worker_owner_lease_check_failed",
+                worker=f"{self.config.node_prefix}-{worker.index}",
+                error="InvalidPTTL",
+                retry_seconds=3,
+            )
+            return False
+
+        worker.retry_at = now + delay
+        self._log(
+            event,
+            worker=f"{self.config.node_prefix}-{worker.index}",
+            retry_seconds=round(delay, 3),
+        )
+        return False
+
     async def _stop_worker(self, worker):
         worker.ready = False
         worker.unhealthy = 0
@@ -712,8 +763,6 @@ class RelayRuntime:
                 await asyncio.gather(stopping, return_exceptions=True)
             if self.stop_event.is_set():
                 return
-            for worker in self.workers:
-                await self._spawn(worker)
             timeout = aiohttp.ClientTimeout(total=3)
             async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
                 first_ready_deadline = time.monotonic() + 45
@@ -731,8 +780,12 @@ class RelayRuntime:
                             worker.failures += 1
                             worker.retry_at = time.monotonic() + min(2 ** min(worker.failures, 5), 30)
                             self._log("worker_exited", worker=f"{self.config.node_prefix}-{worker.index}", code=code)
-                        if worker.process is None and time.monotonic() >= worker.retry_at:
-                            await self._spawn(worker)
+                        if (
+                            worker.process is None
+                            and time.monotonic() >= worker.retry_at
+                        ):
+                            if await self._worker_owner_lease_expired(worker):
+                                await self._spawn(worker)
                     await asyncio.gather(*(self._worker_health(session, worker) for worker in self.workers))
                     self._last_probe = time.monotonic()
                     self.checked_at = int(time.time())

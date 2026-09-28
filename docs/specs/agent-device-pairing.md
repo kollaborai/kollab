@@ -1,8 +1,180 @@
 # Private device pairing and conversation grants
 
-Status: implemented protocol primitives and local CLI; HTTP transport and automatic cross-device synchronization are adapter responsibilities.
+Status: unreleased source contains the private `/connect` code-entry view,
+`/connect offer`, K1 code/device-key proof handling, durable pending-request
+metadata, and an issuer API that requires a separate accept/reject after proof.
+Acceptance consumes the delegated device allowance and issues only a
+`conversation:send` credential plus a room invitation. When a supported active
+profile and credential are available, an accepted request also receives its
+allowlisted profile settings and one provider credential inside a device-sealed,
+workspace-scoped provisioning bundle. `/connect requests` shows the source and
+destination profile names, provider/model and exact credential category before
+the human accepts; the credential is read again only after acceptance. The
+destination installs the bundle atomically and sends a device-signed receipt;
+the issuer approves the peer only after verifying that receipt. Network
+revocation does not revoke a copied credential at its provider. Enrollment
+grants no workspace or tool access. The pending-request/decision API is not yet
+wired into a proactive trusted-agent notification, natural-language approval,
+or agent-side decision tool; the local human issuer uses explicit
+`/connect requests`, `/connect accept`, and `/connect reject` commands. A
+process restart cannot resume the in-memory mailbox worker or code-derived
+envelope key. If the owner has already accepted and the destination's
+owner-context-bound intent and device-signed install receipt were durably
+recorded, a later runtime can finish peer approval only when the owner key,
+issuer workspace, relay key, origin, and room still match and the delegation
+is not revoked. This recovery records the prior human decision; it cannot
+create one. The full contract below is not complete or released. See the
+[implementation ledger](agent-network-implementation-status.md).
 
 This contract provides one account-free path for an owner to enroll a new device, keep a private member roster, grant one device a narrow conversation permission, and revoke it later. Discovery only locates a peer. It does not enroll a key, authorize a message, or authorize tool execution.
+
+## Code enrollment and delegated approval
+
+The human experience must require no invitation-file transfer. The human tells
+an already trusted Kollab agent, for example: "I'm connecting two new servers to
+my family network. Give me the codes and accept those connections." The trusted
+agent can approve those enrollments under that instruction. It cannot grant
+itself standing authority to enroll arbitrary devices or export credentials.
+
+`kollabor.ai` is the default discovery domain, not the identity of the private
+network. A self-hosted domain uses the same flow. Each private network has its
+own opaque identity and issuer policy; "family" and device names are labels.
+If the human selects two networks, authorization names both network IDs and the
+per-network scopes. It never silently joins all networks of the trusted device.
+
+Required sequence:
+
+1. The local human input path records a durable enrollment delegation before a
+   model can use it: authorizing human action ID, authorized agent/session,
+   issuer, network IDs, allowed configuration profile and credential categories,
+   maximum new devices, expiration and revocation state. The example above
+   grants two admissions, with a ten-minute default window. Vague or ambiguous
+   requests require a concrete selection; model output is not authorization.
+2. Under that delegation, the agent requests one single-use code per device.
+   The runtime displays the codes through a private UI; model/tool history gets
+   a display receipt and non-secret enrollment IDs, never the actual codes.
+   One code may carry an explicitly authorized selection of networks for one
+   device. Two servers use two codes; sharing a reusable group password is not
+   this contract.
+3. On the new server the human runs `/connect`. A private input screen shows the
+   domain (default `kollabor.ai`) and asks for the code. It creates or reuses that
+   server's local device key and verifies signed discovery. Codes are not slash
+   command arguments, shell arguments, model input, command history, telemetry,
+   or logs. Attach mode forwards a typed local-only RPC to the existing daemon;
+   the viewer must not enroll a separate identity.
+4. The code establishes a bounded pending enrollment, not membership. The new
+   device proves possession of the code and its private key, binding both to the
+   exact enrollment ID, intended issuer, requested networks, nonce and expiry.
+   The issuer must authenticate through this pairing exchange; a directory or
+   relay-supplied public key alone cannot replace the trusted issuer.
+5. The relay delivers an encrypted enrollment notification to the trusted
+   installation. Only a verified request matching an active human delegation
+   may nudge its designated agent. Unknown visitors stay pending under the
+   separate visitor policy and cannot cause unrestricted model wakeups.
+6. The trusted agent sees bounded metadata: enrollment ID, device public-key
+   fingerprint, requested profile/networks, remaining allowance and a clearly
+   marked unverified device label. A message such as "this is David" is request
+   data, not proof of identity or an instruction to expand access.
+7. The agent proposes accept or reject through a narrow enrollment tool. The
+   runtime rechecks the durable delegation, agent identity, proof, expiry,
+   requested scope and revocation; atomically binds the code to the new key and
+   consumes the admission allowance. Concurrent workers cannot approve a third
+   device under a two-device grant. Models never receive the issuer private key.
+8. After acceptance the issuer signs a device-bound membership credential and
+   encrypts the authorized configuration bundle specifically for that device.
+   The device verifies issuer, recipient, network audience, configuration digest,
+   revision and expiry before installing it. While pending, the signed challenge
+   exposes only the destination profile label and authorized credential
+   category plus its bounded expiry; no room capability, private roster, provider
+   credential or profile settings are disclosed.
+9. The new agent reports joined/provisioned only after private storage succeeds
+   and the matching acknowledgment returns. Retry by the same device is
+   idempotent; a different key cannot reuse the code or retrieve the bundle.
+   The destination durably journals the stable round and exact request before
+   sending it, then records the exact signed decision and encrypted install ACK
+   before their side effects. After restart it revalidates the owner, relay,
+   origin, destination, workspace, scope and expiry. ACK replay reuses the exact
+   encrypted receipt while each outer HTTP request gets a fresh signature and
+   nonce. Credential import, invitation join and attachment finish idempotently;
+   a conflicting existing invitation fails closed, and a matching invitation
+   preserves other local approvals. Membership still does not grant permission
+   for unsolicited conversations or remote workspace tools.
+
+Code design must resist guessing and malicious bootstrap substitution. Use a
+high-entropy generated code (at least 100 random bits, presented in copyable
+groups), or a reviewed password-authenticated key exchange if short human PINs
+are selected. Hashing a six-digit PIN and using it directly as an encryption key
+is not acceptable. The service stores bounded, expiring encrypted enrollment
+records, with atomic redemption across workers/hosts, connection/source limits
+and admission quotas. Codes are never reusable membership credentials.
+
+### Provisioned configuration and tokens
+
+The bundle has an explicit, versioned allowlist: network identity and discovery
+settings, selected model/profile preferences, approved agent/skill configuration
+and the credentials authorized by the human's provisioning policy. Installing a
+profile is distinct from executing its hooks, shell commands or downloaded
+skills; enrollment must not run arbitrary configuration content.
+
+- Device identity seeds and owner signing keys stay on their original machines.
+- Prefer individually scoped, expiring and revocable device credentials. Neither
+  the LLM nor relay needs plaintext credentials; a local credential broker reads,
+  seals, imports and reports success without returning secret values to tools.
+- Provider credentials require an explicit policy for that provider/profile.
+  Network enrollment alone does not authorize copying an entire credential store,
+  `.env`, SSH keys, cloud keys or account login caches.
+- A provider's reusable API key or OAuth refresh token is not a new per-device
+  credential merely because it is encrypted. If explicitly shared, the receiving
+  machine obtains its actual provider privileges. Removing network membership
+  does not revoke a copied provider token; provider-side rotation/revocation is
+  required. Claim per-device revocation only when the provider or an authorized
+  credential service actually enforces it. Do not invent provider delegation.
+- Private storage is user-owned with restrictive permissions or supported secure
+  storage. Workspace configuration contains references, not plaintext secrets.
+  Imported credentials must not overwrite unrelated existing credentials.
+
+### Failure and acceptance requirements
+
+Retain the current network and local configuration when a code, discovery,
+approval or provisioning step fails. A pending proof request expires if the
+approving agent is unavailable; reconnect cannot create a human acceptance.
+After an explicit acceptance, a persisted matching signed installation receipt
+may finish the already-decided peer approval after restart. A wrong owner,
+workspace, relay, origin, room, or revoked delegation must fail closed.
+Expiry while a request is awaiting human acceptance or before a signed receipt
+is durably stored blocks new acceptance and delivery. A receipt stored within
+the active window can finish that prior decision after expiry; revocation still
+blocks reconciliation. Bound notification retries and suppress duplicate model
+turns. Keep a secret-free audit of the human action, decision, device key,
+granted scopes, bundle digest, installation acknowledgment and rejection reason.
+
+Issuer recovery cleanup is local state maintenance and does not authorize a new
+enrollment. It reads the exact durable request and delegation even when either
+is revoked or expired. A stale row with `peer_approved` recorded is removed
+without revoking its peer. If any installation receipt exists while
+`peer_approved` is still false, cleanup preserves the row and retries
+reconciliation; it does not revoke a credential the destination may already
+be using. For an incomplete revoked or expired request with no receipt, the
+issuer may revoke only the exact still-active credential whose owner-signed
+token is in the encrypted recovery row and whose owner, stored token and device
+key match the current private directory and durable request. Already expired
+or revoked credentials need no new permanent revocation. The recovery row is
+removed only after revocation succeeds or the directory confirms that the
+credential is already inactive. Missing credentials after durable approval,
+owner/scope mismatches, malformed state and receipt ambiguity retain the row
+with bounded retry and fixed error codes; `/connect status` shows aggregate
+counts and retry state without IDs or credential material. If durable approval
+never occurred and there is no delivery intent or issued credential, the row
+can be discarded because no credential was issued.
+
+Acceptance must cover the actual TUI and attach/daemon path, both network hosts,
+real trusted-agent notification and tool decision, atomic two-device allowance,
+wrong/reused/expired codes, code theft without destination-key possession after
+binding, malicious identity labels, relay key substitution, issuer offline/restart,
+concurrent approval/replay, revocation during provisioning, partial installation,
+and absence of codes/tokens from model requests, tool responses, histories, logs,
+events and shared project files. Provider access must be exercised before calling
+a provisioned profile usable. These are required gates, not completed checks.
 
 ## Keys and authority
 

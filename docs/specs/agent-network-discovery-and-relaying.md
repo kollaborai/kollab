@@ -1,10 +1,10 @@
 # Kollab Agent Network: Discovery, Identity, and Relaying
 
-Status: working design draft reconstructed from Marco's conversations.
+Status: full implementation acceptance contract reconstructed from Marco's conversations; work in progress.
 Created: 2026-09-26.
-Implementation status: signed discovery and the public encrypted-presence relay are deployed on kollabor.ai. The same Kollab app runs managed workers with shared Valkey presence/routing; actual two-server communication and worker/backend recovery passed. Capacity measurements are recorded, including the high-rate client-error boundary; million-connection capacity is unproven. See the [current beacon contract](agent-public-beacon.md), [deployment record](../operations/relay-deployment-2026-09-27.md) and [evidence ledger](agent-network-implementation-status.md). Owner/device pairing, private-directory and A2A workspace adapters are included in Kollab 0.9.0 with local evidence. The machine-wide cross-workspace catalog and DHT remain proposed.
+Implementation status: signed discovery and encrypted-presence forwarding have dated deployment evidence on kollabor.ai. The same Kollab app runs managed workers with shared Valkey state. The two-host result was ping/pong, not a model/tool conversation. Current source adds the machine-wide catalog and the normal Hub conversation bridge; live model execution, complete human grant enforcement and broader peer discovery/routing remain required. Capacity measurements include a high-rate error boundary; million-connection capacity is unproven. See the [beacon contract](agent-public-beacon.md), [deployment record](../operations/relay-deployment-2026-09-27.md) and [implementation ledger](agent-network-implementation-status.md).
 
-Scenario guide: [setup, encryption, admission, and local-agent walkthroughs](agent-network-walkthroughs.md). Except for `/connect` and `/hub dns connect`, its network commands are proposed UX. This design describes Kollab 0.9.0 and proposed follow-on work. The publication runbook records the deployed discovery slice and its rollback paths.
+Scenario guide: [setup, encryption, admission, and local-agent walkthroughs](agent-network-walkthroughs.md). The beacon contract names commands implemented in current source; other scenario commands remain proposed spellings for required behavior. This design remains the full completion contract. The publication runbook records the deployed discovery slice and its rollback paths.
 
 Detailed contract: [domain-to-agent discovery and new-laptop enrollment](agent-domain-discovery-contract.md). It records the current source, live public DNS/HTTPS observations, and required publication alignment. The canonical URL is `/.well-known/agent-keys.json`, matching the current client; the extensionless path remains a compatibility alias.
 
@@ -60,6 +60,8 @@ No saved specification matching the full, revised network idea was found in the 
 - The feature is open source and self-hostable, with no required paid API, proprietary service, central account, or dependency on the availability of `kollabor.ai`. Reuse the current Hub and small, license-compatible dependencies; protocol traffic consumes no model turns.
 
 “Every instance can relay” establishes a capability. Whether forwarding is enabled by default, and for which peers, remains a policy decision.
+
+Current forwarding consent rule (`peer_router.py`, `peer_transport.py`): a peer link allows forwarding only when both endpoints hold the `forwarder` role, and every edge of a relayed route needs that consent, including the edge into the destination. Only a direct origin-to-destination link needs none. An agent that does not opt into forwarding is therefore reached directly or through the relay beacon, not through multi-hop peer routes.
 
 ## User stories
 
@@ -129,7 +131,25 @@ The walkthrough proposal uses locally generated keys for account-free participat
 
 The retailer example exposed a necessary distinction: receiving a connection through a recognized peer does not prove the customer's identity or spending authority. An agent signature can establish control of a key; the service must bind that identity to its customer relationship and permissions. Routing access, directory visibility, recipient acceptance, and local tool authority need separate rules.
 
-Origin identity must survive forwarding, so a recipient can distinguish the requesting agent from an intermediary. End-to-end encryption of agent payloads is a requirement. TLS to a rendezvous/relay service protects that connection; a separately authenticated secure session between agent endpoints protects their payloads from forwarding operators. The handshake must bind the session to independently verified peer identities. The exact protocol/library, credential format, and replay protection remain implementation decisions; no custom cryptographic protocol is specified here. See the walkthrough's security contract and primary references.
+Origin identity must survive forwarding, so a recipient can distinguish the requesting agent from an intermediary. End-to-end encryption of agent payloads is a requirement. TLS to a rendezvous/relay service protects that connection; a separately authenticated secure session between agent endpoints protects their payloads from forwarding operators. The handshake must bind the session to independently verified peer identities. This architecture does not prescribe one protocol for every route; the current direct-peer implementation is described below. See the walkthrough's security contract and primary references.
+
+Current unreleased source establishes an end-to-end peer TLS session for
+conversation traffic, but the RelayAgent bridge carries its TLS records inside
+the existing RelayClient encrypted application channel. It is not a direct
+socket route. `plugins/hub/secure_conversation.py` fetches the peer's public
+identity certificate over that channel, verifies the certificate key against
+the locally approved Ed25519 key, and presents the local certificate on the
+first handshake packet. After the handshake, message, status and cancellation
+payloads use TLS records in 8 KiB chunks. RelayClient registration and approval
+changes discard the session. The SHA-256 PeerLink session binding includes the
+TLS transcript, both device keys, current local and peer relay sessions, and
+the shared room. Live two-host, published-package, forwarding-router, and
+multi-hop acceptance remain open.
+Once TLS is established, receiver denials use a fixed application receipt
+`{id, state: "rejected", duplicate: false, reason}` with a bounded reason
+enum. The sender checks the receipt shape before marking delivery failed;
+pre-session, revocation and network failures remain transport failures. An
+incomplete inbound TLS handshake has a 30-second absolute lifetime.
 
 ## Discovery and presence
 
@@ -148,20 +168,32 @@ Nodes keep bounded contact sets and permitted records rather than copying a glob
 
 Recipient lookup should support a stable identity and, where permitted, discovery by owner/group or capability. Human-readable names can help users choose a recipient but cannot be the sole routing key.
 
-On the same host, the proposed user service keeps a machine roster with workspace identity, display label, coordinator role, and current presence. Local workspace paths are visible only within the permitted local scope by default; remote records use opaque workspace IDs and approved labels. Registering a workspace for this local roster does not publish it on the internet. Cross-workspace messages and feed subscriptions remain separately authorized.
+Current source implements a bounded same-user, same-host roster through
+`/connect agents local`. It reports stable machine/workspace/agent IDs, display
+name, coordinator role, state, and online presence without publishing local
+paths or waking a model. Remote-safe roster export requires an active relay
+workspace ID and remains scoped to approved room peers. Cross-workspace
+messages, contact authorization, and feed subscriptions remain separate; the
+unintegrated peer-record/router modules do not yet replicate this roster across
+the wider network.
 
 ## Connection UX and configuration
 
-The scenario guide proposes the following command families for review:
+Current unreleased source uses `/connect <domain>` for signed public discovery
+and attaches to a compatible advertised relay. Bare `/connect` and
+`/connect enroll [domain]` open private device-code entry; `/connect offer
+[domain]` creates a private offer, and `/connect requests`, `accept`, and
+`reject` support explicit local review. Device enrollment and provisioning
+remain partial and unreleased. The generic direct-address flow and broader
+`network`/`relay` command families below remain proposals:
 
-- `/connect`: contact a configured starting peer or discover a local one.
-- `/connect <address>`: use a supplied starting address.
+- Generic `/connect <address>`: contact a supplied starting peer or discover a local one.
 - Earlier `/relay <address>`: possible alias; no alias decision was made.
 - `/relay setup`: an interactive wrapper for proposed shell command `kollab relay setup`; configures a reachable directory/rendezvous node with optional forwarding.
 - `kollab relay start|status|stop`: manage that background service independently of a chat or coordinator process.
 - `/network ...`: identity, roster, group enrollment, contact requests, and communication grants; examples appear in the scenario guide.
 
-These are proposed command contracts, not commands added by this document. The scenario guide uses the corrected domain `kollabor.ai`. Its existing public discovery publication is distinct from the proposed running network service. Any operator can use their own domain or peer contacts.
+These broader command contracts are proposals, not commands added by this document. The scenario guide uses the corrected domain `kollabor.ai`. Its existing public discovery publication is distinct from the proposed running network service. Any operator can use their own domain or peer contacts.
 
 Proposed configuration placement: save network/peer selection and sharing scope in workspace configuration; keep credentials and private keys in user-level credential storage. Changing a project config file must not silently enroll that project into an owner's private network. Show the connected network, relevant peers, and whether a route actually reaches the intended agent.
 
@@ -204,17 +236,35 @@ Source inspection on 2026-09-26 confirms these useful starting points:
 - `plugins/hub/dns/registry.py` — `AgentRegistry` loads persistent records and provides resolution, capability queries, trust/approval state, and liveness handling. Registration and lookup use `designation` as the dictionary key.
 - `plugins/hub/dns/models.py` — `AgentRecord.aid` formats `agent:<designation>@<authority>`, but this scoped identifier is not the registry's lookup key. Two remote agents with the same designation require an identity/indexing change.
 - `plugins/hub/dns/discovery.py` and `discovery_store.py` — verified origin/key descriptors are cached independently from the messaging registry. `endpoint.register_well_known` now rejects the former automatic import/approval operation.
-- `plugins/hub/plugin.py` — `_resolve_dial_target` selects a local Unix socket or a directly dialed remote endpoint from a registry record.
+- `plugins/hub/plugin.py` — `_resolve_dial_target` selects a local Unix socket or a directly dialed remote endpoint from an approved registry record.
 - `plugins/hub/messenger.py` — `AgentMessenger._open` opens a Unix connection or a TCP/TLS stream and applies the client authentication handshake where configured. Although remote URI examples use `ws`/`wss`, this function calls `asyncio.open_connection`; these scheme names alone are not evidence of a WebSocket wire protocol.
 
-The original inspected direct-endpoint path provides direct remote connectivity. The later public relay adds shared encrypted-presence forwarding, with a separate current contract and deployment record linked above. Multi-hop decentralized discovery and the wider owner-enrollment scenarios remain separate from that deployed relay.
+The pre-existing direct endpoint path can carry ordinary Hub messages to a
+manually configured, approved remote endpoint. It is separate from the new
+RelayAgent conversation bridge and is not populated by public network
+discovery. The bridge's peer TLS session currently travels through the shared
+RelayClient relay. The signed peer router has no Hub call site, so forwarding,
+multi-hop route selection, and alternate-route recovery remain unimplemented.
+The relay's deployment contract and measured limits are documented separately.
 
-The later [domain-contract inspection](agent-domain-discovery-contract.md#1-what-already-exists) confirmed the public `_agent.kollabor.ai` TXT and extensionless HTTPS identity document. The current client's `.json` URL returned 404, so publication must be aligned with source. No private enrollment, remote handshake, multi-machine connectivity, forwarding, or external service integration was exercised.
+The earlier [domain-contract inspection](agent-domain-discovery-contract.md) recorded a point-in-time 404 from the `.json` URL; preserve it as historical evidence. A direct check on 2026-09-27 09:44 UTC now found both the TXT-selected extensionless URL and canonical `.json` URL at HTTP 200 with identical bytes (revision 472, SHA-256 `66dc9ebf58960cb8dd073f9c23f91b26697d091468c0f8e05e2f010a2e7ac920`). Relay health returned `ok`, two of two workers ready. This did not validate the signature, enrollment POST routes, private admission, a model/tool exchange, or external multi-machine service integration.
 
-## Proposed acceptance scenarios
+## Required acceptance scenarios
 
 1. **Household discovery:** two independently installed instances on one LAN discover each other without a separately installed central service. Discovery alone does not grant private-group membership.
-2. **New device enrollment:** a new computer joins through any supported starting peer; after the selected ownership/pairing flow, it can find the user's existing agents. An unrelated anonymous participant cannot obtain the same private roster.
+2. **New device enrollment:** a new computer uses `/connect` private code entry through any supported starting peer. The code creates a pending enrollment request. A trusted agent may approve it only under a prior runtime-enforced human delegation, bounded by network/profile, device allowance and expiry. Successful approval delivers device-encrypted configuration and explicitly authorized credentials; then it can find the user's existing agents. An unrelated anonymous participant cannot obtain the same private roster. Codes and secrets never enter model/chat history. See the [enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
+
+   Current unreleased source is partial against scenario 2: private code entry,
+   `/connect offer`, redacted `/connect requests`, and explicit local
+   `/connect accept` and `/connect reject` commands exist. Offers authorize one
+   device for five minutes, and the durable delegation is limited to
+   `conversation:send`. Code and destination-key proof create a pending request;
+   they do not approve it. Acceptance issues only the narrow conversation
+   credential and room invitation. No encrypted configuration bundle,
+   provider credential, private roster, workspace grant, or tool permission is
+   provisioned. The pending mailbox key and worker remain process-local, so a
+   restart fails closed for an in-flight exchange. These requirements remain
+   acceptance gates.
 3. **Remote workspace execution:** an agent on computer A requests an authorized change from an agent on server B. B performs the work through its normal tools in B's workspace, and A receives a correlated result.
 4. **Peer forwarding:** A reaches B through peer C when A cannot dial B directly. C does not become the apparent author of A's request.
 5. **Peer loss:** an interrupted route recovers through an already available alternate path, or reports no route. A new participant can use an alternate bootstrap peer. The test must not assume an alternate path always exists.
@@ -232,7 +282,7 @@ The later [domain-contract inspection](agent-domain-discovery-contract.md#1-what
 17. **Bootstrap independence:** peers continue discovering through remaining known contacts when one bootstrap disappears. A fresh installation without any reachable contact reports bootstrap failure. The implementation does not assume a complete global roster or instantaneous convergence.
 18. **Open-source independence:** the same functionality operates with an operator's own domain and free/open-source dependencies, without a Kollabor account, paid service, proprietary SDK, or automatic publication to `kollabor.ai`.
 
-These are proposed checks for a future implementation, not reported test results. A single central-relay demonstration would prove only part of the desired design.
+These are required checks, not reported test results. The [implementation ledger](agent-network-implementation-status.md) records current evidence and missing work. A single central-relay demonstration proves only part of this design; discovery or ping/pong alone never completes the requested workflow.
 
 ## Decisions needed to make this implementation-ready
 
@@ -245,7 +295,11 @@ These are proposed checks for a future implementation, not reported test results
 7. Set the connection/hosting command names, config ownership, and background process lifecycle.
 8. Decide whether conversation feeds and non-Kollab runtime adapters belong in the first delivery or a subsequent one.
 
-Suggested next design step: settle the identity and secure-session protocol against the walkthroughs, then implement the quiet machine roster and communication-grant boundary before internet enrollment and a three-node discovery/forwarding demonstration.
+Suggested next design step: connect signed peer records and pair-signed links
+to the live Hub transport, then prove the same end-to-end session and grant
+checks through a real forwarded route. Preserve the implemented quiet machine
+roster and verify that visibility still does not grant conversation or tool
+permission.
 
 ## Conversation provenance
 

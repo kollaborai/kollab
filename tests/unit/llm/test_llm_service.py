@@ -229,6 +229,115 @@ class TestLLMServiceIntegration(unittest.TestCase):
 
         self.assertTrue(self.service.cancel_processing)
 
+    def test_idle_human_cancel_supersedes_remote_cancellation_generation(self):
+        async def scenario():
+            self.service.is_processing = True
+            remote_generation = self.service.cancel_current_request(
+                origin="remote_task"
+            )
+            self.assertIsInstance(remote_generation, int)
+            self.service.is_processing = False
+
+            human_generation = self.service.cancel_current_request()
+
+            self.assertGreater(human_generation, remote_generation)
+            self.assertEqual(self.service._queue_processor.cancel_origin, "human")
+            self.assertTrue(self.service.cancel_processing)
+            self.assertFalse(
+                self.service.clear_remote_task_cancellation(remote_generation)
+            )
+            await self.service.wait_for_tasks()
+
+        asyncio.run(scenario())
+
+    def test_remote_cancellation_waits_for_tool_cleanup_before_release(self):
+        async def scenario():
+            cleanup_started = asyncio.Event()
+            finish_cleanup = asyncio.Event()
+
+            async def delayed_cleanup():
+                cleanup_started.set()
+                await finish_cleanup.wait()
+
+            self.service.tool_executor.cancel_running_tool = delayed_cleanup
+            self.service.is_processing = True
+            generation = self.service.cancel_current_request(origin="remote_task")
+
+            try:
+                await cleanup_started.wait()
+                self.service.is_processing = False
+                self.assertFalse(
+                    self.service.remote_task_cancellation_ready(generation)
+                )
+                self.assertFalse(
+                    self.service.clear_remote_task_cancellation(generation)
+                )
+                self.assertTrue(self.service.cancel_processing)
+
+                finish_cleanup.set()
+                await self.service.wait_for_tasks()
+                self.assertTrue(
+                    self.service.remote_task_cancellation_ready(generation)
+                )
+                self.assertTrue(
+                    self.service.clear_remote_task_cancellation(generation)
+                )
+                self.assertFalse(self.service.cancel_processing)
+            finally:
+                finish_cleanup.set()
+                await self.service.wait_for_tasks()
+
+        asyncio.run(scenario())
+
+    def test_superseded_remote_cleanup_failures_are_pruned_but_current_fails_closed(
+        self,
+    ):
+        async def scenario():
+            async def failed_cleanup():
+                raise RuntimeError("synthetic cancellation cleanup failure")
+
+            self.service.tool_executor.cancel_running_tool = failed_cleanup
+
+            async def fail_remote_cancellation():
+                self.service.is_processing = True
+                generation = self.service.cancel_current_request(origin="remote_task")
+                task = self.service._cancellation_cleanup_tasks[generation]
+                with self.assertRaisesRegex(
+                    RuntimeError, "synthetic cancellation cleanup failure"
+                ):
+                    await task
+                self.service.is_processing = False
+                return generation
+
+            for _ in range(3):
+                generation = await fail_remote_cancellation()
+                self.assertFalse(
+                    self.service.remote_task_cancellation_ready(generation)
+                )
+                self.assertEqual(len(self.service._cancellation_cleanup_tasks), 1)
+                self.assertTrue(self.service.cancel_processing)
+
+                self.service.cancel_current_request()  # idle human ESC supersedes
+                self.assertEqual(self.service._queue_processor.cancel_origin, "human")
+                self.assertTrue(self.service.remote_task_cancellation_ready(generation))
+                self.assertFalse(
+                    self.service.clear_remote_task_cancellation(generation)
+                )
+                self.assertEqual(self.service._cancellation_cleanup_tasks, {})
+                self.service.cancel_processing = False  # next human turn starts
+
+            current_generation = await fail_remote_cancellation()
+            self.assertFalse(
+                self.service.remote_task_cancellation_ready(current_generation)
+            )
+            self.assertFalse(
+                self.service.clear_remote_task_cancellation(current_generation)
+            )
+            self.assertEqual(len(self.service._cancellation_cleanup_tasks), 1)
+            self.assertTrue(self.service.cancel_processing)
+
+        asyncio.run(scenario())
+
     def test_status_line_generation(self):
         """Test status line information generation."""
         # Set some test state

@@ -15,6 +15,7 @@ holding.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .context import ContextListSnapshot, ConversationContext
@@ -767,6 +768,58 @@ class RemoteStateService(StateService):
         return str(result.get("text", ""))
 
     # === Hub writes (phase 4.6 — attach mode msg/broadcast) ===
+
+    async def hub_enroll(self, domain: str, code: str) -> dict[str, str]:
+        """Submit enrollment through the daemon without a slash-command string."""
+        result = await self._rpc.call(
+            "state.hub_enroll",
+            {"domain": domain, "code": code},
+            timeout=max(self._timeout, 90.0),
+        )
+        if not isinstance(result, dict):
+            raise ValueError("daemon connect enrollment failed")
+        if result.get("error"):
+            raise ValueError("daemon connect enrollment failed")
+        status = result.get("status")
+        receipt_id = result.get("receipt_id")
+        if status == "pending" and isinstance(receipt_id, str):
+            return {"status": "pending", "receipt_id": receipt_id}
+        if isinstance(status, str) and status in {"approved", "rejected"}:
+            return {"status": status}
+        raise ValueError("daemon connect enrollment failed")
+
+    async def hub_enrollment_offer(self, domain: str) -> dict[str, str]:
+        """Create an offer through the daemon for the private connect view."""
+        result = await self._rpc.call(
+            "state.hub_enrollment_offer",
+            {"domain": domain},
+            timeout=max(self._timeout, 90.0),
+        )
+        if not isinstance(result, dict) or result.get("error"):
+            raise ValueError("daemon connect offer failed")
+        offer_id = result.get("offer_id")
+        expires_at = result.get("expires_at")
+        code = result.get("code")
+        if (
+            set(result) == {"status", "offer_id", "expires_at", "code"}
+            and result.get("status") == "offered"
+            and isinstance(offer_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", offer_id)
+            and isinstance(expires_at, str)
+            and expires_at.isdigit()
+            and isinstance(code, str)
+            and re.fullmatch(
+                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
+                code,
+            )
+        ):
+            return {
+                "status": "offered",
+                "offer_id": offer_id,
+                "expires_at": expires_at,
+                "code": code,
+            }
+        raise ValueError("daemon connect offer failed")
 
     async def hub_connect(self, command: str) -> str:
         result = await self._rpc.call(

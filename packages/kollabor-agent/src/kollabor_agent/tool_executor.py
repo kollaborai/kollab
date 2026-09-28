@@ -6,7 +6,9 @@ file operations with proper error handling, logging, and result processing.
 
 import asyncio
 import logging
+import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -164,6 +166,7 @@ class ToolExecutor:
 
         # Cancellation callback - checked between tool executions
         self._cancel_callback = None
+        self._operation_observer = None
 
         # Track active shell executor so ESC can cancel running subprocesses
         self._active_shell_executor: Optional[ShellExecutor] = None
@@ -179,6 +182,38 @@ class ToolExecutor:
             callback: Callable that returns True if cancellation is requested
         """
         self._cancel_callback = callback
+
+    def set_operation_observer(self, observer):
+        """Attach a best-effort observer for shared tool execution phases."""
+        self._operation_observer = observer
+
+    def _notify_operation_observer(
+        self,
+        phase: str,
+        *,
+        tool_data: Dict[str, Any],
+        tool_call_id: str,
+        tool_call_id_generated: bool,
+        operation_generation: int | None = None,
+        begin: bool = False,
+    ) -> int | None:
+        observer = self._operation_observer
+        if not callable(observer):
+            return None
+        try:
+            generation = observer(
+                phase=phase,
+                tool_data=tool_data,
+                tool_call_id=tool_call_id,
+                tool_call_id_generated=tool_call_id_generated,
+                operation_generation=operation_generation,
+                begin=begin,
+            )
+            return generation if isinstance(generation, int) else None
+        except Exception:
+            # Diagnostics must never alter permission decisions or tool results.
+            logger.debug("Tool operation observer failed")
+            return None
 
     def configure_tool_output_store(
         self,
@@ -389,6 +424,26 @@ class ToolExecutor:
 
         tool_id = tool_data.get("id", "unknown")
         tool_name = self._get_display_name(tool_data)
+        raw_operation_id = tool_data.get("id")
+        if (
+            isinstance(raw_operation_id, str)
+            and len(raw_operation_id) <= 128
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", raw_operation_id)
+            and raw_operation_id != "unknown"
+        ):
+            operation_call_id = raw_operation_id
+            operation_call_id_generated = False
+        else:
+            operation_call_id = uuid.uuid4().hex
+            operation_call_id_generated = True
+
+        operation_generation = self._notify_operation_observer(
+            "tool_permission",
+            tool_data=tool_data,
+            tool_call_id=operation_call_id,
+            tool_call_id_generated=operation_call_id_generated,
+            begin=True,
+        )
 
         publish_semantic(
             self.event_bus,
@@ -399,31 +454,50 @@ class ToolExecutor:
             input=tool_data.get("input", tool_data.get("params", {})),
         )
 
-        result = await self._execute_tool_inner(tool_data)
-        self._executed_count += 1
+        try:
+            result = await self._execute_tool_inner(
+                tool_data,
+                operation_generation=operation_generation,
+                operation_call_id=operation_call_id,
+                operation_call_id_generated=operation_call_id_generated,
+            )
+            self._executed_count += 1
 
-        if self._tool_output_store is not None:
-            self._tool_output_store.prepare_result(
-                result,
-                max_chars=self._tool_output_max_chars,
-                preview_chars=self._tool_output_preview_chars,
+            if self._tool_output_store is not None:
+                self._tool_output_store.prepare_result(
+                    result,
+                    max_chars=self._tool_output_max_chars,
+                    preview_chars=self._tool_output_preview_chars,
+                )
+
+            publish_semantic(
+                self.event_bus,
+                "tool_result",
+                tool_id=result.tool_id,
+                tool_name=tool_name,
+                success=result.success,
+                output=result.output,
+                error=result.error,
+                execution_time=result.execution_time,
+                metadata=result.metadata or {},
+            )
+            return result
+        finally:
+            self._notify_operation_observer(
+                "tool_complete",
+                tool_data=tool_data,
+                tool_call_id=operation_call_id,
+                tool_call_id_generated=operation_call_id_generated,
+                operation_generation=operation_generation,
             )
 
-        publish_semantic(
-            self.event_bus,
-            "tool_result",
-            tool_id=result.tool_id,
-            tool_name=tool_name,
-            success=result.success,
-            output=result.output,
-            error=result.error,
-            execution_time=result.execution_time,
-            metadata=result.metadata or {},
-        )
-        return result
-
     async def _execute_tool_inner(
-        self, tool_data: Dict[str, Any]
+        self,
+        tool_data: Dict[str, Any],
+        *,
+        operation_generation: int | None = None,
+        operation_call_id: str | None = None,
+        operation_call_id_generated: bool = False,
     ) -> ToolExecutionResult:
         """Execute a single tool (terminal, MCP, or file operation).
 
@@ -501,6 +575,21 @@ class ToolExecutor:
                 )
 
             # Execute based on tool type
+            execution_phase_started = False
+
+            def mark_tool_execution() -> None:
+                nonlocal execution_phase_started
+                if execution_phase_started:
+                    return
+                execution_phase_started = True
+                self._notify_operation_observer(
+                    "tool_execution",
+                    tool_data=tool_data,
+                    tool_call_id=operation_call_id or uuid.uuid4().hex,
+                    tool_call_id_generated=operation_call_id_generated,
+                    operation_generation=operation_generation,
+                )
+
             try:
                 logger.debug(f"Executing tool {tool_id} of type {tool_type}")
                 try:
@@ -514,6 +603,7 @@ class ToolExecutor:
                         logger.debug(
                             f"Routing to plugin handler for {_plugin_key}"
                         )
+                        mark_tool_execution()
                         result = await self._plugin_handlers[_plugin_key](tool_data)
                     elif tool_type in (
                         "terminal",
@@ -524,20 +614,24 @@ class ToolExecutor:
                         logger.debug(
                             f"About to call _execute_terminal_command for {tool_id}"
                         )
+                        mark_tool_execution()
                         result = await self._execute_terminal_command(tool_data)
                         logger.debug(
                             f"_execute_terminal_command completed for {tool_id}"
                         )
                     elif tool_type == "mcp_tool":
                         logger.debug(f"About to call _execute_mcp_tool for {tool_id}")
+                        mark_tool_execution()
                         result = await self._execute_mcp_tool(tool_data)
                         logger.debug(f"_execute_mcp_tool completed for {tool_id}")
                     elif tool_type in ("web_fetch", "web-fetch"):
                         logger.debug(f"About to call _execute_web_fetch for {tool_id}")
+                        mark_tool_execution()
                         result = await self._execute_web_fetch(tool_data)
                         logger.debug(f"_execute_web_fetch completed for {tool_id}")
                     elif tool_type in ("web_search", "web-search"):
                         logger.debug(f"About to call _execute_web_search for {tool_id}")
+                        mark_tool_execution()
                         result = await self._execute_web_search(tool_data)
                         logger.debug(f"_execute_web_search completed for {tool_id}")
                     elif (
@@ -548,12 +642,14 @@ class ToolExecutor:
                         logger.debug(
                             f"About to call _execute_file_operation for {tool_id}"
                         )
+                        mark_tool_execution()
                         result = await self._execute_file_operation(tool_data)
                         logger.debug(f"_execute_file_operation completed for {tool_id}")
                     elif tool_type in ("workspace_set", "workspace-set"):
                         logger.debug(
                             f"About to call _execute_workspace_set for {tool_id}"
                         )
+                        mark_tool_execution()
                         result = await self._execute_workspace_set(tool_data)
                         logger.debug(
                             f"_execute_workspace_set completed for {tool_id}"
@@ -562,6 +658,7 @@ class ToolExecutor:
                         logger.debug(
                             f"About to call _execute_mcp_reload for {tool_id}"
                         )
+                        mark_tool_execution()
                         result = await self._execute_mcp_reload(tool_data)
                         logger.debug(
                             f"_execute_mcp_reload completed for {tool_id}"
@@ -570,6 +667,7 @@ class ToolExecutor:
                         logger.debug(
                             f"About to call _execute_tool_search for {tool_id}"
                         )
+                        mark_tool_execution()
                         result = await self._execute_tool_search(tool_data)
                         logger.debug(
                             f"_execute_tool_search completed for {tool_id}"
@@ -578,6 +676,7 @@ class ToolExecutor:
                         logger.debug(
                             f"About to call _execute_tool_load for {tool_id}"
                         )
+                        mark_tool_execution()
                         result = await self._execute_tool_load(tool_data)
                         logger.debug(
                             f"_execute_tool_load completed for {tool_id}"

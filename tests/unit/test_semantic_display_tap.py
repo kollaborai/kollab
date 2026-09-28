@@ -378,6 +378,13 @@ class TestSendMessage:
         class SlowLLM:
             is_processing = False
 
+            def __init__(self):
+                self.turn_task = None
+
+            async def submit_human_input(self, message, *, source):
+                self.turn_task = asyncio.create_task(self.process_user_input(message))
+                return {"status": "queued"}
+
             async def process_user_input(self, message, pre_displayed=False):
                 turn_started.set()
                 await turn_may_finish.wait()
@@ -391,7 +398,7 @@ class TestSendMessage:
 
         await asyncio.wait_for(turn_started.wait(), timeout=2)
         turn_may_finish.set()
-        await asyncio.sleep(0)
+        await svc._llm_service.turn_task
 
     @pytest.mark.asyncio
     async def test_rejects_empty_and_busy(self):

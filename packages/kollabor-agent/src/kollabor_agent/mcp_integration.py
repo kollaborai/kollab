@@ -1506,7 +1506,7 @@ class MCPIntegration:
         return tools
 
     def get_tool_definitions_for_api(self) -> List[Dict[str, Any]]:
-        """Convert registered MCP tools to API tool schema format.
+        """Convert MCP and built-in tools to API tool schema format.
 
         Returns generic format that adapters (OpenAI/Anthropic) auto-convert:
         - OpenAI wraps in: {type: "function", function: {...}}
@@ -1515,14 +1515,13 @@ class MCPIntegration:
         Returns:
             List of tool definitions in generic API format
         """
-        if not self._mcp_enabled():
-            return []
-
         tools = []
-        allowed_mcp_tools = self._get_bundle_tool_list()
+        mcp_enabled = self._mcp_enabled()
+        allowed_mcp_tools = self._get_bundle_tool_list() if mcp_enabled else None
+        mcp_tool_entries = self.tool_registry.items() if mcp_enabled else ()
 
         # Add MCP tools from registry
-        for tool_name, tool_info in self.tool_registry.items():
+        for tool_name, tool_info in mcp_tool_entries:
             if not tool_info.get("enabled", True):
                 continue
 
@@ -1540,7 +1539,9 @@ class MCPIntegration:
 
             definition = tool_info.get("definition", {})
             if not isinstance(definition, dict):
-                logger.warning("Skipping MCP tool %s with malformed definition", tool_name)
+                logger.warning(
+                    "Skipping MCP tool %s with malformed definition", tool_name
+                )
                 continue
 
             raw_parameters = definition.get("parameters")
@@ -1563,15 +1564,19 @@ class MCPIntegration:
                 }
             )
 
+        mcp_tool_count = len(tools)
+
         # Add built-in tools from unified registry
         registry_tools = self._get_registry_tools()
         if registry_tools is not None:
             tools.extend(registry_tools)
         else:
-            logger.warning("Registry tools unavailable and no fallback — skipping built-in tools")
+            logger.warning(
+                "Registry tools unavailable and no fallback — skipping built-in tools"
+            )
 
         logger.debug(
-            f"Prepared {len(tools)} tools for API ({len(self.tool_registry)} MCP + file ops)"
+            f"Prepared {len(tools)} tools for API ({mcp_tool_count} MCP + built-ins)"
         )
         return tools
 

@@ -494,7 +494,9 @@ class PrivateDirectory:
         proof_token = proof.token if isinstance(proof, PairingProof) else proof
         challenge_claims = self._verify_owner_jws(challenge_token, "pairing")
         challenge_id = _string_claim(challenge_claims, "jti")
-        pending = self._get_pending_pairing(challenge_id, challenge_token, timestamp)
+        pending = self._get_pending_pairing(
+            challenge_id, challenge_token, timestamp, allow_used=True
+        )
         if proof_token is None:
             proof_token = pending.get("proof_token")
         if not isinstance(proof_token, str):
@@ -529,15 +531,15 @@ class PrivateDirectory:
         credential_token = _sign_jws(
             credential_claims, owner_signing_key, kid=self.owner_id  # gitleaks:allow -- runtime key reference
         )
+        reused_token = None
         with self._mutating_state(now=timestamp) as state:
             current = state["pending_pairings"].get(challenge_id)
             if (
                 not current
                 or current.get("token") != challenge_token
-                or current.get("used")
             ):
                 raise AuthorizationError(
-                    "pairing challenge is unknown or already consumed"
+                    "pairing challenge is unknown"
                 )
             if current.get("proof_token") != proof_token:
                 raise AuthorizationError(
@@ -545,10 +547,25 @@ class PrivateDirectory:
                 )
             if timestamp >= current.get("expires_at", 0):
                 raise CredentialError("pairing challenge has expired")
-            if credential_id not in state["members"]:
-                _require_capacity(state, "members", MAX_MEMBERS)
-            current["used"] = True
-            state["members"][credential_id] = credential_token
+            if current.get("used"):
+                reused_token = self._pairing_credential_token(state, challenge_id)
+            else:
+                if credential_id not in state["members"]:
+                    _require_capacity(state, "members", MAX_MEMBERS)
+                current["used"] = True
+                state["members"][credential_id] = credential_token
+        if reused_token is not None:
+            reused_claims = self._verify_owner_jws(reused_token, "device")
+            if (
+                reused_claims.get("pairing_jti") != challenge_id
+                or reused_claims.get("scope") != list(clean_scopes)
+                or _integer_claim(reused_claims, "exp") - _integer_claim(reused_claims, "iat")
+                != credential_ttl_seconds
+            ):
+                raise AuthorizationError(
+                    "pairing challenge was already approved with different terms"
+                )
+            return self.validate_device_credential(reused_token, now=timestamp)
         return DeviceCredential(
             credential_token,
             credential_id,
@@ -557,6 +574,24 @@ class PrivateDirectory:
             device_key,
             expires_at,
         )
+
+    def _pairing_credential_token(
+        self, state: dict[str, Any], challenge_id: str
+    ) -> str:
+        """Find the single exact owner credential already issued for a pairing."""
+        matches: list[str] = []
+        for token in state["members"].values():
+            try:
+                claims = self._verify_owner_jws(token, "device")
+            except (CredentialError, TypeError, ValueError):
+                continue
+            if claims.get("pairing_jti") == challenge_id:
+                matches.append(token)
+        if len(matches) != 1:
+            raise AuthorizationError(
+                "consumed pairing challenge has no unique issued credential"
+            )
+        return matches[0]
 
     def record_pairing_proof(
         self,
@@ -662,16 +697,11 @@ class PrivateDirectory:
         now: int | None = None,
     ) -> DeviceCredential:
         """Install one owner-signed member credential received over a trusted channel."""
-        token = (
-            credential.token if isinstance(credential, DeviceCredential) else credential
-        )
-        timestamp = _now(now)
-        claims = self._verify_owner_jws(token, "device")
-        _validate_credential_claims(claims, self.owner_id, now=timestamp)
-        credential_id = _string_claim(claims, "jti")
-        device_id = _string_claim(claims, "sub")
-        public_key = _public_key_from_id(device_id)
-        with self._mutating_state(now=timestamp) as state:
+        validated = self.validate_device_credential(credential, now=now)
+        token = validated.token
+        credential_id = validated.credential_id
+        device_id = validated.device_id
+        with self._mutating_state(now=_now(now)) as state:
             existing = state["members"].get(credential_id)
             if existing is not None and existing != token:
                 raise AuthorizationError(
@@ -682,6 +712,29 @@ class PrivateDirectory:
             if existing is None:
                 _require_capacity(state, "members", MAX_MEMBERS)
             state["members"][credential_id] = token
+        return validated
+
+    def validate_device_credential(
+        self,
+        credential: DeviceCredential | str,
+        *,
+        now: int | None = None,
+    ) -> DeviceCredential:
+        """Validate a member credential without changing private-directory state."""
+        token = (
+            credential.token if isinstance(credential, DeviceCredential) else credential
+        )
+        timestamp = _now(now)
+        claims = self._verify_owner_jws(token, "device")
+        _validate_credential_claims(claims, self.owner_id, now=timestamp)
+        credential_id = _string_claim(claims, "jti")
+        device_id = _string_claim(claims, "sub")
+        public_key = _public_key_from_id(device_id)
+        with self._locked_file():
+            state = self._read_state_unlocked()
+            self._check_owner(state)
+            if _is_revoked(state, credential_id=credential_id, device_id=device_id):
+                raise AuthorizationError("credential or device has been revoked")
         return DeviceCredential(
             token,
             credential_id,
@@ -833,6 +886,80 @@ class PrivateDirectory:
             _require_capacity(state, "revocations", MAX_REVOCATIONS)
             state["revocations"][revocation_id] = token
         return Revocation(token, revocation_id, target_type, target_id)
+
+    def revoke_issued_credential(
+        self,
+        credential: DeviceCredential | str,
+        owner_signing_key: SigningKey,
+        *,
+        expected_device_public_key: bytes,
+        now: int | None = None,
+    ) -> Revocation | None:
+        """Revoke only this directory's exact credential for the expected key.
+
+        The signed token is verified at its issuance time so cleanup can safely
+        identify an already-expired credential. Expired members are pruned
+        without adding a permanent revocation. Active credentials are revoked
+        atomically only while the exact token remains stored as a member.
+        """
+        self._require_owner_key(owner_signing_key)
+        if not isinstance(expected_device_public_key, bytes) or len(expected_device_public_key) != 32:
+            raise AuthorizationError("expected device key is invalid")
+        token = credential.token if isinstance(credential, DeviceCredential) else credential
+        if not isinstance(token, str) or not token:
+            raise CredentialError("issued credential is invalid")
+        claims = self._verify_owner_jws(token, "device")
+        issued_at = _integer_claim(claims, "iat")
+        _validate_credential_claims(claims, self.owner_id, now=issued_at)
+        credential_id = _string_claim(claims, "jti")
+        device_id = _string_claim(claims, "sub")
+        if _public_key_from_id(device_id) != expected_device_public_key:
+            raise AuthorizationError("issued credential is for a different device")
+
+        timestamp = _now(now)
+        if _integer_claim(claims, "exp") <= timestamp:
+            with self._locked_file():
+                state = self._read_state_unlocked()
+                self._check_owner(state)
+                existing = state["members"].get(credential_id)
+                if existing is None:
+                    return None
+                if existing != token:
+                    raise AuthorizationError(
+                        "credential id is bound to a different stored token"
+                    )
+                self._prune_expired_state(state, timestamp)
+                self._write_state_unlocked(state)
+            return None
+
+        revocation_id = str(uuid.uuid4())
+        revocation_claims = {
+            "kollab_type": _TOKEN_TYPES["revocation"],
+            "iss": self.owner_id,
+            "sub": self.owner_id,
+            "aud": _directory_audience(self.owner_id),
+            "iat": timestamp,
+            "jti": revocation_id,
+            "target_type": "credential",
+            "target_id": credential_id,
+        }
+        revocation_token = _sign_jws(
+            revocation_claims, owner_signing_key, kid=self.owner_id  # gitleaks:allow
+        )
+        with self._mutating_state(now=timestamp) as state:
+            if state["members"].get(credential_id) != token:
+                raise AuthorizationError(
+                    "issued credential is not the exact stored member token"
+                )
+            if _is_revoked(
+                state, credential_id=credential_id, device_id=device_id
+            ):
+                return None
+            _require_capacity(state, "revocations", MAX_REVOCATIONS)
+            state["revocations"][revocation_id] = revocation_token
+        return Revocation(
+            revocation_token, revocation_id, "credential", credential_id
+        )
 
     def apply_revocation(self, revocation: Revocation | str) -> Revocation:
         """Persist an owner-signed revocation received through private sync."""
@@ -1101,7 +1228,7 @@ class PrivateDirectory:
         _validate_credential_claims(claims, self.owner_id, now=now)
 
     def _get_pending_pairing(
-        self, challenge_id: str, token: str, now: int
+        self, challenge_id: str, token: str, now: int, *, allow_used: bool = False
     ) -> dict[str, Any]:
         with self._locked_file():
             state = self._read_state_unlocked()
@@ -1111,7 +1238,7 @@ class PrivateDirectory:
                 raise AuthorizationError(
                     "pairing challenge is not pending in this directory"
                 )
-            if pending.get("used"):
+            if pending.get("used") and not allow_used:
                 raise AuthorizationError("pairing challenge has already been consumed")
             if now >= pending.get("expires_at", 0):
                 raise CredentialError("pairing challenge has expired")

@@ -17,6 +17,7 @@ from .local import LocalStateService
 from .refresher import WidgetStateRefresher
 from .remote import RemoteStateService
 from .snapshots import (
+    ActiveOperationSnapshot,
     AgentListSnapshot,
     AgentSnapshot,
     ConversationSnapshot,
@@ -46,6 +47,7 @@ __all__ = [
     "WidgetStateRefresher",
     "WidgetState",
     "Snapshot",
+    "ActiveOperationSnapshot",
     "ConversationSnapshot",
     "MessageDto",
     "SessionStats",

@@ -28,12 +28,30 @@ async def _async_noop() -> None:
     return None
 
 
-def test_disabled_mcp_skips_discovery_and_schema_exposure():
+def test_disabled_mcp_skips_discovery_and_mcp_schemas_but_keeps_builtin_schemas():
     integration = _disabled_integration()
 
     assert asyncio.run(integration.discover_mcp_servers()) == {}
     assert integration.list_available_tools() == []
-    assert integration.get_tool_definitions_for_api() == []
+
+    tools = integration.get_tool_definitions_for_api()
+    names = {tool["name"] for tool in tools}
+    assert "repo_search" not in names
+    assert "file_read" in names
+    assert "hub_spawn" in names
+
+
+def test_disabled_mcp_keeps_builtin_schemas_within_active_bundle_scope():
+    integration = _disabled_integration()
+    integration._agent_manager = SimpleNamespace(
+        get_active_agent=lambda: SimpleNamespace(tools=["file-read", "hub-msg"])
+    )
+
+    names = {
+        tool["name"] for tool in integration.get_tool_definitions_for_api()
+    }
+
+    assert names == {"file_read", "hub_msg"}
 
 
 def test_disabled_mcp_rejects_calls_and_reload_without_connecting():

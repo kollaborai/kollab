@@ -1,0 +1,5 @@
+# False positives in branch history (test fixtures and variable names);
+# the current lines carry inline gitleaks:allow markers.
+52bf8b1b45617e010420e0a9c43a7059e8ad5168:tests/unit/test_enrollment_codes.py:generic-api-key:11
+85c14f026d85917084607366ebfcd06e4202ee65:tests/unit/test_relay_agent_bridge.py:generic-api-key:571
+52bf8b1b45617e010420e0a9c43a7059e8ad5168:plugins/hub/dns/private_directory.py:generic-api-key:947

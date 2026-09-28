@@ -507,10 +507,9 @@ class OpenAIOAuthClient:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             ) as resp:
                 if resp.status != 200:
-                    text = await resp.text()
-                    raise OAuthError(
-                        f"Refresh failed (HTTP {resp.status}): {text[:300]}"
-                    )
+                    # OAuth error bodies can echo refresh/access tokens. Keep
+                    # only the status code in errors that may reach logs or UI.
+                    raise OAuthError(f"Refresh failed (HTTP {resp.status})")
 
                 body = await resp.json()
 

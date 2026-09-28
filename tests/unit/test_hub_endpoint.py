@@ -13,6 +13,8 @@ import os
 import shutil
 import subprocess
 
+import pytest
+
 from plugins.hub.dns.endpoint import (
     DEFAULT_ENDPOINT_PORT,
     EndpointConfig,
@@ -28,7 +30,14 @@ from plugins.hub.dns.identity import IdentityManager
 from plugins.hub.dns.models import AgentRecord
 from plugins.hub.dns.registry import AgentRegistry
 from plugins.hub.dns.storage import DNSStorage
-from plugins.hub.messenger import AgentMessenger, AgentSocketServer
+from plugins.hub.messenger import (
+    REMOTE_MESSAGE_AUTH_KEY,
+    AgentMessenger,
+    AgentSocketServer,
+    PrivateDirectoryRemoteMessageAuthorizer,
+    _remote_auth_bytes,
+    remote_message_proof_body,
+)
 from plugins.hub.models import HubMessage
 
 
@@ -201,6 +210,83 @@ def _make_dns(tmp_path):
     return storage, identity, registry
 
 
+def _remote_auth(
+    identity, registry, *, designation="client-agent", server="server-agent"
+):
+    server_record = registry.resolve(server)
+    assert server_record is not None
+    return {
+        "identity_manager": identity,
+        "designation": designation,
+        "expected_server_designation": server,
+        "expected_server_public_key": server_record.public_key,
+    }
+
+
+def _install_private_directory_grant(tmp_path, identity, message, *, target_uri):
+    """Build a real owner-approved grant bound to the Hub message body."""
+    from nacl.signing import SigningKey
+
+    from plugins.hub.dns.private_directory import (
+        PrivateDirectory,
+        prove_pairing,
+        sign_request,
+    )
+
+    device_key = identity._signing_keys["client-agent"]
+    owner_key = SigningKey.generate()
+    workspace_id = "endpoint-workspace"
+    directory = PrivateDirectory(
+        tmp_path / "private-directory.json",
+        owner_public_key=bytes(owner_key.verify_key),
+        workspace_id=workspace_id,
+    )
+    challenge = directory.begin_pairing(
+        owner_key, expected_device_public_key=bytes(device_key.verify_key)
+    )
+    pairing_proof = prove_pairing(
+        challenge, device_key, owner_public_key=bytes(owner_key.verify_key)
+    )
+    directory.record_pairing_proof(challenge, pairing_proof)
+    credential = directory.approve_pairing(
+        challenge,
+        pairing_proof,
+        owner_key,
+        approved_by_human=True,
+    )
+    grant = directory.issue_conversation_grant(
+        credential,
+        owner_key,
+        recipient_workspace_id=workspace_id,
+        purpose="conversation",
+        conversation_id=message.thread_id,
+        approved_by_human=True,
+    )
+    body = remote_message_proof_body(message)
+    request_proof = sign_request(
+        device_key,
+        credential_jws=credential.token,
+        grant_jws=grant.token,
+        body=body,
+        method="POST",
+        path="/hub/direct/message",
+        target_uri=target_uri,
+        recipient_workspace_id=workspace_id,
+        purpose="conversation",
+        conversation_id=message.thread_id,
+        message_id=message.id,
+    )
+    message.metadata[REMOTE_MESSAGE_AUTH_KEY] = {
+        "credential_jws": credential.token,
+        "grant_jws": grant.token,
+        "proof_jws": request_proof,
+        "workspace_id": workspace_id,
+        "purpose": "conversation",
+        "conversation_id": message.thread_id,
+    }
+    return PrivateDirectoryRemoteMessageAuthorizer(directory, target_uri)
+
+
 async def _start_endpoint_server(tmp_path, received, *, socket_name):
     """Spin up an AgentSocketServer with a plaintext TCP endpoint.
 
@@ -232,7 +318,9 @@ async def _start_endpoint_server(tmp_path, received, *, socket_name):
     server = AgentSocketServer("server-id", on_message, socket_name=socket_name)
     # Wire registry + identity (TCP listener forces the handshake regardless
     # of require_auth here).
-    server.set_dns_auth(registry, identity, require_auth=False)
+    server.set_dns_auth(
+        registry, identity, require_auth=False, local_designation="server-agent"
+    )
     server.enable_endpoint("127.0.0.1", 0, None)  # plaintext, OS-assigned port
     await server.start()
     port = server._tcp_server.sockets[0].getsockname()[1]
@@ -311,15 +399,25 @@ def test_offbox_idle_connection_dropped_after_timeout(tmp_path):
         server = AgentSocketServer(
             "idle-id", on_message, socket_name=f"ep-idle-{os.getpid()}"
         )
-        server.set_dns_auth(registry, identity, require_auth=False)
+        server.set_dns_auth(
+            registry, identity, require_auth=False, local_designation="server-agent"
+        )
         server.enable_endpoint("127.0.0.1", 0, None)
         server._remote_idle_timeout = 0.3  # short for the test
         await server.start()
         port = server._tcp_server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            ok = await AgentMessenger.do_client_handshake(
-                reader, writer, identity, "client-agent", timeout=5.0
+            server_record = registry.resolve("server-agent")
+            assert server_record is not None
+            ok = await AgentMessenger.do_remote_client_handshake(
+                reader,
+                writer,
+                identity,
+                "client-agent",
+                "server-agent",
+                server_record.public_key,
+                timeout=5.0,
             )
             assert ok is True
             # Send nothing. The server should close within a few idle windows.
@@ -344,15 +442,29 @@ def test_offbox_handshake_and_delivery(tmp_path):
             tmp_path, received, socket_name=f"ep-ok-{os.getpid()}"
         )
         try:
-            auth = {"identity_manager": identity, "designation": "client-agent"}
+            auth = _remote_auth(identity, _registry)
+            message = HubMessage(
+                content="hello over the wire",
+                from_identity="client-agent",
+                to="server-agent",
+            )
+            server.set_remote_message_authorizer(
+                _install_private_directory_grant(
+                    tmp_path,
+                    identity,
+                    message,
+                    target_uri="https://127.0.0.1/hub/direct/message",
+                )
+            )
             ok = await AgentMessenger.send_to_agent(
                 f"ws://127.0.0.1:{port}",
-                HubMessage(content="hello over the wire", from_identity="client-agent"),
+                message,
                 auth=auth,
             )
             assert ok is True
             assert len(received) == 1
             assert received[0].content == "hello over the wire"
+            assert REMOTE_MESSAGE_AUTH_KEY not in received[0].metadata
         finally:
             await server.stop()
 
@@ -369,13 +481,424 @@ def test_offbox_rejects_unregistered_client(tmp_path):
             # 'intruder' has a keypair but is NOT in the server's registry,
             # so the server cannot resolve a public key -> auth_rejected.
             identity.get_or_create_keypair("intruder")
-            auth = {"identity_manager": identity, "designation": "intruder"}
+            auth = _remote_auth(identity, _registry, designation="intruder")
             ok = await AgentMessenger.send_to_agent(
                 f"ws://127.0.0.1:{port}",
-                HubMessage(content="let me in", from_identity="intruder"),
+                HubMessage(
+                    content="let me in",
+                    from_identity="intruder",
+                    to="server-agent",
+                ),
                 auth=auth,
             )
             assert ok is False
+            assert received == []
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+def test_offbox_rejects_unapproved_client(tmp_path):
+    async def run():
+        received = []
+        server, identity, registry, port = await _start_endpoint_server(
+            tmp_path, received, socket_name=f"ep-pending-{os.getpid()}"
+        )
+        try:
+            client_record = registry.resolve("client-agent")
+            assert client_record is not None
+            client_record.approval_state = "pending"
+            message = HubMessage(
+                content="pending peers cannot message",
+                from_identity="client-agent",
+                to="server-agent",
+            )
+            ok = await AgentMessenger.send_to_agent(
+                f"ws://127.0.0.1:{port}",
+                message,
+                auth=_remote_auth(identity, registry),
+            )
+            assert ok is False
+            assert received == []
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+def test_offbox_connections_are_capped_before_handshake_tasks_are_created(tmp_path):
+    """The off-box listener rejects excess streams and releases slots on close."""
+
+    async def run():
+        async def on_message(msg):
+            pass
+
+        server = AgentSocketServer(
+            "connection-cap-id",
+            on_message,
+            socket_name=f"ep-cap-{os.getpid()}",
+        )
+        server.set_dns_auth(object(), object(), local_designation="server-agent")
+        server._remote_connection_limit = 1
+
+        async def hold_handshake(reader, writer):
+            await reader.readline()
+            return None
+
+        server._do_remote_handshake = hold_handshake
+        server.enable_endpoint("127.0.0.1", 0, None)
+        await server.start()
+        port = server._tcp_server.sockets[0].getsockname()[1]
+        first_writer = second_writer = None
+        try:
+            _, first_writer = await asyncio.open_connection("127.0.0.1", port)
+            for _ in range(100):
+                if server._remote_connection_count == 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert server._remote_connection_count == 1
+
+            second_reader, second_writer = await asyncio.open_connection(
+                "127.0.0.1", port
+            )
+            assert await asyncio.wait_for(second_reader.read(1), timeout=1.0) == b""
+            assert server._remote_connection_count == 1
+            assert server._remote_connections_rejected == 1
+
+            first_writer.close()
+            await first_writer.wait_closed()
+            for _ in range(100):
+                if server._remote_connection_count == 0:
+                    break
+                await asyncio.sleep(0.01)
+            assert server._remote_connection_count == 0
+        finally:
+            for writer in (first_writer, second_writer):
+                if writer is not None:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+            await server.stop()
+
+    _run(run())
+
+
+def test_remote_endpoint_rejects_legacy_or_malformed_server_greeting(tmp_path):
+    async def run():
+        _, identity, registry = _make_dns(tmp_path)
+        identity.get_or_create_keypair("client-agent")
+        _, server_pub = identity.get_or_create_keypair("server-agent")
+        registry.register(
+            AgentRecord(
+                designation="server-agent",
+                public_key=server_pub,
+                approval_state="approved",
+            )
+        )
+        responses = []
+        response_read = asyncio.Event()
+
+        async def legacy_peer(reader, writer):
+            writer.write(b'{"type":"ack"}\n')
+            await writer.drain()
+            responses.append(await reader.readline())
+            response_read.set()
+            writer.close()
+            await writer.wait_closed()
+
+        listener = await asyncio.start_server(legacy_peer, "127.0.0.1", 0)
+        port = listener.sockets[0].getsockname()[1]
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                assert not await AgentMessenger.do_remote_client_handshake(
+                    reader,
+                    writer,
+                    identity,
+                    "client-agent",
+                    "server-agent",
+                    server_pub,
+                    timeout=2,
+                )
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            await asyncio.wait_for(response_read.wait(), timeout=1)
+            assert responses == [b""]
+        finally:
+            listener.close()
+            await listener.wait_closed()
+
+    _run(run())
+
+
+def test_remote_client_rejects_impersonated_server_key(tmp_path):
+    async def run():
+        _, client_identity, registry = _make_dns(tmp_path / "client")
+        client_identity.get_or_create_keypair("client-agent")
+        _, pinned_server_key = client_identity.get_or_create_keypair("server-agent")
+        registry.register(
+            AgentRecord(
+                designation="server-agent",
+                public_key=pinned_server_key,
+                approval_state="approved",
+            )
+        )
+        _, attacker_identity, _ = _make_dns(tmp_path / "attacker")
+        attacker_identity.get_or_create_keypair("server-agent")
+        _, attacker_key = attacker_identity.get_or_create_keypair("server-agent")
+        client_responses = []
+        response_read = asyncio.Event()
+
+        async def impersonator(reader, writer):
+            nonce = "a" * 64
+            challenge = {
+                "type": "auth_challenge",
+                "version": 2,
+                "designation": "server-agent",
+                "nonce": nonce,
+                "signature": attacker_identity.sign_message(
+                    "server-agent",
+                    _remote_auth_bytes("server_challenge", "server-agent", nonce),
+                ),
+            }
+            writer.write((json.dumps(challenge) + "\n").encode())
+            await writer.drain()
+            client_responses.append(await reader.readline())
+            response_read.set()
+            writer.close()
+            await writer.wait_closed()
+
+        listener = await asyncio.start_server(impersonator, "127.0.0.1", 0)
+        port = listener.sockets[0].getsockname()[1]
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                assert not await AgentMessenger.do_remote_client_handshake(
+                    reader,
+                    writer,
+                    client_identity,
+                    "client-agent",
+                    "server-agent",
+                    pinned_server_key,
+                    timeout=2,
+                )
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            await asyncio.wait_for(response_read.wait(), timeout=1)
+            assert client_responses == [b""]
+            assert attacker_key != pinned_server_key
+        finally:
+            listener.close()
+            await listener.wait_closed()
+
+    _run(run())
+
+
+def test_offbox_message_requires_receiver_scoped_grant(tmp_path):
+    async def run():
+        received = []
+        server, identity, registry, port = await _start_endpoint_server(
+            tmp_path, received, socket_name=f"ep-no-grant-{os.getpid()}"
+        )
+        try:
+            message = HubMessage(
+                content="no grant",
+                from_identity="client-agent",
+                to="server-agent",
+            )
+            ok = await AgentMessenger.send_to_agent(
+                f"ws://127.0.0.1:{port}",
+                message,
+                auth=_remote_auth(identity, registry),
+            )
+            assert ok is False
+            assert received == []
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+def test_offbox_message_cannot_spoof_authenticated_designation(tmp_path):
+    async def run():
+        received = []
+        server, identity, registry, port = await _start_endpoint_server(
+            tmp_path, received, socket_name=f"ep-spoof-{os.getpid()}"
+        )
+        try:
+            message = HubMessage(
+                content="spoofed identity",
+                from_identity="server-agent",
+                to="server-agent",
+            )
+            ok = await AgentMessenger.send_to_agent(
+                f"ws://127.0.0.1:{port}",
+                message,
+                auth=_remote_auth(identity, registry),
+            )
+            assert ok is False
+            assert received == []
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+@pytest.mark.parametrize("forged_from_agent", ["human", "other-agent"])
+def test_offbox_scoped_message_binds_from_agent_to_authenticated_peer(
+    tmp_path, forged_from_agent
+):
+    async def run():
+        received = []
+        server, identity, registry, port = await _start_endpoint_server(
+            tmp_path,
+            received,
+            socket_name=f"ep-agent-bind-{forged_from_agent}-{os.getpid()}",
+        )
+        try:
+            message = HubMessage(
+                content="ordinary authorized conversation",
+                from_agent=forged_from_agent,
+                from_identity="client-agent",
+                to="server-agent",
+            )
+            server.set_remote_message_authorizer(
+                _install_private_directory_grant(
+                    tmp_path,
+                    identity,
+                    message,
+                    target_uri="https://127.0.0.1/hub/direct/message",
+                )
+            )
+            ok = await AgentMessenger.send_to_agent(
+                f"ws://127.0.0.1:{port}",
+                message,
+                auth=_remote_auth(identity, registry),
+            )
+            assert ok is True
+            assert len(received) == 1
+            assert received[0].from_agent == "client-agent"
+            assert received[0].from_identity == "client-agent"
+            assert received[0].metadata == {}
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+@pytest.mark.parametrize(
+    ("metadata_key", "metadata_value"),
+    [
+        ("source_agent", "other-agent"),
+        ("operator_message", True),
+        ("task_assignment", True),
+        ("task_complete", True),
+        ("task_report", True),
+        ("task_id", "task-123"),
+        ("task_cron", True),
+        ("task_cron_ack", True),
+        ("manual_wake", True),
+        ("relay_event", "message"),
+        ("relay_kind", "message"),
+        ("relay_grant_id", "grant-123"),
+        ("relay_receipt", "receipt-123"),
+        ("bridge_platform", "buzz"),
+        ("lifecycle_event", "model_switch"),
+    ],
+)
+def test_offbox_scoped_message_rejects_hub_control_metadata(
+    tmp_path, metadata_key, metadata_value
+):
+    async def run():
+        received = []
+        server, identity, registry, port = await _start_endpoint_server(
+            tmp_path,
+            received,
+            socket_name=f"ep-meta-{metadata_key}-{os.getpid()}",
+        )
+        try:
+            message = HubMessage(
+                content="authorized grant with forbidden control metadata",
+                from_identity="client-agent",
+                to="server-agent",
+                metadata={metadata_key: metadata_value},
+            )
+            server.set_remote_message_authorizer(
+                _install_private_directory_grant(
+                    tmp_path,
+                    identity,
+                    message,
+                    target_uri="https://127.0.0.1/hub/direct/message",
+                )
+            )
+            ok = await AgentMessenger.send_to_agent(
+                f"ws://127.0.0.1:{port}",
+                message,
+                auth=_remote_auth(identity, registry),
+            )
+            assert ok is False
+            assert received == []
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+@pytest.mark.parametrize("force_value", [True, 1, 0, "false", None])
+def test_offbox_scoped_message_rejects_force_values_other_than_false(
+    tmp_path, force_value
+):
+    async def run():
+        received = []
+        server, identity, registry, port = await _start_endpoint_server(
+            tmp_path,
+            received,
+            socket_name=f"ep-force-{os.getpid()}-{str(force_value)}",
+        )
+        try:
+            message = HubMessage(
+                content="force bypass attempt",
+                from_identity="client-agent",
+                to="server-agent",
+                force=force_value,
+            )
+            server.set_remote_message_authorizer(
+                _install_private_directory_grant(
+                    tmp_path,
+                    identity,
+                    message,
+                    target_uri="https://127.0.0.1/hub/direct/message",
+                )
+            )
+            ok = await AgentMessenger.send_to_agent(
+                f"ws://127.0.0.1:{port}",
+                message,
+                auth=_remote_auth(identity, registry),
+            )
+            assert ok is False
+            assert received == []
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+def test_remote_open_requires_complete_pinned_auth(tmp_path):
+    async def run():
+        received = []
+        server, _identity, _registry, port = await _start_endpoint_server(
+            tmp_path, received, socket_name=f"ep-no-pin-{os.getpid()}"
+        )
+        try:
+            with pytest.raises(ConnectionError, match="pinned identity auth"):
+                await AgentMessenger._open(
+                    f"ws://127.0.0.1:{port}", timeout=2, auth=None
+                )
             assert received == []
         finally:
             await server.stop()
@@ -458,7 +981,9 @@ def test_offbox_tls_round_trip_end_to_end(tmp_path):
         server = AgentSocketServer(
             "tls-id", on_message, socket_name=f"ep-tls-{os.getpid()}"
         )
-        server.set_dns_auth(registry, identity, require_auth=False)
+        server.set_dns_auth(
+            registry, identity, require_auth=False, local_designation="server-agent"
+        )
         server.enable_endpoint("127.0.0.1", 0, server_ssl)
         await server.start()
         port = server._tcp_server.sockets[0].getsockname()[1]
@@ -466,14 +991,24 @@ def test_offbox_tls_round_trip_end_to_end(tmp_path):
             # tls_ca in auth -> _open builds the client context from it; the
             # self-signed cert is its own CA, and its IP SAN lets hostname
             # verification pass for wss://127.0.0.1.
-            auth = {
-                "identity_manager": identity,
-                "designation": "client-agent",
-                "tls_ca": cert,
-            }
+            auth = _remote_auth(identity, registry)
+            auth["tls_ca"] = cert
+            message = HubMessage(
+                content="hello over TLS",
+                from_identity="client-agent",
+                to="server-agent",
+            )
+            server.set_remote_message_authorizer(
+                _install_private_directory_grant(
+                    tmp_path,
+                    identity,
+                    message,
+                    target_uri=f"https://127.0.0.1:{port}/hub/direct/message",
+                )
+            )
             ok = await AgentMessenger.send_to_agent(
                 f"wss://127.0.0.1:{port}",
-                HubMessage(content="hello over TLS", from_identity="client-agent"),
+                message,
                 auth=auth,
             )
             assert ok is True
@@ -583,9 +1118,63 @@ def test_output_diagnostics_distinguish_empty_output_from_transport_failure():
     _run(run())
 
 
-def test_offbox_all_dialers_route_through_open(tmp_path):
-    """request_status / signal_shutdown / subscribe accept auth= and reach a
-    remote endpoint through the same handshake path as send_to_agent."""
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {
+            "action": "rpc_request",
+            "request_id": "remote",
+            "method": "relay.command",
+            "params": {"value": "allow all"},
+        },
+        {
+            "action": "rpc_request",
+            "request_id": "remote",
+            "method": "state.set_config",
+            "params": {},
+        },
+        {"action": "attach"},
+        {"action": "subscribe"},
+        {"action": "shutdown"},
+        {"action": "status"},
+    ],
+)
+def test_authenticated_offbox_cannot_invoke_operator_dispatch(tmp_path, frame):
+    async def run():
+        received = []
+        server, identity, _, port = await _start_endpoint_server(
+            tmp_path, received, socket_name=f"ep-admin-{os.getpid()}"
+        )
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                server_record = server._dns_registry.resolve("server-agent")
+                assert server_record is not None
+                assert await AgentMessenger.do_remote_client_handshake(
+                    reader,
+                    writer,
+                    identity,
+                    "client-agent",
+                    "server-agent",
+                    server_record.public_key,
+                    timeout=2,
+                )
+                writer.write(json.dumps(frame).encode() + b"\n")
+                await writer.drain()
+                reply = json.loads(await asyncio.wait_for(reader.readline(), 2))
+                assert "local operator authorization required" in json.dumps(reply)
+                assert not received and not server._shutdown_requested
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
+def test_offbox_peer_auth_does_not_grant_local_operator_control(tmp_path):
+    """A peer's valid key never authorizes status/attach/shutdown control."""
 
     async def run():
         received = {"status": False, "shutdown": False}
@@ -614,20 +1203,22 @@ def test_offbox_all_dialers_route_through_open(tmp_path):
         server = AgentSocketServer(
             "server-id", on_message, socket_name=f"ep-all-{os.getpid()}"
         )
-        server.set_dns_auth(registry, identity, require_auth=False)
+        server.set_dns_auth(
+            registry, identity, require_auth=False, local_designation="server-agent"
+        )
         server.enable_endpoint("127.0.0.1", 0, None)
         await server.start()
         port = server._tcp_server.sockets[0].getsockname()[1]
         try:
-            auth = {"identity_manager": identity, "designation": "client-agent"}
+            auth = _remote_auth(identity, registry)
             target = f"ws://127.0.0.1:{port}"
             # status
             status = await AgentMessenger.request_status(target, auth=auth)
-            assert status.get("type") == "status"
+            assert status == {}
             received["status"] = True
-            # shutdown signal — server acks, proving the handshake + round-trip.
+            # Even authenticated peers cannot shut down the local daemon.
             acked = await AgentMessenger.signal_shutdown(target, auth=auth)
-            assert acked is True
+            assert acked is False
             received["shutdown"] = True
             assert all(received.values())
         finally:
@@ -696,10 +1287,24 @@ def test_resolve_dial_target_upgrades_remote(tmp_path):
     assert target == "/tmp/fallback.sock"
     assert auth is None
 
-    # Wire a real identity manager -> remote dial is upgraded with auth.
+    # A remote record with no public-key pin or explicit approval stays local.
     p._dns_identity = IdentityManager(DNSStorage(tmp_path / "dns-id"))
+    p._dns_identity.get_or_create_keypair("me")
+    target, auth = p._resolve_dial_target("remote-peer", "/tmp/fallback.sock")
+    assert target == "/tmp/fallback.sock"
+    assert auth is None
+
+    remote_record = p._dns_registry.resolve("remote-peer")
+    assert remote_record is not None
+    _, remote_public_key = p._dns_identity.get_or_create_keypair("remote-peer")
+    remote_record.public_key = remote_public_key
+    remote_record.approval_state = "approved"
+
+    # A pinned, explicitly approved remote peer upgrades with mutual auth.
     target, auth = p._resolve_dial_target("remote-peer", "/tmp/fallback.sock")
     assert target == "wss://mesh.example.com:8765"
     assert auth is not None
     assert auth["designation"] == "me"
     assert auth["identity_manager"] is p._dns_identity
+    assert auth["expected_server_designation"] == "remote-peer"
+    assert auth["expected_server_public_key"] == remote_public_key

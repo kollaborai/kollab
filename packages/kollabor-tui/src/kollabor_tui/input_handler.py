@@ -157,6 +157,7 @@ class InputHandler:
             self.command_menu_renderer,
             self.slash_parser,
             self.error_handler,
+            expand_paste_placeholders=self._paste_processor.expand_paste_placeholders,
         )
 
         # Connect KeyPressHandler to CommandModeHandler for state sync

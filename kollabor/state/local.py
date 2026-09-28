@@ -23,6 +23,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai.message_content import contains_image_content, content_to_text
 from kollabor_ai.model_registry import supports_vision
@@ -31,6 +32,7 @@ from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
 from .interface import StateService
 from .snapshots import (
+    ActiveOperationSnapshot,
     AgentListSnapshot,
     AgentSnapshot,
     ConversationSnapshot,
@@ -793,6 +795,13 @@ class LocalStateService(StateService):
                 except TypeError:
                     bg_count = 0
 
+            operation_reader = getattr(
+                self._llm_service, "get_active_operation_snapshot", None
+            )
+            operation_data = operation_reader() if callable(operation_reader) else {}
+            if not isinstance(operation_data, dict):
+                operation_data = {}
+
             return ProcessingSnapshot(
                 is_processing=is_processing,
                 current_processing_tokens=int(
@@ -804,6 +813,7 @@ class LocalStateService(StateService):
                 pending_tools_count=pending_tools_count,
                 bg_tasks_count=bg_count,
                 circuit_breaker_state=circuit_state,
+                active_operation=ActiveOperationSnapshot.from_dict(operation_data),
             )
         except Exception as e:
             logger.debug(f"get_processing_state error: {e}")
@@ -2173,6 +2183,67 @@ class LocalStateService(StateService):
 
     # === Hub writes (phase 4.6 — attach mode msg/broadcast) ===
 
+    async def hub_enroll(self, domain: str, code: str) -> dict[str, str]:
+        """Submit a private connect code to the Hub that owns this identity."""
+        hub = self._resolve_hub_plugin()
+        if hub is None:
+            return {"error": "connect enrollment is unavailable"}
+        handler = getattr(hub, "_run_connect_enrollment", None)
+        if handler is None:
+            return {"error": "connect enrollment is unavailable"}
+        try:
+            result = await handler(domain, code)
+        except Exception:
+            # The code must never reach logs or an RPC exception response.
+            return {"error": "connect request could not be submitted"}
+        if not isinstance(result, dict):
+            return {"error": "connect request could not be submitted"}
+        status = result.get("status")
+        receipt_id = result.get("receipt_id")
+        if status == "pending" and isinstance(receipt_id, str):
+            return {"status": "pending", "receipt_id": receipt_id}
+        if isinstance(status, str) and status in {"approved", "rejected"}:
+            return {"status": status}
+        return {"error": "connect request could not be submitted"}
+
+    async def hub_enrollment_offer(self, domain: str) -> dict[str, str]:
+        """Create a one-device code through the Hub that owns local identity."""
+        hub = self._resolve_hub_plugin()
+        if hub is None:
+            return {"error": "connect enrollment is unavailable"}
+        handler = getattr(hub, "_run_connect_enrollment_offer", None)
+        if handler is None:
+            return {"error": "connect enrollment is unavailable"}
+        try:
+            result = await handler(domain)
+        except Exception:
+            # The one-time code must never reach logs or an RPC exception.
+            return {"error": "connect offer could not be created"}
+        if not isinstance(result, dict) or result.get("error"):
+            return {"error": "connect offer could not be created"}
+        offer_id = result.get("offer_id")
+        expires_at = result.get("expires_at")
+        code = result.get("code")
+        if (
+            result.get("status") == "offered"
+            and isinstance(offer_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", offer_id)
+            and isinstance(expires_at, str)
+            and expires_at.isdigit()
+            and isinstance(code, str)
+            and re.fullmatch(
+                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
+                code,
+            )
+        ):
+            return {
+                "status": "offered",
+                "offer_id": offer_id,
+                "expires_at": expires_at,
+                "code": code,
+            }
+        return {"error": "connect offer could not be created"}
+
     async def hub_connect(self, command: str) -> str:
         hub = self._resolve_hub_plugin()
         if hub is None:
@@ -2259,11 +2330,13 @@ class LocalStateService(StateService):
             registry = self._event_bus.get_service("command_registry")
         except Exception:
             registry = None
-        definition = (
-            registry.get_command("goal") if registry is not None else None
-        )
+        definition = registry.get_command("goal") if registry is not None else None
         if definition is None or definition.handler is None:
-            return {"success": False, "message": "goal command unavailable", "display_type": "error"}
+            return {
+                "success": False,
+                "message": "goal command unavailable",
+                "display_type": "error",
+            }
         command = SlashCommand(
             name="goal",
             args=[],
@@ -2284,9 +2357,10 @@ class LocalStateService(StateService):
     async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
-        `process_user_input` runs the whole turn, which can take minutes. The
-        RPC caller must not wait on that, so the turn is scheduled as a tracked
-        background task and progress is followed on the DisplayTap instead.
+        The input pipeline only acknowledges admission to the LLM queue; model
+        execution continues in the background and progress is followed on the
+        DisplayTap. Awaiting admission lets the RPC report rejected input
+        instead of acknowledging a turn that never entered the pipeline.
         """
         text = content_to_text(message).strip()
         if not text:
@@ -2358,14 +2432,24 @@ class LocalStateService(StateService):
                 asyncio.get_running_loop().create_task(command_coro)
             return {"accepted": True, "reason": "slash command"}
 
-        coro = llm.process_user_input(message)
-        create_task = getattr(llm, "create_background_task", None)
-        if callable(create_task):
-            create_task(coro, name="rpc_send_message")
-        else:
-            asyncio.get_running_loop().create_task(coro)
+        try:
+            submission = await llm.submit_human_input(
+                message, source=UserInputSource.STATE_RPC
+            )
+        except Exception as exc:
+            logger.warning("state input submission failed (%s)", type(exc).__name__)
+            return {"accepted": False, "reason": "input submission failed"}
 
-        return {"accepted": True, "reason": ""}
+        if isinstance(submission, dict) and submission.get("status") in {
+            "queued",
+            "submitted",
+        }:
+            return {"accepted": True, "reason": ""}
+
+        reason = submission.get("reason") if isinstance(submission, dict) else None
+        if not isinstance(reason, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", reason):
+            reason = "input not accepted"
+        return {"accepted": False, "reason": reason}
 
     def _goal_service(self):
         event_bus = getattr(self, "_event_bus", None)
@@ -2418,8 +2502,10 @@ class LocalStateService(StateService):
         dict when handled, None to fall through to the normal path.
         """
         lowered = text.strip().lower()
-        is_goal = lowered.startswith("/goal ") or lowered.startswith("/goals ") or (
-            lowered in ("/goal", "/goals")
+        is_goal = (
+            lowered.startswith("/goal ")
+            or lowered.startswith("/goals ")
+            or (lowered in ("/goal", "/goals"))
         )
         if not is_goal:
             return None

@@ -309,10 +309,11 @@ class KeyPressHandler:
 
             # Check for slash command mode handling AFTER parsing
             # (so arrow keys work)
-            if self.command_mode != CommandMode.NORMAL:
+            command_mode = self.command_mode
+            if command_mode != CommandMode.NORMAL:
                 logger.info(
                     f"Processing key '{key_press.name}' "
-                    f"in command mode: {self.command_mode}"
+                    f"in command mode: {command_mode}"
                 )
                 if self._handle_command_mode_keypress_callback:
                     handled = await self._handle_command_mode_keypress_callback(
@@ -320,6 +321,15 @@ class KeyPressHandler:
                     )
                     if handled:
                         return
+
+                # A command menu owns its submit keys. Falling through would
+                # route a declined Enter through the generic message handler,
+                # bypassing command-menu argument selection and expansion.
+                if command_mode == CommandMode.MENU_POPUP and key_press.name in (
+                    "Enter",
+                    "Ctrl+J",
+                ):
+                    return
 
             # Emit key press event for plugins
             key_result = await self.event_bus.emit_with_hooks(

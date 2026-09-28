@@ -1,9 +1,11 @@
 """Socket-based messaging between agents."""
 
 import asyncio
+import inspect
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import time
@@ -31,10 +33,38 @@ INBOX_MAX_REPLAY: int = 20
 
 # Idle timeout (seconds) for the off-box read loop. An authenticated remote
 # peer that handshakes then sends nothing (or stops between actions) is dropped
-# after this long, capping the per-connection resource hold. Local unix
-# connections are unbounded (cooperative same-UID peers). Does NOT affect the
-# `attach` live-stream path, which exits the read loop before streaming.
+# after this long. Combined with REMOTE_MAX_CONNECTIONS this bounds remote
+# connection state. Local unix connections are unaffected. Does NOT affect
+# the `attach` live-stream path, which exits the read loop before streaming.
 REMOTE_IDLE_TIMEOUT: float = 30.0
+# Hard limit on concurrently accepted off-box connections per agent. Excess
+# connections are closed before a handler task or handshake state is created.
+REMOTE_MAX_CONNECTIONS: int = 64
+REMOTE_AUTH_VERSION = 2
+REMOTE_HANDSHAKE_MAX_LINE_BYTES = 8192
+REMOTE_PEER_FORWARD_MAX_FRAME_BYTES = 64 * 1024
+REMOTE_PEER_FORWARD_MAX_CONCURRENCY = 8
+REMOTE_PEER_FORWARD_MAX_PER_KEY_PER_MINUTE = 120
+REMOTE_PEER_FORWARD_TIMEOUT = 4.0
+REMOTE_AUTH_DOMAIN = b"kollab.hub.remote-auth.v2\x00"
+REMOTE_AUTH_NONCE_RE = re.compile(r"[0-9a-f]{64}\Z")
+REMOTE_AUTH_SIGNATURE_RE = re.compile(r"[0-9a-f]{128}\Z")
+REMOTE_MESSAGE_AUTH_KEY = "direct_authorization"
+REMOTE_MESSAGE_AUTH_FIELDS = frozenset(
+    {
+        "credential_jws",
+        "grant_jws",
+        "proof_jws",
+        "workspace_id",
+        "purpose",
+        "conversation_id",
+    }
+)
+REMOTE_MESSAGE_ALLOWED_METADATA_FIELDS = frozenset({REMOTE_MESSAGE_AUTH_KEY})
+REMOTE_MESSAGE_METHOD = "POST"
+REMOTE_MESSAGE_PATH = "/hub/direct/message"
+REMOTE_MESSAGE_PURPOSE = "conversation"
+REMOTE_MESSAGE_MAX_TOKEN_BYTES = 16_384
 
 
 def _coerce_line_count(value: Any, default: int) -> int:
@@ -44,6 +74,133 @@ def _coerce_line_count(value: Any, default: int) -> int:
     except (TypeError, ValueError, OverflowError):
         count = default
     return max(1, count)
+
+
+def _remote_auth_bytes(kind: str, *values: str) -> bytes:
+    """Return canonical, domain-separated bytes for remote endpoint auth."""
+    payload = json.dumps(
+        [REMOTE_AUTH_VERSION, kind, *values],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return REMOTE_AUTH_DOMAIN + payload
+
+
+def _valid_remote_designation(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value.encode("utf-8")) <= 256
+        and not any(ord(char) < 33 or ord(char) == 127 for char in value)
+    )
+
+
+def _valid_ed25519_key_hex(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        return len(bytes.fromhex(value)) == 32
+    except ValueError:
+        return False
+
+
+def _remote_message_authorization(message: HubMessage) -> Optional[Dict[str, str]]:
+    """Return a bounded exact-shape owner-grant envelope, or None."""
+    metadata = getattr(message, "metadata", None)
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != REMOTE_MESSAGE_ALLOWED_METADATA_FIELDS
+    ):
+        return None
+    value = metadata.get(REMOTE_MESSAGE_AUTH_KEY)
+    if not isinstance(value, dict) or set(value) != REMOTE_MESSAGE_AUTH_FIELDS:
+        return None
+    result: Dict[str, str] = {}
+    limits = {
+        "credential_jws": REMOTE_MESSAGE_MAX_TOKEN_BYTES,
+        "grant_jws": REMOTE_MESSAGE_MAX_TOKEN_BYTES,
+        "proof_jws": REMOTE_MESSAGE_MAX_TOKEN_BYTES,
+        "workspace_id": 256,
+        "purpose": 64,
+        "conversation_id": 256,
+    }
+    for name, limit in limits.items():
+        field_value = value.get(name)
+        if (
+            not isinstance(field_value, str)
+            or not field_value
+            or len(field_value.encode("utf-8")) > limit
+            or any(ord(char) < 32 or ord(char) == 127 for char in field_value)
+        ):
+            return None
+        result[name] = field_value
+    if result["purpose"] != REMOTE_MESSAGE_PURPOSE:
+        return None
+    if result["conversation_id"] != getattr(message, "thread_id", ""):
+        return None
+    return result
+
+
+def remote_message_proof_body(message: HubMessage) -> bytes:
+    """Canonical JSON body signed by the PrivateDirectory request proof.
+
+    The proof envelope itself is omitted to avoid a circular signature. Every
+    other HubMessage field, including exact message content and thread binding,
+    remains covered by the proof.
+    """
+    payload = message.to_dict()
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("remote message metadata must be an object")
+    metadata = dict(metadata)
+    metadata.pop(REMOTE_MESSAGE_AUTH_KEY, None)
+    payload["metadata"] = metadata
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+class PrivateDirectoryRemoteMessageAuthorizer:
+    """Adapt the existing recipient-owned PrivateDirectory grant to Hub frames.
+
+    The caller must construct this only from its local private directory and
+    exact externally configured HTTPS target URI. It never trusts a target URI
+    supplied by the peer. The authenticated Hub designation key must also be
+    the enrolled device key in the credential.
+    """
+
+    def __init__(self, directory: Any, target_uri: str):
+        self._directory = directory
+        self._target_uri = target_uri
+
+    def __call__(
+        self, peer_designation: str, peer_public_key: str, message: HubMessage
+    ) -> bool:
+        authorization = _remote_message_authorization(message)
+        if authorization is None:
+            return False
+        try:
+            body = remote_message_proof_body(message)
+            principal = self._directory.authorize_request(
+                authorization["credential_jws"],
+                authorization["grant_jws"],
+                authorization["proof_jws"],
+                body=body,
+                method=REMOTE_MESSAGE_METHOD,
+                path=REMOTE_MESSAGE_PATH,
+                target_uri=self._target_uri,
+                recipient_workspace_id=authorization["workspace_id"],
+                purpose=authorization["purpose"],
+                conversation_id=authorization["conversation_id"],
+                message_id=message.id,
+            )
+        except (TypeError, ValueError):
+            return False
+        return principal.public_key.hex() == peer_public_key.lower()
+
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +347,20 @@ class AgentSocketServer:
         self._auth_enabled: bool = False  # OFF until set_dns_auth() enables it
         self._dns_registry: Optional[Any] = None  # AgentRegistry for pubkey lookup
         self._dns_identity: Optional[Any] = None  # IdentityManager for verify
+        self._local_designation: str = ""
+        # Remote Hub messages need a recipient-owned scoped-grant validator.
+        # No callback is installed by the historical endpoint wiring, so the
+        # safe default is to reject remote conversation messages.
+        self._remote_message_authorizer: Optional[Callable[..., Any]] = None
+        # The only remote operator-like action admitted by the off-box server
+        # is an opaque, authenticated peer carrier frame. No Hub message or
+        # model hook is involved in this callback.
+        self._peer_forward_handler: Optional[Callable[..., Any]] = None
+        self._peer_forward_semaphore = asyncio.Semaphore(
+            REMOTE_PEER_FORWARD_MAX_CONCURRENCY
+        )
+        self._peer_forward_rate_minute: int | None = None
+        self._peer_forward_rate_counts: dict[str, int] = {}
 
         # Off-box TCP/TLS endpoint (None until enable_endpoint() is called).
         # Remote connections share _handle_connection but ALWAYS require the
@@ -203,6 +374,9 @@ class AgentSocketServer:
         self._endpoint_bind_error: str = ""
         # Idle read timeout for off-box connections (overridable for tests).
         self._remote_idle_timeout: float = REMOTE_IDLE_TIMEOUT
+        self._remote_connection_limit: int = REMOTE_MAX_CONNECTIONS
+        self._remote_connection_count: int = 0
+        self._remote_connections_rejected: int = 0
 
         # Listening-server shutdown does not close already accepted streams.
         # Own both sides explicitly so stop() can drain connection handlers
@@ -518,6 +692,213 @@ class AgentSocketServer:
         logger.info(f"socket auth succeeded for '{designation}'")
         return designation
 
+    async def _do_remote_handshake(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> Optional[tuple[str, str]]:
+        """Authenticate both endpoint identities using the pinned v2 protocol.
+
+        The server signs its fresh challenge before the client reveals its
+        designation. The client response signs both identities and nonces;
+        the final server signature confirms that same transcript. Remote
+        endpoints never fall back to the legacy greeting behavior.
+        """
+
+        async def reject() -> None:
+            try:
+                writer.write(
+                    b'{"type":"auth_rejected","reason":"authentication failed"}\n'
+                )
+                await writer.drain()
+            except Exception:
+                pass
+
+        server_designation = self._local_designation
+        if (
+            not _valid_remote_designation(server_designation)
+            or self._dns_registry is None
+            or self._dns_identity is None
+        ):
+            await reject()
+            return None
+
+        server_record = self._dns_registry.resolve(server_designation)
+        server_key = getattr(server_record, "public_key", "")
+        if not _valid_ed25519_key_hex(server_key):
+            await reject()
+            return None
+
+        server_nonce = secrets.token_hex(32)
+        challenge_bytes = _remote_auth_bytes(
+            "server_challenge", server_designation, server_nonce
+        )
+        try:
+            server_signature = self._dns_identity.sign_message(
+                server_designation, challenge_bytes
+            )
+        except Exception:
+            await reject()
+            return None
+        if not self._dns_identity.verify_signature(
+            server_key, challenge_bytes, server_signature
+        ):
+            await reject()
+            return None
+
+        challenge = {
+            "type": "auth_challenge",
+            "version": REMOTE_AUTH_VERSION,
+            "designation": server_designation,
+            "nonce": server_nonce,
+            "signature": server_signature,
+        }
+        writer.write((json.dumps(challenge, separators=(",", ":")) + "\n").encode())
+        await writer.drain()
+
+        try:
+            response_line = await asyncio.wait_for(reader.readline(), timeout=10.0)
+        except (asyncio.TimeoutError, ValueError, asyncio.LimitOverrunError):
+            await reject()
+            return None
+        if (
+            not response_line
+            or len(response_line) > REMOTE_HANDSHAKE_MAX_LINE_BYTES
+            or not response_line.endswith(b"\n")
+        ):
+            await reject()
+            return None
+        try:
+            response = json.loads(response_line.decode("utf-8").strip())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            await reject()
+            return None
+        if (
+            not isinstance(response, dict)
+            or set(response)
+            != {"type", "version", "designation", "client_nonce", "signature"}
+            or response.get("type") != "auth_response"
+            or response.get("version") != REMOTE_AUTH_VERSION
+        ):
+            await reject()
+            return None
+
+        client_designation = response.get("designation")
+        client_nonce = response.get("client_nonce")
+        client_signature = response.get("signature")
+        if (
+            not _valid_remote_designation(client_designation)
+            or not isinstance(client_nonce, str)
+            or not REMOTE_AUTH_NONCE_RE.fullmatch(client_nonce)
+            or not isinstance(client_signature, str)
+            or not REMOTE_AUTH_SIGNATURE_RE.fullmatch(client_signature)
+        ):
+            await reject()
+            return None
+
+        client_record = self._dns_registry.resolve(client_designation)
+        client_key = getattr(client_record, "public_key", "")
+        # Remote traffic requires a human-approved peer. Runtime allowlists
+        # and unknown/pending records are not communication authorization.
+        if (
+            client_record is None
+            or getattr(client_record, "approval_state", "") != "approved"
+            or not _valid_ed25519_key_hex(client_key)
+        ):
+            await reject()
+            return None
+
+        transcript = _remote_auth_bytes(
+            "client_response",
+            server_designation,
+            client_designation,
+            server_nonce,
+            client_nonce,
+        )
+        if not self._dns_identity.verify_signature(
+            client_key, transcript, client_signature
+        ):
+            await reject()
+            return None
+
+        server_proof = _remote_auth_bytes(
+            "server_response",
+            server_designation,
+            client_designation,
+            server_nonce,
+            client_nonce,
+        )
+        try:
+            final_signature = self._dns_identity.sign_message(
+                server_designation, server_proof
+            )
+        except Exception:
+            await reject()
+            return None
+        final = {
+            "type": "auth_ok",
+            "version": REMOTE_AUTH_VERSION,
+            "designation": server_designation,
+            "signature": final_signature,
+        }
+        writer.write((json.dumps(final, separators=(",", ":")) + "\n").encode())
+        await writer.drain()
+        return client_designation, client_key.lower()
+
+    def set_remote_message_authorizer(
+        self, authorizer: Optional[Callable[..., Any]]
+    ) -> None:
+        """Install a trusted local validator for recipient-scoped remote grants.
+
+        The callback receives ``(peer_designation, peer_public_key, message)``
+        and must validate the recipient-issued communication grant, its scope,
+        target workspace, message binding, expiry and replay. The endpoint
+        does not trust fields merely because the peer signed them. With no
+        callback, all remote Hub messages are rejected.
+        """
+        if authorizer is not None and not callable(authorizer):
+            raise TypeError("remote message authorizer must be callable")
+        self._remote_message_authorizer = authorizer
+
+    def set_peer_forward_handler(
+        self, handler: Optional[Callable[[str, str, dict], Any]]
+    ) -> None:
+        """Install the opaque peer-carrier handler for authenticated TLS peers.
+
+        The callback receives the designation and key verified by the remote
+        Ed25519 handshake plus the bounded wire frame. It is never called for
+        Unix/local operator requests and has no access to Hub message dispatch.
+        """
+        if handler is not None and not callable(handler):
+            raise TypeError("peer forward handler must be callable")
+        self._peer_forward_handler = handler
+
+    def _allow_peer_forward_rate(self, public_key: str) -> bool:
+        minute = int(time.monotonic() // 60)
+        if minute != self._peer_forward_rate_minute:
+            self._peer_forward_rate_minute = minute
+            self._peer_forward_rate_counts.clear()
+        count = self._peer_forward_rate_counts.get(public_key)
+        if count is None:
+            if len(self._peer_forward_rate_counts) >= 256:
+                return False
+            count = 0
+        if count >= REMOTE_PEER_FORWARD_MAX_PER_KEY_PER_MINUTE:
+            return False
+        self._peer_forward_rate_counts[public_key] = count + 1
+        return True
+
+    def _remote_peer_is_current(self, designation: str, public_key: str) -> bool:
+        """Recheck peer approval and key pin between remote requests."""
+        if not self._dns_registry or not designation or not public_key:
+            return False
+        record = self._dns_registry.resolve(designation)
+        return bool(
+            record
+            and getattr(record, "approval_state", "") == "approved"
+            and str(getattr(record, "public_key", "")).lower() == public_key
+        )
+
     def _accept_connection(
         self,
         reader: asyncio.StreamReader,
@@ -525,10 +906,29 @@ class AgentSocketServer:
         require_auth: bool = False,
     ) -> None:
         """Own an accepted stream until its connection handler is drained."""
+        if require_auth:
+            if self._remote_connection_count >= self._remote_connection_limit:
+                self._remote_connections_rejected += 1
+                logger.debug(
+                    "rejecting remote connection: active limit %d reached",
+                    self._remote_connection_limit,
+                )
+                writer.close()
+                return
+            # This callback runs synchronously on the event loop. Claim the
+            # slot before scheduling a task so a burst cannot race past it.
+            self._remote_connection_count += 1
         self._connection_writers.add(writer)
-        task = asyncio.create_task(
-            self._own_connection(reader, writer, require_auth=require_auth)
-        )
+        try:
+            task = asyncio.create_task(
+                self._own_connection(reader, writer, require_auth=require_auth)
+            )
+        except Exception:
+            if require_auth:
+                self._remote_connection_count -= 1
+            self._connection_writers.discard(writer)
+            writer.close()
+            raise
         self._connection_tasks.add(task)
 
     async def _own_connection(
@@ -550,6 +950,8 @@ class AgentSocketServer:
             self._connection_writers.discard(writer)
             if task is not None:
                 self._connection_tasks.discard(task)
+            if require_auth:
+                self._remote_connection_count -= 1
 
     async def _handle_connection(
         self,
@@ -625,15 +1027,27 @@ class AgentSocketServer:
                     pass
                 return
 
-            authenticated_as = await self._do_handshake(reader, writer)
-            if authenticated_as is None:
-                # Handshake failed — connection already cleaned up in _do_handshake
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-                return
+            authenticated_public_key = ""
+            if require_auth:
+                remote_peer = await self._do_remote_handshake(reader, writer)
+                if remote_peer is None:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+                    return
+                authenticated_as, authenticated_public_key = remote_peer
+            else:
+                authenticated_as = await self._do_handshake(reader, writer)
+                if authenticated_as is None:
+                    # Handshake failed — connection already cleaned up in _do_handshake
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+                    return
             # Connection is now authenticated as `authenticated_as`
             logger.debug(f"connection authenticated as '{authenticated_as}'")
 
@@ -655,23 +1069,172 @@ class AgentSocketServer:
                             self._remote_idle_timeout,
                         )
                         break
+                    except (ValueError, asyncio.LimitOverrunError):
+                        logger.warning("remote connection frame exceeded the read limit")
+                        break
                 else:
                     line = await reader.readline()
                 if not line:
                     break
 
+                # Bound off-box JSON before decoding or invoking any handler.
+                # The relay peer-forward envelope is smaller than this cap;
+                # ordinary Hub requests keep their existing local behavior.
+                if require_auth and len(line) > REMOTE_PEER_FORWARD_MAX_FRAME_BYTES:
+                    writer.write(b'{"type":"error","msg":"remote frame too large"}\n')
+                    await writer.drain()
+                    return
+
                 try:
                     msg_data = json.loads(line.decode().strip())
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
+                if not isinstance(msg_data, dict):
+                    continue
 
                 action = msg_data.get("action", "")
 
+                if require_auth and not self._remote_peer_is_current(
+                    authenticated_as, authenticated_public_key
+                ):
+                    writer.write(
+                        b'{"type":"error","msg":"remote peer is not approved"}\n'
+                    )
+                    await writer.drain()
+                    return
+
+                # A verified peer key grants peer messaging, never operator
+                # access to the local daemon. The same dispatcher backs the
+                # off-box listener and Unix attach/RPC transport, so enforce
+                # this boundary here before any administrative handler runs.
+                local_operator = (
+                    not require_auth
+                    and peer_cred is not None
+                    and peer_cred[1] == os.getuid()
+                )
+                remote_admin = require_auth and action not in (
+                    "message",
+                    "ping",
+                    "peer_forward",
+                )
+                local_admin = not require_auth and action not in ("message", "ping")
+                if remote_admin or (local_admin and not local_operator):
+                    if action == "rpc_request":
+                        rejection = {
+                            "action": "rpc_reply",
+                            "request_id": msg_data.get("request_id", ""),
+                            "error": "local operator authorization required",
+                            "error_kind": "handler",
+                        }
+                    else:
+                        rejection = {
+                            "type": "error",
+                            "msg": "local operator authorization required",
+                        }
+                    writer.write((json.dumps(rejection) + "\n").encode())
+                    await writer.drain()
+                    return
+
                 if action == "message":
                     msg = HubMessage.from_dict(msg_data)
+                    if require_auth:
+                        if (
+                            msg.from_identity != authenticated_as
+                            or msg.scope != "direct"
+                            or msg.action != "message"
+                            or msg.type != "message"
+                            or msg.to != self._local_designation
+                            or msg.force is not False
+                            or _remote_message_authorization(msg) is None
+                        ):
+                            writer.write(
+                                b'{"type":"error","msg":"remote message identity or scope rejected"}\n'
+                            )
+                            await writer.drain()
+                            return
+                        authorizer = self._remote_message_authorizer
+                        if authorizer is None:
+                            writer.write(
+                                b'{"type":"error","msg":"scoped conversation authorization unavailable"}\n'
+                            )
+                            await writer.drain()
+                            return
+                        try:
+                            authorized = authorizer(
+                                authenticated_as, authenticated_public_key, msg
+                            )
+                            if inspect.isawaitable(authorized):
+                                authorized = await authorized
+                        except Exception:
+                            # Do not expose authorization proof or message
+                            # contents through logs or the remote error reply.
+                            logger.warning("remote conversation authorization failed")
+                            authorized = False
+                        if authorized is not True:
+                            writer.write(
+                                b'{"type":"error","msg":"remote conversation is not authorized"}\n'
+                            )
+                            await writer.drain()
+                            return
+                        # The proof material is transport authorization, not
+                        # conversation content. Do not pass bearer credentials
+                        # or one-use proofs into Hub hooks, persistence, or logs.
+                        msg.from_agent = authenticated_as
+                        msg.metadata.clear()
                     await self._on_message(msg)
                     ack = json.dumps({"type": "ack", "id": msg.id}) + "\n"
                     writer.write(ack.encode())
+                    await writer.drain()
+
+                elif action == "peer_forward":
+                    # This route is only for a TLS-authenticated peer. It
+                    # bypasses Hub message hooks, task admission and RPC.
+                    handler = self._peer_forward_handler
+                    ssl_object = writer.get_extra_info("ssl_object")
+                    frame = msg_data.get("frame")
+                    if (
+                        not require_auth
+                        or ssl_object is None
+                        or handler is None
+                        or set(msg_data) != {"action", "frame"}
+                        or not isinstance(frame, dict)
+                        or not self._allow_peer_forward_rate(authenticated_public_key)
+                    ):
+                        writer.write(
+                            b'{"type":"error","msg":"peer forwarding unavailable"}\n'
+                        )
+                        await writer.drain()
+                        return
+                    try:
+                        async with self._peer_forward_semaphore:
+                            async with asyncio.timeout(REMOTE_PEER_FORWARD_TIMEOUT):
+                                result = handler(
+                                    authenticated_as,
+                                    authenticated_public_key,
+                                    frame,
+                                )
+                                if inspect.isawaitable(result):
+                                    result = await result
+                        if not isinstance(result, dict):
+                            raise ValueError("invalid peer forward response")
+                        response_line = json.dumps(
+                            {"type": "peer_forward_result", "response": result},
+                            separators=(",", ":"),
+                        ).encode("utf-8") + b"\n"
+                        if len(response_line) > REMOTE_PEER_FORWARD_MAX_FRAME_BYTES:
+                            raise ValueError("peer forward response too large")
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # Never expose payloads, callback text, or exception
+                        # messages through a remote protocol reply or log.
+                        logger.warning("authenticated peer forwarding failed")
+                        writer.write(
+                            b'{"type":"error","msg":"peer forwarding failed"}\n'
+                        )
+                        await writer.drain()
+                        return
+                    writer.write(response_line)
                     await writer.drain()
 
                 elif action == "ping":
@@ -877,6 +1440,7 @@ class AgentSocketServer:
         registry: Any,
         identity_manager: Any,
         require_auth: bool = False,
+        local_designation: str = "",
     ) -> None:
         """Wire DNS registry + identity manager for Ed25519 handshake auth.
 
@@ -886,6 +1450,7 @@ class AgentSocketServer:
         self._dns_registry = registry
         self._dns_identity = identity_manager
         self._auth_enabled = require_auth
+        self._local_designation = local_designation
         if require_auth:
             logger.info("socket auth enabled (Ed25519 challenge-response)")
         else:
@@ -1205,6 +1770,130 @@ class AgentMessenger:
         return False
 
     @staticmethod
+    async def do_remote_client_handshake(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        identity_manager: Any,
+        designation: str,
+        expected_server_designation: str,
+        expected_server_public_key: str,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Complete mutual v2 auth against a pre-pinned server key.
+
+        Unlike the local Unix handshake, every remote greeting must be a
+        valid signed v2 challenge. A malformed, legacy, or ordinary greeting
+        is a hard failure before the client sends its designation.
+        """
+        if (
+            not _valid_remote_designation(designation)
+            or not _valid_remote_designation(expected_server_designation)
+            or not _valid_ed25519_key_hex(expected_server_public_key)
+        ):
+            return False
+
+        try:
+            greeting_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+        except (asyncio.TimeoutError, ValueError, asyncio.LimitOverrunError):
+            return False
+        if (
+            not greeting_line
+            or len(greeting_line) > REMOTE_HANDSHAKE_MAX_LINE_BYTES
+            or not greeting_line.endswith(b"\n")
+        ):
+            return False
+        try:
+            greeting = json.loads(greeting_line.decode("utf-8").strip())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        if (
+            not isinstance(greeting, dict)
+            or set(greeting) != {"type", "version", "designation", "nonce", "signature"}
+            or greeting.get("type") != "auth_challenge"
+            or greeting.get("version") != REMOTE_AUTH_VERSION
+            or greeting.get("designation") != expected_server_designation
+        ):
+            return False
+
+        server_nonce = greeting.get("nonce")
+        server_signature = greeting.get("signature")
+        if (
+            not isinstance(server_nonce, str)
+            or not REMOTE_AUTH_NONCE_RE.fullmatch(server_nonce)
+            or not isinstance(server_signature, str)
+            or not REMOTE_AUTH_SIGNATURE_RE.fullmatch(server_signature)
+        ):
+            return False
+
+        challenge = _remote_auth_bytes(
+            "server_challenge", expected_server_designation, server_nonce
+        )
+        if not identity_manager.verify_signature(
+            expected_server_public_key, challenge, server_signature
+        ):
+            return False
+
+        client_nonce = secrets.token_hex(32)
+        transcript = _remote_auth_bytes(
+            "client_response",
+            expected_server_designation,
+            designation,
+            server_nonce,
+            client_nonce,
+        )
+        try:
+            client_signature = identity_manager.sign_message(designation, transcript)
+        except Exception:
+            return False
+        response = {
+            "type": "auth_response",
+            "version": REMOTE_AUTH_VERSION,
+            "designation": designation,
+            "client_nonce": client_nonce,
+            "signature": client_signature,
+        }
+        writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
+        await writer.drain()
+
+        try:
+            result_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+        except (asyncio.TimeoutError, ValueError, asyncio.LimitOverrunError):
+            return False
+        if (
+            not result_line
+            or len(result_line) > REMOTE_HANDSHAKE_MAX_LINE_BYTES
+            or not result_line.endswith(b"\n")
+        ):
+            return False
+        try:
+            result = json.loads(result_line.decode("utf-8").strip())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        if (
+            not isinstance(result, dict)
+            or set(result) != {"type", "version", "designation", "signature"}
+            or result.get("type") != "auth_ok"
+            or result.get("version") != REMOTE_AUTH_VERSION
+            or result.get("designation") != expected_server_designation
+        ):
+            return False
+        final_signature = result.get("signature")
+        if not isinstance(
+            final_signature, str
+        ) or not REMOTE_AUTH_SIGNATURE_RE.fullmatch(final_signature):
+            return False
+        server_proof = _remote_auth_bytes(
+            "server_response",
+            expected_server_designation,
+            designation,
+            server_nonce,
+            client_nonce,
+        )
+        return identity_manager.verify_signature(
+            expected_server_public_key, server_proof, final_signature
+        )
+
+    @staticmethod
     async def _open(
         target: str,
         *,
@@ -1235,6 +1924,14 @@ class AgentMessenger:
         )
 
         remote = is_remote_uri(target)
+        if remote and (
+            not isinstance(auth, dict)
+            or not _valid_remote_designation(auth.get("designation"))
+            or not _valid_remote_designation(auth.get("expected_server_designation"))
+            or not _valid_ed25519_key_hex(auth.get("expected_server_public_key"))
+            or auth.get("identity_manager") is None
+        ):
+            raise ConnectionError("remote endpoint requires pinned identity auth")
         if remote:
             parsed = parse_endpoint_uri(target)
             if parsed is None:
@@ -1254,8 +1951,36 @@ class AgentMessenger:
                 timeout=timeout,
             )
 
-        # Remote peers always challenge; local peers only when auth is forced.
-        if auth is not None and (remote or auth.get("require_auth")):
+        if remote:
+            try:
+                ok = await AgentMessenger.do_remote_client_handshake(
+                    reader,
+                    writer,
+                    auth["identity_manager"],
+                    auth["designation"],
+                    auth["expected_server_designation"],
+                    auth["expected_server_public_key"],
+                    timeout=timeout,
+                )
+            except Exception:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+                raise
+            if not ok:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+                raise ConnectionError(
+                    f"remote endpoint authentication failed for {target}"
+                )
+        elif auth is not None and auth.get("require_auth"):
+            # Preserve the legacy, same-host Unix behavior. Remote streams use
+            # only the strict pinned v2 handshake above.
             ok = await AgentMessenger.do_client_handshake(
                 reader,
                 writer,

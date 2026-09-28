@@ -145,18 +145,30 @@ interactive equivalents:
 /hub dns exposes the local identity registry and the historical direct
 TCP/TLS endpoint. `/hub dns endpoint` inspects that listener; its legacy
 "a2a endpoint" label does not indicate standard A2A or WebSocket support.
-`/hub dns connect <domain>` delegates to `/connect`: signed discovery and
-origin pinning, followed by an outbound WSS connection only to an advertised
-compatible relay. It does not import remote keys into the messaging registry.
+`/hub dns connect [domain]` is an alias for `/connect [domain]`. An explicit
+domain performs signed public discovery and attaches the current workspace to
+the advertised relay. Bare `/connect` and `/connect enroll [domain]` open the
+private device-enrollment form. Public relay attachment does not enroll a device
+in a private group; a fresh attachment starts in an empty workspace room and
+does not expose a public roster. Join a shared invitation room to see its peers.
 See [Agent DNS](../architecture/reference/agent-dns-reference.md).
 
 ## Public beacon commands
 
-These commands are available in the current source. Deployment and verification
-status are tracked in the [implementation ledger](../specs/agent-network-implementation-status.md).
+The current source supports public discovery/relay attachment and the private
+enrollment commands below. The enrollment commands are unreleased; PyPI's latest
+`kollab` package remains 0.9.0 and does not include them.
+Deployment and verification status are tracked in the
+[implementation ledger](../specs/agent-network-implementation-status.md).
 
 ```text
-/connect <domain>                  verify signed discovery and attach to an advertised relay
+/connect <domain>                  verify public discovery and attach to its relay
+/connect                           open private code-entry form (default: kollabor.ai)
+/connect enroll [domain]           open the same private code-entry form
+/connect offer [domain]            create/display one private, one-device K1 code
+/connect requests                  list redacted pending enrollment requests
+/connect accept <receipt-id>       explicitly accept a proof-verified enrollment
+/connect reject <receipt-id>       explicitly reject a proof-verified enrollment
 /connect status                    show actual transport state and workspace public key
 /connect invite                    save a private invitation file; display its path only
 /connect join <local-file-path>     verify the invitation's origin, pin inviter, and join
@@ -166,13 +178,63 @@ status are tracked in the [implementation ledger](../specs/agent-network-impleme
 /connect ping <64-hex-key>          request an encrypted presence response
 /connect rotate                    replace the room capability and clear local approvals
 /connect disconnect                close the connection and disable reconnect on launch
+/connect agents [local|peer-key]    list authorized remote agents or quiet local presence
+/connect allow <peer-key> <name>    permit incoming conversations for a local agent
+/connect deny <peer-key> [name]     revoke incoming authority and cancel affected work
+/connect grants                    list receiving and human sending grants
+/connect authorize <address> <request>  authorize one exact initial request for hub_msg
+/connect send <address> <request>   authorize and send that exact human request
+/connect withdraw <grant-id>       withdraw local sending and correlated-return authority
+/connect task <address> <id>        inspect the receiving task state
+/connect cancel <address> <id>      cancel the remote task
 ```
+
+An offer authorizes one new device for five minutes. Its membership credential
+is scoped to `conversation:send`. Enter the displayed K1 code only in the private
+enrollment form. Never place the code in slash-command text, chat, shell input,
+logs, or model context. Code and device-key proof create a durable pending
+request; they do not approve membership. On the local issuer session that
+created the offer, `/connect requests` shows bounded metadata, the destination
+workspace and a shortened device-key fingerprint, without codes, proofs, tokens,
+or membership secrets. When an active supported provider profile is available,
+the request also names its source and destination profiles, provider/model and
+the exact credential category proposed for copying. Use the exact 32-hex receipt
+ID with `/connect accept` or `/connect reject`. Acceptance revalidates the
+active issuer session and requested scope, consumes one device allowance, and
+issues the scoped conversation credential and room invitation. It also sends
+the allowlisted profile settings and one displayed provider credential in a
+device-sealed bundle; the destination installs it atomically and returns a
+device-signed receipt before the issuer approves the peer. Network revocation
+does not revoke a copied credential at its provider. Rejection consumes no
+allowance. Enrollment grants no workspace or tool permission. The
+pending-request API is not exposed as a remote-agent tool; these are local
+operator commands. If the issuer worker or its in-memory code key is gone, the
+request cannot be decided in that process. See the
+[pairing spec](../specs/agent-device-pairing.md) and
+[implementation ledger](../specs/agent-network-implementation-status.md).
 
 Privately transfer the invitation file to the joining computer. Do not paste its
 contents into chat or a command. Joining pins the inviter; the inviter approves
 the joining key before replying to its pings. Room membership permits peer-key
 visibility and ciphertext routing. Workspace tools require separate receiver
 membership, grants, and local permissions. Peer traffic never starts an LLM turn.
+
+The conversation commands above are current development source for the corrected
+release; Kollab 0.9.0 does not include them. A remote address is the complete
+`relay:<key>:<workspace-id>:<agent-id>` from the directory. Receiving permission
+is independent of presence approval and normal tool permissions. Sending grants
+are bound to the exact human request, recipient and sending session, with a
+ten-minute deadline. `/connect send` authorizes and sends one exact request.
+`/connect authorize` returns a grant ID for an exact request. The response
+parser accepts XML `thread` and `thread_id` attributes on `hub_msg` and maps
+either to the internal thread ID; use the same authorized request as the tag
+body. The structured `hub-msg` schema also exposes optional `thread_id`. The
+relay harness supplies the exact pending human grant ID, full destination and
+unchanged request. A supplied unknown ID fails instead of selecting another
+ready grant; this identifier selects an existing grant and cannot create
+authority. A receipt is admission, not completion.
+See the [network implementation ledger](../specs/agent-network-implementation-status.md)
+for remaining conversation and live acceptance requirements.
 
 `/connect invite` already writes its source file with mode `0600`. Check the
 receiving copy after transfer and use `chmod 600 <invitation-file>` in that
@@ -183,10 +245,12 @@ cannot join their own invitation. Self-invitation rejection preserves the curren
 connection. Join errors distinguish local file access, permissions, self-invitation
 and publisher verification without displaying invitation contents.
 
-In attach mode, `/connect` and its `/hub dns connect` alias run through
-`state.hub_connect` on the owning daemon. The viewer does not create another
-relay identity or connection. First use requires an explicit connection;
-subsequent launches may reconnect the enabled workspace.
+In attach mode, code entry and offer creation use typed `state.hub_enroll` and
+`state.hub_enrollment_offer` calls on the owning daemon. Existing `/connect`
+status, invitation, peer, conversation, and enrollment review subcommands use
+`state.hub_connect`; accept/reject RPC arguments contain only a receipt ID. The
+viewer does not create another relay identity or connection. The enrollment
+outcome shown to the viewer is limited to status and a receipt ID.
 
 Run the service from the same application:
 
@@ -703,27 +767,38 @@ executed by: plugins/agent_orchestrator/plugin.py
     <broadcast to="*">stop what you're doing, new priority from the user</broadcast>
 
 
-### hub messaging (mesh peer communication)
+### hub messaging (local mesh and authorized relay communication)
 
 parsed by: plugins/hub/plugin.py (response hook)
-these tags are for communication between hub peers (agents with
-identities that are visible on the mesh).
+These tags reach local Hub peers by identity. The XML response parser also
+accepts a full `relay:<key>:<workspace-id>:<agent-id>` address for an authorized
+remote send. A remote address is not a local Hub identity.
 
 #### <hub_msg> - send message to hub peer
 
   syntax:
     <hub_msg to="identity">message content</hub_msg>
+    <hub_msg to="relay:<key>:<workspace-id>:<agent-id>" thread="<grant-id>">exact authorized request</hub_msg>
 
   how it works:
-    - sends a message to a peer on the hub mesh by identity
+    - local identity targets use the local Hub message path
+    - a full relay address uses the remote relay path and requires a matching
+      human communication grant
     - message is delivered via unix socket when online, or queued in the
       durable identity inbox for a known offline pool identity
     - the receiving agent sees it injected into their conversation
     - the receiving agent's LLM generates a response
-    - all peers on the mesh can observe the message (open channel)
+    - local Hub peer messages are visible to all peers on that local mesh
+    - remote relay messages follow their authenticated destination and are not
+      local open-channel broadcasts
 
   limitations:
-    - target must be a known hub identity (e.g. "lapis", "jarvis")
+    - local target must be a known hub identity (e.g. "lapis", "jarvis")
+    - remote target must be the complete directory address; display names alone
+      are ambiguous
+    - remote sends require human authorization for the exact request and address
+    - the XML parser's grant attribute is `thread`; the structured `hub-msg`
+      tool schema does not currently expose a grant/thread parameter
     - offline delivery is supported for durable pool identities; capture still
       requires a live peer or orchestrator session
     - NOT for orchestrator-managed agents (use <message> instead)

@@ -38,12 +38,20 @@ from .plugin_schema import (
     PluginConfigSchema,
     WidgetType,
 )
+from .provisioned_state import (
+    ProvisionedStateError,
+    ProvisionedStateFile,
+    default_provisioned_state_path,
+)
 from .service import ConfigService
 
 __all__ = [
     "ConfigManager",
     "ConfigLoader",
     "ConfigService",
+    "ProvisionedStateError",
+    "ProvisionedStateFile",
+    "default_provisioned_state_path",
     "LLMTaskConfig",
     "BackgroundTasksConfig",
     "QueueConfig",

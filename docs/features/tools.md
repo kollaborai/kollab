@@ -233,14 +233,24 @@ Common MCP tools:
 
 ### Native Tools
 
-Native tools are defined in the tool executor and exposed via MCP integration:
+Built-in tool definitions come from the tool registry and are executed by the
+normal tool executor. `MCPIntegration` assembles the schemas sent to the model,
+combining built-ins with enabled external MCP tools.
+
+Built-ins do not require an MCP server. In the current source, `--no-mcp` skips
+external discovery and schemas while retaining permitted built-in tools, including
+file and Hub tools. An external discovery error also leaves built-in loading
+available. The active agent's tool scope, `kollabor.llm.native_tool_calling`, and
+the active profile's tool support still apply. Exposing a schema does not bypass
+the workspace's tool permission policy.
 
 File location: `packages/kollabor-agent/src/kollabor_agent/`
 
 - `tool_executor.py` - Main execution engine
 - `file_operations_executor.py` - File operation handlers
 - `shell_executor.py` - Shell command execution
-- `mcp_integration.py` - MCP protocol client
+- `native_tools_handler.py` - Native schema loading and background MCP discovery
+- `mcp_integration.py` - External MCP client and model-facing schema assembly
 
 ### MCP Tools
 

@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kollabor.llm.hook_system import LLMHookSystem
+from kollabor.llm.llm_coordinator import LLMService
+from kollabor.user_input_source import UserInputSource
 from kollabor_ai.message_content import (
     EphemeralImageStore,
     content_to_text,
@@ -239,6 +241,22 @@ async def test_attached_daemon_submission_preserves_mixed_content(
 ) -> None:
     """A real attach socket must deliver image parts into the hook pipeline."""
     event_bus, _, _, hub, _ = await _build_input_pipeline("keyword")
+    input_handler = object.__new__(LLMService)
+    input_handler.event_bus = event_bus
+    event_bus.register_service("llm_service", input_handler)
+
+    async def process_attached_input(_data, _event):
+        return {"status": "queued"}
+
+    assert await event_bus.register_hook(
+        Hook(
+            name="process_user_input",
+            plugin_name="llm_core",
+            event_type=EventType.USER_INPUT,
+            priority=HookPriority.LLM.value,
+            callback=process_attached_input,
+        )
+    )
     received: list[tuple[object, dict]] = []
     delivered = asyncio.Event()
 
@@ -246,7 +264,10 @@ async def test_attached_daemon_submission_preserves_mixed_content(
 
     async def capture_attached_submission(event_type, data, source):
         result = await original_emit_with_hooks(event_type, data, source)
-        if event_type == EventType.USER_INPUT and source == "hub_plugin":
+        if (
+            event_type == EventType.USER_INPUT
+            and source == UserInputSource.HUB_ATTACHMENT.value
+        ):
             received.append((data["message"], result))
             delivered.set()
         return result

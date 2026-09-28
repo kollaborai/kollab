@@ -7,11 +7,14 @@ kollabor-tui (display, status), and kollabor-events (hooks).
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional, cast
 
+from kollabor.user_input_source import UserInputSource
 from kollabor_agent import BackgroundTaskManager, NativeToolsHandler
+from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
-from kollabor_agent.queue_processor import QueueProcessor
+from kollabor_agent.queue_processor import CancellationOrigin, QueueProcessor
 from kollabor_agent.tool_executor import ToolExecutor
 from kollabor_ai import (
     ConversationManager,
@@ -51,6 +54,24 @@ from .status_service import StatusService
 from .streaming_handler import StreamingHandler
 
 logger = logging.getLogger(__name__)
+
+_ACTIVE_OPERATION_PHASES = frozenset(
+    {
+        "provider_request",
+        "provider_streaming",
+        "provider_retry_wait",
+        "provider_response",
+        "provider_failed",
+        "provider_cancelled",
+        "tool_permission",
+        "tool_execution",
+        "tool_complete",
+        "cancellation_cleanup",
+    }
+)
+_ACTIVE_OPERATION_CLEANUP_STATES = frozenset(
+    {"requested", "pending", "complete", "failed", "superseded"}
+)
 
 
 class LLMService:
@@ -318,6 +339,10 @@ class LLMService:
         self._init_stats_and_metrics()
         self._init_components()
         self._init_hooks()
+        # Cancellation cleanup tasks are keyed to their generation. Relay
+        # admission waits for all in-flight cleanup so an older background
+        # cancel cannot reach a later remote turn.
+        self._cancellation_cleanup_tasks: dict[int, asyncio.Task | None] = {}
 
         logger.info("Core LLM Service initialized")
 
@@ -337,6 +362,7 @@ class LLMService:
         self.renderer = renderer
         self.profile_manager = profile_manager
         self.agent_manager = agent_manager
+        self._initialize_active_operation_tracking()
 
         # True once the agent has completed at least one turn. Used by
         # auto_grant_mcp_tools to skip boot-time connects (tools are already
@@ -354,6 +380,21 @@ class LLMService:
         # Load task management configuration using structured dataclass
         task_config_dict = config.get("kollabor.llm.task_management", {})
         self.task_config = LLMTaskConfig.from_dict(task_config_dict)
+
+    def _initialize_active_operation_tracking(self) -> None:
+        self._active_operation_generation = 0
+        self._active_operation: dict[str, Any] = {
+            "task_id": None,
+            "generation": 0,
+            "phase": "idle",
+            "provider": None,
+            "request_id": None,
+            "tool_name": None,
+            "tool_call_id": None,
+            "tool_call_id_generated": False,
+            "cancel_generation": None,
+            "cleanup_state": "none",
+        }
 
     def _init_conversation_system(self, config):
         """Initialize conversation state, logger, and manager."""
@@ -402,6 +443,7 @@ class LLMService:
         )
         # Wire up cancellation callback so tool executor can check for user cancellation
         self.tool_executor.set_cancel_callback(lambda: self.cancel_processing)
+        self.tool_executor.set_operation_observer(self._observe_tool_operation)
 
         # Register as services so plugins can access them
         event_bus.register_service("response_parser", self.response_parser)
@@ -447,6 +489,259 @@ class LLMService:
         # Link session ID for raw log correlation
         self.api_service.set_session_id(self.conversation_logger.session_id)
         self.api_service.set_media_resolver(self.resolve_media)
+        self.api_service.set_operation_observer(self._observe_provider_operation)
+
+    @staticmethod
+    def _safe_operation_task_id(task_id: Any) -> str | None:
+        if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
+            return None
+        return task_id
+
+    @staticmethod
+    def _safe_operation_provider(provider: Any) -> str | None:
+        from kollabor_ai.providers.models import ProviderType
+
+        provider_id = getattr(provider, "value", provider)
+        if not isinstance(provider_id, str):
+            return None
+        allowed = {entry.value for entry in ProviderType}
+        return provider_id if provider_id in allowed else None
+
+    @staticmethod
+    def _safe_operation_tool_name(tool_data: Any) -> str | None:
+        if not isinstance(tool_data, dict):
+            return None
+        candidates = []
+        tool_type = tool_data.get("type")
+        if isinstance(tool_type, str):
+            candidates.append(tool_type.replace("-", "_"))
+        if isinstance(tool_type, str) and tool_type in {"mcp_tool", "mcp-tool"}:
+            name = tool_data.get("name")
+            if isinstance(name, str):
+                candidates.append(name)
+
+        try:
+            from kollabor_agent.tool_registry import get_registry
+
+            registry = get_registry()
+            for candidate in candidates:
+                definition = registry.get_by_native_name(candidate)
+                if definition is None:
+                    definition = registry.get(candidate.replace("_", "-"))
+                if definition is None:
+                    definition = registry.get_by_xml_tag(candidate)
+                if definition is not None:
+                    native_name = definition.native_name
+                    if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", native_name):
+                        return native_name
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _safe_operation_id(value: Any) -> str | None:
+        if not isinstance(value, str) or len(value) > 128:
+            return None
+        return (
+            value
+            if re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value
+            )
+            else None
+        )
+
+    def _operation_context_task_id(self) -> str | None:
+        return self._safe_operation_task_id(remote_task_id.get())
+
+    def _begin_active_operation(
+        self,
+        phase: str,
+        *,
+        task_id: str | None = None,
+        provider: Any = None,
+        request_id: Any = None,
+        tool_name: str | None = None,
+        tool_call_id: Any = None,
+        tool_call_id_generated: bool = False,
+    ) -> int:
+        if phase not in _ACTIVE_OPERATION_PHASES:
+            return self._active_operation_generation
+        current_task_id = self._safe_operation_task_id(task_id)
+        if current_task_id is None:
+            current_task_id = self._operation_context_task_id()
+
+        # A remote operation that has entered cancellation cleanup cannot
+        # become active again under stale work from the same task.
+        if (
+            current_task_id is not None
+            and self._active_operation.get("task_id") == current_task_id
+            and self._active_operation.get("cleanup_state")
+            in {"requested", "pending", "failed", "superseded"}
+        ):
+            return int(self._active_operation.get("generation", 0))
+
+        self._active_operation_generation += 1
+        generation = self._active_operation_generation
+        safe_tool_name = (
+            tool_name
+            if isinstance(tool_name, str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool_name)
+            else None
+        )
+        self._active_operation = {
+            "task_id": current_task_id,
+            "generation": generation,
+            "phase": phase,
+            "provider": self._safe_operation_provider(provider),
+            "request_id": self._safe_operation_id(request_id),
+            "tool_name": safe_tool_name,
+            "tool_call_id": self._safe_operation_id(tool_call_id),
+            "tool_call_id_generated": bool(tool_call_id_generated),
+            "cancel_generation": None,
+            "cleanup_state": "none",
+        }
+        return generation
+
+    def _update_active_operation(
+        self,
+        phase: str,
+        *,
+        task_id: str | None = None,
+        operation_generation: int | None = None,
+        provider: Any = None,
+        request_id: Any = None,
+        tool_name: str | None = None,
+        tool_call_id: Any = None,
+        tool_call_id_generated: bool | None = None,
+    ) -> bool:
+        if phase not in _ACTIVE_OPERATION_PHASES:
+            return False
+        current_task_id = self._safe_operation_task_id(task_id)
+        if current_task_id is None:
+            current_task_id = self._operation_context_task_id()
+        current = self._active_operation
+        if (
+            isinstance(operation_generation, bool)
+            or not isinstance(operation_generation, int)
+            or current.get("generation") != operation_generation
+            or current.get("task_id") != current_task_id
+        ):
+            return False
+        if current.get("cleanup_state") != "none":
+            return False
+
+        current["phase"] = phase
+        if provider is not None:
+            current["provider"] = self._safe_operation_provider(provider)
+        if request_id is not None:
+            current["request_id"] = self._safe_operation_id(request_id)
+        if tool_name is not None:
+            current["tool_name"] = (
+                tool_name
+                if isinstance(tool_name, str)
+                and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool_name)
+                else None
+            )
+        if tool_call_id is not None:
+            current["tool_call_id"] = self._safe_operation_id(tool_call_id)
+        if tool_call_id_generated is not None:
+            current["tool_call_id_generated"] = bool(tool_call_id_generated)
+        return True
+
+    def _observe_provider_operation(
+        self,
+        *,
+        phase: str,
+        provider: Any,
+        request_id: Any,
+        operation_generation: int | None,
+        begin: bool,
+    ) -> int | None:
+        if begin:
+            return self._begin_active_operation(
+                phase,
+                provider=provider,
+                request_id=request_id,
+            )
+        self._update_active_operation(
+            phase,
+            operation_generation=operation_generation,
+            provider=provider,
+            request_id=request_id,
+        )
+        return operation_generation
+
+    def _observe_tool_operation(
+        self,
+        *,
+        phase: str,
+        tool_data: Any,
+        tool_call_id: Any,
+        tool_call_id_generated: bool,
+        operation_generation: int | None,
+        begin: bool,
+    ) -> int | None:
+        tool_name = self._safe_operation_tool_name(tool_data)
+        if begin:
+            return self._begin_active_operation(
+                phase,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tool_call_id_generated=tool_call_id_generated,
+            )
+        self._update_active_operation(
+            phase,
+            operation_generation=operation_generation,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_call_id_generated=tool_call_id_generated,
+        )
+        return operation_generation
+
+    def get_active_operation_snapshot(self) -> dict[str, Any]:
+        """Return a detached, allowlisted owner-visible activity snapshot."""
+        return dict(self._active_operation)
+
+    def _set_operation_cleanup_state(
+        self, task_id: str, cancel_generation: int, cleanup_state: str
+    ) -> bool:
+        safe_task_id = self._safe_operation_task_id(task_id)
+        current = self._active_operation
+        if (
+            safe_task_id is None
+            or current.get("task_id") != safe_task_id
+            or current.get("cancel_generation") != cancel_generation
+        ):
+            return False
+        if cleanup_state not in _ACTIVE_OPERATION_CLEANUP_STATES:
+            return False
+        current["phase"] = "cancellation_cleanup"
+        current["cleanup_state"] = cleanup_state
+        return True
+
+    def _record_operation_cancellation(
+        self, task_id: str, cancel_generation: int
+    ) -> None:
+        safe_task_id = self._safe_operation_task_id(task_id)
+        if safe_task_id is None:
+            return
+        current = self._active_operation
+        if current.get("task_id") != safe_task_id:
+            self._begin_active_operation(
+                "cancellation_cleanup", task_id=safe_task_id
+            )
+            current = self._active_operation
+        current["phase"] = "cancellation_cleanup"
+        current["cancel_generation"] = cancel_generation
+        current["cleanup_state"] = "requested"
+
+    def _mark_current_operation_superseded(self, cancel_generation: int) -> None:
+        current = self._active_operation
+        task_id = current.get("task_id")
+        if task_id is not None:
+            self._set_operation_cleanup_state(
+                task_id, cancel_generation, "superseded"
+            )
 
     def resolve_media(self, media_id: str) -> Optional[str]:
         """Resolve one live pasted image for a provider request."""
@@ -1512,6 +1807,66 @@ class LLMService:
             ),
         }
 
+    async def submit_human_input(
+        self,
+        message: MessageContent,
+        *,
+        source: UserInputSource,
+        pre_displayed: bool = False,
+    ) -> Dict[str, Any]:
+        """Submit trusted human input through the canonical hook pipeline.
+
+        RPC, initial CLI and pipe producers use this method so they receive the
+        same pre/main/post phases exactly once. Internal/model-origin callers
+        cannot select an arbitrary source string here.
+        """
+        if not isinstance(source, UserInputSource):
+            return {"status": "rejected", "reason": "invalid_input_source"}
+
+        emit = getattr(self.event_bus, "emit_with_hooks", None)
+        if not callable(emit):
+            return {"status": "rejected", "reason": "input_pipeline_unavailable"}
+
+        try:
+            outcome = await emit(
+                EventType.USER_INPUT,
+                {
+                    "message": message,
+                    "message_pre_displayed": pre_displayed,
+                },
+                source.value,
+            )
+        except Exception as exc:
+            # Do not include user content or exception text in logs/results.
+            logger.error("Human input event dispatch failed (%s)", type(exc).__name__)
+            return {"status": "rejected", "reason": "input_dispatch_failed"}
+
+        if not isinstance(outcome, dict):
+            return {"status": "rejected", "reason": "invalid_event_result"}
+
+        pre_result = outcome.get("pre") or {}
+        if pre_result.get("cancelled"):
+            return {"status": "cancelled", "phase": "pre_user_input"}
+
+        main_result = outcome.get("main") or {}
+        if main_result.get("cancelled"):
+            return {"status": "cancelled", "phase": "user_input"}
+
+        for hook_result in main_result.get("hook_results", []):
+            if hook_result.get("hook_key") != "llm_core.process_user_input":
+                continue
+            if not hook_result.get("success"):
+                return {
+                    "status": "rejected",
+                    "reason": "input_processing_failed",
+                }
+            result = hook_result.get("result")
+            if isinstance(result, dict):
+                return result
+            return {"status": "rejected", "reason": "invalid_input_result"}
+
+        return {"status": "rejected", "reason": "input_handler_unavailable"}
+
     # --- MessageHandler delegation methods ---
 
     async def _handle_context_injection(
@@ -1569,10 +1924,60 @@ class LLMService:
             await self.event_bus.register_hook(cancel_hook)
             logger.info("Registered cancel hook for attach-mode client")
 
-    def cancel_current_request(self):
-        """Cancel the current processing request."""
+    def cancel_current_request(
+        self,
+        *,
+        origin: CancellationOrigin = "human",
+        task_id: str | None = None,
+    ) -> int | None:
+        """Cancel the current turn and return its cancellation generation.
+
+        Human callers keep the default origin. Relay cancellation is scoped to
+        one remote turn and can be cleared after that turn is idle, but only if
+        no later human or external cancellation superseded its generation.
+        """
+        if origin not in {"human", "remote_task", "external"}:
+            raise ValueError("invalid cancellation origin")
+
+        queue_processor = self._queue_processor
+        if not self.is_processing:
+            # A human ESC can arrive after the provider stopped but while the
+            # bridge is still holding its cancellation latch. Keep that pause
+            # and supersede the bridge token. An idle ESC with no pending
+            # cancellation preserves the existing no-op behavior.
+            if origin == "human" and queue_processor.cancel_processing:
+                previous_generation = queue_processor.cancel_generation
+                if queue_processor.cancel_origin == "remote_task":
+                    self._mark_current_operation_superseded(previous_generation)
+                return queue_processor.request_cancellation(origin="human")
+            return None
+
+        if queue_processor.cancel_processing:
+            if queue_processor.cancel_origin != origin:
+                # Never let a relay stop replace an existing human/external
+                # cancellation. Human input, however, intentionally supersedes
+                # a relay cancellation below.
+                if origin != "human":
+                    return None
+                if queue_processor.cancel_origin == "remote_task":
+                    self._mark_current_operation_superseded(
+                        queue_processor.cancel_generation
+                    )
+            elif origin == "remote_task":
+                # Repeated bridge stop requests for the same turn are
+                # idempotent and retain the token that owns the latch.
+                return queue_processor.cancel_generation
+
+        generation = queue_processor.request_cancellation(origin=origin)
+        cancellation_task_id = self._safe_operation_task_id(task_id)
+        if cancellation_task_id is None:
+            cancellation_task_id = self._operation_context_task_id()
+        if cancellation_task_id is not None:
+            self._record_operation_cancellation(cancellation_task_id, generation)
+            self._set_operation_cleanup_state(
+                cancellation_task_id, generation, "pending"
+            )
         if self.is_processing:
-            self.cancel_processing = True
             # Cancel API request through API service (KISS refactoring)
             self.api_service.cancel_current_request()
             # Cancel any running shell subprocess so ESC interrupts
@@ -1580,13 +1985,118 @@ class LLMService:
             try:
                 coord = self  # alias for clarity in the closure
                 if coord.tool_executor is not None:
-                    coord.create_background_task(
+                    cleanup_task = coord.create_background_task(
                         lambda: coord.tool_executor.cancel_running_tool(),
-                        name="esc_cancel_tool",
+                        name=f"esc_cancel_tool_{generation}",
+                    )
+                    self._prune_cancellation_cleanup_tasks()
+                    self._cancellation_cleanup_tasks[generation] = cleanup_task
+                    cleanup_task.add_done_callback(
+                        lambda _task: self._prune_cancellation_cleanup_tasks()
                     )
             except Exception as e:
+                # A rejected cleanup task must fail closed. Do not let a relay
+                # turn release its token while a subprocess or MCP call may
+                # still be running.
+                if origin == "remote_task":
+                    self._prune_cancellation_cleanup_tasks()
+                    self._cancellation_cleanup_tasks[generation] = None
+                    if cancellation_task_id is not None:
+                        self._set_operation_cleanup_state(
+                            cancellation_task_id, generation, "failed"
+                        )
                 logger.debug(f"Could not cancel running tool: {e}")
             logger.info("Processing cancellation requested")
+        return generation
+
+    def clear_remote_task_cancellation(
+        self, generation: int, *, task_id: str | None = None
+    ) -> bool:
+        """Release an idle relay cancellation only when its token still owns it."""
+        if not self.remote_task_cancellation_ready(generation, task_id=task_id):
+            return False
+        if task_id is not None:
+            if self._active_operation.get("cleanup_state") == "superseded":
+                return False
+        cleared = self._queue_processor.clear_remote_task_cancellation(generation)
+        if task_id is not None:
+            if cleared:
+                self._set_operation_cleanup_state(task_id, generation, "complete")
+            elif (
+                self._queue_processor.cancel_generation != generation
+                or self._queue_processor.cancel_origin != "remote_task"
+            ):
+                self._set_operation_cleanup_state(task_id, generation, "superseded")
+        return cleared
+
+    def remote_task_cancellation_ready(
+        self, generation: int, *, task_id: str | None = None
+    ) -> bool:
+        """Whether cancellation cleanup for this token has completed safely."""
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            return False
+        if task_id is not None:
+            safe_task_id = self._safe_operation_task_id(task_id)
+            operation = self._active_operation
+            if (
+                safe_task_id is None
+                or operation.get("task_id") != safe_task_id
+                or operation.get("cancel_generation") != generation
+                or operation.get("cleanup_state") == "failed"
+            ):
+                return False
+        return self.cancellation_cleanup_ready()
+
+    def cancellation_cleanup_ready(self) -> bool:
+        """Whether any owned cancellation cleanup can still affect a later turn."""
+        self._prune_cancellation_cleanup_tasks()
+        return not self._cancellation_cleanup_tasks
+
+    def _prune_cancellation_cleanup_tasks(self) -> None:
+        """Drop terminal cleanup records once they cannot own a remote latch."""
+        queue_processor = self._queue_processor
+        current_remote_generation = (
+            queue_processor.cancel_generation
+            if queue_processor.cancel_processing
+            and queue_processor.cancel_origin == "remote_task"
+            else None
+        )
+        for generation, task in tuple(self._cancellation_cleanup_tasks.items()):
+            if task is not None and not task.done():
+                continue
+            failed = task is None or task.cancelled()
+            if task is not None and not failed:
+                try:
+                    failed = task.exception() is not None
+                except Exception:
+                    failed = True
+            if failed and generation == current_remote_generation:
+                # The current remote cancellation has no verified cleanup.
+                # Keep its marker and block release until ownership changes.
+                operation = self._active_operation
+                task_id = operation.get("task_id")
+                if (
+                    isinstance(task_id, str)
+                    and operation.get("cancel_generation") == generation
+                ):
+                    self._set_operation_cleanup_state(
+                        task_id, generation, "failed"
+                    )
+                continue
+            operation = self._active_operation
+            operation_task_id = operation.get("task_id")
+            if (
+                not failed
+                and not self.is_processing
+                and current_remote_generation != generation
+                and isinstance(operation_task_id, str)
+                and operation.get("cancel_generation") == generation
+                and operation.get("cleanup_state") not in {"failed", "superseded"}
+            ):
+                self._set_operation_cleanup_state(
+                    operation_task_id, generation, "complete"
+                )
+            self._cancellation_cleanup_tasks.pop(generation, None)
 
     # --- StreamingHandler forwarding methods ---
 
