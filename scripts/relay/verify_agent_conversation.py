@@ -686,6 +686,8 @@ class ProcessRunner:
         command_sent = False
         result_seen = False
         command_output_offset = 0
+        text_sent_at = 0.0
+        echo_text = command_text[1:].lower()
         diagnostic_command = bool(
             connect_arguments and connect_arguments[0] in {"status", "peers", "agents"}
         )
@@ -732,18 +734,10 @@ class ProcessRunner:
                             "info: ready. type your message and press enter",
                             attached_at,
                         )
-                        if attach_reported and ready_at >= 0 and not command_sent:
+                        if attach_reported and ready_at >= 0 and not text_sent_at:
                             command_output_offset = len(captured)
-                            # Type like a person: the TUI treats characters that
-                            # arrive under 50 ms apart (or coalesced over SSH
-                            # with the Enter) as a paste, not a slash command.
-                            for byte in encoded_command:
-                                os.write(master, bytes((byte,)))
-                                time.sleep(0.06)
-                            time.sleep(0.3)
-                            os.write(master, b"\r")
-                            command_sent = True
-                            quiet_since = time.monotonic()
+                            os.write(master, encoded_command)
+                            text_sent_at = time.monotonic()
                         elif (
                             command_sent
                             and "info:"
@@ -761,6 +755,20 @@ class ProcessRunner:
                     break
                 elif result_seen and time.monotonic() - quiet_since >= 0.75:
                     break
+                # Send Enter only after the TUI has echoed the typed command:
+                # text and Enter that arrive together (e.g. coalesced over
+                # SSH) are taken as a multi-line paste, not a slash command.
+                if text_sent_at and not command_sent:
+                    echoed = echo_text in _clean_text(
+                        captured[command_output_offset:].decode(
+                            "utf-8", errors="replace"
+                        )
+                    ).lower()
+                    waited = time.monotonic() - text_sent_at
+                    if (echoed and waited >= 0.3) or waited >= 3.0:
+                        os.write(master, b"\r")
+                        command_sent = True
+                        quiet_since = time.monotonic()
 
             if not command_sent:
                 raise AcceptanceError(
