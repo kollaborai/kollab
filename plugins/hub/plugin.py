@@ -2610,6 +2610,26 @@ class HubPlugin(BasePlugin):
                     ),
                 )
 
+        # A receiving agent's final reply returns to its sender automatically.
+        # Only a question is its to send; refuse anything else before routing,
+        # with an error that says how to reply instead of a generic failure.
+        relay = getattr(self, "_relay_agent", None)
+        if relay is not None and relay._turn.get() is not None and relay_kind != "question":
+            active = relay.active
+            sender = active.record["payload"]["from"] if active else "the sender"
+            error = (
+                "Do not send your answer with hub_msg: your final reply in this turn "
+                f"is returned to {sender} automatically. Write the answer as your "
+                "normal reply. hub_msg is only for one kind='question' to the sender."
+            )
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                output=error,
+                error=error,
+            )
+
         # Auto-detect idle chatter
         any_wait = wait_attr in ("true", "yes", "1")
         if not any_wait:

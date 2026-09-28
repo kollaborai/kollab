@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Relay conversations no longer fill the transcript with errors and filler. A
+  receiving agent that tries to send its answer with `hub_msg` gets an
+  actionable error (its final reply returns automatically; only one
+  `kind='question'` is allowed). Progress events are shown to the human without
+  starting a sender model turn, and turns started by relay events no longer
+  offer tools they would refuse.
+
 ## [0.10.6] - 2026-09-28
 
 ### Fixed
