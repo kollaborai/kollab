@@ -2267,21 +2267,37 @@ try:
 except Exception:
     print(json.dumps({"accepted":False,"reason":"state_rpc_unavailable"}))
 """
-    result = runner.python(
-        endpoint,
-        source,
-        [str(endpoint.workspace), endpoint.agent],
-        input_bytes=json.dumps({"message": message}, ensure_ascii=False).encode(
-            "utf-8"
-        ),
-        timeout=45,
-    )
-    value = _json_object(_require_success(result, endpoint.label + ".human_input"))
-    if value.get("accepted") is not True:
-        raise AcceptanceError(
-            "human_input_not_accepted", "the endpoint did not accept the human turn"
+    # A person typing into a busy agent waits for the current turn to finish;
+    # retry only that transient refusal, for a bounded time.
+    deadline = time.monotonic() + 60
+    while True:
+        result = runner.python(
+            endpoint,
+            source,
+            [str(endpoint.workspace), endpoint.agent],
+            input_bytes=json.dumps({"message": message}, ensure_ascii=False).encode(
+                "utf-8"
+            ),
+            timeout=45,
         )
-    return {"accepted": True, "source": "state.send_message/STATE_RPC"}
+        value = _json_object(
+            _require_success(result, endpoint.label + ".human_input")
+        )
+        if value.get("accepted") is True:
+            return {"accepted": True, "source": "state.send_message/STATE_RPC"}
+        reason = value.get("reason")
+        if reason == "turn already in flight" and time.monotonic() < deadline:
+            time.sleep(1.0)
+            continue
+        safe_reason = (
+            reason
+            if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_ ]{1,64}", reason)
+            else "unknown"
+        )
+        raise AcceptanceError(
+            "human_input_not_accepted",
+            f"the endpoint did not accept the human turn ({safe_reason})",
+        )
 
 
 def _wait_for_outbound_grant(

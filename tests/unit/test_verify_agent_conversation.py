@@ -2135,6 +2135,43 @@ def test_artifact_directory_rejects_world_readable_existing_base(tmp_path):
     assert raised.value.code == "artifact_path_unsafe"
 
 
+def test_submit_human_input_waits_out_a_turn_in_flight(tmp_path, monkeypatch):
+    # Live run 53334887: the human answer arrived while the sender was still in
+    # a turn and was refused once; a person would simply retry.
+    replies = iter(
+        [
+            {"accepted": False, "reason": "turn already in flight"},
+            {"accepted": True, "reason": ""},
+        ]
+    )
+
+    class BusyThenIdleRunner:
+        calls = 0
+
+        def python(self, endpoint, source, arguments=(), **kwargs):
+            BusyThenIdleRunner.calls += 1
+            return harness.CommandResult(0, json.dumps(next(replies)), "")
+
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+    endpoint = harness.Endpoint("local", tmp_path.resolve(), "lapis")
+    message = (
+        f"Please ask relay:{REMOTE_KEY}:{REMOTE_WORKSPACE_ID}:koordinator to "
+        "create one acceptance file"
+    )
+    evidence = harness._submit_human_input(BusyThenIdleRunner(), endpoint, message)
+    assert evidence["accepted"] is True
+    assert BusyThenIdleRunner.calls == 2
+
+    class RefusingRunner:
+        def python(self, endpoint, source, arguments=(), **kwargs):
+            return harness.CommandResult(
+                0, json.dumps({"accepted": False, "reason": "no llm service"}), ""
+            )
+
+    with pytest.raises(harness.AcceptanceError, match="no llm service"):
+        harness._submit_human_input(RefusingRunner(), endpoint, message)
+
+
 def test_submit_human_input_uses_state_rpc_and_keeps_prompt_off_command_arguments(
     tmp_path,
 ):
