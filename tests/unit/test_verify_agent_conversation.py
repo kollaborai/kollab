@@ -920,7 +920,9 @@ def test_bounded_trace_reader_uses_recent_tail_and_drops_partial_records(tmp_pat
     raw_dir.mkdir(mode=0o755)
     raw_path = raw_dir / "large_raw.jsonl"
     raw_path.write_bytes(
-        b'{"old":"' + b"x" * (3 * 1024 * 1024) + b'"}\n{"marker":"recent-complete"}\n'
+        b'{"old":"'
+        + b"x" * (harness.TRACE_FILE_READ_MAX_BYTES + 1024 * 1024)
+        + b'"}\n{"marker":"recent-complete"}\n'
     )
     raw_path.chmod(0o600)
 
@@ -1096,7 +1098,9 @@ def test_bounded_trace_reader_enforces_total_byte_budget(tmp_path):
     raw_dir.mkdir(mode=0o755)
     row = b'{"marker":"x"}\n'
     payload = row * (harness.TRACE_FILE_READ_MAX_BYTES // len(row))
-    for index in range(9):
+    # One more full-size file than the total budget holds.
+    files = harness.TRACE_TOTAL_READ_MAX_BYTES // harness.TRACE_FILE_READ_MAX_BYTES + 1
+    for index in range(files):
         raw_path = raw_dir / f"trace-{index:02d}_raw.jsonl"
         raw_path.write_bytes(payload)
         raw_path.chmod(0o600)

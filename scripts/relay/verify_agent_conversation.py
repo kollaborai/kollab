@@ -86,8 +86,8 @@ VERSION_RE = re.compile(r"\bkollab(?:or)?\s+(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\b", 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 TASK_DEADLINE_MAX = 600
 INTERACTIVE_OUTPUT_MAX_BYTES = 1_048_576
-TRACE_FILE_READ_MAX_BYTES = 2 * 1024 * 1024
-TRACE_TOTAL_READ_MAX_BYTES = 16 * 1024 * 1024
+TRACE_FILE_READ_MAX_BYTES = 16 * 1024 * 1024
+TRACE_TOTAL_READ_MAX_BYTES = 64 * 1024 * 1024
 TRACE_MAX_FILES = 40
 TRACE_MAX_DIRECTORY_ENTRIES = 4096
 TRACE_MAX_RECORDS = 20_000
@@ -111,8 +111,8 @@ _trace_state = {
     "reasons": {},
     "expected": {},
 }
-_TRACE_FILE_READ_MAX_BYTES = 2 * 1024 * 1024
-_TRACE_TOTAL_READ_MAX_BYTES = 16 * 1024 * 1024
+_TRACE_FILE_READ_MAX_BYTES = 16 * 1024 * 1024
+_TRACE_TOTAL_READ_MAX_BYTES = 64 * 1024 * 1024
 _TRACE_MAX_FILES = 40
 _TRACE_MAX_DIRECTORY_ENTRIES = 4096
 _TRACE_MAX_RECORDS = 20000
@@ -2341,8 +2341,8 @@ def safe_read(path,limit):
     return trace_safe_read(path,limit)
 def recent_paths(directory,pattern,count,limit):
     return trace_recent_paths(directory,pattern,count,limit)
-for path in recent_paths(conversations,"*.jsonl",30,5*1024*1024):
-    try: raw=safe_read(path,5*1024*1024)
+for path in recent_paths(conversations,"*.jsonl",30,16*1024*1024):
+    try: raw=safe_read(path,16*1024*1024)
     except OSError: continue
     for line in raw.splitlines():
         try: item=json.loads(line)
@@ -2354,8 +2354,8 @@ for path in recent_paths(conversations,"*.jsonl",30,5*1024*1024):
                 tool_results[tool_id]=content
 rawdir=conversations/"raw"
 if rawdir.is_dir() and not rawdir.is_symlink():
-    for path in recent_paths(rawdir,"*_raw.jsonl",20,5*1024*1024):
-        try: raw=safe_read(path,5*1024*1024)
+    for path in recent_paths(rawdir,"*_raw.jsonl",20,16*1024*1024):
+        try: raw=safe_read(path,16*1024*1024)
         except OSError: continue
         for line in raw.splitlines():
             try: item=json.loads(line)
@@ -2454,8 +2454,8 @@ def arguments(value):
             return parsed if isinstance(parsed,dict) else {}
         except (ValueError,TypeError): return {}
     return {}
-for path in recent_paths(conversations/"raw","*_raw.jsonl",30,5*1024*1024):
-    try: raw=safe_read(path,5*1024*1024)
+for path in recent_paths(conversations/"raw","*_raw.jsonl",30,16*1024*1024):
+    try: raw=safe_read(path,16*1024*1024)
     except OSError: continue
     for line in raw.splitlines():
         try: item=json.loads(line)
@@ -2498,8 +2498,8 @@ for path in recent_paths(conversations/"raw","*_raw.jsonl",30,5*1024*1024):
                     == expected_hash
                 ):
                     xml_calls += 1
-for path in recent_paths(conversations,"*.jsonl",30,5*1024*1024):
-    try: raw=safe_read(path,5*1024*1024)
+for path in recent_paths(conversations,"*.jsonl",30,16*1024*1024):
+    try: raw=safe_read(path,16*1024*1024)
     except OSError: continue
     for line in raw.splitlines():
         try: item=json.loads(line)
@@ -2757,9 +2757,9 @@ def arguments(call):
     return {}
 
 
-for path in recent_paths(conversations, "*.jsonl", 40, 5 * 1024 * 1024):
+for path in recent_paths(conversations, "*.jsonl", 40, 16 * 1024 * 1024):
     try:
-        raw = safe_read(path, 5 * 1024 * 1024)
+        raw = safe_read(path, 16 * 1024 * 1024)
     except OSError:
         continue
     for line in raw.splitlines():
@@ -2801,9 +2801,9 @@ report = {
 }
 
 raw_records = []
-for path in recent_paths(conversations / "raw", "*_raw.jsonl", 40, 5 * 1024 * 1024):
+for path in recent_paths(conversations / "raw", "*_raw.jsonl", 40, 16 * 1024 * 1024):
     try:
-        raw = safe_read(path, 5 * 1024 * 1024)
+        raw = safe_read(path, 16 * 1024 * 1024)
     except OSError:
         continue
     for line_number, line in enumerate(raw.splitlines()):
@@ -3246,10 +3246,10 @@ try:
             matching_message_count = 0
             complete_metadata_observed = False
             for path in recent_paths(
-                conversations / "raw", "*_raw.jsonl", 30, 5 * 1024 * 1024
+                conversations / "raw", "*_raw.jsonl", 30, 16 * 1024 * 1024
             ):
                 try:
-                    raw = safe_read(path, 5 * 1024 * 1024)
+                    raw = safe_read(path, 16 * 1024 * 1024)
                 except OSError:
                     continue
                 for line in raw.splitlines():
@@ -4363,7 +4363,7 @@ def safe_read(path, limit):
 
 
 def recent_paths(directory, limit=40):
-    return trace_recent_paths(directory, "*_raw.jsonl", limit, 5 * 1024 * 1024)
+    return trace_recent_paths(directory, "*_raw.jsonl", limit, 16 * 1024 * 1024)
 
 
 def user_texts(value):
@@ -4402,7 +4402,7 @@ def arguments(call):
 
 for path in recent_paths(raw_dir):
     try:
-        raw = safe_read(path, 5 * 1024 * 1024)
+        raw = safe_read(path, 16 * 1024 * 1024)
     except OSError:
         continue
     for line in raw.splitlines():
