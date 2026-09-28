@@ -7,12 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-09-28
+
+### Added
+
+- Added voice mode (`/voicemode`, aliases `/vm` and `/voice`) on macOS: local
+  transcription, spoken and display response channels, and a local classifier
+  deciding what to speak. Voice starts only on an explicit command; the audio
+  runtime and models install on demand and add nothing to the base install.
+  Echo cancellation is not implemented and the compact status row is still
+  being repaired.
+- Web UI: pick an agent bundle and workspace when starting a session, manage
+  profiles, and manage MCP servers from the toolbar. The engine applies the MCP
+  servers requested for a new session.
+
 ### Fixed
 
 - `/connect accept` explains when a relay restart or reconnect ended the relay
   session a code was issued under, instead of reporting "unauthorized". The
   relay keeps no durable state, so a restart ends in-flight enrollments; create
   a new code (#94).
+- `kollab relay run` workers stop themselves when their supervisor dies without
+  a clean stop, and startup waits out a previous owner's lease instead of giving
+  up after 45 seconds (#97).
+- Goals: pasted text expands in command mode, `goal_report` accepts multi-line
+  evidence references and reports detail when no turn is in flight, and pausing
+  discards held completions.
+- Tool output budgets never return an empty result, input typed during startup
+  is re-queued instead of dropped, compaction keeps coordination state across a
+  restart, and the command executor shows handler errors instead of only
+  logging them.
+
+### Documentation
+
+- Exact walkthroughs for hosting kollabor.ai, self-hosting, enrollment by code,
+  discovering agents, approving contact, conversing and revoking access.
 
 ## [0.10.1] - 2026-09-28
 
