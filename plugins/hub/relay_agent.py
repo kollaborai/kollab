@@ -1855,7 +1855,7 @@ class RelayAgentBridge:
                 logger.warning(
                     "remote directory for peer %s unavailable: %s",
                     peer_key[:12],
-                    type(exc).__name__,
+                    str(exc)[:200],
                 )
                 continue
         valid_keys = {

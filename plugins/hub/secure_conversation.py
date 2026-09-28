@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -30,6 +31,8 @@ from .secure_session import (
     identity_certificate,
     identity_public_key,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_SECURE_SESSIONS = 64
 MAX_SECURE_SESSIONS_PER_PEER = 8
@@ -198,8 +201,15 @@ class SecureConversationTransport:
         except asyncio.CancelledError:
             self._discard_outbound(key)
             raise
-        except Exception:
+        except Exception as exc:
             self._discard_outbound(key)
+            logger.warning(
+                "secure %s request to %s failed: %s: %s",
+                method,
+                peer_key[:12],
+                type(exc).__name__,
+                str(exc)[:200],
+            )
             raise RelayError("secure conversation transport failed") from None
 
     async def handle_packet(
