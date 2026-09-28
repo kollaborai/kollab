@@ -156,8 +156,7 @@ See [Agent DNS](../architecture/reference/agent-dns-reference.md).
 ## Public beacon commands
 
 The current source supports public discovery/relay attachment and the private
-enrollment commands below. The enrollment commands are unreleased; PyPI's latest
-`kollab` package remains 0.9.0 and does not include them.
+enrollment commands below. The enrollment commands ship in Kollab 0.10.0.
 Deployment and verification status are tracked in the
 [implementation ledger](../specs/agent-network-implementation-status.md).
 
@@ -189,7 +188,9 @@ Deployment and verification status are tracked in the
 /connect cancel <address> <id>      cancel the remote task
 ```
 
-An offer authorizes one new device for five minutes. Its membership credential
+Only the agent holding the discovery domain's coordinator key can create an
+offer; on kollabor.ai that is the beacon operator. An offer authorizes one new
+device for five minutes. Its membership credential
 is scoped to `conversation:send`. Enter the displayed K1 code only in the private
 enrollment form. Never place the code in slash-command text, chat, shell input,
 logs, or model context. Code and device-key proof create a durable pending
@@ -219,8 +220,7 @@ the joining key before replying to its pings. Room membership permits peer-key
 visibility and ciphertext routing. Workspace tools require separate receiver
 membership, grants, and local permissions. Peer traffic never starts an LLM turn.
 
-The conversation commands above are current development source for the corrected
-release; Kollab 0.9.0 does not include them. A remote address is the complete
+The conversation commands above ship in Kollab 0.10.0. A remote address is the complete
 `relay:<key>:<workspace-id>:<agent-id>` from the directory. Receiving permission
 is independent of presence approval and normal tool permissions. Sending grants
 are bound to the exact human request, recipient and sending session, with a

@@ -6,11 +6,13 @@ covered pairing, attached `/connect status`, the core model/tool/file
 exchange, question/answer, follow-up, cancellation, reconnect, and rejection
 of unauthorized, revoked, replayed and wrong-workspace requests. This is source
 evidence, not a release. Still open: live code enrollment, installed-package
-acceptance, peer-mesh direct/LAN/multihop routes, and measured capacity. The
+acceptance, peer-mesh direct/LAN/multihop routes, and measured capacity.
+Code offers require the discovery domain's coordinator key, so on kollabor.ai
+only the beacon operator can issue codes; per-network issuers are not built. The
 defects fixed on the way are listed in
 [the goal tracker](../operations/agent-network-goal-wbs.md#live-acceptance-on-current-source-2026-09-28).
 
-Updated: 2026-09-27 UTC. The full networking design remains the acceptance contract. The 0.9.0 release baseline delivered discovery and encrypted presence, and did not satisfy the requested agent-to-agent workflow. Historical evidence below retains its original scope. A pre-existing direct Hub endpoint dialer can reach manually configured, approved remote endpoints for ordinary Hub messages. Separately, unreleased RelayAgent source carries message, status, cancellation, and reply traffic inside pinned TLS 1.3 peer sessions over RelayClient; this is not a direct socket route. Two real Mac-to-alzan-prod model/tool/file/reply exchanges and attached status checks passed on development source. A later guidance-candidate run admitted a same-task Q&A and delivered its question to the sender, but the verifier stopped before the human answer and task resumption were proven. Full live acceptance and published-package proof remain open. Enrollment is partial, and signed peer-mesh routing foundations are still not connected to Hub. The full network is not complete.
+Updated: 2026-09-27 UTC. The full networking design remains the acceptance contract. The 0.9.0 release baseline delivered discovery and encrypted presence, and did not satisfy the requested agent-to-agent workflow. Historical evidence below retains its original scope. A pre-existing direct Hub endpoint dialer can reach manually configured, approved remote endpoints for ordinary Hub messages. Separately, Kollab 0.10.0's RelayAgent source carries message, status, cancellation, and reply traffic inside pinned TLS 1.3 peer sessions over RelayClient; this is not a direct socket route. Two real Mac-to-alzan-prod model/tool/file/reply exchanges and attached status checks passed on development source. A later guidance-candidate run admitted a same-task Q&A and delivered its question to the sender, but the verifier stopped before the human answer and task resumption were proven. Full live acceptance and published-package proof remain open. Enrollment is partial, and signed peer-mesh routing foundations are still not connected to Hub. The full network is not complete.
 
 ## Required enrollment UX clarification
 
@@ -22,7 +24,7 @@ request, an explicit accept/reject decision by the local issuer, and
 device-encrypted provisioning. The code itself is not approval. See
 [the enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
 
-Status: partial unreleased source, not published or fully deployed. The source
+Status: partial source, ships in Kollab 0.10.0; not fully deployed. The source
 has private `/connect`/`/connect enroll` code entry and `/connect offer`, K1
 proof handling, one-device/five-minute offers, and a durable local delegation
 bound to conversation and any explicitly listed provider category. A verified
@@ -145,7 +147,7 @@ Read-only public observations (chronological; each timestamp is a separate check
   as a public GET route; no public POST was attempted, so it does not establish
   whether POST enrollment traffic is forwarded by the deployed proxy.
 
-Enrollment admission limits in current unreleased source (not live capacity proof):
+Enrollment admission limits in Kollab 0.10.0 (not live capacity proof):
 the relay limits ordinary source-IP/endpoint buckets to 10 requests per 60-second
 bucket and issuer/reply polling buckets to 60. At most 65,536 active
 source-IP/endpoint rate buckets are retained. Signed-request nonces expire after
@@ -237,7 +239,7 @@ local operator methods.
 
 ### Forward-secret direct conversation channel
 
-Unreleased source now wraps message, task-status and cancellation application
+Kollab 0.10.0 wraps message, task-status and cancellation application
 payloads in mutually authenticated TLS 1.3 before sending them through the
 existing RelayClient Box channel. The peer's public self-signed Ed25519
 certificate is retrieved as public bootstrap material and pinned to the
@@ -339,7 +341,7 @@ Python 3.13. A private environment at
 0.9.0 packages; `pip check` passed and a fresh interactive zsh resolves `kollab`.
 After the human's OpenAI login, a real provider request in
 `/home/almazan/kollab-relay-proof.q5GZCg` returned `KOLLAB_PROVIDER_READY` with
-exit 0. This proves provider access for the installed baseline, not the unreleased
+exit 0. This proves provider access for the installed baseline, not the Kollab 0.10.0
 relay model/tool conversation. The public discovery/health check at 06:07 UTC
 returned identical aliases (revision 256) and 2/2 ready relay workers. Preserve
 that check as historical evidence; the newer read-only check at 09:44 UTC above
@@ -405,7 +407,7 @@ Local TLS evidence demonstrates encrypted peer presence, invitation-room isolati
 
 Current contract and walkthroughs: [public beacon](agent-public-beacon.md). Deployment, recovery and capacity details: [public relay record](../operations/relay-deployment-2026-09-27.md). A separate Redis Cluster probe recovered after shard movement and primary failover; Valkey Cluster interoperability was not tested. This follow-on supersedes the earlier decision to defer forwarding; it does not alter the workspace permission boundary.
 
-Current unreleased source also bounds each worker's pending and in-flight
+Kollab 0.10.0 also bounds each worker's pending and in-flight
 backplane work by item count and a 16 MiB estimated retained-payload budget;
 overloaded routes receive negative acknowledgements. Room-change invalidations
 coalesce, with one follow-up retained when a room changes during refresh. After
@@ -504,7 +506,7 @@ This update is a scoped WIP checkpoint. No push or publication was made; shared 
 - The private directory exposes one configured destination. There is no machine-wide quiet workspace catalog, multi-server roster replication or presence consensus yet.
 - Membership and revocations are installed explicitly at each receiver. Revocation is effective there once persisted; cross-device revocation synchronization is not implemented. Local issuer recovery resumes only the exact approved mailbox exchange after owner/relay/origin/room/workspace/device/scope checks. Terminal revoked or expired incomplete rows are cleaned only when durable state shows `peer_approved` false and no installation receipt: the owner-signed credential must match the exact stored token and destination key before its credential ID is revoked. A stale row for a peer already marked approved is deleted without revocation; a receipt with unresolved peer approval or any scope mismatch is preserved with fixed-code backoff and redacted aggregate status. Real relay-process restart proof remains open.
 - The local operator assertion of human approval is a trusted API boundary. Remote routes cannot approve pairing or mint grants; local code holding the owner key remains authoritative.
-- Direct connection succeeded for the initial local A2A protocol proof. The 0.9.0 relay deployment proved application-encrypted ping/pong only; later unreleased source carried a real model/tool/file/reply flow as mutual-TLS records over the relay and passed one live two-host run. This does not prove direct NAT traversal, multihop routing, or a durable offline queue. TLS termination at intermediaries alone is not application-level end-to-end encryption.
+- Direct connection succeeded for the initial local A2A protocol proof. The 0.9.0 relay deployment proved application-encrypted ping/pong only; the 0.10.0 source later carried a real model/tool/file/reply flow as mutual-TLS records over the relay and passed two full live two-host acceptance runs on 2026-09-28. This does not prove direct NAT traversal, multihop routing, or a durable offline queue. TLS termination at intermediaries alone is not application-level end-to-end encryption.
 - The receiver assumes trusted local workspace processes. Symlink/path checks are not an operating-system sandbox against concurrent malicious local filesystem mutation.
 - A public remote HTTPS receiver, a general LLM coding task and a full product `/network` or `/relay` UX need separate implementation/deployment evidence.
 

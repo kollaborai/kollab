@@ -133,7 +133,7 @@ The retailer example exposed a necessary distinction: receiving a connection thr
 
 Origin identity must survive forwarding, so a recipient can distinguish the requesting agent from an intermediary. End-to-end encryption of agent payloads is a requirement. TLS to a rendezvous/relay service protects that connection; a separately authenticated secure session between agent endpoints protects their payloads from forwarding operators. The handshake must bind the session to independently verified peer identities. This architecture does not prescribe one protocol for every route; the current direct-peer implementation is described below. See the walkthrough's security contract and primary references.
 
-Current unreleased source establishes an end-to-end peer TLS session for
+Kollab 0.10.0 establishes an end-to-end peer TLS session for
 conversation traffic, but the RelayAgent bridge carries its TLS records inside
 the existing RelayClient encrypted application channel. It is not a direct
 socket route. `plugins/hub/secure_conversation.py` fetches the peer's public
@@ -179,12 +179,12 @@ the wider network.
 
 ## Connection UX and configuration
 
-Current unreleased source uses `/connect <domain>` for signed public discovery
+Kollab 0.10.0 uses `/connect <domain>` for signed public discovery
 and attaches to a compatible advertised relay. Bare `/connect` and
 `/connect enroll [domain]` open private device-code entry; `/connect offer
 [domain]` creates a private offer, and `/connect requests`, `accept`, and
 `reject` support explicit local review. Device enrollment and provisioning
-remain partial and unreleased. The generic direct-address flow and broader
+remain partial in Kollab 0.10.0. The generic direct-address flow and broader
 `network`/`relay` command families below remain proposals:
 
 - Generic `/connect <address>`: contact a supplied starting peer or discover a local one.
@@ -254,17 +254,19 @@ The earlier [domain-contract inspection](agent-domain-discovery-contract.md) rec
 1. **Household discovery:** two independently installed instances on one LAN discover each other without a separately installed central service. Discovery alone does not grant private-group membership.
 2. **New device enrollment:** a new computer uses `/connect` private code entry through any supported starting peer. The code creates a pending enrollment request. A trusted agent may approve it only under a prior runtime-enforced human delegation, bounded by network/profile, device allowance and expiry. Successful approval delivers device-encrypted configuration and explicitly authorized credentials; then it can find the user's existing agents. An unrelated anonymous participant cannot obtain the same private roster. Codes and secrets never enter model/chat history. See the [enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
 
-   Current unreleased source is partial against scenario 2: private code entry,
+   Kollab 0.10.0 is partial against scenario 2: private code entry,
    `/connect offer`, redacted `/connect requests`, and explicit local
    `/connect accept` and `/connect reject` commands exist. Offers authorize one
    device for five minutes, and the durable delegation is limited to
    `conversation:send`. Code and destination-key proof create a pending request;
-   they do not approve it. Acceptance issues only the narrow conversation
-   credential and room invitation. No encrypted configuration bundle,
-   provider credential, private roster, workspace grant, or tool permission is
-   provisioned. The pending mailbox key and worker remain process-local, so a
-   restart fails closed for an in-flight exchange. These requirements remain
-   acceptance gates.
+   they do not approve it. Acceptance issues the narrow conversation
+   credential and room invitation, and, when a supported active profile is
+   available, a device-sealed bundle carrying allowlisted profile settings and
+   one provider credential, installed atomically and confirmed by a
+   device-signed receipt before peer approval. No private roster, workspace
+   grant, or tool permission is provisioned. The pending mailbox key and worker
+   remain process-local, so a restart fails closed for an in-flight exchange.
+   These requirements remain acceptance gates.
 3. **Remote workspace execution:** an agent on computer A requests an authorized change from an agent on server B. B performs the work through its normal tools in B's workspace, and A receives a correlated result.
 4. **Peer forwarding:** A reaches B through peer C when A cannot dial B directly. C does not become the apparent author of A's request.
 5. **Peer loss:** an interrupted route recovers through an already available alternate path, or reports no route. A new participant can use an alternate bootstrap peer. The test must not assume an alternate path always exists.
