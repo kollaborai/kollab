@@ -8,7 +8,7 @@ import pytest
 from plugins.hub import enrollment_codes as codes
 
 OFFER_ID = "00112233445566778899aabbccddeeff"
-SECRET = "0123456789ABCDEFGHJK"
+SECRET = "0123456789ABCDEFGHJK"  # gitleaks:allow (test fixture)
 DISPLAY_CODE = f"K1-{OFFER_ID}-0123-4567-89AB-CDEF-GHJK"
 
 

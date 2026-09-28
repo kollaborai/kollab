@@ -944,7 +944,7 @@ class PrivateDirectory:
             "target_id": credential_id,
         }
         revocation_token = _sign_jws(
-            revocation_claims, owner_signing_key, kid=self.owner_id
+            revocation_claims, owner_signing_key, kid=self.owner_id  # gitleaks:allow
         )
         with self._mutating_state(now=timestamp) as state:
             if state["members"].get(credential_id) != token:

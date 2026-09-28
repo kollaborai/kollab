@@ -568,7 +568,7 @@ async def test_relay_payload_contains_only_pinned_tls_records_for_conversations(
     members, _ = bridges
     (left, _, _, _), (right, _, right_model, _) = members
     allow(left, right)
-    secret_text = "private-marker-79d3c2 " + ('"\\\n' * 1300) + "z"
+    secret_text = "private-marker-79d3c2 " + ('"\\\n' * 1300) + "z"  # gitleaks:allow
     authorize(left, right, secret_text)
     observed = []
     original_receive = right._receive
