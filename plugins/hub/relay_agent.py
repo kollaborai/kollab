@@ -2368,6 +2368,17 @@ class RelayAgentBridge:
                     "that question is correlated to this task and waits for the human-approved answer. "
                     "Do not use kind='question' to start remote contact; an initial sender must use kind='message'."
                 ),
+                "Exact hub_msg arguments for that question: "
+                + json.dumps(
+                    {
+                        "to": payload["from"],
+                        "kind": "question",
+                        "thread_id": payload["id"],
+                        "message": "<your question>",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             ]
         try:
             state = self._state().state

@@ -101,6 +101,12 @@ async def test_question_guidance_is_scoped_to_the_active_receiving_task(bridges)
     assert "waits for the human-approved answer" in text
     assert "Do not use kind='question' to start remote contact" in text
     assert "Send a relay answer only after the human supplies it" in text
+    # Live run 6872e251: the receiver model guessed the thread_id from address
+    # fragments; the exact arguments name the active task.
+    assert (
+        '"to":"' + address(sender) + '","kind":"question","thread_id":"'
+        + grant["id"] + '"'
+    ) in text
 
 
 def test_hub_msg_tool_description_separates_initial_question_and_answer_roles():
