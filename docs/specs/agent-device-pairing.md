@@ -1,8 +1,30 @@
 # Private device pairing and conversation grants
 
-Status: implemented protocol primitives and local CLI. The code-entry,
-delegated-agent approval and encrypted provisioning flow below is the required
-product contract, added 2026-09-27 UTC; it is not implemented or released yet.
+Status: unreleased source contains the private `/connect` code-entry view,
+`/connect offer`, K1 code/device-key proof handling, durable pending-request
+metadata, and an issuer API that requires a separate accept/reject after proof.
+Acceptance consumes the delegated device allowance and issues only a
+`conversation:send` credential plus a room invitation. When a supported active
+profile and credential are available, an accepted request also receives its
+allowlisted profile settings and one provider credential inside a device-sealed,
+workspace-scoped provisioning bundle. `/connect requests` shows the source and
+destination profile names, provider/model and exact credential category before
+the human accepts; the credential is read again only after acceptance. The
+destination installs the bundle atomically and sends a device-signed receipt;
+the issuer approves the peer only after verifying that receipt. Network
+revocation does not revoke a copied credential at its provider. Enrollment
+grants no workspace or tool access. The pending-request/decision API is not yet
+wired into a proactive trusted-agent notification, natural-language approval,
+or agent-side decision tool; the local human issuer uses explicit
+`/connect requests`, `/connect accept`, and `/connect reject` commands. A
+process restart cannot resume the in-memory mailbox worker or code-derived
+envelope key. If the owner has already accepted and the destination's
+owner-context-bound intent and device-signed install receipt were durably
+recorded, a later runtime can finish peer approval only when the owner key,
+issuer workspace, relay key, origin, and room still match and the delegation
+is not revoked. This recovery records the prior human decision; it cannot
+create one. The full contract below is not complete or released. See the
+[implementation ledger](agent-network-implementation-status.md).
 
 This contract provides one account-free path for an owner to enroll a new device, keep a private member roster, grant one device a narrow conversation permission, and revoke it later. Discovery only locates a peer. It does not enroll a key, authorize a message, or authorize tool execution.
 
@@ -61,13 +83,22 @@ Required sequence:
 8. After acceptance the issuer signs a device-bound membership credential and
    encrypts the authorized configuration bundle specifically for that device.
    The device verifies issuer, recipient, network audience, configuration digest,
-   revision and expiry before installing it. No room capability, private roster,
-   provider credential or configuration is disclosed while pending.
+   revision and expiry before installing it. While pending, the signed challenge
+   exposes only the destination profile label and authorized credential
+   category plus its bounded expiry; no room capability, private roster, provider
+   credential or profile settings are disclosed.
 9. The new agent reports joined/provisioned only after private storage succeeds
    and the matching acknowledgment returns. Retry by the same device is
    idempotent; a different key cannot reuse the code or retrieve the bundle.
-   Membership still does not grant permission for unsolicited conversations or
-   remote workspace tools.
+   The destination durably journals the stable round and exact request before
+   sending it, then records the exact signed decision and encrypted install ACK
+   before their side effects. After restart it revalidates the owner, relay,
+   origin, destination, workspace, scope and expiry. ACK replay reuses the exact
+   encrypted receipt while each outer HTTP request gets a fresh signature and
+   nonce. Credential import, invitation join and attachment finish idempotently;
+   a conflicting existing invitation fails closed, and a matching invitation
+   preserves other local approvals. Membership still does not grant permission
+   for unsolicited conversations or remote workspace tools.
 
 Code design must resist guessing and malicious bootstrap substitution. Use a
 high-entropy generated code (at least 100 random bits, presented in copyable
@@ -105,12 +136,36 @@ skills; enrollment must not run arbitrary configuration content.
 ### Failure and acceptance requirements
 
 Retain the current network and local configuration when a code, discovery,
-approval or provisioning step fails. A pending request expires if the approving
-agent is unavailable; it never becomes approved by elapsed time or reconnect.
-Bound notification retries and suppress duplicate model turns. Revocation or
-expiry during an approval wait blocks credential issuance and delivery. Keep a
-secret-free audit of the human action, decision, device key, granted scopes,
-bundle digest, installation acknowledgment and rejection reason.
+approval or provisioning step fails. A pending proof request expires if the
+approving agent is unavailable; reconnect cannot create a human acceptance.
+After an explicit acceptance, a persisted matching signed installation receipt
+may finish the already-decided peer approval after restart. A wrong owner,
+workspace, relay, origin, room, or revoked delegation must fail closed.
+Expiry while a request is awaiting human acceptance or before a signed receipt
+is durably stored blocks new acceptance and delivery. A receipt stored within
+the active window can finish that prior decision after expiry; revocation still
+blocks reconciliation. Bound notification retries and suppress duplicate model
+turns. Keep a secret-free audit of the human action, decision, device key,
+granted scopes, bundle digest, installation acknowledgment and rejection reason.
+
+Issuer recovery cleanup is local state maintenance and does not authorize a new
+enrollment. It reads the exact durable request and delegation even when either
+is revoked or expired. A stale row with `peer_approved` recorded is removed
+without revoking its peer. If any installation receipt exists while
+`peer_approved` is still false, cleanup preserves the row and retries
+reconciliation; it does not revoke a credential the destination may already
+be using. For an incomplete revoked or expired request with no receipt, the
+issuer may revoke only the exact still-active credential whose owner-signed
+token is in the encrypted recovery row and whose owner, stored token and device
+key match the current private directory and durable request. Already expired
+or revoked credentials need no new permanent revocation. The recovery row is
+removed only after revocation succeeds or the directory confirms that the
+credential is already inactive. Missing credentials after durable approval,
+owner/scope mismatches, malformed state and receipt ambiguity retain the row
+with bounded retry and fixed error codes; `/connect status` shows aggregate
+counts and retry state without IDs or credential material. If durable approval
+never occurred and there is no delivery intent or issued credential, the row
+can be discarded because no credential was issued.
 
 Acceptance must cover the actual TUI and attach/daemon path, both network hosts,
 real trusted-agent notification and tool decision, atomic two-device allowance,
