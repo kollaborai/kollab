@@ -1412,7 +1412,8 @@ async def test_issuer_requires_explicit_decision_after_proof(
         await issuer.decide(round_id, decision="accept")
     bridge.identity.agent_id = "owner-agent"
     relay._session_id = "different-session"
-    with pytest.raises(EnrollmentProtocolError, match="unauthorized"):
+    # A reconnect under a new relay session still cannot decide, but says why.
+    with pytest.raises(EnrollmentProtocolError, match="session_changed"):
         await issuer.decide(round_id, decision="accept")
     relay._session_id = session_id
 

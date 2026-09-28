@@ -1,6 +1,8 @@
 import { useState, type ComponentProps } from "react";
 import { Plus, Settings2, Trash2 } from "lucide-react";
-import type { AgentPoolEntry, Profile, Session } from "@/api";
+import type { AgentBundleEntry, AgentPoolEntry, Profile, Session } from "@/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { formatSessionName } from "@/utils/session-display";
 import {
   AlertDialog,
@@ -45,13 +47,19 @@ export function AppSidebar({
   sessions,
   profiles,
   agents,
+  bundles,
   selectedProfile,
   selectedIdentity,
+  selectedBundle,
+  workspacePath,
   activeId,
   busy,
   onProfileChange,
   onIdentityChange,
+  onBundleChange,
+  onWorkspaceChange,
   onSettings,
+  onManageProfiles,
   // Named `onSelectSession`, not `onSelect`: ComponentProps<typeof Sidebar>
   // already carries the DOM `onSelect` handler, and the collision widens the
   // callback argument to `string | SyntheticEvent`.
@@ -63,13 +71,19 @@ export function AppSidebar({
   sessions: Session[];
   profiles: Profile[];
   agents: AgentPoolEntry[];
+  bundles: AgentBundleEntry[];
   selectedProfile: string;
   selectedIdentity: string;
+  selectedBundle: string;
+  workspacePath: string;
   activeId: string | null;
   busy: boolean;
   onProfileChange: (profile: string) => void;
   onIdentityChange: (identity: string) => void;
+  onBundleChange: (bundle: string) => void;
+  onWorkspaceChange: (path: string) => void;
   onSettings: () => void;
+  onManageProfiles: () => void;
   onSelectSession: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
@@ -114,12 +128,30 @@ export function AppSidebar({
           <SidebarGroupContent className="px-2">
             <div className="flex flex-col gap-2">
               <Select
+                value={selectedBundle || "default"}
+                onValueChange={onBundleChange}
+                disabled={busy}
+              >
+                <SelectTrigger className="w-full" aria-label="Agent bundle">
+                  <SelectValue placeholder="default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">default</SelectItem>
+                  {bundles.map((bundle) => (
+                    <SelectItem key={bundle.name} value={bundle.name}>
+                      {bundle.name}
+                      {bundle.profile ? ` · ${bundle.profile}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select
                 value={selectedIdentity}
                 onValueChange={onIdentityChange}
                 disabled={busy || !agents.length}
               >
                 <SelectTrigger className="w-full" aria-label="Agent identity">
-                  <SelectValue placeholder="Choose an agent" />
+                  <SelectValue placeholder="Auto-assign identity" />
                 </SelectTrigger>
                 <SelectContent>
                   {agents.length ? (
@@ -159,7 +191,25 @@ export function AppSidebar({
                   )}
                 </SelectContent>
               </Select>
+              <Input
+                aria-label="Workspace path"
+                placeholder="Workspace (defaults to engine cwd)"
+                value={workspacePath}
+                onChange={(event) => onWorkspaceChange(event.target.value)}
+                disabled={busy}
+                className="h-8"
+              />
             </div>
+          </SidebarGroupContent>
+          <SidebarGroupContent className="px-2 pt-1">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full justify-center"
+              onClick={onManageProfiles}
+            >
+              Manage profiles
+            </Button>
           </SidebarGroupContent>
         </SidebarGroup>
 

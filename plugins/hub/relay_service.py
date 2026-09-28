@@ -19,6 +19,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -842,6 +843,24 @@ def create_app(config: RelayConfig) -> web.Application:
     return app
 
 
+SUPERVISOR_PID_ENV = "KOLLAB_RELAY_SUPERVISOR_PID"
+SUPERVISOR_CHECK_SECONDS = 2.0
+
+
+async def _watch_supervisor(supervisor_pid: int) -> None:
+    """Stop this worker once the runtime that spawned it is gone.
+
+    Workers run in their own session, so a supervisor that dies without a
+    clean stop would otherwise leave them serving and renewing their owner
+    lease, which blocks every replacement runtime.
+    """
+    while True:
+        if os.getppid() != supervisor_pid:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+        await asyncio.sleep(SUPERVISOR_CHECK_SECONDS)
+
+
 async def start_relay(app: web.Application) -> None:
     state: RelayState = app["relay_state"]
     try:
@@ -849,6 +868,9 @@ async def start_relay(app: web.Application) -> None:
     except RelayBackendError:
         # Do not include backend connection details in startup logs.
         raise RuntimeError("relay backend startup failed") from None
+    supervisor = os.environ.get(SUPERVISOR_PID_ENV, "")
+    if supervisor.isdigit():
+        app["supervisor_watch"] = asyncio.create_task(_watch_supervisor(int(supervisor)))
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -1110,6 +1132,10 @@ async def _close_websockets(
 
 async def cleanup_relay(app: web.Application) -> None:
     state: RelayState = app["relay_state"]
+    watch = app.get("supervisor_watch")
+    if watch is not None:
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
     if state.maintenance_task is not None:
         state.maintenance_task.cancel()
         await asyncio.gather(state.maintenance_task, return_exceptions=True)

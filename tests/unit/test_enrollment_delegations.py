@@ -237,6 +237,18 @@ def test_wrong_agent_session_issuer_or_scope_is_rejected_without_consumption(tmp
     assert store.get(ACTION_ID).consumed_new_devices == 0
 
 
+def test_changed_relay_session_is_reported_distinctly(tmp_path):
+    store = _store(tmp_path)
+    _create(store)
+    _consume(store, "enrollment-01")
+
+    with pytest.raises(delegation_module.DelegationSessionChangedError):
+        store.get_enrollment_request("enrollment-01", agent_id=AGENT_ID, session_id="another-session")
+    with pytest.raises(DelegationAuthorizationError) as other_agent:
+        store.get_enrollment_request("enrollment-01", agent_id="another-agent", session_id=SESSION_ID)
+    assert not isinstance(other_agent.value, delegation_module.DelegationSessionChangedError)
+
+
 def test_requested_scope_can_be_narrower_but_never_wider(tmp_path):
     store = _store(tmp_path)
     _create(store)

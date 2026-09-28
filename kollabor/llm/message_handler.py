@@ -41,6 +41,14 @@ class MessageHandler:
     # Cooldown after ESC cancel: hub continues are blocked for this many seconds
     HUB_CONTINUE_COOLDOWN = 5.0
 
+    # Boot-hold policy for user input arriving before startup completes.
+    # First hold waits ~immediately; one delayed retry (30s) follows. After
+    # STARTUP_HOLD_MAX_ATTEMPTS the message is marked {final: False,
+    # undelivered: True} instead of being dropped silently.
+    STARTUP_HOLD_MAX_ATTEMPTS = 2
+    STARTUP_HOLD_INITIAL_WAIT = 30
+    STARTUP_HOLD_RETRY_WAIT = 30
+
     def __init__(self, coordinator):
         """Initialize the message handler.
 
@@ -109,11 +117,57 @@ class MessageHandler:
                 )
                 data["message_pre_displayed"] = True
                 pre_displayed = True
+            # Bounded re-enqueue: the first wait is immediate-ish, then one
+            # delayed retry. A message is never dropped silently — after the
+            # cap it is marked undelivered so callers (and the voice seam)
+            # can distinguish "held during boot" from "lost".
+            held_attempts = int(data.get("startup_hold_attempts", 0))
+            if held_attempts >= self.STARTUP_HOLD_MAX_ATTEMPTS:
+                logger.error(
+                    "Startup still pending after %d holds; marking message "
+                    "undelivered",
+                    held_attempts,
+                )
+                data["final"] = False
+                data["undelivered"] = True
+                return {
+                    "status": "startup_timeout",
+                    "final": False,
+                    "undelivered": True,
+                }
+            data["startup_hold_attempts"] = held_attempts + 1
+            hold_timeout = (
+                self.STARTUP_HOLD_INITIAL_WAIT
+                if held_attempts == 0
+                else self.STARTUP_HOLD_RETRY_WAIT
+            )
             try:
-                await asyncio.wait_for(startup_ready.wait(), timeout=30)
+                await asyncio.wait_for(startup_ready.wait(), timeout=hold_timeout)
             except asyncio.TimeoutError:
-                logger.error("Timed out waiting for startup to complete")
-                return {"status": "startup_timeout"}
+                logger.error(
+                    "Timed out waiting for startup to complete (attempt %d)",
+                    held_attempts + 1,
+                )
+                # Re-enqueue the same event data so the message survives boot
+                # instead of being dropped. The incremented attempts counter
+                # rides along in `data` and bounds the loop.
+                try:
+                    await self._coordinator.event_bus.emit(
+                        "user_input",
+                        dict(data),
+                    )
+                except Exception as emit_error:  # pragma: no cover - defensive
+                    logger.error(
+                        "Failed to re-enqueue held user input: %s", emit_error
+                    )
+                    data["final"] = False
+                    data["undelivered"] = True
+                    return {
+                        "status": "startup_timeout",
+                        "final": False,
+                        "undelivered": True,
+                    }
+                return {"status": "startup_hold", "requeued": True}
 
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")

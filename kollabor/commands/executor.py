@@ -60,6 +60,7 @@ class SlashCommandExecutor:
                 await self._emit_command_error(
                     event_bus, command, "command_not_found", error_result
                 )
+                await self._display_command_result(error_result, event_bus)
                 return error_result
 
             # Check if command is enabled
@@ -72,6 +73,7 @@ class SlashCommandExecutor:
                 await self._emit_command_error(
                     event_bus, command, "command_disabled", error_result
                 )
+                await self._display_command_result(error_result, event_bus)
                 return error_result
 
             # Emit command execution start event
@@ -141,6 +143,12 @@ class SlashCommandExecutor:
                 await self._emit_command_error(
                     event_bus, command, "handler_error", error_result
                 )
+                # Render the failure into the surface — the success path
+                # displays via _display_command_result; the error path
+                # returned without it, so a broken handler (nephrite's
+                # on_enter TypeError) showed the user literally nothing.
+                # Blank is worse than silence; surface the error.
+                await self._display_command_result(error_result, event_bus)
                 self.logger.error(
                     f"Command /{command.name} handler failed: {handler_error}"
                 )
@@ -157,6 +165,8 @@ class SlashCommandExecutor:
             await self._emit_command_error(
                 event_bus, command, "internal_error", error_result
             )
+            # Same surface-render guarantee as handler errors above.
+            await self._display_command_result(error_result, event_bus)
             self.logger.error(f"Internal error executing command /{command.name}: {e}")
             return error_result
 

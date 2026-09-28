@@ -37,6 +37,7 @@ INSTANCE_LABEL = "io.kollab.relay.instance"
 CONFIG_LABEL = "io.kollab.relay.config"
 OWNER_VALUE = "kollab-relay-runtime-v1"
 BACKEND_ENV = "KOLLAB_RELAY_BACKEND_URL"
+FIRST_READY_GRACE_SECONDS = 45
 LIMIT_DEFAULTS = {
     "max_connections_per_node": 512,
     "max_connections_per_room": 16,
@@ -609,6 +610,8 @@ class RelayRuntime:
         environment = dict(os.environ)
         environment[BACKEND_ENV] = self.backend_url
         environment["PYTHONUNBUFFERED"] = "1"
+        # Workers stop themselves if this supervisor dies without a clean stop.
+        environment["KOLLAB_RELAY_SUPERVISOR_PID"] = str(os.getpid())
         worker.process = await asyncio.create_subprocess_exec(
             *args,
             env=environment,
@@ -626,6 +629,11 @@ class RelayRuntime:
             port=self.config.base_port + worker.index - 1,
             pid=worker.process.pid,
         )
+
+    @staticmethod
+    def _extend_first_ready_deadline(deadline: float, worker) -> float:
+        """A previous owner's lease can outlive the startup window; wait it out."""
+        return max(deadline, worker.retry_at + FIRST_READY_GRACE_SECONDS)
 
     async def _worker_owner_lease_expired(self, worker) -> bool:
         """Allow a replacement only after Redis no longer fences the old owner."""
@@ -765,7 +773,7 @@ class RelayRuntime:
                 return
             timeout = aiohttp.ClientTimeout(total=3)
             async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                first_ready_deadline = time.monotonic() + 45
+                first_ready_deadline = time.monotonic() + FIRST_READY_GRACE_SECONDS
                 had_ready = False
                 while not self.stop_event.is_set():
                     await self._backend_ping()
@@ -786,6 +794,10 @@ class RelayRuntime:
                         ):
                             if await self._worker_owner_lease_expired(worker):
                                 await self._spawn(worker)
+                            elif not had_ready:
+                                first_ready_deadline = self._extend_first_ready_deadline(
+                                    first_ready_deadline, worker
+                                )
                     await asyncio.gather(*(self._worker_health(session, worker) for worker in self.workers))
                     self._last_probe = time.monotonic()
                     self.checked_at = int(time.time())

@@ -750,6 +750,8 @@ class ConversationManager:
     def _load_from_jsonl(self, session_file: Path) -> Dict[str, Any]:
         """Load session data from JSONL session file."""
         messages: List[Dict[str, Any]] = []
+        pending_compaction: Dict[str, Any] = {}  # last-round-wins
+        last_compaction_timestamp: Optional[str] = None
         metadata: Dict[str, Any] = {
             "started_at": None,
             "working_directory": "unknown",
@@ -826,8 +828,48 @@ class ConversationManager:
                         recognized_record = True
                         summary = data.get("summary", {})
                         metadata["topics"] = summary.get("themes", [])
+                    elif msg_type == "context_compaction":
+                        # Compaction summary written by context_compaction
+                        # plugin (rebirth recovery, aquamarine's gap [B]).
+                        # Replay as a user-role message; LAST-ROUND-WINS is
+                        # enforced by keeping only the final round — records
+                        # before the last one are superseded. Tail-after-
+                        # timestamp: only the compaction record is replayed;
+                        # user/assistant records AFTER its timestamp are
+                        # appended on top by the loop below (they are newer).
+                        recognized_record = True
+                        content = data.get("content", "")
+                        compaction_timestamp = data.get("timestamp")
+                        if compaction_timestamp:
+                            last_compaction_timestamp = str(compaction_timestamp)
+                        if content:
+                            pending_compaction = {
+                                "uuid": data.get("uuid") or str(uuid4()),
+                                "role": "user",
+                                "content": content,
+                                "timestamp": data.get("timestamp"),
+                                "parent_uuid": None,
+                                "metadata": {
+                                    "context_compaction": True,
+                                    "compaction_round": data.get(
+                                        "compaction_round"
+                                    ),
+                                },
+                                "session_id": session_file.stem.replace(
+                                    "session_", ""
+                                ),
+                            }
                     elif msg_type in ("user", "assistant"):
                         recognized_record = True
+                        record_timestamp = data.get("timestamp")
+                        if (
+                            last_compaction_timestamp is not None
+                            and record_timestamp is not None
+                            and str(record_timestamp) <= last_compaction_timestamp
+                        ):
+                            # The compaction summary supersedes all records at
+                            # or before its timestamp; replay only the live tail.
+                            continue
                         content = data.get("message", {}).get("content", "")
                         if isinstance(content, list) and content:
                             content = content[0].get("text", "")
@@ -848,6 +890,24 @@ class ConversationManager:
 
             if not recognized_record:
                 return {}
+
+            # Compaction summary replay: LAST-ROUND-WINS (only the final
+            # compaction record is replayed — earlier rounds are fully
+            # superseded by later ones), and it PREPENDS the messages that
+            # arrived after compaction ran (they are newer, the loop kept
+            # them in order).
+            if pending_compaction:
+                if last_compaction_timestamp is not None:
+                    messages = [
+                        message
+                        for message in messages
+                        if (
+                            message.get("timestamp") is None
+                            or str(message.get("timestamp"))
+                            > last_compaction_timestamp
+                        )
+                    ]
+                messages = [pending_compaction] + messages
 
             # Build summary-like shape to keep interface stable
             return {

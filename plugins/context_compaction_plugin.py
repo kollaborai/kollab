@@ -776,6 +776,80 @@ class ContextCompactionPlugin(BasePlugin):
         )
         return True
 
+    def _coordination_pending(self) -> bool:
+        """Readiness gate: is undelivered coordination state in flight?
+
+        True when either:
+          1. The LLM service has queued agent-HUD entries that have not been
+             drained into history yet (a mid-turn hub message is sitting in
+             the queue — compacting now would summarize it before the model
+             ever saw it).
+          2. The hub task ledger has pending replies awaiting this agent.
+
+        Compaction is deferred one turn while this is true; it retries on
+        the next turn-complete. Data is never lost either way (JSONL and
+        the ledger are durable) — this protects coordination STATE from
+        being probabilistically summarized out of the model's context.
+        """
+        svc = self._llm_service
+        if svc is not None:
+            queued = getattr(svc, "_pending_agent_hud", None)
+            # isinstance check guards test doubles: a Mock attribute is not
+            # a queue. Real queues are list[AgentHudEntry].
+            if isinstance(queued, list) and queued:
+                return True
+        # Ledger pending replies: agent_hub service pattern mirrors the
+        # hub plugin's own HUD injection (plugin.py pending_replies()).
+        if self.event_bus is not None:
+            try:
+                hub_plugin = self.event_bus.get_service("hub_plugin")
+                ledger = (
+                    getattr(hub_plugin, "_task_ledger", None)
+                    if hub_plugin is not None
+                    else None
+                )
+                if (
+                    ledger is not None
+                    and type(ledger).__module__ != "unittest.mock"
+                    and hasattr(ledger, "pending_replies")
+                    and ledger.pending_replies()
+                ):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    @staticmethod
+    def _extract_coordination_lines(
+        summarizable: List[ConversationMessage],
+    ) -> List[str]:
+        """Deterministically pull hub-coordination fragments from messages
+        about to be summarized.
+
+        Matches [hub channel: / [hub: blocks (including wake instructions
+        and pending-reply HUD sections) anywhere in the content, extracts
+        them as whole blocks. Pure string surgery — no LLM involved, no
+        probability of loss. Everything else stays summarizable.
+        """
+        blocks: List[str] = []
+        for msg in summarizable:
+            content = msg.content or ""
+            if "[hub channel:" not in content and "[hub:" not in content:
+                continue
+            # Split into blocks on the hub-channel header; each block runs
+            # to the next header or end of content.
+            import re
+
+            pattern = re.compile(r"\[hub[^\]]*?\]", re.IGNORECASE)
+            headers = list(pattern.finditer(content))
+            for i, m in enumerate(headers):
+                start = m.start()
+                end = headers[i + 1].start() if i + 1 < len(headers) else len(content)
+                block = content[start:end].strip()
+                if block:
+                    blocks.append(block)
+        return blocks
+
     def _compaction_task_done(self, task: asyncio.Task) -> None:
         """Observe and retire a background compaction task."""
         self._compaction_tasks.discard(task)
@@ -802,12 +876,17 @@ class ContextCompactionPlugin(BasePlugin):
         if not history:
             return data
 
-        if self._should_compact(history):
+        if self._should_compact(history) and not self._coordination_pending():
             self._compaction_in_progress = True
             task = asyncio.create_task(self._run_compaction())
             self._compaction_task = task
             self._compaction_tasks.add(task)
             task.add_done_callback(self._compaction_task_done)
+        elif self._should_compact(history) and self._coordination_pending():
+            logger.info(
+                "Compaction deferred: coordination in flight "
+                "(queued HUD hub messages or pending hub replies)"
+            )
 
         self._maybe_emit_budget_hud(history)
 
@@ -1086,8 +1165,14 @@ class ContextCompactionPlugin(BasePlugin):
         # Metadata-tagged hub messages (new path)
         if msg.metadata.get("hub_message"):
             return True
-        # Content-pattern fallback for messages injected before metadata tagging
-        if msg.role == "user" and msg.content.startswith("[hub channel:"):
+        # Content-pattern fallback for messages injected before metadata tagging.
+        # CONTAINMENT, not startswith: hub messages that arrive mid-turn are
+        # drained as a MERGED agent-HUD block (context/budget sections first),
+        # so "[hub channel:" appears mid-content, not at the start.
+        if (
+            msg.role == "user"
+            and ("[hub channel:" in msg.content or "[hub:" in msg.content)
+        ):
             return True
         return False
 
@@ -1100,14 +1185,25 @@ class ContextCompactionPlugin(BasePlugin):
         is expected to DO and potentially report back on.
         """
         if not msg.metadata.get("hub_message"):
-            # Fallback: content-based detection for untagged messages
-            if not (msg.role == "user" and msg.content.startswith("[hub channel:")):
+            # Fallback: content-based detection for untagged messages.
+            # Containment — see _is_hub_message for the merged-HUD rationale.
+            if not (
+                msg.role == "user"
+                and (
+                    "[hub channel:" in msg.content or "[hub:" in msg.content
+                )
+            ):
                 return False
 
         content_lower = msg.content.lower()
 
-        # Observed messages (not intended for us) are never tasks
-        if "you do not need to respond" in content_lower:
+        # Observed messages (not intended for us) are never tasks.
+        # Check BEFORE the hub_is_intended shortcut: an intended message
+        # that is explicitly observed-flagged is still not a task.
+        if (
+            "you do not need to respond" in content_lower
+            or "do not relay, repeat, or respond" in content_lower
+        ):
             return False
 
         # Check for task indicators
@@ -1267,6 +1363,26 @@ class ContextCompactionPlugin(BasePlugin):
                 untracked_msgs
             )
 
+            # --- Deterministic coordination block (no LLM discretion) -----
+            # Any hub-coordination line still present in the SUMMARIZABLE
+            # set (mid-turn messages that reached history without hub
+            # metadata, human-elsewhere traffic, GO signals, delivery
+            # reports) is extracted VERBATIM and prepended to the summary.
+            # The summarizer never gets to decide whether coordination
+            # state survives — it is passed through.
+            coordination_lines = self._extract_coordination_lines(summarizable)
+            coordination_block = ""
+            if coordination_lines:
+                coordination_block = (
+                    "=== COORDINATION STATE (verbatim, machine-extracted) ===\n"
+                    + "\n---\n".join(coordination_lines)
+                    + "\n=== END COORDINATION STATE ==="
+                )
+                logger.info(
+                    f"Coordination block: {len(coordination_lines)} hub lines "
+                    "extracted verbatim into summary"
+                )
+
             summary_text = None
             if summarizable:
                 # Format only the summarizable portion for the LLM
@@ -1290,7 +1406,14 @@ class ContextCompactionPlugin(BasePlugin):
                     return
 
             # Build compacted history:
-            # system + summary (if any) + ledger decisions + tasks + to_keep
+            # system + summary (coordination block PREPENDS the LLM
+            # summary so it can never be lost to summarization) + ledger
+            # decisions + tasks + to_keep
+            if coordination_block:
+                if summary_text:
+                    summary_text = coordination_block + "\n\n" + summary_text
+                else:
+                    summary_text = coordination_block
             compacted = self._build_compacted_history(
                 system_msg,
                 summary_text or "",
@@ -1317,7 +1440,7 @@ class ContextCompactionPlugin(BasePlugin):
             self._compaction_round += 1
             self._consecutive_failures = 0
 
-            # Log compaction event
+            # Log compaction event (summary_text persisted for rebirth)
             await self._log_compaction_event(
                 messages_summarized=len(summarizable),
                 messages_kept=len(to_keep),
@@ -1325,6 +1448,7 @@ class ContextCompactionPlugin(BasePlugin):
                 pre_count=snapshot_len,
                 post_count=len(compacted),
                 tasks_preserved=len(preserved_tasks),
+                summary_text=summary_text or "",
             )
 
             logger.info(
@@ -1738,8 +1862,15 @@ class ContextCompactionPlugin(BasePlugin):
         pre_count: int,
         post_count: int,
         tasks_preserved: int = 0,
+        summary_text: str = "",
     ) -> None:
-        """Append compaction record to session JSONL."""
+        """Append compaction record to session JSONL.
+
+        summary_text (full summary incl. the deterministic COORDINATION STATE
+        block) is persisted so rebirth/replay can recover coordination state
+        from disk — the in-memory summary_message never reaches JSONL on its
+        own (aquamarine's review, gap [A]).
+        """
         if not self.config.get(
             "plugins.context_compaction.log_compaction_events", True
         ):
@@ -1767,6 +1898,13 @@ class ContextCompactionPlugin(BasePlugin):
             "post_message_count": post_count,
             "tasks_preserved": tasks_preserved,
         }
+        if summary_text:
+            # Replayable payload: conversation_manager loader (or rebirth
+            # tooling) treats this as a replayable summary record —
+            # last-round-wins + tail-after-timestamp on resume.
+            record["content"] = summary_text
+            record["role"] = "user"
+            record["subtype"] = "compaction_summary"
 
         try:
             with open(session_file, "a") as f:
