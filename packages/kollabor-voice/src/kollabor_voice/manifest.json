@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "runtime": [
+    "faster-whisper==1.2.1",
+    "kokoro-onnx==0.6.1",
+    "sounddevice==0.5.6",
+    "numpy==2.5.3",
+    "onnxruntime==1.30.0"
+  ],
+  "voice": "af_heart",
+  "bundles": {
+    "whisper-base": {
+      "license": "MIT",
+      "license_url": "https://github.com/openai/whisper/blob/main/LICENSE",
+      "revision": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+      "base_url": "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/",
+      "files": [
+        {
+          "name": "config.json",
+          "size": 2309,
+          "sha256": "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a"
+        },
+        {
+          "name": "tokenizer.json",
+          "size": 2203239,
+          "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+        },
+        {
+          "name": "vocabulary.txt",
+          "size": 459861,
+          "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+        },
+        {
+          "name": "model.bin",
+          "size": 145217532,
+          "sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9"
+        }
+      ]
+    },
+    "kokoro": {
+      "license": "Apache-2.0",
+      "license_url": "https://huggingface.co/hexgrad/Kokoro-82M/blob/main/LICENSE",
+      "revision": "model-files-v1.1",
+      "base_url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/",
+      "files": [
+        {
+          "name": "kokoro-v1.0.int8.onnx",
+          "size": 114119327,
+          "sha256": "ae315a79b623f244700e4afb9246c46a26066782e049ba174bf3ba433970ee9c"
+        },
+        {
+          "name": "voices-v1.0.bin",
+          "size": 28214398,
+          "sha256": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d"
+        }
+      ]
+    }
+  },
+  "classifiers": {
+    "laya": {
+      "runtime": [
+        "laya==0.3.4",
+        "torch==2.14.0",
+        "transformers==5.17.0",
+        "safetensors==0.8.0",
+        "huggingface_hub==1.32.0",
+        "numpy==2.5.3"
+      ],
+      "model": "typed-decisions",
+      "minimum_probability": 0.8,
+      "bundle": {
+        "license": "Apache-2.0",
+        "license_url": "https://huggingface.co/convaiinnovations/laya/blob/1c5edc17a7acd8701df6fc341c0d179f1c62c982/README.md",
+        "revision": "1c5edc17a7acd8701df6fc341c0d179f1c62c982",
+        "base_url": "https://huggingface.co/convaiinnovations/laya/resolve/1c5edc17a7acd8701df6fc341c0d179f1c62c982/typed-decisions/",
+        "hf_cache": "models--convaiinnovations--laya/snapshots/1c5edc17a7acd8701df6fc341c0d179f1c62c982/typed-decisions",
+        "files": [
+          {
+            "name": "encoder/config.json",
+            "size": 2084,
+            "sha256": "5268d24ad3b77c8151de5dcb0762ba4391619aad9ab0bda33e36fb083cfeae6d"
+          },
+          {
+            "name": "model.safetensors",
+            "size": 842609220,
+            "sha256": "4fa56de72383a9d3efa9cfa78955733c81b9fc8067a587ca4beb82c78107a24e"
+          },
+          {
+            "name": "rl_agent_config.json",
+            "size": 847,
+            "sha256": "ebf0cd524d92342a6be5e48e9fca3d7c2babfb5a56ccd79d2171ef5d8c7f7be8"
+          },
+          {
+            "name": "tokenizer/tokenizer.json",
+            "size": 3583228,
+            "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+          },
+          {
+            "name": "tokenizer/tokenizer_config.json",
+            "size": 337,
+            "sha256": "08d4cf3ac4dca381759441b85b91a6d40e688471dcd33d15d6649eb0a9a854d1"
+          }
+        ]
+      },
+      "voice_head": {
+        "name": "voice-intent-v1.safetensors",
+        "size": 2913416,
+        "sha256": "27caff23f9514f2fdd2f7067876bd6aa998b83ee7626bb83cfd8223fe0298a90",
+        "question_sha256": "89360b28b4f691b78b4d613c352bcb884d92f6984371aab127439ed6d1910ba1",
+        "version": "voice-intent-v1",
+        "kernel_gamma": 0.5,
+        "license": "MIT"
+      },
+      "speech_head": {
+        "name": "spoken-style-v1.safetensors",
+        "size": 1278580,
+        "sha256": "a4af93a63dc0b0b3b55afcff28e756505989eacdea7cb69d57ddabbf778953d3",
+        "question_sha256": "f31899d4f7a832780f554bdb462360ef91ddd4ec7a27872c84c4d86cad82e5dd",
+        "kernel_gamma": 0.5
+      }
+    }
+  }
+}

@@ -9,6 +9,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from kollabor_agent.execution_context import remote_task_id
@@ -33,6 +34,14 @@ from .tool_output_budget import (
 logger = logging.getLogger(__name__)
 
 CancellationOrigin = Literal["human", "remote_task", "external"]
+
+
+@dataclass
+class QueuedInput:
+    """A user message with routing metadata preserved through queue batching."""
+
+    content: MessageContent
+    voice: dict
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -350,6 +359,11 @@ class QueueProcessor:
         # Watchdog heartbeat: new work arriving is activity — keeps a session
         # that just received a message from being flagged as wedged.
         self.mark_progress()
+        if isinstance(message, QueuedInput):
+            # Voice admission must never acknowledge a message silently dropped
+            # by an overflow strategy. Reject before modifying the queue.
+            self.processing_queue.put_nowait(message)
+            return
         self._queue_metrics["total_enqueue_attempts"] += 1
 
         if self.task_config.queue.log_queue_events:
@@ -380,6 +394,8 @@ class QueueProcessor:
 
     async def _drop_oldest_strategy(self, message: MessageContent) -> None:
         """Drop oldest task to make room."""
+        if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
+            raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         if self.task_config.queue.log_queue_events:
             logger.debug("Applying drop_oldest strategy")
 
@@ -448,6 +464,8 @@ class QueueProcessor:
 
     def _unknown_strategy(self, message: MessageContent) -> None:
         """Handle unknown overflow strategy."""
+        if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
+            raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         logger.warning(
             f"Unknown overflow strategy '{self.task_config.queue.overflow_strategy}', defaulting to drop_oldest"
         )
@@ -666,11 +684,24 @@ class QueueProcessor:
         Returns:
             Updated parent UUID
         """
-        combined_message = combine_message_contents(messages)
+        voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+        self.active_voice = voice_inputs[-1].voice if voice_inputs else None
+        combined_message = combine_message_contents(
+            [m.content if isinstance(m, QueuedInput) else m for m in messages]
+        )
+        if self.active_voice:
+            from kollabor_voice.observer import voice_instructions
+
+            combined_message = prepend_text(
+                f"[Voice instructions: {voice_instructions(self.active_voice)}]\n", combined_message
+            )
 
         # Add user message to conversation history
         self._add_message_fn(
-            ConversationMessage(role="user", content=combined_message),
+            ConversationMessage(
+                role="user", content=combined_message,
+                metadata={"source": "voice", "voice": self.active_voice} if self.active_voice else {},
+            ),
             parent_uuid=current_parent_uuid,
         )
 
@@ -1231,6 +1262,21 @@ class QueueProcessor:
                     tool_results=None,
                     thinking_content=thinking_blocks,
                 )
+                voice = getattr(self, "active_voice", None)
+                has_spoken_text = clean_response.strip() or parsed_response.get("spoken_text")
+                if voice and has_spoken_text and not self.cancel_processing:
+                    # Visible assistant prose is spoken before tools run. The
+                    # same reply ID spans updates and the final answer so the
+                    # device can serialize and deduplicate their sentences.
+                    await self.event_bus.emit_with_hooks(
+                        "voice_response_ready",
+                        {
+                            "voice": voice,
+                            "display_text": clean_response,
+                            "spoken_text": parsed_response.get("spoken_text"),
+                        },
+                        "llm_service",
+                    )
 
             # Step 6: Execute native tools (batch via native_tools_handler)
             native_results = []
@@ -1624,6 +1670,7 @@ class QueueProcessor:
         # Publishing earlier would tell remote clients the turn ended while its
         # tools were still running, and they would stop reading the stream.
         if self.turn_completed:
+            self.active_voice = None
             publish_semantic(
                 self.renderer,
                 "turn_complete",

@@ -14,7 +14,7 @@ from kollabor.user_input_source import UserInputSource
 from kollabor_agent import BackgroundTaskManager, NativeToolsHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
-from kollabor_agent.queue_processor import CancellationOrigin, QueueProcessor
+from kollabor_agent.queue_processor import CancellationOrigin, QueuedInput, QueueProcessor
 from kollabor_agent.tool_executor import ToolExecutor
 from kollabor_ai import (
     ConversationManager,
@@ -1474,8 +1474,14 @@ class LLMService:
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
         if self._pending_agent_hud:
-            combined = combine_message_contents(messages)
-            messages = [self.merge_pending_agent_hud(combined)]
+            voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+            combined = combine_message_contents(
+                [m.content if isinstance(m, QueuedInput) else m for m in messages]
+            )
+            combined = self.merge_pending_agent_hud(combined)
+            messages = [
+                QueuedInput(combined, voice_inputs[-1].voice) if voice_inputs else combined
+            ]
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=self.current_parent_uuid,
@@ -1654,7 +1660,7 @@ class LLMService:
         await self._native_tools.load_tools()
 
     async def process_user_input(
-        self, message: MessageContent, pre_displayed: bool = False
+        self, message: MessageContent, pre_displayed: bool = False, voice: dict | None = None
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1694,6 +1700,9 @@ class LLMService:
                 "status": "rejected",
                 "reason": f"model '{self.api_service.model}' does not accept image input",
             }
+
+        if voice and self._queue_processor.processing_queue.full():
+            return {"status": "rejected", "reason": "Agent input queue is full"}
 
         # Display user message using MessageDisplayService (DRY refactoring)
         if not pre_displayed:
@@ -1792,7 +1801,9 @@ class LLMService:
         )
 
         # Add to processing queue with overflow handling
-        await self._enqueue_with_overflow_strategy(normalized_message)
+        await self._enqueue_with_overflow_strategy(
+            QueuedInput(normalized_message, voice) if voice else normalized_message
+        )
 
         # Start processing if not already running
         if not self.is_processing:

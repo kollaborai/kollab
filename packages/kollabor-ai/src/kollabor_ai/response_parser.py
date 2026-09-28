@@ -758,9 +758,6 @@ class ResponseParser:
         Returns:
             Parsed response with all extracted components
         """
-        # Fix malformed tool calls before parsing
-        raw_response = self._fix_malformed_tool_calls(raw_response)
-
         # Mask code spans before tag scanning so example XML inside
         # backtick/code blocks is never executed as a real command.
         # The masked copy is used only for tag extraction; clean_content
@@ -768,6 +765,11 @@ class ResponseParser:
         # _clean_content strips all tags and the placeholders are invisible
         # to the user (streaming already rendered the original text).
         raw_response, _code_restore = self._mask_code_spans(raw_response)
+        from .response_channels import protect_response_channels
+
+        raw_response, spoken_text = protect_response_channels(raw_response, _code_restore)
+        # Display data cannot be interpreted or repaired as executable tool calls.
+        raw_response = self._fix_malformed_tool_calls(raw_response)
 
         # DIAGNOSTIC: McKinsey Phase 2 - Root cause analysis
         opening_count = raw_response.count("<think>")
@@ -867,6 +869,8 @@ class ResponseParser:
         parsed = {
             "raw": raw_response,
             "content": clean_content,
+            "display_text": clean_content,
+            "spoken_text": spoken_text,
             "turn_completed": turn_completed,
             "question_gate_active": has_question and total_tools > 0,  # Tools suspended
             "components": components,

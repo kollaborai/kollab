@@ -4,12 +4,61 @@ import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from kollabor_ai import ConversationManager, KollaborConversationLogger
 from kollabor_events.models import SlashCommand
+
+
+@pytest.mark.asyncio
+async def test_daemon_resume_preserves_tool_voice_and_structured_message_data():
+    from kollabor.state.local import LocalStateService
+
+    records = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "Check this."}],
+            "metadata": {"source": "voice", "voice": {"event_ids": ["one"]}},
+        },
+        {
+            "role": "assistant",
+            "content": "<display_text>Code stays on screen.</display_text><spoken_text>I'll check it.</spoken_text>",
+            "metadata": {"tool_calls": [{"id": "read-1", "name": "read_file"}]},
+        },
+        {"role": "tool", "content": "# Kollab", "metadata": {"tool_call_id": "read-1"}},
+    ]
+    manager = SimpleNamespace(
+        messages=records,
+        current_session_id="before",
+        load_session=lambda _: True,
+    )
+    history = []
+    llm = SimpleNamespace(conversation_manager=manager, conversation_history=history)
+    result = await LocalStateService(llm, None).resume_conversation("saved")
+    assert llm.conversation_history is history and result["message_count"] == 3
+    for message, record in zip(history, records):
+        assert message.content == record["content"]
+        assert message.metadata == record["metadata"]
+        assert message.metadata is not record["metadata"]
+    assert history[0].content is not records[0]["content"]
+    assert result["messages"][1]["content"] == "Code stays on screen."
+
+
+def test_legacy_resume_preview_only_displays_the_screen_field():
+    from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+    plugin = ResumeConversationPlugin(event_bus=Mock(), config={})
+    raw = "<display_text>Visible answer.</display_text><spoken_text>Brief narration.</spoken_text>"
+    plugin.llm_service = SimpleNamespace(conversation_history=[], session_stats={})
+    plugin.conversation_manager = SimpleNamespace(
+        messages=[{"role": "assistant", "content": raw}]
+    )
+    display = plugin._prepare_session_display("header", "restored")
+    assert display[1] == ("assistant", "Visible answer.", {})
+    assert plugin.llm_service.conversation_history[0].content == raw
 
 
 class TestResumeCommand:

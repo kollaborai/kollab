@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 HOSTED_IMAGE_GENERATION_INSTRUCTIONS = (
     "Hosted image-generation contract:\n"
+    "- Use image generation only to fulfill an explicit request to create or edit an image. "
+    "Ordinary conversation, hearing or screen questions, agent status, and questions about "
+    "whether you are generating images do not request an image. Do not create decorative "
+    "icons, confirmations, or illustrations for those replies.\n"
     "- When the user asks for an image or explicitly asks to use image generation, "
     "call the hosted `image_generation` tool. Do not substitute scratchpad, file "
     "inspection, ASCII text, or prose for the image tool.\n"
@@ -681,6 +685,15 @@ class OpenAIResponsesProvider(LLMProvider):
             "stream": stream,
             "store": store_responses,
         }
+        # An explicitly empty tool list is a tool-free request (for example the
+        # voice observer). Hosted tools must not bypass that caller boundary.
+        auto_hosted_images = (
+            self.supports_hosted_image_generation
+            and tools != []
+            and kwargs.get("tool_choice") != "none"
+        )
+        if "tool_choice" in kwargs:
+            params["tool_choice"] = kwargs["tool_choice"]
 
         # Extract system message to instructions
         instructions = None
@@ -748,7 +761,7 @@ class OpenAIResponsesProvider(LLMProvider):
         elif self._requires_streaming:
             params["instructions"] = "You are a helpful assistant."
 
-        if self.supports_hosted_image_generation:
+        if auto_hosted_images:
             params["instructions"] = (
                 f"{params.get('instructions', '').strip()}\n\n"
                 f"{HOSTED_IMAGE_GENERATION_INSTRUCTIONS}"
@@ -829,7 +842,7 @@ class OpenAIResponsesProvider(LLMProvider):
         # Transform function tools to Responses API format while preserving
         # hosted/non-function tools exactly as supplied. The Codex OAuth route
         # exposes image generation as a hosted tool, not a function.
-        if tools or self.supports_hosted_image_generation:
+        if tools or auto_hosted_images:
             responses_tools = []
             for tool in tools or []:
                 if tool.get("type") and tool.get("type") != "function":
@@ -855,7 +868,7 @@ class OpenAIResponsesProvider(LLMProvider):
                         "parameters": parameters,
                     }
                 )
-            if self.supports_hosted_image_generation and not any(
+            if auto_hosted_images and not any(
                 tool.get("type") == "image_generation" for tool in responses_tools
             ):
                 responses_tools.append({"type": "image_generation"})

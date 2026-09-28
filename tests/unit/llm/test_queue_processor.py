@@ -152,6 +152,40 @@ class TestQueueProcessor(unittest.TestCase):
         # turn_completed set to True in setUp to prevent infinite loops
         self.assertFalse(self.processor.cancel_processing)
 
+    def test_voice_metadata_survives_batch_and_resets_for_typed_input(self):
+        from kollabor_agent.queue_processor import QueuedInput
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent")
+        voice = {
+            "epoch": "epoch", "reply_id": "reply",
+            "uncertain_event_ids": ["heard"],
+            "playback_context": ["Should I run the tests?"],
+        }
+        self.loop.run_until_complete(self.processor.process_message_batch(
+            [QueuedInput("Check the tests", voice)], "parent"
+        ))
+        message = self.add_message_fn.call_args.args[0]
+        self.assertEqual(message.metadata["voice"], voice)
+        self.assertIn("Voice instructions", message.content)
+        self.assertIn("classifier is unsure", message.content)
+        self.assertIn("one period (.) with no tools", message.content)
+        self.assertIn("Should I run the tests?", message.content)
+        self.assertEqual(self.processor.active_voice, voice)
+        self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
+        self.assertIsNone(self.processor.active_voice)
+
+    def test_typed_overflow_cannot_drop_a_durably_admitted_voice_input(self):
+        from kollabor_agent.queue_processor import QueuedInput
+        self.processor.processing_queue = asyncio.Queue(maxsize=1)
+        voice = QueuedInput("Check the tests", {"epoch": "epoch"})
+        self.loop.run_until_complete(self.processor.enqueue(voice))
+        with self.assertRaisesRegex(RuntimeError, "cannot discard"):
+            self.loop.run_until_complete(self.processor.enqueue("Typed input"))
+        self.assertIs(self.processor.processing_queue.get_nowait(), voice)
+        self.assertEqual(self.processor.dropped_messages, 0)
+        self.assertFalse(self.processor.is_processing)
+        # turn_completed set to True in setUp to prevent infinite loops
+        self.assertFalse(self.processor.cancel_processing)
+
     def test_remote_cancellation_requires_idle_matching_generation(self):
         self.processor.is_processing = True
         generation = self.processor.request_cancellation(origin="remote_task")
@@ -422,6 +456,76 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.message_display_service.display_complete_response.assert_not_called()
         self.message_display_service.display_tool_results.assert_called_once()
+
+    def test_voice_update_is_queued_before_tools_and_final_reply_uses_same_identity(self):
+        order = []
+        voice = {"epoch": "e", "reply_id": "request"}
+        self.processor.active_voice = voice
+        self.renderer.pipe_mode = False
+        self.config.get = lambda key, default=None: 0 if key.endswith("delay") else default
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = "private reasoning"
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.api_service.has_pending_tool_calls = MagicMock(return_value=False)
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = (
+            "private tool output"
+        )
+
+        async def execute(_):
+            order.append("tools")
+            return ToolExecutionResult(
+                tool_id="read",
+                tool_type="terminal",
+                success=True,
+                output="private tool output",
+            )
+
+        async def emit(event, data, source):
+            if event == "voice_response_ready":
+                order.append((data["spoken_text"], data["voice"]))
+                self.assertNotIn("private tool output", data["spoken_text"])
+            return {}
+
+        self.tool_executor.execute_tool = AsyncMock(side_effect=execute)
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=emit)
+        self.response_parser.parse_response.return_value = {
+            "content": "I'll recheck the voice mode files.",
+            "spoken_text": "I'll recheck the voice mode files.",
+            "components": {},
+            "turn_completed": False,
+            "question_gate_active": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "read", "type": "terminal", "command": "true"}
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant")
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("I'll recheck the voice mode files.", False, False, False)
+        )
+        self.loop.run_until_complete(self.processor._execute_llm_turn_inner(True, "parent"))
+        self.assertEqual(order, [("I'll recheck the voice mode files.", voice), "tools"])
+        self.assertEqual(self.processor.active_voice, voice)
+
+        self.response_parser.parse_response.return_value["turn_completed"] = True
+        self.response_parser.parse_response.return_value["spoken_text"] = "The check is finished."
+        self.response_parser.get_all_tools.return_value = []
+        self.processor._emit_llm_response_and_handle.return_value = (
+            "The check is finished.",
+            False,
+            False,
+            False,
+        )
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(False, "parent")
+        )
+        self.assertEqual(order[-1], ("The check is finished.", voice))
+        self.assertIsNone(self.processor.active_voice)
 
     def test_pipe_mode_displays_question_gate_response(self):
         """Pipe mode keeps a response that is waiting for user input visible."""

@@ -978,7 +978,12 @@ class ResumeConversationPlugin:
             loaded_messages.append(ConversationMessage(role=role, content=content))
 
             if role in ("user", "assistant"):
-                display_messages.append((role, content, {}))
+                visible = content
+                if role == "assistant" and isinstance(content, str):
+                    from kollabor_ai.response_channels import display_response_text
+
+                    visible = display_response_text(content)
+                display_messages.append((role, visible, {}))
 
         # In-place replace preserves list identity; see
         # _replace_conversation_history docstring for the bug history.

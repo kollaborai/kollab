@@ -55,6 +55,7 @@ class ToolRegistry:
             scratchpad,
             task,
             terminal,
+            voice,
             web,
             workspace,
         )
@@ -71,6 +72,7 @@ class ToolRegistry:
         workspace.register_all()
         mcp.register_all()
         on_demand.register_all()
+        voice.register_all()
 
     def register(self, tool_def: ToolDefinition, replace: bool = False) -> None:
         """Register a tool definition.

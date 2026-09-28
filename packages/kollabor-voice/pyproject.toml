@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kollabor-voice"
+version = "0.10.1"
+description = "Shared local voice service with automatic setup, durable transcription and sentence playback"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = []
+
+[project.optional-dependencies]
+# Optional for contributors running real audio tests in their own environment.
+# Production setup follows the pinned runtime manifest in the isolated service.
+full = [
+    "faster-whisper==1.2.1",
+    "kokoro-onnx==0.6.1",
+    "sounddevice==0.5.6",
+    "numpy==2.5.3",
+    "onnxruntime==1.30.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kollabor_voice"]

@@ -11,6 +11,7 @@ from .model import ModelCommandHandler
 from .setup import SetupCommandHandler
 from .skills import SkillCommandHandler
 from .system import SystemCommandHandler
+from .voicemode import VoiceModeCommandHandler
 
 __all__ = [
     "AgentCommandHandler",
@@ -24,4 +25,5 @@ __all__ = [
     "SetupCommandHandler",
     "LoadoutCommandHandler",
     "GoalCommandHandler",
+    "VoiceModeCommandHandler",
 ]

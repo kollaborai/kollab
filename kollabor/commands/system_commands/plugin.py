@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         SetupCommandHandler,
         SkillCommandHandler,
         SystemCommandHandler,
+        VoiceModeCommandHandler,
     )
 
 from kollabor_events.models import CommandResult, Event, SlashCommand
@@ -49,6 +50,7 @@ class SystemCommandsPlugin:
     _context_handler: ContextCommandHandler | None
     _loadout_handler: LoadoutCommandHandler | None
     _goal_handler: GoalCommandHandler | None
+    _voicemode_handler: VoiceModeCommandHandler | None
 
     def __init__(
         self,
@@ -131,6 +133,7 @@ class SystemCommandsPlugin:
                 SetupCommandHandler,
                 SkillCommandHandler,
                 SystemCommandHandler,
+                VoiceModeCommandHandler,
             )
 
             if self._agent_handler is None:
@@ -210,6 +213,15 @@ class SystemCommandsPlugin:
                     self.event_bus,
                 )
 
+            if getattr(self, "_voicemode_handler", None) is None:
+                from .handlers import VoiceModeCommandHandler
+
+                self._voicemode_handler = VoiceModeCommandHandler(
+                    self.command_registry,
+                    self.event_bus,
+                    config=self.config_manager,
+                )
+
     @property
     def MODAL_ACTIONS(self) -> Set[str]:
         """Aggregate MODAL_ACTIONS from all handlers."""
@@ -260,6 +272,8 @@ class SystemCommandsPlugin:
             self._loadout_handler.register_commands()
         if getattr(self, "_goal_handler", None):
             self._goal_handler.register_commands()
+        if getattr(self, "_voicemode_handler", None):
+            self._voicemode_handler.register_commands()
 
     def register_commands(self):
         """Alias for register_all_commands for backward compatibility."""

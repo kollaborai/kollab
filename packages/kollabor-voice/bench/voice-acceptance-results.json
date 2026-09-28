@@ -1,0 +1,335 @@
+{
+  "fixtures_sha256": "5215c0f2eb02507543a2104b0cb96a13e41e934f08f56b9e8346ad16c0c04d8c",
+  "head_sha256": "27caff23f9514f2fdd2f7067876bd6aa998b83ee7626bb83cfd8223fe0298a90",
+  "minimum_probability": 0.8,
+  "cold_import_and_load_seconds": 32.08271887502633,
+  "first_inference_ms": 164.85141695011407,
+  "warm_mean_ms": 29.697350362160552,
+  "count": 40,
+  "automatic": 36,
+  "deferred_to_agent": 4,
+  "automatic_correct": 34,
+  "automatic_errors": 2,
+  "results": [
+    {
+      "text": "Can you take another look at why voice mode is stuck?",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9997994303703308,
+      "elapsed_ms": 164.85141695011407
+    },
+    {
+      "text": "I need the entire utterance delivered, including what came first.",
+      "context": "assistant: What is wrong with the transcript?",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9999595880508423,
+      "elapsed_ms": 35.16341699287295
+    },
+    {
+      "text": "Please stop narrating the raw tool results.",
+      "context": "",
+      "expected": "respond",
+      "decision": "defer",
+      "confidence": 0.7286004722118378,
+      "elapsed_ms": 30.667749990243465
+    },
+    {
+      "text": "Tell me what classifier is actually running.",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.928301215171814,
+      "elapsed_ms": 31.461458012927324
+    },
+    {
+      "text": "Make that choice persistent.",
+      "context": "assistant: Laya is now selected.",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9384148120880127,
+      "elapsed_ms": 32.22412499599159
+    },
+    {
+      "text": "Use the one on this computer.",
+      "context": "assistant: Should the classifier run locally or in the cloud?",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9934613704681396,
+      "elapsed_ms": 33.01741601899266
+    },
+    {
+      "text": "That fixed the missing indicator, thanks.",
+      "context": "assistant: I updated the voice status row.",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9905999302864075,
+      "elapsed_ms": 32.61033300077543
+    },
+    {
+      "text": "Kollab, please inspect the transcript log.",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9932050704956055,
+      "elapsed_ms": 32.53216703888029
+    },
+    {
+      "text": "Koordinator, can you verify the saved conversation?",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9966928958892822,
+      "elapsed_ms": 34.54491595039144
+    },
+    {
+      "text": "You can hear me, but are you getting everything I say?",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.8798946142196655,
+      "elapsed_ms": 32.576250028796494
+    },
+    {
+      "text": "I mean speaking the update aloud, not transcribing it.",
+      "context": "assistant: I will check the transcription.",
+      "expected": "respond",
+      "decision": "defer",
+      "confidence": 0.7044397592544556,
+      "elapsed_ms": 33.64329203031957
+    },
+    {
+      "text": "Would you explain how the voice output queue behaves?",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9596251249313354,
+      "elapsed_ms": 27.208124985918403
+    },
+    {
+      "text": "No, do not delete those files.",
+      "context": "assistant: Should I remove the old outputs?",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9517011642456055,
+      "elapsed_ms": 28.36633299011737
+    },
+    {
+      "text": "Please cancel the request you are processing.",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9990022778511047,
+      "elapsed_ms": 27.804749959614128
+    },
+    {
+      "text": "I see the progress now. Keep going.",
+      "context": "assistant: Setup is downloading the model.",
+      "expected": "respond",
+      "decision": "ignore",
+      "confidence": 0.9381762519478798,
+      "elapsed_ms": 28.542166983243078
+    },
+    {
+      "text": "The guide says to restart. Can you check if that is necessary?",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9968300461769104,
+      "elapsed_ms": 27.52245799638331
+    },
+    {
+      "text": "Before answering, inspect the latest source files.",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9838094711303711,
+      "elapsed_ms": 27.831542014610022
+    },
+    {
+      "text": "One service should handle all the agents.",
+      "context": "assistant: How should the voice service be shared?",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.8992528319358826,
+      "elapsed_ms": 34.2613750253804
+    },
+    {
+      "text": "Why did you ignore the start of my message?",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9997966885566711,
+      "elapsed_ms": 27.437750017270446
+    },
+    {
+      "text": "Could you speak the short progress update before running tools?",
+      "context": "",
+      "expected": "respond",
+      "decision": "respond",
+      "confidence": 0.9666769504547119,
+      "elapsed_ms": 28.24399998644367
+    },
+    {
+      "text": "Zoe, are you able to hear me on the conference call?",
+      "context": "assistant: Voice mode is listening.",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9930914528667927,
+      "elapsed_ms": 33.65133301122114
+    },
+    {
+      "text": "Hey Siri, open the calendar.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9974552532657981,
+      "elapsed_ms": 27.658125036396086
+    },
+    {
+      "text": "Alexa, tell me tomorrow's weather.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9274634495377541,
+      "elapsed_ms": 27.465458028018475
+    },
+    {
+      "text": "I am quoting an example: please inspect the transcript log.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9195127636194229,
+      "elapsed_ms": 28.268958965782076
+    },
+    {
+      "text": "The sales pitch says visit our website and buy today.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9999998507005756,
+      "elapsed_ms": 27.713999967090786
+    },
+    {
+      "text": "Kollab, remain quiet while I collect my thoughts.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9999693089885113,
+      "elapsed_ms": 28.644291043747216
+    },
+    {
+      "text": "Let me think it over before I give an answer.",
+      "context": "assistant: Should I restart the daemon?",
+      "expected": "ignore",
+      "decision": "defer",
+      "confidence": 0.6153081953525543,
+      "elapsed_ms": 28.993749991059303
+    },
+    {
+      "text": "Everyone in the webinar, can you hear the speaker?",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9109782129526138,
+      "elapsed_ms": 28.350999986287206
+    },
+    {
+      "text": "Carla, would you fix the microphone setting for me?",
+      "context": "",
+      "expected": "ignore",
+      "decision": "respond",
+      "confidence": 0.9998144507408142,
+      "elapsed_ms": 27.88650000002235
+    },
+    {
+      "text": "Dear Chris, please forward the report. Thank you.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9574077241122723,
+      "elapsed_ms": 28.45595800317824
+    },
+    {
+      "text": "A reminder to myself: find the charger this evening.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9996652120898943,
+      "elapsed_ms": 27.62449998408556
+    },
+    {
+      "text": "We now return to the scheduled broadcast.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9971011716406792,
+      "elapsed_ms": 27.417999983299524
+    },
+    {
+      "text": "The tutorial narrator says ask your assistant to explain the bug.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9999462513624167,
+      "elapsed_ms": 30.181415961124003
+    },
+    {
+      "text": "I am practicing a presentation that starts can you all hear me.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9999978813143571,
+      "elapsed_ms": 28.739500034134835
+    },
+    {
+      "text": "Luca, thank you for correcting those files.",
+      "context": "assistant: The code is updated.",
+      "expected": "ignore",
+      "decision": "defer",
+      "confidence": 0.6206251978874207,
+      "elapsed_ms": 29.02566600823775
+    },
+    {
+      "text": "No reply is required, I am only reading my notes aloud.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.999962019152008,
+      "elapsed_ms": 29.477458039764315
+    },
+    {
+      "text": "Hey Google, set the thermostat to seventy.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9999753541651444,
+      "elapsed_ms": 28.55287498096004
+    },
+    {
+      "text": "The customer on the recording asks please stop the operation.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9862700821831822,
+      "elapsed_ms": 29.446500004269183
+    },
+    {
+      "text": "Registration closes soon, click the link to join.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9999384952607215,
+      "elapsed_ms": 26.979542046319693
+    },
+    {
+      "text": "The laundry should be dry by now, I suppose.",
+      "context": "",
+      "expected": "ignore",
+      "decision": "ignore",
+      "confidence": 0.9987912569195032,
+      "elapsed_ms": 28.002209030091763
+    }
+  ]
+}

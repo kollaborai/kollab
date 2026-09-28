@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import re
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
@@ -2739,10 +2740,23 @@ class LocalStateService(StateService):
             if not isinstance(msg, dict):
                 continue
             role = str(msg.get("role", "user"))
-            content = str(msg.get("content", ""))
-            loaded_messages.append(ConversationMessage(role=role, content=content))
+            content = deepcopy(msg.get("content") or "")
+            metadata = deepcopy(msg.get("metadata") or {})
+            loaded_messages.append(
+                ConversationMessage(
+                    role=role,
+                    content=content,
+                    metadata=metadata,
+                    thinking=msg.get("thinking"),
+                )
+            )
             if role in ("user", "assistant"):
-                display_messages.append({"role": role, "content": content})
+                visible = content
+                if role == "assistant" and isinstance(content, str):
+                    from kollabor_ai.response_channels import display_response_text
+
+                    visible = display_response_text(content)
+                display_messages.append({"role": role, "content": visible})
 
         # Replace history IN PLACE (list-identity preservation).
         history = getattr(llm, "conversation_history", None)

@@ -865,6 +865,7 @@ class TerminalLLMChat:
             profile_manager=self.profile_manager,
             agent_manager=self.agent_manager,
             config=self.config,
+            config_service=self.config,
             layout_manager=self.layout_manager,
             event_bus=self.event_bus,
         )
@@ -914,6 +915,13 @@ class TerminalLLMChat:
         self.plugin_instances = self.plugin_registry.instantiate_plugins(
             self.event_bus, self.renderer, self.config
         )
+        # Expose plugin instances through the event-bus service registry so
+        # widgets can consume plugin status without coupling to application state.
+        voice_plugin = self.plugin_instances.get("voice") or self.plugin_instances.get(
+            "VoicePlugin"
+        )
+        if voice_plugin is not None:
+            self.event_bus.register_service("voice_plugin", voice_plugin)
 
         # Task tracking for race condition prevention
         self.running = False
@@ -1980,7 +1988,15 @@ class TerminalLLMChat:
 
                 etype = event.get("type", "")
 
-                if etype == "message":
+                if etype == "voice_reply":
+                    voice = self.event_bus.get_service("voice_plugin")
+                    if voice is not None:
+                        try:
+                            await voice.handle_remote_reply(event)
+                        except Exception as exc:
+                            logger.warning("Remote voice reply failed: %s", exc)
+
+                elif etype == "message":
                     # Semantic message - render through local display pipeline
                     msg_type = event.get("message_type", "system")
                     content = event.get("content", "")
