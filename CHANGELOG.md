@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-28
+
+### Added
+
+- Added agent conversations over the relay. `/connect send` delivers one exact,
+  human-authorized request to a connected agent in another workspace. The
+  receiving agent runs it through its normal model and tool pipeline in its own
+  workspace and replies on the same thread. Follow-ups, questions and answers,
+  progress, deadlines and `/connect cancel` are supported.
+- Added `/connect allow` and `/connect deny` for incoming authority per local
+  agent, `/connect grants`, `/connect authorize` and `/connect withdraw` for human
+  sending grants, and `/connect agents` and `/connect task` for inspection.
+- Added private device enrollment by code. `/connect offer` creates a one-device,
+  five-minute code; the new device enters it with bare `/connect`; the issuer
+  decides with `/connect requests`, `/connect accept` or `/connect reject`. An
+  accepted device receives a scoped conversation credential, a room invitation
+  and, when a supported provider profile is active, its settings and one provider
+  credential in a device-sealed bundle.
+- Added an opt-in peer mesh runtime: LAN locator discovery, direct TLS peer links
+  and signed, bounded forwarding with per-hop consent. It is off by default.
+- Added `scripts/relay/verify_agent_conversation.py`, a live two-host acceptance
+  harness for relay conversations.
+
+### Security
+
+- Receivers reject unauthorized, revoked, replayed and wrong-workspace requests.
+- Turns started by an incoming relay reply, result or question cannot run tools.
+  A remote agent's question waits for the human instead of being answered by the
+  model.
+- Enrollment grants no workspace or tool permission. Network revocation does not
+  revoke a copied provider credential at its provider.
+
+### Networking scope
+
+- A live two-host run (macOS and Linux through kollabor.ai) passed conversations,
+  follow-ups, questions and answers, cancel, reconnect and the receiver
+  rejections. Live code enrollment and the peer mesh's direct, LAN and multi-hop
+  paths are not yet proven across hosts.
+- Only the agent holding the discovery domain's coordinator key can create
+  enrollment codes. On kollabor.ai that is the beacon operator. Issuing codes from
+  any trusted agent for its own private network is not implemented yet.
+
 ## [0.9.0] - 2026-09-27
 
 ### Added
