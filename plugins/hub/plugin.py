@@ -8492,6 +8492,8 @@ class HubPlugin(BasePlugin):
             state = (
                 self.event_bus.get_service("state_service") if self.event_bus else None
             )
+            if state is None:
+                return "connect: this window is not connected to its agent daemon; restart kollab"
             handler = getattr(state, "hub_connect", None)
             if handler is None:
                 return "beacon: attached daemon must be updated to support /connect"
