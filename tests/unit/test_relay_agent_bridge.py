@@ -917,25 +917,15 @@ async def test_question_answer_resumes_same_granted_thread_once(bridges):
             }
         ),
     )
-    bad_missing_thread = await in_turn(
-        left_model,
-        left_hub._handle_hub_msg_tool(
-            {
-                "id": "answer-missing-thread",
-                "to": question_peer,
-                "kind": "answer",
-                "reply_to": question["id"],
-                "content": "Use the workspace root.",
-            }
-        ),
-    )
-    assert not bad_missing_reply.success and not bad_missing_thread.success
+    # An omitted thread_id is bound from the question record; that success
+    # path is covered by test_human_answer_binds_thread_and_asker_from_the_question.
+    assert not bad_missing_reply.success
     assert not left.store.pending_outbound()
 
+    # A stale agent segment is routed to the asker (see the binding test); a
+    # different workspace is never the asker.
     wrong_target = RelayAddress.parse(question_peer)
-    wrong_target = str(
-        RelayAddress(wrong_target.key, wrong_target.workspace_id, "other-session")
-    )
+    wrong_target = str(RelayAddress(wrong_target.key, "0" * 32, "other-session"))
     bad_target = await in_turn(
         left_model,
         left_hub._handle_hub_msg_tool(

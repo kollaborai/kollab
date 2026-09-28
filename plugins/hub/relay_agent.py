@@ -865,12 +865,14 @@ class RelayAgentBridge:
                 raise RelayError("conversation question is no longer pending")
             original = question["payload"]
             # reply_to names the pending question; its record fixes the thread
-            # and the asker. Accept the asker's key and workspace even if the
-            # model mistyped the agent segment or thread, and route by record.
+            # and the asker. Bind an omitted thread, refuse a contradicting one,
+            # accept the asker's key and workspace with a stale agent segment,
+            # and route by the record.
             asker = RelayAddress.parse(original["from"])
             if (
                 destination.key != asker.key
                 or destination.workspace_id != asker.workspace_id
+                or (params["thread_id"] and params["thread_id"] != original["thread_id"])
             ):
                 raise RelayError("conversation answer does not match the pending question")
             params["thread_id"] = original["thread_id"]
@@ -1117,7 +1119,9 @@ class RelayAgentBridge:
             "agent_id": source_agent or self.identity.agent_id,
             "to": target,
             "content": content,
-            "thread_id": thread_id or message_id,
+            # An answer's thread comes from its question; keep an omitted one
+            # empty so the owner can tell omission from a contradiction.
+            "thread_id": thread_id if kind == "answer" else (thread_id or message_id),
             "grant_id": grant_id,
             "reply_to": reply_to,
             "kind": kind,

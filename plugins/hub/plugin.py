@@ -7839,20 +7839,26 @@ class HubPlugin(BasePlugin):
                         "remote routing accepts direct conversation messages only",
                     )
                 ]
+            relay_kind = message.metadata.get("relay_kind", "message")
+            # HubMessage gives itself a thread when none is set; an answer's
+            # thread must come only from the model or from its question.
+            relay_thread = (
+                message.metadata.get("relay_grant_id", "")
+                if relay_kind == "answer"
+                else message.thread_id
+            )
             try:
                 receipt = await relay.send(
                     message.to,
                     message.content,
                     thread_id=(
-                        message.thread_id
-                        if ID.fullmatch(message.thread_id or "")
-                        else ""
+                        relay_thread if ID.fullmatch(relay_thread or "") else ""
                     ),
                     grant_id=message.metadata.get("relay_grant_id", ""),
                     reply_to=(
                         message.reply_to if ID.fullmatch(message.reply_to or "") else ""
                     ),
-                    kind=message.metadata.get("relay_kind", "message"),
+                    kind=relay_kind,
                 )
                 message.metadata["relay_receipt"] = receipt
                 if receipt["state"] in {
