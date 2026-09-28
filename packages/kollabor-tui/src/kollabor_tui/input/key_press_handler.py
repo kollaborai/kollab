@@ -311,7 +311,7 @@ class KeyPressHandler:
             # (so arrow keys work)
             command_mode = self.command_mode
             if command_mode != CommandMode.NORMAL:
-                logger.info(
+                logger.debug(
                     f"Processing key '{key_press.name}' "
                     f"in command mode: {command_mode}"
                 )

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enrollment codes are redacted from every log line, and a code typed into any
+  `/connect` subcommand is refused with a pointer to the private form. Unknown
+  `/connect` words report "unknown subcommand" (with a suggestion) instead of a
+  DNS error, the private code form says how to get a code, `/connect <domain>`
+  points to `/connect offer`, and `/connect help` lists every subcommand with
+  its description.
 - `/upgrade`, `kollab --upgrade` and `kollab --update` now upgrade the install
   that is running (uv tool, pipx, Homebrew, or the current environment's pip,
   falling back to `uv pip` when pip is missing) instead of whichever installer

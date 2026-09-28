@@ -136,6 +136,43 @@ CONNECT_SUBCOMMANDS = [
     SubcommandInfo("help", "", "Show usage for every subcommand"),
 ]
 
+CODE_IN_COMMAND = (
+    "connect: codes never go in a command. Run /connect with nothing after it "
+    "and paste the code into the private form."
+)
+
+
+def format_connect_help() -> str:
+    """Aligned /connect usage built from the same list as the command menu."""
+    rows = [
+        ("/connect", "Join with a code from a connected device (private form)"),
+        ("/connect <domain>", "Connect this agent to a network, e.g. kollabor.ai"),
+    ]
+    rows += [
+        (f"/connect {sub.name} {sub.args}".rstrip(), sub.description)
+        for sub in CONNECT_SUBCOMMANDS
+    ]
+    width = max(len(left) for left, _ in rows)
+    return "\n".join(f"{left:<{width}}  {text}" for left, text in rows)
+
+
+def _looks_like_connect_target(value: str) -> bool:
+    """A domain, origin URL, host:port or installed network ID, not a typo."""
+    if value == "localhost" or any(mark in value for mark in ".:/"):
+        return True
+    try:
+        from kollabor_config.provisioned_state import ProvisionedStateFile
+
+        return value in ProvisionedStateFile().get_network_preferences()
+    except (OSError, ValueError):
+        return True  # let the owning daemon report unreadable state
+
+
+def _unknown_connect_subcommand(head: str) -> str:
+    matches = [sub.name for sub in CONNECT_SUBCOMMANDS if sub.name.startswith(head)]
+    hint = f" Did you mean /connect {matches[0]}?" if len(matches) == 1 else ""
+    return f"connect: unknown subcommand '{head}'.{hint} Run /connect help for the list."
+
 _TASK_CRON_ID_RE = re.compile(
     r"\[\s*task\s+reminder\s*:\s*([^\]\s]+)\s*\]",
     re.IGNORECASE,
@@ -8416,20 +8453,20 @@ class HubPlugin(BasePlugin):
             value = " ".join(getattr(command_or_args, "args", None) or []).strip()
         parts = value.split()
         head = parts[0].lower() if parts else ""
+        if any(part.upper().startswith("K1-") for part in parts):
+            return CODE_IN_COMMAND
+        if head == "help":
+            return format_connect_help()
         enrollment_commands = {"", "enroll"}
         if head in enrollment_commands:
             if len(parts) > 2:
-                return "connect: enter the code only in the private enrollment form"
+                return CODE_IN_COMMAND
             domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            if domain.upper().startswith("K1-"):
-                return "connect: enter the code only in the private enrollment form"
             return await self._open_connect_altview(domain)
         if head == "offer":
             if len(parts) > 2:
                 return "connect: use /connect offer [domain]"
             domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            if domain.upper().startswith("K1-"):
-                return "connect: use /connect offer [domain]"
             return await self._open_connect_offer_altview(domain)
         if head in {"contact", "contacts"}:
             if len(parts) > 2:
@@ -8439,22 +8476,16 @@ class HubPlugin(BasePlugin):
                     "connect: attached daemon does not support private contact requests"
                 )
             domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            if domain.upper().startswith("K1-"):
-                return "connect: use /connect contact [relay-domain]"
             return (
                 await self._open_contact_request_altview(domain)
                 if head == "contact"
                 else await self._open_contact_review_altview(domain)
             )
-        if head in {"requests", "accept", "reject"} and any(
-            part.upper().startswith("K1-") for part in parts[1:]
-        ):
-            return "connect: use a receipt ID; enter enrollment codes only in the private form"
         if head not in {sub.name for sub in CONNECT_SUBCOMMANDS}:
+            if not _looks_like_connect_target(parts[0]):
+                return _unknown_connect_subcommand(head)
             if len(parts) != 1:
-                return "connect: enter the code only in the private enrollment form"
-            if parts[0].upper().startswith("K1-"):
-                return "connect: enter the code only in the private enrollment form"
+                return CODE_IN_COMMAND
             # A domain argument joins the public discovery/relay network. Device
             # enrollment remains an explicit private flow via /connect enroll.
         if getattr(getattr(self, "_cli_args", None), "attach", None):

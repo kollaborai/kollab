@@ -19,7 +19,7 @@ from plugins.hub.enrollment_client import (
 )
 from plugins.hub.enrollment_codes import EnrollmentEnvelopeKey
 from plugins.hub.enrollment_delegations import EnrollmentDelegationStore
-from plugins.hub.plugin import HubPlugin
+from plugins.hub.plugin import CODE_IN_COMMAND, HubPlugin
 from plugins.hub.provisioning import ProfilePreferences
 from plugins.hub.relay_agent import RelayAgentBridge
 from plugins.hub.relay_commands import RelayCommands
@@ -281,7 +281,7 @@ async def test_code_text_is_rejected_before_owner_command_dispatch(tmp_path):
 
     result = await hub._handle_connect_command(f"accept {code_text}")
 
-    assert result == ("connect: use a receipt ID; enter enrollment codes only in the private form")
+    assert result == CODE_IN_COMMAND
     assert bridge._enrollment_issuer is None
     assert code_text not in result
 
@@ -307,7 +307,7 @@ async def test_attach_mode_forwards_only_receipt_commands_to_the_owner_daemon():
     code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
     rejected_code = await hub._handle_connect_command(f"accept {code}")
 
-    assert rejected_code == ("connect: use a receipt ID; enter enrollment codes only in the private form")
+    assert rejected_code == CODE_IN_COMMAND
     assert state.hub_connect.await_count == 3
     assert code not in repr(state.hub_connect.await_args_list)
 
@@ -326,9 +326,49 @@ async def test_connect_palette_lists_subcommands_and_each_reaches_the_owner_daem
     state = SimpleNamespace(hub_connect=AsyncMock(side_effect=lambda value: value))
     hub._cli_args = SimpleNamespace(attach=True)
     hub.event_bus = SimpleNamespace(get_service=lambda _name: state)
-    private_forms = {"enroll", "offer", "contact", "contacts"}
+    local = {"enroll", "offer", "contact", "contacts", "help"}
     for name in names:
-        if name in private_forms:
+        if name in local:
             continue
         command = f"{name} {'a' * 32} two words"
         assert await hub._handle_connect_command(command) == command
+
+    help_text = await hub._handle_connect_command("help")
+    assert all(f"/connect {name}" in help_text for name in names)
+    assert state.hub_connect.await_count == len(names) - len(local)
+
+
+@pytest.mark.asyncio
+async def test_codes_and_typos_in_connect_commands_never_reach_the_daemon():
+    state = SimpleNamespace(hub_connect=AsyncMock(side_effect=lambda value: value))
+    hub = HubPlugin.__new__(HubPlugin)
+    hub._cli_args = SimpleNamespace(attach=True)
+    hub.event_bus = SimpleNamespace(get_service=lambda _name: state)
+    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+
+    assert await hub._handle_connect_command(f"approve {code}") == CODE_IN_COMMAND
+    assert await hub._handle_connect_command("pair") == (
+        "connect: unknown subcommand 'pair'. Run /connect help for the list."
+    )
+    assert await hub._handle_connect_command("auth") == (
+        "connect: unknown subcommand 'auth'. Did you mean /connect authorize? "
+        "Run /connect help for the list."
+    )
+    state.hub_connect.assert_not_awaited()
+
+    for target in ("kollabor.ai", "localhost:8443", "https://example.test"):
+        assert await hub._handle_connect_command(target) == target
+
+
+def test_log_lines_never_carry_enrollment_codes():
+    import logging
+
+    from kollabor.logging.setup import CompactFormatter
+
+    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    message = "Executing highlighted menu command: %s"
+    record = logging.LogRecord("t", logging.INFO, __file__, 1, message, (f"/connect approve {code}",), None)
+    line = CompactFormatter("%(message)s").format(record)
+
+    assert code not in line
+    assert line == "Executing highlighted menu command: /connect approve K1-[redacted]"

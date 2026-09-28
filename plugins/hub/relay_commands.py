@@ -160,7 +160,7 @@ class RelayCommands:
         )
         return (
             self.format_status()
-            + "\nNext: /connect invite, privately copy that file, then /connect join <file> on the second computer."
+            + "\nNext: /connect offer shows a code; enter it with /connect on the other device."
         )
 
     def _contacts(self):
@@ -436,20 +436,9 @@ class RelayCommands:
             self.client.join_invite(token)
             return await self._attach(result, ca, cidrs)
         if head == "help":
-            return (
-                "/connect <domain|network-id> | networks | status | peers | invite | join <private file>\n"
-                "/connect contact <relay-domain> | contacts <relay-domain> | contact-point <relay-domain>\n"
-                "/connect approve|revoke|ping <peer public key> | rotate | disconnect\n"
-                "/connect agents [local|peer public key] | grants\n"
-                "/connect allow <peer public key> <local agent name>\n"
-                "/connect deny <peer public key> [local agent name]\n"
-                "/connect authorize <full relay agent address> <human task purpose>\n"
-                "/connect requests | accept <32-hex receipt-id> | reject <32-hex receipt-id>\n"
-                "/connect withdraw <communication grant id>\n"
-                "/connect send <full relay agent address> <message>\n"
-                "/connect task|cancel <full relay agent address> <message id>\n"
-                "/connect answer <question event id> <answer>"
-            )
+            from .plugin import format_connect_help
+
+            return format_connect_help()
         value = value or self.client.state.origin or "https://kollabor.ai"
         result, ca, cidrs, is_card = await self._discover(value)
         if is_card:

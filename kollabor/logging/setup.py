@@ -7,6 +7,7 @@ defaults during bootstrap.
 
 import logging as _logging
 import logging.handlers  # force-load submodule for TimedRotatingFileHandler
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -27,6 +28,10 @@ _NOISY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3")
 # agent run for weeks without filling the disk.
 DEFAULT_LOG_MAX_BYTES = 200 * 1024 * 1024  # 200 MB per file
 DEFAULT_LOG_BACKUP_COUNT = 3  # keep 3 rotated files (+ the live one)
+
+# Enrollment codes are one-device credentials. A user can still paste one
+# into a command or chat line, so no log record may carry it.
+_ENROLLMENT_CODE_RE = re.compile(r"K1-[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*", re.IGNORECASE)
 
 
 def _build_rotating_handler(
@@ -58,7 +63,7 @@ class CompactFormatter(_logging.Formatter):
         # Map long level names to 4-char versions
         level_mapping = {"WARNING": "WARN", "CRITICAL": "CRIT", "DEBUG": "DEBG"}
         record.levelname = level_mapping.get(record.levelname, record.levelname)
-        return super().format(record)
+        return _ENROLLMENT_CODE_RE.sub("K1-[redacted]", super().format(record))
 
 
 class LoggingSetup:
