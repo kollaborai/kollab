@@ -171,6 +171,32 @@ async def mesh_network(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_relay_peer_with_mesh_link_keeps_native_relay_path(mesh_network):
+    # Live regression: once peers exchanged mesh records, secure requests to a
+    # relay-connected peer went through peer.forward and failed; without a
+    # direct dial the mesh adds nothing for a peer already on the relay.
+    clients, states, application_calls, dispatch_calls, _ = mesh_network
+    origin_mesh = states["origin"]["mesh"]
+    relay_key = clients["relay"].public_key
+    assert origin_mesh.direct_enabled is False
+    assert origin_mesh.router.link_between(
+        origin_mesh.local_peer_id, peer_id_for_key(relay_key)
+    ) is not None
+    forwarded = []
+
+    async def record_forward(peer_key, frame, *, timeout):
+        forwarded.append(peer_key)
+        raise AssertionError("relay peer request used the mesh carrier")
+
+    origin_mesh._send_forward_to_peer = record_forward
+    result = await states["origin"]["secure"].request(relay_key, "directory", {}, timeout=10)
+
+    assert result == {"agents": [{"name": "relay-agent"}], "truncated": False}
+    assert forwarded == []
+    assert any(method == "secure_packet" for _, method in application_calls["relay"])
+
+
+@pytest.mark.asyncio
 async def test_three_peer_carrier_delivers_secure_directory_and_replay_once(mesh_network):
     clients, states, application_calls, dispatch_calls, wire = mesh_network
     origin_mesh = states["origin"]["mesh"]

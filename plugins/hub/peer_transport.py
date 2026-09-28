@@ -1770,6 +1770,11 @@ class PeerMeshRuntime:
             if record is None or not router.route_candidates(remote_id):
                 raise RelayError("no authenticated peer route is available")
         else:
+            # A peer already on the relay only benefits from the mesh when a
+            # direct dial exists; otherwise the mesh would wrap the same packet
+            # in peer.forward over the same relay, so keep the native path.
+            if not self.direct_enabled or self._locator_for_peer(peer_key) is None:
+                return await self.client.request(peer_key, method, payload, timeout=timeout)
             record = self.record_store.get(remote_id, scope=router.scope)
             link = router.link_between(self.local_peer_id, remote_id)
             tls_id = self.secure_transport.link_session_id(peer_key)
