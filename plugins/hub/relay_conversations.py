@@ -1538,7 +1538,21 @@ class ConversationStore:
         task = self.task(task_id, room=room, peer=peer)
         if task is None:
             raise RelayError("conversation task is unavailable")
-        self.transition(task_id, "cancelled", detail="cancelled by sending peer")
+        if self.transition(task_id, "cancelled", detail="cancelled by sending peer"):
+            # Work already produced for this task (a queued result, progress or
+            # question) must not reach the sender after it cancelled.
+            with self._connect() as db:
+                db.execute(
+                    "UPDATE outbound_queue SET state='revoked',detail='task cancelled' "
+                    "WHERE room=? AND peer=? AND thread=? AND state='queued'",
+                    (room, peer, task_id),
+                )
+                db.execute(
+                    "UPDATE conversation_events SET state='revoked',presented=1 "
+                    "WHERE room=? AND peer=? AND thread=? "
+                    "AND state IN ('pending','queued','answer_queued')",
+                    (room, peer, task_id),
+                )
         current = self.task(task_id)
         return {"id": task_id, "state": current["state"]}
 

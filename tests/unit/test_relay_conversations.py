@@ -448,6 +448,26 @@ def test_scoped_revoke_preserves_other_agents_and_rooms(store):
     assert store.allowed(OTHER_ROOM, PEER, "sapphire")
 
 
+def test_cancel_revokes_result_already_queued_for_the_sender(store):
+    grant(store)
+    incoming = message()
+    admit(store, incoming)
+    store.transition(incoming["id"], "running")
+    reply = outbound(
+        170,
+        kind="result",
+        reply_to=incoming["id"],
+        thread_id=incoming["thread_id"],
+        expires_at=incoming["expires_at"],
+        content="Created proof.txt.",
+    )
+    store.queue_outbound(ROOM, reply)
+    store.transition(incoming["id"], "reply_pending")
+
+    assert store.cancel(ROOM, PEER, incoming["id"])["state"] == "cancelled"
+    assert store.outbound(reply["id"])["state"] == "revoked"
+
+
 def test_peer_cannot_cancel_another_peers_task(store):
     grant(store)
     admit(store)
