@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Any agent connected to a relay can create enrollment codes for its own private
+  network. The new device verifies the issuer's key through the code exchange
+  instead of trusting only the discovery domain's publisher, so codes are no
+  longer limited to the kollabor.ai operator (#89).
+- The device-code screen says what to check when a code cannot be created.
+
 ## [0.10.0] - 2026-09-28
 
 ### Added

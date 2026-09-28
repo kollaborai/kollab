@@ -423,6 +423,8 @@ async def _run_enrollment(
     wrong_challenge_audience=False,
     expired_challenge=False,
     lose_ack_response=False,
+    publisher_key=None,
+    claim_other_owner=False,
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
@@ -458,7 +460,7 @@ async def _run_enrollment(
     discovery = SimpleNamespace(
         origin=origin,
         manifest={
-            "coordinator": {"public_key": owner_public_key.hex()},
+            "coordinator": {"public_key": (publisher_key or owner_public_key).hex()},
             "endpoints": {"control": origin + "/relay/v1"},
         },
     )
@@ -546,7 +548,10 @@ async def _run_enrollment(
             if path.endswith("/reply/poll"):
                 self.reply_polls += 1
                 if self.reply_polls == 1:
-                    payload = sign_enrollment_payload(owner_signing_key, self.challenge_payload)
+                    challenge_payload = dict(self.challenge_payload)
+                    if claim_other_owner:
+                        challenge_payload["owner_key"] = SigningKey.generate().verify_key.encode().hex()
+                    payload = sign_enrollment_payload(owner_signing_key, challenge_payload)
                     if tamper_challenge:
                         payload["owner_signature"] = "0" * 128
                     return {
@@ -857,6 +862,31 @@ async def test_device_enrollment_rejects_invalid_owner_signature_before_state_ch
 
 
 @pytest.mark.asyncio
+async def test_device_enrollment_trusts_code_authenticated_issuer_not_discovery_publisher(tmp_path, monkeypatch):
+    result, commands, destination, _transport, owner_directory = await _run_enrollment(
+        tmp_path, monkeypatch, publisher_key=SigningKey.generate().verify_key.encode()
+    )
+
+    assert result == {"status": "approved"}
+    assert destination.state.approvals == [destination.state.inviter]
+    commands._attach.assert_awaited_once()
+    assert owner_directory.members()
+
+
+@pytest.mark.asyncio
+async def test_device_enrollment_rejects_challenge_signed_for_another_owner_key(tmp_path, monkeypatch):
+    result, commands, destination, _transport, owner_directory = await _run_enrollment(
+        tmp_path, monkeypatch, claim_other_owner=True
+    )
+
+    assert result == {"error": "invalid_response"}
+    assert destination.state.origin == ""
+    assert destination.state.approvals == []
+    commands._attach.assert_not_awaited()
+    assert owner_directory.members() == ()
+
+
+@pytest.mark.asyncio
 async def test_device_enrollment_rejects_owner_scope_for_another_workspace(tmp_path, monkeypatch):
     result, commands, destination, transport, owner_directory = await _run_enrollment(
         tmp_path, monkeypatch, wrong_challenge_audience=True
@@ -893,13 +923,15 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
     relay._store.save()
     relay._state = "online"
     relay._session_id = "1" * 32
+    # The beacon's publisher is another identity: any trusted agent issues
+    # codes for its own network (agent-device-pairing.md).
     discovery = SimpleNamespace(
         origin=origin,
         publisher_principal_id=principal,
         manifest={
             "coordinator": {
-                "designation": "owner-agent",
-                "public_key": owner_signing_key.verify_key.encode().hex(),
+                "designation": "discovery",
+                "public_key": SigningKey.generate().verify_key.encode().hex(),
             }
         },
     )
@@ -980,11 +1012,13 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
     ]
     assert record["authorized_agent_id"] == "owner-agent"
     assert record["authorized_session_id"] == relay._session_id
-    assert record["issuer"] == principal
+    assert record["issuer"] == enrollment_client.public_key_id(owner_signing_key.verify_key.encode())
     assert record["configuration_profile"] == enrollment_client._profile_reference(provider_profile.name)
     assert "a" * 128 not in json.dumps(state)
     assert all("/" not in network_id for network_id in record["network_ids"])
     assert any(network_id.startswith("origin:") for network_id in record["network_ids"])
+    assert record["issuer"] in record["network_ids"]
+    assert principal not in record["network_ids"]
 
     offer = issuer._offers[result["offer_id"]]
     # This test simulates the post-acceptance worker read of the provider key.
@@ -1079,12 +1113,13 @@ async def test_issuer_requires_explicit_decision_after_proof(
     revoke_after_receipt_before_peer_approval,
 ):
     origin = "https://kollabor.ai"
-    principal = "ed25519:" + "e" * 64
     offer_id = "0123456789abcdef0123456789abcdef"
     round_id = "f" * 32
     human_action_id = "human-action-123"
     session_id = "a" * 32
     owner_signing_key = SigningKey.generate()
+    # The issuer principal is the issuing agent's own key, not the publisher.
+    principal = enrollment_client.public_key_id(owner_signing_key.verify_key.encode())
     code = generate_enrollment_code(offer_id)
     envelope_key = derive_enrollment_envelope_key(code)
     destination_key = SigningKey.generate()
@@ -1169,7 +1204,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
         issuer_key=relay.public_key,
         room_capability=relay.state.room,
         origin=origin,
-        publisher_principal_id=principal,
+        issuer_principal_id=principal,
         network_ids=network_ids,
         profile=profile_reference,
         envelope_key=envelope_key,

@@ -72,6 +72,34 @@ Getting there took 23 runs. Runtime defects found and fixed on the way:
 The relay behind `kollabor.ai` runs release `20260928-789c657`, which adds the
 enrollment mailbox routes (`/relay/v1/enrollment/`, POST only).
 
+## Clean-install acceptance on 0.10.0 (2026-09-28)
+
+Kollab 0.10.0 was published to PyPI from tag `v0.10.0` (`d490b61`). Both hosts
+installed it into fresh virtual environments with `pip install kollab==0.10.0`,
+and the pilots were relaunched from those installs (daemon command lines point
+at the new venvs; both report `kollab 0.10.0`). Run
+`381f49e978d64a7db2911126057fd4bb` passed every check: pairing, the core
+model/tool/file exchange, ui-command, follow-up, question/answer, cancel,
+reconnect, receiver-guard rejection of unauthorized, revoked and
+wrong-workspace requests, and replay deduplication.
+
+## Live code enrollment on source (2026-09-28, #89)
+
+0.10.0 let only the discovery domain's coordinator issue codes, so the live run
+used the #89 source instead. A brand-new issuer on the Mac (fresh home, one
+profile with a fake API key, no real credentials anywhere) ran
+`/connect kollabor.ai` and `/connect offer`; a brand-new device on `alzan-prod`
+received the code by bracketed paste into bare `/connect`. The issuer listed
+the redacted request (device fingerprint, workspace, profile and credential
+category) and accepted it. Result: the device reported `beacon: online` with one
+approved peer, the issuer listed the device key as approved, and the device's
+provisioned state held the issuer's profile under network IDs naming the
+issuer's own key rather than the kollabor.ai publisher.
+
+The first attempt pasted the code into the domain field, which rendered it in
+clear text; the entry view now moves anything from `K1-` onward into the masked
+code field, and the second attempt exercised that path.
+
 ## Evidence already recorded
 
 - The 0.9.0 deployment proved encrypted relay ping/pong, not an agent

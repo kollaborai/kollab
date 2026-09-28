@@ -221,6 +221,32 @@ async def test_bracketed_paste_tab_does_not_change_focus_or_expose_code():
 
 
 @pytest.mark.asyncio
+async def test_code_pasted_into_domain_field_moves_to_private_field():
+    captured_codes = []
+
+    async def submit(submission: ConnectSubmission) -> ConnectOutcome:
+        captured_codes.append(submission.code.reveal())
+        return ConnectOutcome.pending("domain-paste-request")
+
+    view = ConnectAltView(on_submit=submit)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    assert view._focus == "domain"
+
+    await _paste(view, "K1-AAAA-SYNTHETIC-SECRET")
+    await view.render_frame(0.0)
+
+    assert view.domain == "kollabor.ai"
+    assert view._focus == "code"
+    assert "SYNTHETIC-SECRET" not in renderer.text()
+    assert "K1-" not in renderer.text()
+
+    await view.handle_input(_named("Enter"))
+
+    assert captured_codes == ["K1-AAAA-SYNTHETIC-SECRET"]
+
+
+@pytest.mark.asyncio
 async def test_deliberate_tab_changes_focus_outside_bracketed_paste():
     view = ConnectAltView()
     await view.on_enter(_FakeRenderer())
@@ -484,5 +510,6 @@ async def test_offer_callback_failure_never_renders_exception_text(caplog):
     await view.render_frame(0.0)
 
     assert "Could not create a device code." in renderer.text()
+    assert "/connect status shows kollabor.ai online" in renderer.text()
     assert secret not in renderer.text()
     assert secret not in caplog.text
