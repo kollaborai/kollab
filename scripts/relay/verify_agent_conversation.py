@@ -2487,7 +2487,9 @@ for path in recent_paths(conversations/"raw","*_raw.jsonl",30,16*1024*1024):
             name=str(call.get("name","")).lower().replace("-","_")
             value=arguments(call.get("input",call.get("arguments",{})))
             to=value.get("to",value.get("target","")); content=value.get("message",value.get("content",""))
-            thread=value.get("thread_id",value.get("thread",grant))
+            # An empty thread_id binds to the single ready grant, like an
+            # absent one; the receipt join below still requires the grant ID.
+            thread=value.get("thread_id") or value.get("thread") or grant
             if (
                 name == "hub_msg"
                 and to == target

@@ -1516,8 +1516,11 @@ def test_sender_result_consumption_joins_private_event_to_provider_request_and_r
     assert malformed["provider_request_contains_result"] is False
 
 
+# Live run e17c1bc8: the model sent thread_id="" and the runtime bound the call
+# to the single ready grant; the receipt carries the grant ID either way.
+@pytest.mark.parametrize("call_thread", ["grant", ""])
 def test_sender_trace_reads_current_owner_logs_and_correlates_native_tool_receipt(
-    tmp_path,
+    tmp_path, call_thread
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1545,7 +1548,7 @@ def test_sender_trace_reads_current_owner_logs_and_correlates_native_tool_receip
                             "id": tool_id,
                             "input": {
                                 "to": target,
-                                "thread_id": grant_id,
+                                "thread_id": grant_id if call_thread else "",
                                 "message": message,
                             },
                         }
