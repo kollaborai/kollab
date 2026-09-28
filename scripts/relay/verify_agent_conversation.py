@@ -734,10 +734,13 @@ class ProcessRunner:
                         )
                         if attach_reported and ready_at >= 0 and not command_sent:
                             command_output_offset = len(captured)
-                            os.write(master, encoded_command)
-                            # Keep Enter separate so the TUI treats this as a
-                            # slash command, not a multiline paste or model turn.
-                            time.sleep(0.1)
+                            # Type like a person: the TUI treats characters that
+                            # arrive under 50 ms apart (or coalesced over SSH
+                            # with the Enter) as a paste, not a slash command.
+                            for byte in encoded_command:
+                                os.write(master, bytes((byte,)))
+                                time.sleep(0.06)
+                            time.sleep(0.3)
                             os.write(master, b"\r")
                             command_sent = True
                             quiet_since = time.monotonic()
