@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `/quit` (alias `/exit`), which exits Kollab the same way a second
+  Ctrl+C does.
+
+### Fixed
+
+- The session prompt reads the host name with `uname -n`, so hosts without a
+  `hostname` binary (Arch Linux) no longer log an error on every prompt render.
+
 ## [0.10.3] - 2026-09-28
 
 ### Fixed

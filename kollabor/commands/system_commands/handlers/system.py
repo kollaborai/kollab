@@ -195,6 +195,19 @@ class SystemCommandHandler(BaseCommandHandler):
         )
         self.command_registry.register_command(upgrade_command)
 
+        # Register /quit command
+        quit_command = CommandDefinition(
+            name="quit",
+            description="Exit Kollab (same as pressing Ctrl+C twice)",
+            handler=self.handle_quit,
+            plugin_name="system",
+            category=CommandCategory.SYSTEM,
+            mode=CommandMode.INSTANT,
+            aliases=["exit"],
+            icon="[X]",
+        )
+        self.command_registry.register_command(quit_command)
+
     async def handle_help(self, command: SlashCommand) -> CommandResult:
         """Handle /help command.
 
@@ -1240,6 +1253,10 @@ Platform: {version_info['platform']}"""
                 message=f"Error getting version: {str(e)}",
                 display_type="error",
             )
+
+    async def handle_quit(self, command: SlashCommand) -> CommandResult:
+        """Exit the way a second Ctrl+C does, so shutdown and cleanup are shared."""
+        raise KeyboardInterrupt
 
     async def handle_upgrade(self, command: SlashCommand) -> CommandResult:
         """Handle /upgrade command - update Kollab and restart.
