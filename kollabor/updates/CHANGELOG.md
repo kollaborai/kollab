@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-28
+
 ### Fixed
 
 - Any agent connected to a relay can create enrollment codes for its own private
@@ -14,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of trusting only the discovery domain's publisher, so codes are no
   longer limited to the kollabor.ai operator (#89).
 - The device-code screen says what to check when a code cannot be created.
+- A code typed or pasted into the domain field of the private `/connect` form
+  moves to the masked code field instead of showing in clear text.
 
 ## [0.10.0] - 2026-09-28
 
