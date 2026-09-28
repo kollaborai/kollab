@@ -2526,7 +2526,7 @@ class HubPlugin(BasePlugin):
 
             if (
                 not target.startswith("relay:")
-                or not ID.fullmatch(thread_id)
+                or (thread_id and not ID.fullmatch(thread_id))
                 or not ID.fullmatch(reply_to)
             ):
                 return ToolExecutionResult(

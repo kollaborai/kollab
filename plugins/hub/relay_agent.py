@@ -864,11 +864,16 @@ class RelayAgentBridge:
             ):
                 raise RelayError("conversation question is no longer pending")
             original = question["payload"]
+            # reply_to names the pending question; its record fixes the thread
+            # and the asker. Accept the asker's key and workspace even if the
+            # model mistyped the agent segment or thread, and route by record.
+            asker = RelayAddress.parse(original["from"])
             if (
-                params["thread_id"] != original["thread_id"]
-                or str(destination) != original["from"]
+                destination.key != asker.key
+                or destination.workspace_id != asker.workspace_id
             ):
                 raise RelayError("conversation answer does not match the pending question")
+            params["thread_id"] = original["thread_id"]
             if question[
                 "room"
             ] != client.state.room or not self.store._same_participant(

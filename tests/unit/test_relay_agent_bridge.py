@@ -809,6 +809,46 @@ async def test_remote_task_reply_binds_sender_with_drifted_agent_segment(bridges
 
 
 @pytest.mark.asyncio
+async def test_human_answer_binds_thread_and_asker_from_the_question(bridges):
+    members, _ = bridges
+    (left, left_hub, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+    asked = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    question_id = asked.metadata["relay_receipt"]["id"]
+    asker = left.store.event(question_id)["payload"]["from"]
+    key, workspace, _agent = asker.split(":")[1:]
+
+    # From a human turn: empty thread_id and a stale agent segment.
+    answered = await left_hub._handle_hub_msg_tool(
+        {
+            "id": "answer",
+            "to": f"relay:{key}:{workspace}:stale-agent",
+            "kind": "answer",
+            "thread_id": "",
+            "reply_to": question_id,
+            "content": "Use the workspace root.",
+        }
+    )
+    assert answered.success, answered.error
+    assert left.store.event(question_id)["state"] == "answered"
+    assert right.store.task(task_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_question_answer_resumes_same_granted_thread_once(bridges):
     members, _ = bridges
     (left, left_hub, left_model, left_bus), (right, right_hub, right_model, _) = members
