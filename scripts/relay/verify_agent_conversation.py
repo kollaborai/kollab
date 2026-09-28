@@ -2907,7 +2907,9 @@ for record_index, (_name, _line_number, item) in enumerate(raw_records):
             and target == peer_address
             and call_kind == "question"
             and call_thread == task_id
-            and call_reply == task_id
+            # The runtime sets a question's reply_to to its thread
+            # (relay_agent.send); the ledger check proves the stored value.
+            and call_reply in {task_id, ""}
             and content == question_text
         ):
             question_calls.append((record_index, call_index, tool_id))

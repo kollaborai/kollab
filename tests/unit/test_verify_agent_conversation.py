@@ -3899,7 +3899,9 @@ def test_question_answer_trace_requires_actual_wires_and_native_receipts(tmp_pat
                                     "to": sender_address,
                                     "kind": "question",
                                     "thread_id": task_id,
-                                    "reply_to": task_id,
+                                    # Live run bc752a87: the model left reply_to
+                                    # empty; the runtime fills it with the thread.
+                                    "reply_to": "",
                                     "message": question_text,
                                 },
                             }
