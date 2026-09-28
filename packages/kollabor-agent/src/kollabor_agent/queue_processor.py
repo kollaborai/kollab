@@ -813,6 +813,12 @@ class QueueProcessor:
             # waits for the model. A cancelled pre-request must not reach the
             # provider; tool guards alone are too late for this boundary.
             raise asyncio.CancelledError("Model request denied by pre-request hook")
+        # A pre-request hook may withhold tools for this request (a relay event
+        # turn answers in text; offering tools it would refuse shows errors).
+        tools_withheld = any(
+            (pre_request or {}).get(phase, {}).get("final_data", {}).get("withhold_tools")
+            for phase in ("pre", "main", "post")
+        )
 
         response = None
         parent_uuid = current_parent_uuid
@@ -931,10 +937,12 @@ class QueueProcessor:
             response = await self._streaming_handler.call_llm(
                 conversation_history=self.conversation_history,
                 max_history=self._max_history,
-                native_tools=self._native_tools_handler.tools,
+                native_tools=None if tools_withheld else self._native_tools_handler.tools,
                 mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                 is_cancelled_fn=lambda: self.cancel_processing,
-                native_tools_provider=lambda: self._native_tools_handler.tools,
+                native_tools_provider=(
+                    None if tools_withheld else lambda: self._native_tools_handler.tools
+                ),
                 turn_id=root_turn_id,
             )
 
@@ -1009,10 +1017,12 @@ class QueueProcessor:
                 response = await self._streaming_handler.call_llm(
                     conversation_history=self.conversation_history,
                     max_history=self._max_history,
-                    native_tools=self._native_tools_handler.tools,
+                    native_tools=None if tools_withheld else self._native_tools_handler.tools,
                     mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                     is_cancelled_fn=lambda: self.cancel_processing,
-                    native_tools_provider=lambda: self._native_tools_handler.tools,
+                    native_tools_provider=(
+                        None if tools_withheld else lambda: self._native_tools_handler.tools
+                    ),
                     parent_turn_id=root_turn_id,
                 )
 

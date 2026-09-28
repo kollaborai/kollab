@@ -739,35 +739,20 @@ async def test_tool_progress_is_bounded_and_does_not_forward_tool_arguments(brid
     assert "sensitive file contents" not in json.dumps(queued)
 
     await right._flush_outbound()
-    assert len(left_model.contexts) == 1
-    progress = left_model.conversation_history[-1]
-    assert "[relay progress]" in progress.content
-    assert "The receiving agent is preparing a local tool operation." in progress.content
-    assert progress.metadata["relay_event_kind"] == "progress"
-    assert progress.metadata["hub_message_id"] == progress.metadata["relay_event_id"]
-    assert "/private/workspace" not in progress.content
-    assert "sensitive file contents" not in progress.content
+    # Progress is shown to the human but never starts a sender model turn: in
+    # the live Mac/alzan-prod run each event produced a filler reply.
+    assert left_model.contexts == []
+    assert not any(
+        "[relay progress]" in str(item.content) for item in left_model.conversation_history
+    )
     displayed = left_hub._display_hub_message.call_args.args[0]
     assert displayed.metadata["relay_event"] == "progress"
     assert "The receiving agent is preparing a local tool operation." in displayed.content
+    assert "/private/workspace" not in displayed.content
+    assert "sensitive file contents" not in displayed.content
     assert "/private/workspace" not in json.dumps(wire.sent)
     assert "sensitive file contents" not in json.dumps(wire.sent)
     assert right.store.task(right.active.record["id"])["state"] == "running"
-
-    executor = ToolExecutor(None, left_bus, workspace=left.workspace)
-    blocked = await in_turn(
-        left_model,
-        executor.execute_tool(
-            {
-                "id": "relay-progress-file-create",
-                "type": "file_create",
-                "file": "progress-cannot-authorize-tools.txt",
-                "content": "progress context is informational",
-            }
-        ),
-    )
-    assert not blocked.success and blocked.metadata["permission_denied"]
-    assert not (left.workspace / "progress-cannot-authorize-tools.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -806,6 +791,50 @@ async def test_remote_task_reply_binds_sender_with_drifted_agent_segment(bridges
                 kind="progress",
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
+    # Live Mac/alzan-prod run: the receiving model sent its final answer with
+    # hub_msg three times and got only a generic "not accepted" error.
+    members, _ = bridges
+    (left, _, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    sender = right.active.record["payload"]["from"]
+
+    refused = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {"id": "answer-by-tool", "to": sender, "content": "proof.txt created"}
+        ),
+    )
+
+    assert not refused.success
+    assert refused.error == (
+        "Do not send your answer with hub_msg: your final reply in this turn is "
+        f"returned to {sender} automatically. Write the answer as your normal reply. "
+        "hub_msg is only for one kind='question' to the sender."
+    )
+    assert not right.active.replied
+
+
+@pytest.mark.asyncio
+async def test_relay_event_turns_withhold_tools_from_the_model(bridges):
+    members, _ = bridges
+    (left, _, _, _), _ = members
+    assert "withhold_tools" not in await left.guard_model({})
+
+    token = left._correlated_event_context.set(
+        {"kind": "result", "event_id": "e" * 32, "thread_id": "t" * 32, "peer": "peer"}
+    )
+    try:
+        assert (await left.guard_model({}))["withhold_tools"] is True
+        assert any("No tools are available." in line for line in await left.harness_context())
+    finally:
+        left._correlated_event_context.reset(token)
 
 
 @pytest.mark.asyncio

@@ -124,6 +124,22 @@ class TestQueueProcessor(unittest.TestCase):
         self.streaming_handler.call_llm.assert_not_awaited()
         self.api_service.call_llm.assert_not_awaited()
 
+    def test_pre_request_hook_can_withhold_tools_for_one_request(self):
+        self.native_tools_handler.tools = [{"name": "terminal"}]
+        self.event_bus.emit_with_hooks.return_value = {
+            "main": {"final_data": {"withhold_tools": True}}
+        }
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="relay-event",
+            )
+        )
+
+        kwargs = self.streaming_handler.call_llm.call_args.kwargs
+        self.assertIsNone(kwargs["native_tools"])
+        self.assertIsNone(kwargs["native_tools_provider"])
+
     def test_human_queue_drain_does_not_inherit_remote_task_context(self):
         async def scenario():
             token = remote_task_id.set("previous-remote-task")
