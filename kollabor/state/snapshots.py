@@ -276,6 +276,141 @@ class ProcessingSnapshot(Snapshot):
     pending_tools_count: int = 0
     bg_tasks_count: int = 0
     circuit_breaker_state: str = "closed"
+    active_operation: "ActiveOperationSnapshot" = field(
+        default_factory=lambda: ActiveOperationSnapshot()
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ProcessingSnapshot":
+        values = dict(data)
+        operation = values.pop("active_operation", None)
+        return cls(
+            **values,
+            active_operation=ActiveOperationSnapshot.from_dict(
+                operation if isinstance(operation, dict) else {}
+            ),
+        )
+
+
+_ACTIVE_OPERATION_PHASES = frozenset(
+    {
+        "idle",
+        "provider_request",
+        "provider_streaming",
+        "provider_retry_wait",
+        "provider_response",
+        "provider_failed",
+        "provider_cancelled",
+        "tool_permission",
+        "tool_execution",
+        "tool_complete",
+        "cancellation_cleanup",
+    }
+)
+_ACTIVE_OPERATION_CLEANUP_STATES = frozenset(
+    {"none", "requested", "pending", "complete", "failed", "superseded"}
+)
+_ACTIVE_OPERATION_PROVIDERS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "azure_openai",
+        "custom",
+        "openrouter",
+        "openai_responses",
+        "gemini",
+    }
+)
+
+
+def _bounded_operation_id(value: Any, *, pattern: str, limit: int) -> str | None:
+    if not isinstance(value, str) or len(value) > limit:
+        return None
+    import re
+
+    return value if re.fullmatch(pattern, value) else None
+
+
+@dataclass(frozen=True)
+class ActiveOperationSnapshot:
+    """Sanitized owner-visible provider/tool/cancellation activity metadata."""
+
+    task_id: str | None = None
+    generation: int = 0
+    phase: str = "idle"
+    provider: str | None = None
+    request_id: str | None = None
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    tool_call_id_generated: bool = False
+    cancel_generation: int | None = None
+    cleanup_state: str = "none"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ActiveOperationSnapshot":
+        generation = data.get("generation", 0)
+        cancel_generation = data.get("cancel_generation")
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            generation = 0
+        if generation < 0:
+            generation = 0
+        if isinstance(cancel_generation, bool) or not isinstance(
+            cancel_generation, int
+        ):
+            cancel_generation = None
+        elif cancel_generation < 0:
+            cancel_generation = None
+
+        task_id = _bounded_operation_id(
+            data.get("task_id"), pattern=r"[0-9a-f]{32}", limit=32
+        )
+        request_id = _bounded_operation_id(
+            data.get("request_id"), pattern=r"[0-9a-f]{32}", limit=32
+        )
+        tool_call_id = _bounded_operation_id(
+            data.get("tool_call_id"),
+            pattern=r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}",
+            limit=128,
+        )
+        tool_name = _bounded_operation_id(
+            data.get("tool_name"), pattern=r"[a-z][a-z0-9_]{0,63}", limit=64
+        )
+        if tool_name is not None:
+            try:
+                from kollabor_agent.tool_registry import get_registry
+
+                definition = get_registry().get_by_native_name(tool_name)
+                tool_name = definition.native_name if definition is not None else None
+            except Exception:
+                tool_name = None
+        provider = data.get("provider")
+        if not isinstance(provider, str) or provider not in _ACTIVE_OPERATION_PROVIDERS:
+            provider = None
+        phase = data.get("phase")
+        if not isinstance(phase, str) or phase not in _ACTIVE_OPERATION_PHASES:
+            phase = "idle"
+        cleanup_state = data.get("cleanup_state")
+        if (
+            not isinstance(cleanup_state, str)
+            or cleanup_state not in _ACTIVE_OPERATION_CLEANUP_STATES
+        ):
+            cleanup_state = "none"
+
+        return cls(
+            task_id=task_id,
+            generation=generation,
+            phase=phase,
+            provider=provider,
+            request_id=request_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_call_id_generated=data.get("tool_call_id_generated") is True,
+            cancel_generation=cancel_generation,
+            cleanup_state=cleanup_state,
+        )
 
 
 @dataclass

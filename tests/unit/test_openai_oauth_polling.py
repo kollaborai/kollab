@@ -133,3 +133,34 @@ async def test_long_server_interval_cannot_extend_poll_timeout(monkeypatch):
 
     assert delays == [10]
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_failure_does_not_expose_provider_response_body():
+    class _RefreshResponse:
+        status = 400
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _RefreshSession:
+        closed = False
+
+        def post(self, *_args, **_kwargs):
+            return _RefreshResponse()
+
+        async def close(self):
+            self.closed = True
+
+    client = openai_oauth.OpenAIOAuthClient()
+    client._session = _RefreshSession()
+    secret_echo = "synthetic-refresh-secret-DO-NOT-LOG"
+
+    with pytest.raises(openai_oauth.OAuthError) as error:
+        await client.refresh_access_token(secret_echo)
+
+    assert "HTTP 400" in str(error.value)
+    assert secret_echo not in str(error.value)

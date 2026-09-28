@@ -1080,6 +1080,19 @@ def get_default_agent() -> tuple[Optional[str], Optional[str]]:
         except Exception as e:
             logger.debug(f"Failed to parse global config {global_config_path}: {e}")
 
+    # Provisioned defaults are a private overlay. Project and explicit user
+    # defaults retain precedence; an installed default fills only the gap.
+    try:
+        from .provisioned_state import ProvisionedStateFile
+
+        state = ProvisionedStateFile().read()
+        for enrollment_id in sorted(state["installs"]):
+            name = state["installs"][enrollment_id]["settings"]["default_agent"]
+            if name:
+                return name, "global"
+    except Exception as e:
+        logger.debug("Could not read private provisioned agent default: %s", e)
+
     return (None, None)
 
 

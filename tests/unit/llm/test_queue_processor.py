@@ -152,6 +152,27 @@ class TestQueueProcessor(unittest.TestCase):
         # turn_completed set to True in setUp to prevent infinite loops
         self.assertFalse(self.processor.cancel_processing)
 
+    def test_remote_cancellation_requires_idle_matching_generation(self):
+        self.processor.is_processing = True
+        generation = self.processor.request_cancellation(origin="remote_task")
+
+        self.assertFalse(self.processor.clear_remote_task_cancellation(generation))
+        self.processor.is_processing = False
+        self.assertFalse(self.processor.clear_remote_task_cancellation(generation + 1))
+        self.assertTrue(self.processor.cancel_processing)
+        self.assertTrue(self.processor.clear_remote_task_cancellation(generation))
+        self.assertFalse(self.processor.cancel_processing)
+
+    def test_direct_cancellation_write_supersedes_remote_generation(self):
+        generation = self.processor.request_cancellation(origin="remote_task")
+
+        self.processor.cancel_processing = True
+
+        self.assertEqual(self.processor.cancel_origin, "external")
+        self.assertGreater(self.processor.cancel_generation, generation)
+        self.assertFalse(self.processor.clear_remote_task_cancellation(generation))
+        self.assertTrue(self.processor.cancel_processing)
+
     def test_enqueue_success(self):
         """Test successful message enqueue."""
         self.loop.run_until_complete(self.processor.enqueue("test message"))

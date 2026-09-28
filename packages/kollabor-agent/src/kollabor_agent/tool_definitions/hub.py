@@ -21,13 +21,19 @@ from ..tool_registry import get_registry
 
 hub_msg = ToolDefinition(
     name="hub-msg",
-    description="Send a message to another agent on the hub.",
+    description=(
+        "Send a message to a local Hub peer or an authorized remote relay agent. "
+        "Start a remote task with kind='message' and the exact human-authorized request. "
+        "Only a receiver inside an active remote task may ask its authenticated sender "
+        "a bounded question with kind='question'. Use kind='answer' only for the exact "
+        "pending question and its peer, thread_id, and event ID."
+    ),
     category="hub",
     risk_level="low",
     requires_permission=False,
     xml_tag="hub_msg",
     xml_form="mixed",
-    xml_attributes=["to", "wait", "force"],
+    xml_attributes=["to", "wait", "force", "thread_id", "reply_to", "kind"],
     xml_body_param="message",
     parameters=[
         ToolParameter(
@@ -39,7 +45,10 @@ hub_msg = ToolDefinition(
         ToolParameter(
             name="message",
             type="string",
-            description="Message content",
+            description=(
+                "Message content. For an initial remote task, send exactly the stored "
+                "human-authorized purpose; do not include the human command wrapper or add text."
+            ),
             required=True,
         ),
         ToolParameter(
@@ -54,19 +63,61 @@ hub_msg = ToolDefinition(
             description="Force delivery even if would be deduped",
             required=False,
         ),
+        ToolParameter(
+            name="thread_id",
+            type="string",
+            description=(
+                "For an initial remote kind='message', the exact human-issued grant ID. "
+                "For kind='answer', the exact thread_id from the pending relay question. "
+                "An ID selects existing authority and never creates authorization."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="reply_to",
+            type="string",
+            description=(
+                "For kind='answer', the exact event_id of the pending relay question. "
+                "The relay store checks the target, thread, question, approval, and expiry."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="kind",
+            type="string",
+            description=(
+                "For initial remote contact, use 'message' with the exact authorized request. "
+                "Only a receiver inside an active remote task may use 'question' to ask its "
+                "authenticated sender one bounded clarification. 'answer' responds to one "
+                "exact pending question using its peer, thread_id, and reply_to event ID."
+            ),
+            required=False,
+            enum=["message", "question", "answer"],
+        ),
     ],
     examples=[
         '<hub_msg to="lapis">standby. waiting for next task.</hub_msg>',
         '<hub_msg to="all" wait="true">phase B shipped. standing by.</hub_msg>',
+        (
+            '<hub_msg to="relay:<approved-agent-address>" kind="answer" '
+            'thread_id="<thread-id>" reply_to="<question-id>">'
+            "Use the workspace root.</hub_msg>"
+        ),
     ],
     result_format="Delivery confirmation.",
     key_rules=[
         "use identity names from the roster (lapis, sapphire, etc), not agent type names",
-        "all messages are visible to all peers — no private DMs",
+        "local Hub mesh messages are visible to peers; remote relay messages use the exact authorized address",
         "wait='true' means you are done talking after this message — use when you have nothing else to do",
         "without wait='true' the system will re-invoke you after delivery — "
         "correct when you have more work to do but causes loops when you're just chatting",
         "be concise — other agents have limited context too",
+        "start a remote task with kind='message', the exact request text from its human "
+        "contact instruction, and that instruction's exact thread_id; do not wrap or extend it",
+        "use kind='question' only as the receiver of an active authenticated remote task, "
+        "and only to ask that task's authenticated sender for a bounded clarification",
+        "answer a relay question only with kind='answer', the question's exact relay "
+        "address, thread_id, and event_id as reply_to; never answer a result or an expired question",
     ],
 )
 

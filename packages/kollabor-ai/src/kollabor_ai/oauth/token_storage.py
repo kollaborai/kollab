@@ -66,13 +66,31 @@ class OAuthTokenStorage:
             for directory in get_config_directory_candidates()
         ]
 
-    async def store_tokens(self, provider: str, tokens: OAuthTokens) -> None:
+    async def store_tokens(
+        self,
+        provider: str,
+        tokens: OAuthTokens,
+        *,
+        profile_name: str | None = None,
+    ) -> None:
         """Store OAuth tokens for a provider.
 
         Args:
             provider: Provider name (e.g. "openai").
             tokens: Token set to store.
         """
+        if profile_name is not None:
+            if provider != "openai":
+                raise OAuthError("profile-scoped OAuth is only supported for OpenAI")
+            from kollabor_config.provisioned_state import ProvisionedStateFile
+
+            if not ProvisionedStateFile().update_profile_oauth_tokens(
+                profile_name, tokens.to_dict()
+            ):
+                raise OAuthError("provisioned OAuth profile is unavailable")
+            logger.info("Stored OAuth tokens for profile-scoped OpenAI profile")
+            return
+
         path = self._token_path(provider)
         data = json.dumps(tokens.to_dict(), indent=2)
         path.write_text(data, encoding="utf-8")
@@ -87,6 +105,8 @@ class OAuthTokenStorage:
         self,
         provider: str,
         auto_refresh: bool = True,
+        *,
+        profile_name: str | None = None,
     ) -> Optional[OAuthTokens]:
         """Load OAuth tokens for a provider, refreshing if needed.
 
@@ -97,6 +117,30 @@ class OAuthTokenStorage:
         Returns:
             OAuthTokens if found and valid, None otherwise.
         """
+        if profile_name is not None:
+            if provider != "openai":
+                return None
+            try:
+                from kollabor_config.provisioned_state import ProvisionedStateFile
+
+                data = ProvisionedStateFile().get_profile_oauth_tokens(profile_name)
+                tokens = OAuthTokens.from_dict(data) if data is not None else None
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                logger.warning("Invalid profile-scoped OAuth tokens: %s", e)
+                return None
+            if tokens is None:
+                return None
+            if auto_refresh and self._needs_refresh(tokens):
+                if not tokens.refresh_token:
+                    return None
+                refreshed = await self._try_refresh(
+                    provider, tokens, profile_name=profile_name
+                )
+                if refreshed is None:
+                    logger.warning("OAuth token refresh failed for profile-scoped OpenAI profile")
+                return refreshed
+            return tokens
+
         path = next(
             (candidate for candidate in self._token_path_candidates(provider) if candidate.exists()),
             self._token_path(provider),
@@ -128,7 +172,9 @@ class OAuthTokenStorage:
 
         return tokens
 
-    async def clear_tokens(self, provider: str) -> bool:
+    async def clear_tokens(
+        self, provider: str, *, profile_name: str | None = None
+    ) -> bool:
         """Clear stored OAuth tokens for a provider.
 
         Args:
@@ -137,6 +183,15 @@ class OAuthTokenStorage:
         Returns:
             True if tokens existed and were cleared.
         """
+        if profile_name is not None:
+            if provider != "openai":
+                return False
+            from kollabor_config.provisioned_state import ProvisionedStateFile
+
+            return ProvisionedStateFile().update_profile_oauth_tokens(
+                profile_name, None, disabled=True
+            )
+
         cleared = False
         for path in self._token_path_candidates(provider):
             if path.exists():
@@ -146,7 +201,7 @@ class OAuthTokenStorage:
             logger.info(f"Cleared OAuth tokens for {provider}")
         return cleared
 
-    async def has_tokens(self, provider: str) -> bool:
+    async def has_tokens(self, provider: str, *, profile_name: str | None = None) -> bool:
         """Check if tokens exist for a provider (without loading/refreshing).
 
         Args:
@@ -155,6 +210,18 @@ class OAuthTokenStorage:
         Returns:
             True if tokens are stored.
         """
+        if profile_name is not None:
+            if provider != "openai":
+                return False
+            try:
+                from kollabor_config.provisioned_state import ProvisionedStateFile
+
+                return (
+                    ProvisionedStateFile().get_profile_oauth_tokens(profile_name)
+                    is not None
+                )
+            except (OSError, ValueError):
+                return False
         return self._token_path(provider).exists()
 
     def _needs_refresh(self, tokens: OAuthTokens) -> bool:
@@ -162,7 +229,11 @@ class OAuthTokenStorage:
         return time.time() >= (tokens.expires_at - self._expiry_buffer)
 
     async def _try_refresh(
-        self, provider: str, tokens: OAuthTokens
+        self,
+        provider: str,
+        tokens: OAuthTokens,
+        *,
+        profile_name: str | None = None,
     ) -> Optional[OAuthTokens]:
         """Attempt to refresh expired tokens.
 
@@ -179,12 +250,25 @@ class OAuthTokenStorage:
                 tokens.refresh_token,
                 previous_account_id=tokens.account_id,
             )
-            await self.store_tokens(provider, new_tokens)
+            await self.store_tokens(
+                provider, new_tokens, profile_name=profile_name
+            )
             logger.info(f"Auto-refreshed OAuth token for {provider}")
             return new_tokens
-        except OAuthError as e:
-            logger.error(f"Token refresh failed for {provider}: {e}")
+        except OAuthError as exc:
+            # Provider response bodies and exception strings may echo tokens.
+            logger.error(
+                "Token refresh failed for %s (profile %s, %s)",
+                provider,
+                profile_name or "global",
+                type(exc).__name__,
+            )
             return None
-        except Exception as e:
-            logger.error(f"Unexpected error refreshing {provider} token: {e}")
+        except Exception as exc:
+            logger.error(
+                "Unexpected token refresh failure for %s (profile %s, %s)",
+                provider,
+                profile_name or "global",
+                type(exc).__name__,
+            )
             return None

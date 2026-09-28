@@ -45,6 +45,7 @@ class CommandModeHandler:
         command_menu_renderer: Any,
         slash_parser: Any,
         error_handler: Optional[Any] = None,
+        expand_paste_placeholders: Optional[Callable[[str], str]] = None,
     ) -> None:
         """Initialize the command mode handler.
 
@@ -57,6 +58,7 @@ class CommandModeHandler:
             command_menu_renderer: Renderer for command menu display.
             slash_parser: Parser for slash command syntax.
             error_handler: Optional error handler for command errors.
+            expand_paste_placeholders: Expander for content stored by PasteProcessor.
         """
         self.buffer_manager = buffer_manager
         self.renderer = renderer
@@ -66,6 +68,7 @@ class CommandModeHandler:
         self.command_menu_renderer = command_menu_renderer
         self.slash_parser = slash_parser
         self.error_handler = error_handler
+        self._expand_paste_placeholders_callback = expand_paste_placeholders
 
         # Command mode state
         self.command_mode = CommandMode.NORMAL
@@ -73,6 +76,11 @@ class CommandModeHandler:
         self.selected_command_index = 0
         self.agent_mention_active = False
         self._available_agents: List[Dict[str, Any]] = []
+        self._bracketed_paste_active = False
+        self._bracketed_paste_buffer: List[str] = []
+        self._bracketed_paste_buffered_length = 0
+        self._bracketed_paste_char_limit = 0
+        self._bracketed_paste_overflowed = False
 
         # Callbacks for operations that require access to parent InputHandler
         self._update_display_callback: Optional[Callable] = None
@@ -123,6 +131,7 @@ class CommandModeHandler:
     async def enter_command_mode(self) -> None:
         """Enter slash command mode and show command menu."""
         try:
+            self._reset_bracketed_paste_state()
             logger.info("Entering slash command mode")
             self.command_mode = CommandMode.MENU_POPUP
             self.command_menu_active = True
@@ -157,6 +166,7 @@ class CommandModeHandler:
     async def enter_agent_mention_mode(self) -> None:
         """Enter ``@`` mention mode and show known Hub agent targets."""
         try:
+            self._reset_bracketed_paste_state()
             logger.info("Entering agent mention mode")
             self.command_mode = CommandMode.MENU_POPUP
             self.command_menu_active = True
@@ -194,6 +204,7 @@ class CommandModeHandler:
     async def exit_command_mode(self) -> None:
         """Exit command mode and restore normal input."""
         try:
+            self._reset_bracketed_paste_state()
             import traceback
 
             logger.info("Exiting slash command mode")
@@ -372,11 +383,15 @@ class CommandModeHandler:
         Returns:
             True if input was handled.
         """
+        if self._bracketed_paste_active:
+            await self._handle_bracketed_paste_character(char)
+            return True
+
         # Handle special keys first
         if ord(char) == 27:  # Escape key
             await self.exit_command_mode()
             return True
-        elif ord(char) == 13:  # Enter key
+        elif ord(char) in (10, 13):  # Enter key (LF or CR)
             await self._execute_selected_command()
             return True
         elif ord(char) == 8 or ord(char) == 127:  # Backspace or Delete
@@ -409,6 +424,16 @@ class CommandModeHandler:
             True if key was handled.
         """
         try:
+            if key_press.name == "BracketedPasteStart":
+                self._start_bracketed_paste()
+                return True
+            if key_press.name == "BracketedPasteEnd":
+                await self._finish_bracketed_paste()
+                return True
+            if self._bracketed_paste_active:
+                await self._handle_bracketed_paste_keypress(key_press)
+                return True
+
             # Handle arrow key navigation
             if key_press.name == "ArrowUp":
                 await self._navigate_menu("up")
@@ -416,7 +441,7 @@ class CommandModeHandler:
             elif key_press.name == "ArrowDown":
                 await self._navigate_menu("down")
                 return True
-            elif key_press.name == "Enter":
+            elif key_press.name in ("Enter", "Ctrl+J"):
                 await self._execute_selected_command()
                 return True
             elif key_press.name == "Escape":
@@ -451,6 +476,82 @@ class CommandModeHandler:
             logger.error(f"Error handling menu popup keypress: {e}")
             await self.exit_command_mode()
             return False
+
+    async def _handle_bracketed_paste_keypress(self, key_press: KeyPress) -> None:
+        """Insert pasted menu text without treating its controls as UI actions."""
+        if key_press.name in ("Enter", "Ctrl+J"):
+            self._append_bracketed_paste_text("\n")
+        elif key_press.name == "Tab":
+            self._append_bracketed_paste_text("\t")
+        elif key_press.char and key_press.char.isprintable():
+            self._append_bracketed_paste_text(key_press.char)
+        # Consume other control/navigation keys so they cannot submit the
+        # command, alter the menu, or trigger app actions.
+
+    async def _handle_bracketed_paste_character(self, char: str) -> None:
+        """Handle raw character input while a bracketed paste is in progress."""
+        if char in ("\r", "\n"):
+            self._append_bracketed_paste_text("\n")
+        elif char == "\t":
+            self._append_bracketed_paste_text("\t")
+        elif char.isprintable():
+            self._append_bracketed_paste_text(char)
+
+    def _append_bracketed_paste_text(self, text: str) -> None:
+        """Keep bracketed-paste staging bounded by remaining input capacity."""
+        if self._bracketed_paste_overflowed:
+            return
+        if (
+            self._bracketed_paste_buffered_length + len(text)
+            > self._bracketed_paste_char_limit
+        ):
+            self._bracketed_paste_buffer.clear()
+            self._bracketed_paste_buffered_length = 0
+            self._bracketed_paste_overflowed = True
+            return
+        self._bracketed_paste_buffer.append(text)
+        self._bracketed_paste_buffered_length += len(text)
+
+    async def _finish_bracketed_paste(self) -> None:
+        """Insert bracketed data in one paste operation after its end marker."""
+        content = "".join(self._bracketed_paste_buffer)
+        overflowed = self._bracketed_paste_overflowed
+        self._reset_bracketed_paste_state()
+        if overflowed:
+            logger.warning("Rejected bracketed paste exceeding the input buffer limit")
+            return
+        if not content:
+            return
+
+        handle_paste = getattr(self.buffer_manager, "handle_paste", None)
+        if callable(handle_paste):
+            await handle_paste(content)
+        else:
+            for char in content:
+                self.buffer_manager.insert_char(char)
+
+        await self._update_command_filter()
+
+    def _start_bracketed_paste(self) -> None:
+        """Begin a bounded paste buffer using the current input capacity."""
+        self._reset_bracketed_paste_state()
+        get_stats = getattr(self.buffer_manager, "get_stats", None)
+        stats = get_stats() if callable(get_stats) else {}
+        buffer_limit = stats.get(
+            "buffer_limit", len(self.buffer_manager.content) + 1000
+        )
+        self._bracketed_paste_char_limit = max(
+            0, buffer_limit - len(self.buffer_manager.content)
+        )
+        self._bracketed_paste_active = True
+
+    def _reset_bracketed_paste_state(self) -> None:
+        """Drop any unfinished bracketed paste during menu teardown/re-entry."""
+        self._bracketed_paste_active = False
+        self._bracketed_paste_buffer.clear()
+        self._bracketed_paste_buffered_length = 0
+        self._bracketed_paste_char_limit = 0
+        self._bracketed_paste_overflowed = False
 
     async def _get_available_agents(self) -> List[Dict[str, Any]]:
         """Load online and runnable Hub identities through the state service."""
@@ -710,12 +811,18 @@ class CommandModeHandler:
     async def _execute_selected_command(self) -> None:
         """Execute the currently selected command or insert subcommand."""
         try:
+            buffer_content = self.buffer_manager.content
+            if self._expand_paste_placeholders_callback:
+                buffer_content = self._expand_paste_placeholders_callback(
+                    buffer_content
+                )
+
             # PRIORITY 1: If menu is active with a selection, use the highlighted item
             if self.command_menu_active:
                 selected_item = self.command_menu_renderer.get_selected_command()
                 if selected_item:
                     typed_command_string = self._exact_typed_command_string(
-                        self.buffer_manager.content, selected_item
+                        buffer_content, selected_item
                     )
                     if typed_command_string:
                         command_string = typed_command_string
@@ -752,7 +859,6 @@ class CommandModeHandler:
                     else:
                         # Regular command - execute it
                         # But preserve any arguments the user typed
-                        buffer_content = self.buffer_manager.content
                         # Extract args from buffer (everything after first space)
                         if " " in buffer_content:
                             args_part = buffer_content.split(" ", 1)[1]
@@ -765,14 +871,14 @@ class CommandModeHandler:
                 else:
                     # No menu selection - fall through to parse buffer content
                     # User may have typed valid command with args that don't match filter
-                    command_string = self.buffer_manager.content
+                    command_string = buffer_content
                     if not command_string or command_string == "/":
                         logger.warning("Menu active but no command to execute")
                         await self.exit_command_mode()
                         return
             else:
                 # FALLBACK: Menu not active, use buffer content
-                command_string = self.buffer_manager.content
+                command_string = buffer_content
                 if not command_string or command_string == "/":
                     logger.warning("No command to execute")
                     await self.exit_command_mode()

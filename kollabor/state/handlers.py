@@ -14,6 +14,7 @@ interface, only the transport differs.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .local import LocalStateService
@@ -75,6 +76,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.clear_project_approvals (phase 4.5 step 7 write)
         state.list_project_approvals  (phase 4.5 step 7 read)
         state.resume_conversation     (phase 4.5 step 7 write)
+        state.hub_enroll              (private typed enrollment submission)
     """
 
     async def _get_conversation(params: dict[str, Any]) -> dict[str, Any]:
@@ -436,6 +438,82 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except Exception:
             return {"error": "beacon command failed"}
 
+    async def _hub_enroll(params: dict[str, Any]) -> dict[str, Any]:
+        domain = params.get("domain")
+        code = params.get("code")
+        if (
+            set(params) != {"domain", "code"}
+            or not isinstance(domain, str)
+            or not domain
+            or len(domain) > 253
+            or any(ord(char) < 32 or ord(char) == 127 for char in domain)
+            or not isinstance(code, str)
+            or not code
+            or len(code) > 128
+            or any(ord(char) < 33 or ord(char) == 127 for char in code)
+        ):
+            return {"error": "invalid connect enrollment request"}
+        try:
+            result = await state_service.hub_enroll(domain, code)
+        except Exception:
+            # Never let an exception containing the private code escape the
+            # local RPC boundary or reach RpcServer's traceback response.
+            return {"error": "connect request could not be submitted"}
+        if not isinstance(result, dict) or result.get("error"):
+            return {"error": "connect request could not be submitted"}
+        status = result.get("status")
+        receipt_id = result.get("receipt_id")
+        if (
+            status == "pending"
+            and isinstance(receipt_id, str)
+            and 1 <= len(receipt_id) <= 128
+        ):
+            return {"status": "pending", "receipt_id": receipt_id}
+        if isinstance(status, str) and status in {"approved", "rejected"}:
+            return {"status": status}
+        return {"error": "connect request could not be submitted"}
+
+    async def _hub_enrollment_offer(params: dict[str, Any]) -> dict[str, Any]:
+        domain = params.get("domain")
+        if (
+            set(params) != {"domain"}
+            or not isinstance(domain, str)
+            or not domain
+            or len(domain) > 253
+            or any(ord(char) < 32 or ord(char) == 127 for char in domain)
+        ):
+            return {"error": "invalid connect offer request"}
+        try:
+            result = await state_service.hub_enrollment_offer(domain)
+        except Exception:
+            # The offer code is deliberately excluded from errors and logs.
+            return {"error": "connect offer could not be created"}
+        if not isinstance(result, dict) or result.get("error"):
+            return {"error": "connect offer could not be created"}
+        offer_id = result.get("offer_id")
+        expires_at = result.get("expires_at")
+        code = result.get("code")
+        if (
+            set(result) == {"status", "offer_id", "expires_at", "code"}
+            and result.get("status") == "offered"
+            and isinstance(offer_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", offer_id)
+            and isinstance(expires_at, str)
+            and expires_at.isdigit()
+            and isinstance(code, str)
+            and re.fullmatch(
+                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
+                code,
+            )
+        ):
+            return {
+                "status": "offered",
+                "offer_id": offer_id,
+                "expires_at": expires_at,
+                "code": code,
+            }
+        return {"error": "connect offer could not be created"}
+
     async def _hub_send_msg(params: dict[str, Any]) -> dict[str, Any]:
         target = params.get("target", "")
         content = params.get("content", "")
@@ -547,6 +625,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_hub_whoami_text": _get_hub_whoami_text,
         "state.get_hub_work_text": _get_hub_work_text,
         # Phase 4.6: hub writes (msg/broadcast from attach client)
+        "state.hub_enroll": _hub_enroll,
+        "state.hub_enrollment_offer": _hub_enrollment_offer,
         "state.hub_connect": _hub_connect,
         "state.hub_send_msg": _hub_send_msg,
         "state.list_hub_agents": _list_hub_agents,

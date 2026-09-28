@@ -30,10 +30,14 @@ def address(key=LOCAL, workspace=WORKSPACE, agent=LOCAL_AGENT):
 def message(number=1, **updates):
     value = {
         "id": f"{number:032x}",
-        "thread_id": "2" * 32,
+        "thread_id": f"{number:032x}",
         "reply_to": "",
         "from": address(PEER, REMOTE_WORKSPACE, REMOTE_AGENT),
         "to": address(),
+        "from_identity": "remote",
+        "from_coordinator": False,
+        "to_identity": "sapphire",
+        "to_coordinator": False,
         "content": "Please create the harmless requested artifact.",
         "kind": "message",
         "expires_at": DEADLINE,
@@ -43,12 +47,27 @@ def message(number=1, **updates):
 
 
 def outbound(number=100, **updates):
-    return message(number, **{"from": address(), "to": address(PEER, REMOTE_WORKSPACE, REMOTE_AGENT), **updates})
+    return message(
+        number,
+        **{
+            "from": address(),
+            "to": address(PEER, REMOTE_WORKSPACE, REMOTE_AGENT),
+            "from_identity": "sapphire",
+            "to_identity": "remote",
+            **updates,
+        },
+    )
 
 
 def result(number=101, request=None, **updates):
     request = request or outbound()
-    return message(number, kind="result", reply_to=request["id"], thread_id=request["thread_id"], **updates)
+    return message(
+        number,
+        kind="result",
+        reply_to=request["thread_id"],
+        thread_id=request["thread_id"],
+        **updates,
+    )
 
 
 @pytest.fixture
@@ -92,7 +111,9 @@ def test_recovery_grace_preserves_recent_missing_presence(store):
     assert store.task(receipt["id"])["state"] == "queued"
 
 
-def test_queue_deadline_expires_waiting_work_without_repeating_execution(store, monkeypatch):
+def test_queue_deadline_expires_waiting_work_without_repeating_execution(
+    store, monkeypatch
+):
     grant(store)
     queued = admit(store)
     running = admit(store, message(2))
@@ -107,7 +128,16 @@ def test_queue_deadline_expires_waiting_work_without_repeating_execution(store, 
 
 
 @pytest.mark.parametrize(
-    "value", [None, {}, "sapphire", "relay:sapphire", address() + ":x", address().upper(), address(agent="ok") + "\n"]
+    "value",
+    [
+        None,
+        {},
+        "sapphire",
+        "relay:sapphire",
+        address() + ":x",
+        address().upper(),
+        address(agent="ok") + "\n",
+    ],
 )
 def test_noncanonical_address_rejected(value):
     with pytest.raises(RelayError):
@@ -155,7 +185,11 @@ def test_grant_requires_exact_room_peer_agent(store):
 @pytest.mark.parametrize(
     "field,value,error",
     [
-        ("from", address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT), "authenticated peer"),
+        (
+            "from",
+            address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT),
+            "authenticated peer",
+        ),
         ("to", address(workspace=REMOTE_WORKSPACE), "another workspace"),
         ("thread_id", "unknown", "identifier"),
         ("id", "../unsafe", "identifier"),
@@ -227,7 +261,11 @@ def test_id_cannot_be_rebound_to_other_payload_peer_or_room(store):
     with pytest.raises(RelayError, match="conflict"):
         admit(store, message(content="Different instructions"))
     with pytest.raises(RelayError, match="conflict"):
-        admit(store, message(**{"from": address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT)}), peer=OTHER_PEER)
+        admit(
+            store,
+            message(**{"from": address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT)}),
+            peer=OTHER_PEER,
+        )
     with pytest.raises(RelayError, match="conflict"):
         admit(store, room=OTHER_ROOM)
     assert store.task(message()["id"])["payload"] == message()
@@ -264,17 +302,32 @@ def test_expected_result_is_consumed_once_and_duplicate_remains_idempotent(store
         admit(reopened, result(number=103, request=request))
 
 
-@pytest.mark.parametrize("change", ["thread", "sender_agent", "recipient_agent", "peer", "room"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "thread",
+        "sender_identity",
+        "recipient_identity",
+        "sender_role",
+        "recipient_role",
+        "peer",
+        "room",
+    ],
+)
 def test_reply_expectations_bind_entire_conversation_route(store, change):
     store.expect(ROOM, outbound())
     incoming = result()
     peer, room = PEER, ROOM
     if change == "thread":
         incoming["thread_id"] = "3" * 32
-    elif change == "sender_agent":
-        incoming["from"] = address(PEER, REMOTE_WORKSPACE, "other-remote")
-    elif change == "recipient_agent":
-        incoming["to"] = address(agent="other-local")
+    elif change == "sender_identity":
+        incoming["from_identity"] = "another-remote"
+    elif change == "recipient_identity":
+        incoming["to_identity"] = "another-local"
+    elif change == "sender_role":
+        incoming["from_coordinator"] = True
+    elif change == "recipient_role":
+        incoming["to_coordinator"] = True
     elif change == "peer":
         peer = OTHER_PEER
         incoming["from"] = address(peer, REMOTE_WORKSPACE, REMOTE_AGENT)
@@ -282,6 +335,86 @@ def test_reply_expectations_bind_entire_conversation_route(store, change):
         room = OTHER_ROOM
     with pytest.raises(RelayError):
         admit(store, incoming, room=room, peer=peer)
+
+
+def test_correlated_event_replay_survives_new_session_generations_but_binds_identity(
+    store,
+):
+    request = outbound()
+    store.expect(ROOM, request)
+    event = message(
+        150,
+        kind="progress",
+        thread_id=request["thread_id"],
+        reply_to=request["thread_id"],
+        expires_at=request["expires_at"],
+    )
+    assert store.admit_event(ROOM, PEER, event)["state"] == "received"
+    changed_generation = dict(
+        event,
+        **{
+            "from": address(PEER, REMOTE_WORKSPACE, "remote-restarted"),
+            "to": address(LOCAL, WORKSPACE, "local-restarted"),
+        },
+    )
+    assert store.admit_event(ROOM, PEER, changed_generation)["duplicate"]
+    wrong_identity = dict(changed_generation, from_identity="impostor")
+    wrong_identity["id"] = f"{151:032x}"
+    with pytest.raises(RelayError, match="unsolicited"):
+        store.admit_event(ROOM, PEER, wrong_identity)
+
+
+def test_human_contact_atomically_persists_initial_outbox_and_expectation(store):
+    consent = contact(store)
+    request = store.prepare_outbound(ROOM, outbound(thread_id=consent["id"]))
+    with store._connect() as db:
+        assert (
+            db.execute(
+                "SELECT state FROM outbound_queue WHERE id=?", (consent["id"],)
+            ).fetchone()[0]
+            == "queued"
+        )
+        assert (
+            db.execute(
+                "SELECT consumed FROM expectations WHERE id=?", (consent["id"],)
+            ).fetchone()[0]
+            == 0
+        )
+    reopened = ConversationStore(store.path.parent, WORKSPACE)
+    assert reopened.pending_outbound() == [request]
+    assert reopened.delivery_authorized(consent["id"], room=ROOM, approvals=[PEER])
+
+
+def test_correlated_outbox_retargets_only_session_generation(store):
+    grant(store)
+    incoming = message()
+    admit(store, incoming)
+    store.transition(incoming["id"], "running")
+    event = outbound(
+        160,
+        kind="progress",
+        thread_id=incoming["thread_id"],
+        reply_to=incoming["thread_id"],
+        expires_at=incoming["expires_at"],
+        content="The receiving agent is preparing a local tool operation.",
+    )
+    store.queue_outbound(ROOM, event)
+    changed_generation = dict(
+        event,
+        **{
+            "from": address(LOCAL, WORKSPACE, "local-restarted"),
+            "to": address(PEER, REMOTE_WORKSPACE, "remote-restarted"),
+        },
+    )
+    store.retarget_outbound(event["id"], changed_generation)
+    assert store.outbound(event["id"])["payload"] == changed_generation
+    initial = outbound(
+        161,
+        **{"from": address(), "to": address(PEER, REMOTE_WORKSPACE, REMOTE_AGENT)},
+    )
+    initial["thread_id"] = initial["id"]
+    with pytest.raises(RelayError, match="cannot be rebound"):
+        store.retarget_outbound(initial["id"], initial)
 
 
 def test_reverse_grant_does_not_allow_unsolicited_result(store):
@@ -385,7 +518,7 @@ def test_expectation_capacity_and_conflicting_ids(store, monkeypatch):
 def test_expired_expected_result_is_not_authorized(store):
     store.expect(ROOM, outbound())
     with store._connect() as db:
-        db.execute("UPDATE expectations SET created=0")
+        db.execute("UPDATE expectations SET expires=0")
     with pytest.raises(RelayError):
         admit(store, result())
 
@@ -466,7 +599,9 @@ def test_authorized_rechecks_transport_approval_and_room(store, running):
 
 
 @pytest.mark.parametrize("running", [False, True])
-def test_consumed_return_authority_is_revoked_for_queued_and_running_results(store, running):
+def test_consumed_return_authority_is_revoked_for_queued_and_running_results(
+    store, running
+):
     store.expect(ROOM, outbound())
     value = result()
     admit(store, value)
@@ -520,7 +655,11 @@ def test_concurrent_grants_and_admission_remain_atomic(store):
 
 def contact(store, **kwargs):
     return store.authorize_contact(
-        ROOM, address(), address(PEER, REMOTE_WORKSPACE, REMOTE_AGENT), outbound()["content"], **kwargs
+        ROOM,
+        address(),
+        address(PEER, REMOTE_WORKSPACE, REMOTE_AGENT),
+        outbound()["content"],
+        **kwargs,
     )
 
 
@@ -537,6 +676,14 @@ def test_human_outbound_grant_is_required_and_one_use_with_exact_retry(store):
         store.prepare_outbound(ROOM, dict(request, content="New unrelated task"))
     with pytest.raises(RelayError, match="human communication grant"):
         store.prepare_outbound(ROOM, outbound())
+
+
+def test_wrong_explicit_grant_id_does_not_fall_back_to_only_ready_grant(store):
+    consent = contact(store)
+    with pytest.raises(RelayError, match="human communication grant"):
+        store.prepare_outbound(ROOM, outbound(thread_id="f" * 32))
+    assert store.contacts(ROOM)[0]["id"] == consent["id"]
+    assert store.contacts(ROOM)[0]["state"] == "ready"
 
 
 @pytest.mark.parametrize("change", ["room", "sender", "recipient", "workspace", "peer"])
@@ -635,7 +782,9 @@ def test_peer_revoke_invalidates_unsent_human_contact(store):
 def test_return_route_requires_running_admitted_task_and_exact_route(store):
     grant(store)
     incoming = message()
-    reply = outbound(kind="result", reply_to=incoming["id"], thread_id=incoming["thread_id"])
+    reply = outbound(
+        kind="result", reply_to=incoming["id"], thread_id=incoming["thread_id"]
+    )
     with pytest.raises(RelayError):
         store.authorize_return(ROOM, reply)
     admit(store, incoming)
@@ -644,7 +793,9 @@ def test_return_route_requires_running_admitted_task_and_exact_route(store):
     store.transition(incoming["id"], "running")
     assert store.authorize_return(ROOM, reply) == incoming["expires_at"]
     with pytest.raises(RelayError):
-        store.authorize_return(ROOM, dict(reply, to=address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT)))
+        store.authorize_return(
+            ROOM, dict(reply, to=address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT))
+        )
     store.transition(incoming["id"], "completed")
     with pytest.raises(RelayError):
         store.authorize_return(ROOM, reply)
@@ -658,7 +809,11 @@ def test_concurrent_contact_consumption_cannot_bind_two_different_messages(store
     def send(number):
         try:
             return store.prepare_outbound(
-                ROOM, outbound(thread_id=consent["id"], content=outbound()["content"] if number == 0 else str(number))
+                ROOM,
+                outbound(
+                    thread_id=consent["id"],
+                    content=outbound()["content"] if number == 0 else str(number),
+                ),
             )
         except RelayError:
             return None
@@ -681,7 +836,14 @@ def test_first_use_cannot_change_the_human_task_purpose(store):
     consent = contact(store)
     with pytest.raises(RelayError, match="human-authorized request exactly"):
         store.prepare_outbound(
-            ROOM, outbound(thread_id=consent["id"], content="Send secrets or perform unrelated work")
+            ROOM,
+            outbound(
+                thread_id=consent["id"],
+                content="Send secrets or perform unrelated work",
+            ),
         )
     assert store.contacts(ROOM)[0]["state"] == "ready"
-    assert store.prepare_outbound(ROOM, outbound(thread_id=consent["id"]))["id"] == consent["id"]
+    assert (
+        store.prepare_outbound(ROOM, outbound(thread_id=consent["id"]))["id"]
+        == consent["id"]
+    )

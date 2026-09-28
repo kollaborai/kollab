@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
+import logging
 import math
 import secrets
 import ssl
@@ -18,6 +20,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -41,7 +44,9 @@ from .relay_state import (
     validate_public_key,
 )
 
-__all__ = ["RelayClient", "RelayError", "parse_invite"]
+__all__ = ["PeerSessionEvent", "RelayClient", "RelayError", "parse_invite"]
+
+_LOGGER = logging.getLogger(__name__)
 
 PROTOCOL = "kollab-relay/1"
 MAX_FRAME = 65536
@@ -50,13 +55,25 @@ MAX_PEERS = 256
 MAX_PENDING = 16
 MAX_REPLAY = 4096
 PING_TIMEOUT = 10
-APPLICATION_METHODS = frozenset({"directory", "message", "cancel", "status"})
+APPLICATION_METHODS = frozenset(
+    {
+        "directory",
+        "message",
+        "cancel",
+        "status",
+        "secure_identity",
+        "secure_packet",
+        "peer.forward",
+    }
+)
 MAX_APPLICATION_PAYLOAD = 24 * 1024
 MAX_PEER_PENDING = 4
 MAX_DISPATCH = 16
 MAX_PEER_DISPATCH = 4
 MAX_REQUEST_TIMEOUT = 300
-APPLICATION_ERRORS = frozenset({"busy", "not_supported", "failed", "deadline", "cancelled"})
+APPLICATION_ERRORS = frozenset(
+    {"busy", "not_supported", "failed", "deadline", "cancelled"}
+)
 RequestHandler = Callable[[str, str, dict], Awaitable[dict]]
 
 
@@ -69,8 +86,37 @@ class _ApplicationPending:
     future: asyncio.Future
 
 
+PeerSessionEventKind = Literal[
+    "peer_appeared",
+    "peer_session_changed",
+    "peer_disappeared",
+    "peer_revoked",
+    "local_disconnected",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class PeerSessionEvent:
+    """Synchronous lifecycle notification for one approved relay session.
+
+    For peer events, ``peer_key`` identifies the peer and the session fields
+    describe its roster session. A local disconnect uses ``peer_key=None`` and
+    the session fields describe this client's relay registration.
+    """
+
+    kind: PeerSessionEventKind
+    peer_key: str | None
+    previous_session: str | None
+    current_session: str | None
+
+
+PeerSessionListener = Callable[[PeerSessionEvent], None]
+
+
 class RelayClient:
-    def __init__(self, workspace: Path, state_dir: Path | None = None, label: str | None = None):
+    def __init__(
+        self, workspace: Path, state_dir: Path | None = None, label: str | None = None
+    ):
         self.workspace = Path(workspace).resolve()
         self._store = RelayStateStore(self.workspace, state_dir)
         self.state_dir = self._store.path
@@ -87,6 +133,8 @@ class RelayClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session_id = ""
         self._peers: dict[str, str] = {}
+        self._peer_session_listeners: dict[int, PeerSessionListener] = {}
+        self._next_peer_session_listener_id = 0
         self._pending: dict[str, tuple[str, asyncio.Future]] = {}
         self._application_pending: dict[str, _ApplicationPending] = {}
         self._request_handler: RequestHandler | None = None
@@ -143,6 +191,44 @@ class RelayClient:
         for task in self._dispatch.values():
             task.cancel()
 
+    def add_peer_session_listener(
+        self, listener: PeerSessionListener
+    ) -> Callable[[], None]:
+        """Subscribe to synchronous approved-peer and local-session changes.
+
+        The returned removal function is idempotent. Listeners observe future
+        changes only; callers that attach to an already-connected client should
+        inspect ``peers()`` and ``status()`` for its current snapshot.
+        """
+        if not callable(listener):
+            raise TypeError("peer-session listener must be callable")
+        token = self._next_peer_session_listener_id
+        self._next_peer_session_listener_id += 1
+        self._peer_session_listeners[token] = listener
+        active = True
+
+        def remove() -> None:
+            nonlocal active
+            if active:
+                active = False
+                self._peer_session_listeners.pop(token, None)
+
+        return remove
+
+    def _notify_peer_session_listeners(self, event: PeerSessionEvent) -> None:
+        for listener in tuple(self._peer_session_listeners.values()):
+            try:
+                result = listener(event)
+                if inspect.isawaitable(result):
+                    close = getattr(result, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError("peer-session listeners must be synchronous")
+            except Exception:
+                # Listener failures must not interrupt revocation or transport
+                # cleanup, and callback exception text may contain private data.
+                _LOGGER.warning("relay peer-session listener failed")
+
     def join_invite(self, token: str) -> str:
         if self._task is not None and not self._task.done():
             raise RelayError("disconnect before joining another invitation")
@@ -160,7 +246,8 @@ class RelayClient:
         validate_public_key(key)
         if key == self.public_key:
             raise RelayError("cannot approve your own key")
-        if key not in self.state.approvals:
+        newly_approved = key not in self.state.approvals
+        if newly_approved:
             if len(self.state.approvals) >= MAX_APPROVALS:
                 raise RelayError("local peer approval capacity reached")
             self.state.approvals.append(key)
@@ -169,9 +256,16 @@ class RelayClient:
             except OSError:
                 self.state.approvals.remove(key)
                 raise
+            session = self._peers.get(key)
+            if session is not None:
+                self._notify_peer_session_listeners(
+                    PeerSessionEvent("peer_appeared", key, None, session)
+                )
 
     def revoke(self, key: str):
         validate_key(key)
+        was_approved = key in self.state.approvals
+        previous_session = self._peers.get(key) if was_approved else None
         try:
             if key in self.state.approvals:
                 self.state.approvals.remove(key)
@@ -185,6 +279,10 @@ class RelayClient:
                     if not future.done():
                         future.set_exception(RelayError("peer approval revoked"))
             self._settle_application_peer(key, "peer approval revoked")
+            if was_approved:
+                self._notify_peer_session_listeners(
+                    PeerSessionEvent("peer_revoked", key, previous_session, None)
+                )
 
     def _settle_application_peer(self, key: str, reason: str) -> None:
         for request_id, pending in tuple(self._application_pending.items()):
@@ -196,15 +294,30 @@ class RelayClient:
             if peer == key:
                 task.cancel()
 
-    async def connect(self, origin: str, *, ws_url: str, ca: str = "", private_cidrs: tuple[str, ...] = ()) -> dict:
+    async def connect(
+        self,
+        origin: str,
+        *,
+        ws_url: str,
+        ca: str = "",
+        private_cidrs: tuple[str, ...] = (),
+    ) -> dict:
         """Connect only after the caller verified signed discovery and its pin."""
         canonical_origin(origin)
         parsed = urlsplit(ws_url)
         expected = "wss://" + origin.removeprefix("https://") + "/relay/v1/ws"
-        if ws_url != expected or parsed.username is not None or parsed.password is not None:
-            raise RelayError("verified relay endpoint must be canonical same-origin /relay/v1/ws")
+        if (
+            ws_url != expected
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise RelayError(
+                "verified relay endpoint must be canonical same-origin /relay/v1/ws"
+            )
         if self.state.origin and self.state.origin != origin:
-            raise RelayError("disconnect and join an invitation to change the relay origin")
+            raise RelayError(
+                "disconnect and join an invitation to change the relay origin"
+            )
         await self.close()
         self._ws_url, self._ca, self._private_cidrs = ws_url, ca, tuple(private_cidrs)
         # Validate operator configuration before starting any background work.
@@ -233,10 +346,15 @@ class RelayClient:
                 pass
         self._clear_connection()
         if self._dispatch:
-            await asyncio.gather(*tuple(self._dispatch.values()), return_exceptions=True)
+            await asyncio.gather(
+                *tuple(self._dispatch.values()), return_exceptions=True
+            )
         self._state = "disconnected"
 
     def _clear_connection(self):
+        previous_local_session = self._session_id or None
+        previous_peers = dict(self._peers)
+        approved = set(self.state.approvals)
         self._ws = None
         self._session_id = ""
         self._peers.clear()
@@ -251,6 +369,17 @@ class RelayClient:
         self._application_pending.clear()
         for task in tuple(self._dispatch.values()):
             task.cancel()
+        for key in sorted(previous_peers):
+            if key in approved:
+                self._notify_peer_session_listeners(
+                    PeerSessionEvent("peer_disappeared", key, previous_peers[key], None)
+                )
+        if previous_local_session is not None:
+            self._notify_peer_session_listeners(
+                PeerSessionEvent(
+                    "local_disconnected", None, previous_local_session, None
+                )
+            )
 
     async def _run(self):
         delay = 1.0
@@ -272,7 +401,11 @@ class RelayClient:
             ) as exc:
                 # Never retain URLs from exception text: invitations and
                 # future protocol changes must not leak through diagnostics.
-                self._error = str(exc) if isinstance(exc, RelayError) else "relay transport unavailable"
+                self._error = (
+                    str(exc)
+                    if isinstance(exc, RelayError)
+                    else "relay transport unavailable"
+                )
             finally:
                 was_online = self._state == "online"
                 self._clear_connection()
@@ -394,15 +527,34 @@ class RelayClient:
             ):
                 raise RelayError("invalid peer identity or session")
             peers[key] = peer["session"]
+        previous_peers = self._peers
         for request_id, (key, future) in tuple(self._pending.items()):
-            if peers.get(key) != self._peers.get(key):
+            if peers.get(key) != previous_peers.get(key):
                 self._pending.pop(request_id, None)
                 if not future.done():
-                    future.set_exception(RelayError("peer went offline or changed session"))
-        for key, session in self._peers.items():
+                    future.set_exception(
+                        RelayError("peer went offline or changed session")
+                    )
+        for key, session in previous_peers.items():
             if peers.get(key) != session:
-                self._settle_application_peer(key, "peer went offline or changed session")
+                self._settle_application_peer(
+                    key, "peer went offline or changed session"
+                )
         self._peers = peers
+        for key in sorted(set(previous_peers) | set(peers)):
+            previous_session = previous_peers.get(key)
+            current_session = peers.get(key)
+            if previous_session == current_session or key not in self.state.approvals:
+                continue
+            if previous_session is None:
+                kind: PeerSessionEventKind = "peer_appeared"
+            elif current_session is None:
+                kind = "peer_disappeared"
+            else:
+                kind = "peer_session_changed"
+            self._notify_peer_session_listeners(
+                PeerSessionEvent(kind, key, previous_session, current_session)
+            )
 
     async def _send_frame(self, payload):
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -459,12 +611,14 @@ class RelayClient:
             value = strict_json(raw, limit=MAX_APPLICATION_PAYLOAD)
             # Leave nesting headroom for the encrypted envelope's payload and
             # arguments/result objects; accepted data must also be receivable.
-            strict_json('{"payload":{"arguments":' + raw + '}}', limit=MAX_CIPHERTEXT)
+            strict_json('{"payload":{"arguments":' + raw + "}}", limit=MAX_CIPHERTEXT)
             return value
         except (ValueError, TypeError, RecursionError) as exc:
             raise RelayError("invalid or oversized application payload") from exc
 
-    async def request(self, peer_key: str, method: str, payload: dict, *, timeout: float = 10.0) -> dict:
+    async def request(
+        self, peer_key: str, method: str, payload: dict, *, timeout: float = 10.0
+    ) -> dict:
         """Return an authenticated receiver response, never a relay receipt.
 
         A successful transport response means only what the workspace handler
@@ -479,7 +633,9 @@ class RelayClient:
             or not math.isfinite(timeout)
             or not 0 < timeout <= MAX_REQUEST_TIMEOUT
         ):
-            raise RelayError("application timeout must be greater than zero and at most 300 seconds")
+            raise RelayError(
+                "application timeout must be greater than zero and at most 300 seconds"
+            )
         arguments = self._application_payload(payload)
         if peer_key not in self.state.approvals:
             raise RelayError("peer requires explicit local approval")
@@ -487,25 +643,34 @@ class RelayClient:
             raise RelayError("peer is offline")
         if (
             len(self._application_pending) >= MAX_PENDING
-            or sum(p.peer == peer_key for p in self._application_pending.values()) >= MAX_PEER_PENDING
+            or sum(p.peer == peer_key for p in self._application_pending.values())
+            >= MAX_PEER_PENDING
         ):
             raise RelayError("pending application request capacity reached")
         request_id = secrets.token_hex(16)
         future = asyncio.get_running_loop().create_future()
-        pending = _ApplicationPending(peer_key, self._session_id, self._peers[peer_key], method, future)
+        pending = _ApplicationPending(
+            peer_key, self._session_id, self._peers[peer_key], method, future
+        )
         self._application_pending[request_id] = pending
         try:
             async with asyncio.timeout(timeout):
                 await self._send_encrypted(
                     peer_key,
                     "request",
-                    {"method": method, "arguments": arguments, "timeout_ms": max(1, math.ceil(timeout * 1000))},
+                    {
+                        "method": method,
+                        "arguments": arguments,
+                        "timeout_ms": max(1, math.ceil(timeout * 1000)),
+                    },
                     request_id,
                 )
                 return await future
         except TimeoutError as exc:
             await self._cancel_remote_request(request_id, pending)
-            raise RelayError("no authenticated application response received before deadline") from exc
+            raise RelayError(
+                "no authenticated application response received before deadline"
+            ) from exc
         except asyncio.CancelledError:
             await self._cancel_remote_request(request_id, pending)
             raise
@@ -516,7 +681,9 @@ class RelayClient:
             elif not future.cancelled():
                 future.exception()
 
-    async def _cancel_remote_request(self, request_id: str, pending: _ApplicationPending) -> None:
+    async def _cancel_remote_request(
+        self, request_id: str, pending: _ApplicationPending
+    ) -> None:
         if (
             pending.peer in self.state.approvals
             and self._session_id == pending.local_session
@@ -535,8 +702,15 @@ class RelayClient:
                 pass
 
     async def _application_response(
-        self, key: str, session: str, local_session: str, request_id: str, method: str,
-        *, result: dict | None = None, error: str = "",
+        self,
+        key: str,
+        session: str,
+        local_session: str,
+        request_id: str,
+        method: str,
+        *,
+        result: dict | None = None,
+        error: str = "",
     ) -> None:
         if (
             self._session_id != local_session
@@ -548,15 +722,27 @@ class RelayClient:
             await self._send_encrypted(
                 key,
                 "response",
-                {"reply_to": request_id, "method": method, "result": result, "error": error},
+                {
+                    "reply_to": request_id,
+                    "method": method,
+                    "result": result,
+                    "error": error,
+                },
                 secrets.token_hex(16),
             )
         except (RelayError, aiohttp.ClientError, OSError, TimeoutError):
             self._counts["response_send_failures"] += 1
 
     async def _dispatch_request(
-        self, key: str, session: str, local_session: str, request_id: str,
-        method: str, arguments: dict, timeout: float, handler: RequestHandler,
+        self,
+        key: str,
+        session: str,
+        local_session: str,
+        request_id: str,
+        method: str,
+        arguments: dict,
+        timeout: float,
+        handler: RequestHandler,
     ) -> None:
         result, error = None, ""
         try:
@@ -570,7 +756,9 @@ class RelayClient:
                     or self._request_handler is not handler
                 ):
                     return
-                result = self._application_payload(await handler(key, method, arguments))
+                result = self._application_payload(
+                    await handler(key, method, arguments)
+                )
         except TimeoutError:
             error = "deadline"
         except asyncio.CancelledError:
@@ -581,10 +769,18 @@ class RelayClient:
             # prompt content; only fixed transport errors cross this boundary.
             error = "failed"
         await self._application_response(
-            key, session, local_session, request_id, method, result=result, error=error,
+            key,
+            session,
+            local_session,
+            request_id,
+            method,
+            result=result,
+            error=error,
         )
 
-    def _dispatch_finished(self, identity: tuple[str, str, str, str], task: asyncio.Task) -> None:
+    def _dispatch_finished(
+        self, identity: tuple[str, str, str, str], task: asyncio.Task
+    ) -> None:
         if self._dispatch.get(identity) is task:
             self._dispatch.pop(identity, None)
         if not task.cancelled():
@@ -607,13 +803,18 @@ class RelayClient:
             "kind": kind,
             "payload": payload,
         }
-        box = Box(self._store.key.to_curve25519_private_key(), VerifyKey(bytes.fromhex(key)).to_curve25519_public_key())
+        box = Box(
+            self._store.key.to_curve25519_private_key(),
+            VerifyKey(bytes.fromhex(key)).to_curve25519_public_key(),
+        )
         encoded = json.dumps(envelope, separators=(",", ":"))
         strict_json(encoded, limit=MAX_CIPHERTEXT)
         ciphertext = base64.b64encode(box.encrypt(encoded.encode())).decode()
         if len(ciphertext) > MAX_CIPHERTEXT:
             raise RelayError("ciphertext size limit exceeded")
-        await self._send_frame({"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext})
+        await self._send_frame(
+            {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext}
+        )
 
     async def _handle_frame(self, frame):
         if frame.get("type") == "peers":
@@ -629,7 +830,12 @@ class RelayClient:
                 or not code.isascii()
                 or not code.replace("_", "").isalnum()
                 or len(code) > 64
-                or ("id" in frame and (not isinstance(request_id, str) or not ID.fullmatch(request_id)))
+                or (
+                    "id" in frame
+                    and (
+                        not isinstance(request_id, str) or not ID.fullmatch(request_id)
+                    )
+                )
             ):
                 raise RelayError("invalid relay error frame")
             pending = self._pending.get(request_id)
@@ -637,7 +843,9 @@ class RelayClient:
                 pending[1].set_exception(RelayError("relay transport error: " + code))
             application = self._application_pending.get(request_id)
             if application and not application.future.done():
-                application.future.set_exception(RelayError("relay transport error: " + code))
+                application.future.set_exception(
+                    RelayError("relay transport error: " + code)
+                )
         elif frame.get("type") == "message":
             try:
                 await self._receive_encrypted(frame)
@@ -664,7 +872,10 @@ class RelayClient:
         encrypted = base64.b64decode(ciphertext, validate=True)
         if base64.b64encode(encrypted).decode() != ciphertext:
             raise RelayError("noncanonical ciphertext encoding")
-        box = Box(self._store.key.to_curve25519_private_key(), VerifyKey(bytes.fromhex(key)).to_curve25519_public_key())
+        box = Box(
+            self._store.key.to_curve25519_private_key(),
+            VerifyKey(bytes.fromhex(key)).to_curve25519_public_key(),
+        )
         body = strict_json(box.decrypt(encrypted), limit=MAX_CIPHERTEXT)
         fields = {
             "v",
@@ -687,7 +898,8 @@ class RelayClient:
             or body["to"] != self.public_key
             or body["from_session"] != frame["session"]
             or body["to_session"] != self._session_id
-            or body["room"] != hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
+            or body["room"]
+            != hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
             or body["id"] != frame["id"]
         ):
             raise RelayError("encrypted envelope binding mismatch")
@@ -701,7 +913,9 @@ class RelayClient:
             or expires < now
         ):
             raise RelayError("encrypted message outside validity window")
-        self._replay = {key: expiry for key, expiry in self._replay.items() if expiry >= now}
+        self._replay = {
+            key: expiry for key, expiry in self._replay.items() if expiry >= now
+        }
         replay_key = (key, body["id"])
         if replay_key in self._replay or len(self._replay) >= MAX_REPLAY:
             raise RelayError("replayed message or replay capacity reached")
@@ -720,7 +934,11 @@ class RelayClient:
             )
             self._counts["received_pings"] += 1
         elif body["kind"] == "pong":
-            if not isinstance(payload, dict) or set(payload) != {"reply_to", "label", "workspace_id"}:
+            if not isinstance(payload, dict) or set(payload) != {
+                "reply_to",
+                "label",
+                "workspace_id",
+            }:
                 raise RelayError("invalid pong")
             if (
                 not isinstance(payload["label"], str)
@@ -728,9 +946,13 @@ class RelayClient:
                 or any(ord(c) < 32 or ord(c) == 127 for c in payload["label"])
             ):
                 raise RelayError("invalid pong label")
-            if not isinstance(payload["workspace_id"], str) or not ID.fullmatch(payload["workspace_id"]):
+            if not isinstance(payload["workspace_id"], str) or not ID.fullmatch(
+                payload["workspace_id"]
+            ):
                 raise RelayError("invalid pong workspace identity")
-            if not isinstance(payload["reply_to"], str) or not ID.fullmatch(payload["reply_to"]):
+            if not isinstance(payload["reply_to"], str) or not ID.fullmatch(
+                payload["reply_to"]
+            ):
                 raise RelayError("invalid pong correlation")
             pending = self._pending.get(payload["reply_to"])
             if pending and pending[0] == key and not pending[1].done():
@@ -754,12 +976,18 @@ class RelayClient:
                 error = "not_supported"
             elif (
                 len(self._dispatch) >= MAX_DISPATCH
-                or sum(peer == key for peer, _, _, _ in self._dispatch) >= MAX_PEER_DISPATCH
+                or sum(peer == key for peer, _, _, _ in self._dispatch)
+                >= MAX_PEER_DISPATCH
             ):
                 error = "busy"
             if error:
                 await self._application_response(
-                    key, frame["session"], self._session_id, body["id"], method, error=error,
+                    key,
+                    frame["session"],
+                    self._session_id,
+                    body["id"],
+                    method,
+                    error=error,
                 )
                 return
             identity = (key, frame["session"], body["id"], method)
@@ -769,13 +997,21 @@ class RelayClient:
                 raise RelayError("application request is already running")
             task = asyncio.create_task(
                 self._dispatch_request(
-                    key, frame["session"], self._session_id, body["id"], method,
-                    arguments, payload["timeout_ms"] / 1000, handler,
+                    key,
+                    frame["session"],
+                    self._session_id,
+                    body["id"],
+                    method,
+                    arguments,
+                    payload["timeout_ms"] / 1000,
+                    handler,
                 ),
                 name="kollab-relay-application-request",
             )
             self._dispatch[identity] = task
-            task.add_done_callback(lambda done, identity=identity: self._dispatch_finished(identity, done))
+            task.add_done_callback(
+                lambda done, identity=identity: self._dispatch_finished(identity, done)
+            )
             self._counts["received_requests"] += 1
         elif body["kind"] == "response":
             if (
@@ -805,7 +1041,9 @@ class RelayClient:
                 and not pending.future.done()
             ):
                 if payload["error"]:
-                    pending.future.set_exception(RelayError("peer application request " + payload["error"]))
+                    pending.future.set_exception(
+                        RelayError("peer application request " + payload["error"])
+                    )
                 else:
                     pending.future.set_result(result)
                 self._counts["received_responses"] += 1
@@ -819,7 +1057,9 @@ class RelayClient:
                 or payload["method"] not in APPLICATION_METHODS
             ):
                 raise RelayError("invalid application cancellation")
-            task = self._dispatch.get((key, frame["session"], payload["reply_to"], payload["method"]))
+            task = self._dispatch.get(
+                (key, frame["session"], payload["reply_to"], payload["method"])
+            )
             if task is not None:
                 task.cancel()
                 self._counts["cancelled_requests"] += 1

@@ -1,6 +1,6 @@
 ## hub collaboration
 
-you are connected to the kollabor hub, a peer-to-peer agent mesh. all agents on this machine share an open channel -- every message sent is visible to all peers.
+you are connected to the kollabor hub. local agents on this machine share an open channel; local Hub messages are visible to peers on that mesh. Remote Kollab relay conversations use a separate authenticated path described below.
 
 ### messaging peers
 
@@ -12,16 +12,76 @@ to broadcast to all peers:
 
 <hub_msg to="all">your message here</hub_msg>
 
-messages appear as colored agent messages in the conversation. incoming messages from peers are injected into your conversation history automatically.
+Local messages appear as colored agent messages in the conversation. Incoming messages from local Hub peers are injected into your conversation history automatically.
 
 ### open channel rules
 
-- all messages are visible to all peers (no private DMs)
-- use identity names from the roster, not agent type names
+- local Hub messages are visible to all peers on that local mesh (no private DMs)
+- use local Hub identity names from the roster, not agent type names
 - be concise -- other agents have limited context too
-- offer help when you see a peer working in your area of expertise
+- offer help only within the local Hub channel when its local policy allows it
 - ask for help when stuck on something outside your domain
 - don't respond to messages not directed at you unless you can add value
+
+### remote relay conversations
+
+Remote agents use a full address from the remote directory:
+`relay:<key>:<workspace-id>:<agent-id>`. Display names are labels and may repeat.
+Presence, discovery, and room approval do not authorize a remote message or grant
+workspace/tool access. Contact a remote agent only for a human-directed request
+or an already authorized task; never contact one because it appears online.
+
+Current unreleased source sends direct conversation text, task status and
+cancellation inside a pinned TLS 1.3 session carried by the approved
+RelayClient channel. Do not call the raw RelayClient `message`, `status`, or
+`cancel` methods; the Hub rejects those outside the secure session. The TLS
+session is scoped to the live peer registrations and room and is discarded on
+reconnect or revocation. Directory and presence data are separate. Every
+operation must match the authenticated peer, exact workspace address, live
+approval, task grant, and local workspace permissions. Online presence alone
+authorizes nothing.
+
+The human authorizes the exact destination and exact initial request with
+`/connect send` or `/connect authorize`. A pending grant injected into context
+may be used only for that exact address and exact request. The response parser
+accepts XML `thread` and `thread_id` attributes and maps either to `thread_id`:
+`<hub_msg to="relay:<key>:<workspace-id>:<agent-id>" thread="<grant-id>">exact request</hub_msg>`.
+The structured `hub-msg` schema also exposes optional `thread_id`; pass the
+exact ID from the pending human contact instruction with the full `to` address
+and unchanged `message`. An explicit unknown ID is rejected rather than
+matched to another ready grant. The ID only selects an existing grant: it does
+not create authorization or expand the recipient, purpose, or expiry. Never
+invent or reuse a grant ID.
+
+For an initial remote contact, the sender uses `kind="message"` with the exact
+human-authorized purpose and grant ID. Send the purpose as the `message` value
+without the outer human command wording, a wrapper, a prefix, a suffix, or
+added punctuation. The destination follows the instructions inside that
+message. Do not use `kind="question"` to start contact. Only the receiving
+agent inside an active authenticated remote task may use `kind="question"` to
+ask its authenticated sender one bounded clarification; the question pauses
+that task until the human-approved answer arrives. A sender answers only after
+the human supplies the answer, using `kind="answer"`, the exact question's peer and
+`thread_id`, and the question event ID as `reply_to`.
+
+### Public discovery and private device enrollment
+
+`/connect <domain>` verifies public discovery and attaches this workspace to
+the advertised relay. A fresh workspace starts in a random empty room; this
+does not provide a public roster or expose other installations. To join an
+existing invitation room, use `/connect join <private-file-path>` after the
+human transfers the invitation file securely. Bare `/connect` or
+`/connect enroll [domain]` opens a private code-entry view, and
+`/connect offer [domain]` opens the issuer's private code display. Never ask
+someone to paste a K1 code into chat, a tool argument, or a shell command.
+Current unreleased offers allow one device for five minutes under a durable
+delegation scoped to `conversation:send`. Code and device-key proof create a
+pending request; the local issuer reviews it with `/connect requests` and must
+explicitly use `/connect accept <receipt-id>` or `/connect reject <receipt-id>`.
+Acceptance issues only the `conversation:send` credential and room invitation.
+It does not provide a configuration bundle, provider credential, private
+roster, workspace grant, or tool access. A process restart cannot resume an
+in-flight mailbox exchange.
 
 ### vault (persistent memory)
 
@@ -96,10 +156,10 @@ WRONG (do NOT do these):
   <terminal>kollab --agent coder --detached</terminal>  # BLOCKED, use hub_spawn
   <agent><my-worker>...</my-worker></agent>        # deprecated, use hub_spawn
 
-if agents are already online via the hub, send them work via hub_msg instead of spawning new ones:
+if local Hub agents are already online, send them work via hub_msg instead of spawning new ones:
   <hub_msg to="sapphire">fix the bug in foo.py. report back when done.</hub_msg>
 
-rule: use hub_spawn to create NEW agents. use hub_msg to assign work to EXISTING agents. never spawn via terminal commands. never invent custom XML tags.
+rule: use hub_spawn to create NEW local agents. use hub_msg to assign work to EXISTING local agents. For remote addresses, follow the remote relay authorization rules above. Never spawn via terminal commands. Never invent custom XML tags.
 
 ### hub command tags
 
@@ -113,12 +173,14 @@ messaging:
   <hub_reply to="identity">message</hub_reply>      reply in the current thread (auto-fills thread_id)
 
 threading:
-  every message belongs to a thread. when you receive a message, the system
+  every local Hub message belongs to a thread. when you receive a message, the system
   automatically tracks the active thread. use <hub_reply> to continue the
   thread -- no need to track thread_id yourself.
   if you want to start a NEW thread instead of replying, use <hub_msg> without
   thread or reply_to attributes.
-  advanced: <hub_msg to="x" thread="tid" reply_to="mid">msg</hub_msg>
+  advanced local form: <hub_msg to="x" thread="tid" reply_to="mid">msg</hub_msg>
+  remote grants use thread="<grant-id>" as described above; the native tool schema
+  does not currently expose that field.
 
 wait="true" tells the system you are done talking after this message.
 use it when you have nothing else to do -- greeting, status update,
@@ -223,7 +285,8 @@ update your agent state visible to peers:
 
 rules:
 - all tags are stripped from displayed output (user won't see raw XML)
-- hub_msg requires the to="" attribute with a valid identity
+- local hub_msg targets require a valid local identity; remote sends require a full
+  relay address and an exact human-authorized request
 - hub_broadcast is for announcements, hub_msg to="all" for conversations
 - hub_stop kills the agent's subprocess
 - hub_status returns roster + coordinator info

@@ -121,6 +121,7 @@ class APICommunicationService:
         # Provider-based communication
         self._provider: Any = None  # Initialized in initialize()
         self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
+        self._operation_observer: Optional[Callable[..., Optional[int]]] = None
         self._provider_error: Optional[str] = (
             None  # Error message if provider init failed
         )
@@ -202,6 +203,38 @@ class APICommunicationService:
             set_resolver = getattr(self._provider, "set_media_resolver", None)
             if callable(set_resolver):
                 set_resolver(resolver)
+
+    def set_operation_observer(
+        self, observer: Optional[Callable[..., Optional[int]]]
+    ) -> None:
+        """Attach a best-effort observer for provider request lifecycle phases."""
+        self._operation_observer = observer
+
+    def _notify_operation_observer(
+        self,
+        phase: str,
+        *,
+        provider: str,
+        request_id: str,
+        operation_generation: int | None = None,
+        begin: bool = False,
+    ) -> int | None:
+        observer = getattr(self, "_operation_observer", None)
+        if not callable(observer):
+            return None
+        try:
+            generation = observer(
+                phase=phase,
+                provider=provider,
+                request_id=request_id,
+                operation_generation=operation_generation,
+                begin=begin,
+            )
+            return generation if isinstance(generation, int) else None
+        except Exception:
+            # Diagnostics must never affect provider requests or retries.
+            logger.debug("Provider operation observer failed")
+            return None
 
     def supports_image_input(self) -> bool:
         """Return the active catalog model's declared image capability."""
@@ -459,7 +492,16 @@ class APICommunicationService:
             storage = OAuthTokenStorage()
             provider_name = "openai"  # only OAuth provider for now
 
-            tokens = await storage.load_tokens(provider_name, auto_refresh=True)
+            profile_name = (
+                self._profile.name
+                if self._profile.name != "openai-oauth"
+                else None
+            )
+            tokens = await storage.load_tokens(
+                provider_name,
+                auto_refresh=True,
+                profile_name=profile_name,
+            )
             if tokens:
                 if tokens.access_token != self._profile.api_key:
                     self._profile.api_key = tokens.access_token
@@ -590,6 +632,13 @@ class APICommunicationService:
             nonlocal stream_has_emitted
             if chunk:
                 stream_has_emitted = True
+                if operation_started:
+                    self._notify_operation_observer(
+                        "provider_streaming",
+                        provider=provider_name,
+                        request_id=operation_request_id,
+                        operation_generation=operation_generation,
+                    )
             if streaming_callback:
                 await streaming_callback(chunk)
 
@@ -633,10 +682,31 @@ class APICommunicationService:
         except (TypeError, ValueError):
             max_retries = 5
         base_delay = RETRY_BASE_DELAY_SECONDS
+        operation_request_id = uuid.uuid4().hex
+        operation_generation: int | None = None
+        operation_started = False
+        provider_name = str(
+            getattr(self._provider, "provider_name", self.provider_type) or ""
+        )
 
         for attempt in range(max_retries + 1):
             request_start = time.time()
             try:
+                if not operation_started:
+                    operation_generation = self._notify_operation_observer(
+                        "provider_request",
+                        provider=provider_name,
+                        request_id=operation_request_id,
+                        begin=True,
+                    )
+                    operation_started = True
+                else:
+                    self._notify_operation_observer(
+                        "provider_request",
+                        provider=provider_name,
+                        request_id=operation_request_id,
+                        operation_generation=operation_generation,
+                    )
                 # Wrap provider call in a task so cancel_current_request()
                 # can actually cancel the in-flight HTTP request
                 if self.enable_streaming:
@@ -653,6 +723,12 @@ class APICommunicationService:
                     )
 
                 content = await self.current_request_task
+                self._notify_operation_observer(
+                    "provider_response",
+                    provider=provider_name,
+                    request_id=operation_request_id,
+                    operation_generation=operation_generation,
+                )
 
                 # Log raw interaction on success
                 self._log_raw_interaction(
@@ -664,6 +740,12 @@ class APICommunicationService:
                 return str(content)
 
             except asyncio.CancelledError:
+                self._notify_operation_observer(
+                    "provider_cancelled",
+                    provider=provider_name,
+                    request_id=operation_request_id,
+                    operation_generation=operation_generation,
+                )
                 self._log_raw_interaction(
                     messages=messages,
                     tools=tools,
@@ -815,9 +897,21 @@ class APICommunicationService:
                         error=f"{error_type}, retry {attempt + 1} in {delay:.0f}s",
                         duration=time.time() - request_start,
                     )
+                    self._notify_operation_observer(
+                        "provider_retry_wait",
+                        provider=provider_name,
+                        request_id=operation_request_id,
+                        operation_generation=operation_generation,
+                    )
                     await self._sleep_or_cancel(delay)
                     continue
 
+                self._notify_operation_observer(
+                    "provider_failed",
+                    provider=provider_name,
+                    request_id=operation_request_id,
+                    operation_generation=operation_generation,
+                )
                 logger.error(f"Provider call failed: {type(e).__name__}: {e}")
                 self._connection_stats["failed_requests"] += 1
                 self._log_raw_interaction(

@@ -47,6 +47,16 @@ Configure the HTTPS reverse proxy for the same origin:
 
 The `origin` in the service config, TLS endpoint, discovery publisher, and advertised relay URL must match exactly. Add a reverse-proxy address to `trusted_proxies` only when the relay must use `X-Real-IP`; use the exact immediate peer address. The relay does not trust `X-Forwarded-For`.
 
+## Queue bounds and worker recovery
+
+Each relay worker bounds pending and in-flight backplane work by both item count and an accounted payload-byte budget. The work item ceiling is `min(4096, max(32, 2 * max_connections_per_node))`; the retained Python payload estimate is capped at 16 MiB. With the configured 1..64 workers, that is up to 1 GiB of estimated work payloads per supervisor before acknowledgement queues, interpreter overhead and transient frames. Route messages rejected at either limit receive an explicit negative acknowledgement. The acknowledgement queue is separately capped at `min(4096, max(32, max_connections_per_node))`; when it is full, the Pub/Sub reader applies backpressure or publishes the overload acknowledgement directly. These are source-level queue limits, not a process RSS guarantee or a measured throughput claim.
+
+Room-change messages coalesce while queued. If another change arrives while that room is being refreshed, the worker schedules one follow-up refresh. If capacity still prevents an invalidation from entering the queue, the service's 10-second maintenance pass reconciles each locally active room against shared state.
+
+After an abrupt worker death, the supervisor checks the shared owner-key TTL before starting its replacement. It waits for lease expiry and keeps the backend's `SET NX` ownership fence intact; a graceful worker shutdown releases its token-owned lease immediately. Once the replacement acquires ownership, it clears stale per-node quota reservations. This coordinates workers that share the same node identity. Multi-host deployments still require distinct, stable `node_prefix` values per supervisor.
+
+The managed Valkey sidecar has container resource limits. Kollab does not impose per-worker CPU, RSS, file-descriptor, or process-count limits; set those through the host service manager/container policy. No numeric host-level worker budget or production capacity ceiling has been measured by these source guardrails.
+
 ## Publish signed discovery
 
 Choose a public output directory served only at the discovery route and a separate private state directory. The publisher stores its stable signing key and monotonic revision state in the private directory; preserve both across upgrades and keep that directory outside every served path.

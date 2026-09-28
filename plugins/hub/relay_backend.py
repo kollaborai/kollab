@@ -5,13 +5,16 @@ quotas use expiring node and source-IP leases. Cluster Pub/Sub uses one sharded
 inbox per relay worker; encrypted payloads and presence invalidations are
 ephemeral and are never persisted as messages.
 """
+
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import ipaddress
 import json
 import secrets
+import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -23,10 +26,31 @@ LEASE_RENEW_SECONDS = 10
 ROUTE_TIMEOUT_SECONDS = 3
 MAX_BACKPLANE_MESSAGE_BYTES = 64 * 1024
 MAX_ROOM_MEMBERS = 256
+MAX_WORK_QUEUE_ITEMS = 4096
+MAX_WORK_QUEUE_BYTES = 16 * 1024 * 1024
+MAX_ACK_QUEUE_ITEMS = 4096
+MAX_ACTIVE_ENROLLMENT_OFFERS = 128
+ENROLLMENT_CAPACITY_INDEX_TTL_MS = 20 * 60_000
+ENROLLMENT_RATE_LIMIT = 10
+ENROLLMENT_RATE_WINDOW_MS = 60_000
+ENROLLMENT_MAX_RATE_SOURCES = 65_536
+ENROLLMENT_INDEX_CLEANUP_BATCH = 256
+ENROLLMENT_MAX_FAILED_CODES = 8
+ENROLLMENT_MAX_NONCES_PER_PRINCIPAL = 4096
+ENROLLMENT_MAX_NONCES = 131_072
+MAX_ACTIVE_CONTACT_REQUESTS = 4096
+MAX_CONTACT_REQUESTS_PER_RECIPIENT = 32
+CONTACT_REQUEST_TTL_MS = 24 * 60 * 60 * 1000
+CONTACT_INDEX_CLEANUP_BATCH = 256
 
 
 class RelayBackendError(RuntimeError):
     """The shared relay backend is unavailable or returned invalid data."""
+
+
+def relay_owner_key(node_id: str) -> str:
+    """Return the fenced shared owner key used by one stable relay worker."""
+    return f"kollab:relay:owner:{{node-{node_id}}}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +97,11 @@ class InMemoryBackend:
         self.connections: dict[str, tuple[str, str]] = {}
         self.source_counts: Counter[str] = Counter()
         self.rooms: dict[str, dict[str, PeerRecord]] = {}
+        self.enrollment_offers: dict[str, dict[str, Any]] = {}
+        self.enrollment_rate: dict[str, tuple[int, float]] = {}
+        self.enrollment_nonces: dict[str, dict[str, float]] = {}
+        self.enrollment_nonce_count = 0
+        self.contact_requests: dict[str, dict[str, dict[str, Any]]] = {}
         self.state: Any = None
 
     async def start(self, state: Any) -> None:
@@ -91,7 +120,9 @@ class InMemoryBackend:
     async def owner_valid(self) -> bool:
         return True
 
-    async def reserve_connection(self, connection_id: str, source_ip: str) -> str | None:
+    async def reserve_connection(
+        self, connection_id: str, source_ip: str
+    ) -> str | None:
         if len(self.connections) >= self.limits.max_connections_per_node:
             return None
         if self.source_counts[source_ip] >= self.limits.max_connections_per_source:
@@ -164,6 +195,431 @@ class InMemoryBackend:
                 "to_session": destination.session,
             }
         )
+
+    def _prune_enrollment_offers(self, now: float) -> None:
+        expired = [
+            offer_id
+            for offer_id, offer in self.enrollment_offers.items()
+            if float(offer["_expires_monotonic"]) <= now
+        ]
+        for offer_id in expired:
+            self.enrollment_offers.pop(offer_id, None)
+
+    def _prune_enrollment_nonces(
+        self, now: float, principal_hash: str | None = None
+    ) -> None:
+        principals = (
+            [(principal_hash, self.enrollment_nonces.get(principal_hash, {}))]
+            if principal_hash is not None
+            else list(self.enrollment_nonces.items())
+        )
+        for principal, entries in principals:
+            expired = [nonce for nonce, expiry in entries.items() if expiry <= now]
+            for nonce in expired:
+                entries.pop(nonce, None)
+            self.enrollment_nonce_count -= len(expired)
+            if not entries:
+                self.enrollment_nonces.pop(principal, None)
+
+    async def enrollment_admission_usage(self) -> dict[str, int]:
+        now = time.monotonic()
+        for key, (_, expires_at) in list(self.enrollment_rate.items()):
+            if expires_at <= now:
+                self.enrollment_rate.pop(key, None)
+        self._prune_enrollment_nonces(now)
+        return {
+            "rate_sources": len(self.enrollment_rate),
+            "nonce_records": self.enrollment_nonce_count,
+        }
+
+    async def consume_enrollment_rate(
+        self, source_hash: str, *, limit: int, window_ms: int
+    ) -> bool:
+        now = time.monotonic()
+        slot = int(now * 1000) // window_ms
+        bucket = f"{source_hash}:{slot}"
+        for key, (_, expires_at) in list(self.enrollment_rate.items()):
+            if expires_at <= now:
+                self.enrollment_rate.pop(key, None)
+        current, _ = self.enrollment_rate.get(bucket, (0, now + window_ms / 1000))
+        if current >= limit:
+            return False
+        if (
+            bucket not in self.enrollment_rate
+            and len(self.enrollment_rate) >= ENROLLMENT_MAX_RATE_SOURCES
+        ):
+            return False
+        self.enrollment_rate[bucket] = (current + 1, now + window_ms / 1000)
+        return True
+
+    async def consume_enrollment_nonce(
+        self,
+        principal_hash: str,
+        nonce_hash: str,
+        *,
+        ttl_ms: int,
+        capacity: int,
+    ) -> bool:
+        now = time.monotonic()
+        self._prune_enrollment_nonces(now, principal_hash)
+        entries = self.enrollment_nonces.get(principal_hash)
+        if entries is not None and nonce_hash in entries:
+            return False
+        if entries is not None and len(entries) >= capacity:
+            raise RelayBackendError("enrollment nonce capacity is full")
+        if self.enrollment_nonce_count >= ENROLLMENT_MAX_NONCES:
+            self._prune_enrollment_nonces(now)
+            entries = self.enrollment_nonces.get(principal_hash)
+            if entries is not None and nonce_hash in entries:
+                return False
+            if entries is not None and len(entries) >= capacity:
+                raise RelayBackendError("enrollment nonce capacity is full")
+            if self.enrollment_nonce_count >= ENROLLMENT_MAX_NONCES:
+                raise RelayBackendError("enrollment nonce capacity is full")
+        if entries is None:
+            if len(self.enrollment_nonces) >= 8192:
+                self._prune_enrollment_nonces(now)
+                if len(self.enrollment_nonces) >= 8192:
+                    raise RelayBackendError("enrollment nonce capacity is full")
+            entries = self.enrollment_nonces.setdefault(principal_hash, {})
+        entries[nonce_hash] = now + ttl_ms / 1000
+        self.enrollment_nonce_count += 1
+        return True
+
+    async def create_enrollment_offer(
+        self, offer_id: str, fields: dict[str, str], *, ttl_ms: int, capacity: int
+    ) -> str:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        existing = self.enrollment_offers.get(offer_id)
+        if existing is not None:
+            return (
+                "duplicate"
+                if existing["create_digest"] == fields["create_digest"]
+                else "conflict"
+            )
+        if len(self.enrollment_offers) >= capacity:
+            return "capacity"
+        record = dict(fields)
+        record.update(
+            {
+                "state": "open",
+                "failed_codes": "0",
+                "_expires_monotonic": now + ttl_ms / 1000,
+            }
+        )
+        self.enrollment_offers[offer_id] = record
+        return "created"
+
+    async def submit_enrollment_request(
+        self,
+        offer_id: str,
+        *,
+        round_id: str,
+        destination_key: str,
+        candidate_hash: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None:
+            return "unavailable"
+        existing_round = offer.get("request_round_id")
+        if existing_round:
+            if (
+                existing_round == round_id
+                and offer.get("request_digest") == content_digest
+                and offer.get("destination_key") == destination_key
+            ):
+                return "duplicate"
+            return "bound"
+        if offer.get("state") != "open":
+            return "unavailable"
+        failures = int(offer.get("failed_codes", "0"))
+        if failures >= ENROLLMENT_MAX_FAILED_CODES:
+            return "rate_limited"
+        if not hmac.compare_digest(offer["code_verifier_hash"], candidate_hash):
+            failures += 1
+            offer["failed_codes"] = str(failures)
+            return (
+                "rate_limited"
+                if failures >= ENROLLMENT_MAX_FAILED_CODES
+                else "invalid_code"
+            )
+        offer.update(
+            {
+                "state": "request_pending",
+                "destination_key": destination_key,
+                "request_round_id": round_id,
+                "request_digest": content_digest,
+                "request_envelope": envelope,
+                "request_claim_id": "",
+            }
+        )
+        return "accepted"
+
+    async def claim_enrollment_round(
+        self, offer_id: str, *, issuer_key: str, claim_id: str
+    ) -> dict[str, str]:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("issuer_key") != issuer_key:
+            return {"status": "unavailable"}
+        if offer.get("state") in ("request_pending", "request_claimed"):
+            phase = "request"
+        elif offer.get("state") in ("proof_pending", "proof_claimed"):
+            phase = "proof"
+        else:
+            return {"status": "empty"}
+        state = offer["state"]
+        stored_claim_id = offer.get(f"{phase}_claim_id", "")
+        if state.endswith("_pending"):
+            offer["state"] = f"{phase}_claimed"
+            offer[f"{phase}_claim_id"] = claim_id
+        elif stored_claim_id != claim_id:
+            return {"status": "claimed"}
+        return {
+            "status": "claimed",
+            "phase": phase,
+            "round_id": offer[f"{phase}_round_id"],
+            "destination_key": offer["destination_key"],
+            "envelope": offer[f"{phase}_envelope"],
+        }
+
+    async def publish_enrollment_challenge(
+        self,
+        offer_id: str,
+        *,
+        issuer_key: str,
+        destination_key: str,
+        round_id: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("issuer_key") != issuer_key:
+            return "unavailable"
+        if offer.get("destination_key") != destination_key:
+            return "unavailable"
+        if offer.get("challenge_round_id"):
+            return (
+                "duplicate"
+                if offer["challenge_round_id"] == round_id
+                and offer.get("challenge_digest") == content_digest
+                else "conflict"
+            )
+        if offer.get("state") != "request_claimed":
+            return "not_ready"
+        offer.update(
+            {
+                "state": "challenge_ready",
+                "challenge_round_id": round_id,
+                "challenge_digest": content_digest,
+                "challenge_envelope": envelope,
+            }
+        )
+        return "stored"
+
+    async def submit_enrollment_proof(
+        self,
+        offer_id: str,
+        *,
+        round_id: str,
+        destination_key: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("destination_key") != destination_key:
+            return "unavailable"
+        if offer.get("proof_round_id"):
+            return (
+                "duplicate"
+                if offer["proof_round_id"] == round_id
+                and offer.get("proof_digest") == content_digest
+                else "conflict"
+            )
+        if offer.get("state") != "challenge_ready":
+            return "not_ready"
+        offer.update(
+            {
+                "state": "proof_pending",
+                "proof_round_id": round_id,
+                "proof_digest": content_digest,
+                "proof_envelope": envelope,
+                "proof_claim_id": "",
+            }
+        )
+        return "stored"
+
+    async def publish_enrollment_decision(
+        self,
+        offer_id: str,
+        *,
+        issuer_key: str,
+        destination_key: str,
+        round_id: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("issuer_key") != issuer_key:
+            return "unavailable"
+        if offer.get("destination_key") != destination_key:
+            return "unavailable"
+        if offer.get("decision_round_id"):
+            return (
+                "duplicate"
+                if offer["decision_round_id"] == round_id
+                and offer.get("decision_digest") == content_digest
+                else "conflict"
+            )
+        if offer.get("state") != "proof_claimed":
+            return "not_ready"
+        offer.update(
+            {
+                "state": "closed",
+                "decision_round_id": round_id,
+                "decision_digest": content_digest,
+                "decision_envelope": envelope,
+            }
+        )
+        return "stored"
+
+    async def poll_enrollment_reply(
+        self, offer_id: str, *, destination_key: str
+    ) -> dict[str, str]:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("destination_key") != destination_key:
+            return {"status": "unavailable"}
+        if offer.get("decision_round_id"):
+            phase = "decision"
+        elif offer.get("challenge_round_id"):
+            phase = "challenge"
+        else:
+            return {"status": "pending"}
+        return {
+            "status": "ready",
+            "phase": phase,
+            "round_id": offer[f"{phase}_round_id"],
+            "envelope": offer[f"{phase}_envelope"],
+        }
+
+    async def submit_enrollment_install_ack(
+        self,
+        offer_id: str,
+        *,
+        round_id: str,
+        destination_key: str,
+        frame: dict[str, Any],
+        content_digest: str,
+    ) -> str:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if (
+            offer is None
+            or offer.get("destination_key") != destination_key
+            or offer.get("decision_round_id") != round_id
+        ):
+            return "unavailable"
+        previous_digest = offer.get("install_ack_digest")
+        if previous_digest is not None:
+            return "duplicate" if previous_digest == content_digest else "conflict"
+        offer["install_ack_frame"] = dict(frame)
+        offer["install_ack_digest"] = content_digest
+        return "stored"
+
+    async def poll_enrollment_install_ack(
+        self, offer_id: str, *, issuer_key: str
+    ) -> dict[str, Any]:
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("issuer_key") != issuer_key:
+            return {"status": "unavailable"}
+        frame = offer.get("install_ack_frame")
+        if frame is None:
+            return {"status": "pending"}
+        return {"status": "ready", "frame": dict(frame)}
+
+    def _prune_contact_requests(self, now: float) -> None:
+        for recipient_hash, requests in list(self.contact_requests.items()):
+            for request_id, row in list(requests.items()):
+                if row["_expires_monotonic"] <= now:
+                    requests.pop(request_id, None)
+            if not requests:
+                self.contact_requests.pop(recipient_hash, None)
+
+    async def store_contact_request(
+        self,
+        recipient_hash: str,
+        request_id: str,
+        fields: dict[str, Any],
+        *,
+        ttl_ms: int,
+    ) -> str:
+        now = time.monotonic()
+        self._prune_contact_requests(now)
+        requests = self.contact_requests.get(recipient_hash, {})
+        existing = requests.get(request_id)
+        if existing is not None:
+            return (
+                "duplicate"
+                if existing["content_digest"] == fields["content_digest"]
+                else "conflict"
+            )
+        if len(requests) >= MAX_CONTACT_REQUESTS_PER_RECIPIENT:
+            return "recipient_capacity"
+        if sum(len(rows) for rows in self.contact_requests.values()) >= MAX_ACTIVE_CONTACT_REQUESTS:
+            return "capacity"
+        row = dict(fields)
+        row.update(
+            {
+                "decision": "pending",
+                "_expires_monotonic": now + ttl_ms / 1000,
+            }
+        )
+        requests[request_id] = row
+        self.contact_requests[recipient_hash] = requests
+        return "stored"
+
+    async def list_contact_requests(
+        self, recipient_hash: str, *, limit: int
+    ) -> list[dict[str, Any]]:
+        self._prune_contact_requests(time.monotonic())
+        rows = self.contact_requests.get(recipient_hash, {})
+        return [
+            dict(row)
+            for row in list(rows.values())[:limit]
+            if row["decision"] == "pending"
+        ]
+
+    async def decide_contact_request(
+        self, recipient_hash: str, request_id: str, decision: str
+    ) -> str:
+        self._prune_contact_requests(time.monotonic())
+        row = self.contact_requests.get(recipient_hash, {}).get(request_id)
+        if row is None:
+            return "unavailable"
+        current = row["decision"]
+        if current == decision:
+            return "duplicate"
+        if current != "pending":
+            return "conflict"
+        row["decision"] = decision
+        return "stored"
 
 
 _RESERVE_LEASE = """
@@ -257,6 +713,320 @@ redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) * 2)
 return 1
 """
 
+_CONSUME_ENROLLMENT_RATE = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[5]))
+for _, source in ipairs(expired) do redis.call('ZREM', KEYS[2], source) end
+local counter_ttl = redis.call('PTTL', KEYS[1])
+local indexed = redis.call('ZSCORE', KEYS[2], ARGV[3])
+if not indexed then
+  if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return -1 end
+end
+local expires_at = now + tonumber(ARGV[2])
+if counter_ttl > 0 then expires_at = now + counter_ttl end
+redis.call('ZADD', KEYS[2], expires_at, ARGV[3])
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[2]) * 2)
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2])) end
+if count > tonumber(ARGV[1]) then return 0 end
+return 1
+"""
+
+_CONSUME_ENROLLMENT_NONCE = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local ttl = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - ttl)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[6]))
+for _, member in ipairs(expired) do redis.call('ZREM', KEYS[2], member) end
+if redis.call('ZSCORE', KEYS[1], ARGV[1]) then return 0 end
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return -1 end
+if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return -1 end
+redis.call('ZADD', KEYS[1], now, ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ttl)
+redis.call('ZADD', KEYS[2], now + ttl, ARGV[5] .. ':' .. ARGV[1])
+redis.call('PEXPIRE', KEYS[2], ttl * 2)
+return 1
+"""
+
+_STORE_CONTACT_REQUEST = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local request_id = ARGV[1]
+local global_member = ARGV[2] .. ':' .. request_id
+local existing = redis.call('HGET', KEYS[1], request_id)
+if existing then
+  local expiry = redis.call('ZSCORE', KEYS[2], request_id)
+  if expiry and tonumber(expiry) > now then
+    local decoded = cjson.decode(existing)
+    if decoded['content_digest'] == ARGV[3] then return 'duplicate' end
+    return 'conflict'
+  end
+  redis.call('HDEL', KEYS[1], request_id)
+  redis.call('HDEL', KEYS[4], request_id)
+  redis.call('ZREM', KEYS[2], request_id)
+  redis.call('ZREM', KEYS[3], global_member)
+end
+local stale_global = redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', now, 'LIMIT', 0, tonumber(ARGV[7]))
+for _, member in ipairs(stale_global) do redis.call('ZREM', KEYS[3], member) end
+local stale_recipient = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[7]))
+for _, expired_id in ipairs(stale_recipient) do
+  redis.call('HDEL', KEYS[1], expired_id)
+  redis.call('HDEL', KEYS[4], expired_id)
+  redis.call('ZREM', KEYS[2], expired_id)
+  redis.call('ZREM', KEYS[3], ARGV[2] .. ':' .. expired_id)
+end
+if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[5]) then return 'recipient_capacity' end
+if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[6]) then return 'capacity' end
+local expires_at = now + tonumber(ARGV[4])
+redis.call('HSET', KEYS[1], request_id, ARGV[8])
+redis.call('HSET', KEYS[4], request_id, 'pending')
+redis.call('ZADD', KEYS[2], expires_at, request_id)
+redis.call('ZADD', KEYS[3], expires_at, global_member)
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]) * 2)
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[4]) * 2)
+redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[4]) * 2)
+redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[4]) * 2)
+return 'stored'
+"""
+
+_LIST_CONTACT_REQUESTS = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[3]))
+for _, request_id in ipairs(expired) do
+  redis.call('HDEL', KEYS[1], request_id)
+  redis.call('HDEL', KEYS[4], request_id)
+  redis.call('ZREM', KEYS[2], request_id)
+  redis.call('ZREM', KEYS[3], ARGV[1] .. ':' .. request_id)
+end
+local ids = redis.call('ZRANGE', KEYS[2], 0, tonumber(ARGV[2]) - 1)
+local rows = {}
+for _, request_id in ipairs(ids) do
+  if redis.call('HGET', KEYS[4], request_id) == 'pending' then
+    local payload = redis.call('HGET', KEYS[1], request_id)
+    if payload then
+      table.insert(rows, request_id)
+      table.insert(rows, payload)
+    end
+  end
+end
+return rows
+"""
+
+_DECIDE_CONTACT_REQUEST = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local expiry = redis.call('ZSCORE', KEYS[2], ARGV[1])
+if not expiry or tonumber(expiry) <= now or not redis.call('HGET', KEYS[1], ARGV[1]) then
+  return 'unavailable'
+end
+local current = redis.call('HGET', KEYS[3], ARGV[1]) or 'pending'
+if current == ARGV[2] then return 'duplicate' end
+if current ~= 'pending' then return 'conflict' end
+redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
+return 'stored'
+"""
+
+_CREATE_ENROLLMENT_OFFER = """
+local existing = redis.call('HGET', KEYS[1], 'create_digest')
+if existing then
+  if existing == ARGV[4] then return 2 end
+  return -1
+end
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
+if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[3]) then return 0 end
+for i = 6, #ARGV, 2 do
+  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+end
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[1]))
+redis.call('ZADD', KEYS[2], now + tonumber(ARGV[1]), ARGV[2])
+-- Keep the active index alive longer than every service-enforced offer TTL.
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[5]))
+return 1
+"""
+
+_SUBMIT_ENROLLMENT_REQUEST = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 'unavailable' end
+local existing = redis.call('HGET', KEYS[1], 'request_round_id')
+if existing then
+  if existing == ARGV[1]
+      and redis.call('HGET', KEYS[1], 'request_digest') == ARGV[5]
+      and redis.call('HGET', KEYS[1], 'destination_key') == ARGV[2] then
+    return 'duplicate'
+  end
+  return 'bound'
+end
+if redis.call('HGET', KEYS[1], 'state') ~= 'open' then return 'unavailable' end
+local failed = tonumber(redis.call('HGET', KEYS[1], 'failed_codes') or '0')
+if failed >= tonumber(ARGV[6]) then return 'rate_limited' end
+local stored = redis.call('HGET', KEYS[1], 'code_verifier_hash') or ''
+local difference = 0
+for i = 1, 64 do
+  difference = difference + math.abs((string.byte(stored, i) or 0) - (string.byte(ARGV[3], i) or 0))
+end
+if #stored ~= 64 or #ARGV[3] ~= 64 or difference ~= 0 then
+  failed = redis.call('HINCRBY', KEYS[1], 'failed_codes', 1)
+  if failed >= tonumber(ARGV[6]) then return 'rate_limited' end
+  return 'invalid_code'
+end
+redis.call('HSET', KEYS[1],
+  'state', 'request_pending',
+  'destination_key', ARGV[2],
+  'request_round_id', ARGV[1],
+  'request_digest', ARGV[5],
+  'request_envelope', ARGV[4],
+  'request_claim_id', '')
+return 'accepted'
+"""
+
+_CLAIM_ENROLLMENT_ROUND = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'issuer_key') ~= ARGV[1] then
+  return {'unavailable'}
+end
+local state = redis.call('HGET', KEYS[1], 'state')
+local phase
+if state == 'request_pending' or state == 'request_claimed' then
+  phase = 'request'
+elseif state == 'proof_pending' or state == 'proof_claimed' then
+  phase = 'proof'
+else
+  return {'empty'}
+end
+local claim_field = phase .. '_claim_id'
+if state == phase .. '_pending' then
+  redis.call('HSET', KEYS[1], 'state', phase .. '_claimed', claim_field, ARGV[2])
+elseif redis.call('HGET', KEYS[1], claim_field) ~= ARGV[2] then
+  return {'claimed'}
+end
+return {
+  'claimed', phase,
+  redis.call('HGET', KEYS[1], phase .. '_round_id') or '',
+  redis.call('HGET', KEYS[1], 'destination_key') or '',
+  redis.call('HGET', KEYS[1], phase .. '_envelope') or ''
+}
+"""
+
+_PUBLISH_ENROLLMENT_CHALLENGE = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'issuer_key') ~= ARGV[1]
+    or redis.call('HGET', KEYS[1], 'destination_key') ~= ARGV[2] then
+  return 'unavailable'
+end
+local existing = redis.call('HGET', KEYS[1], 'challenge_round_id')
+if existing then
+  if existing == ARGV[3]
+      and redis.call('HGET', KEYS[1], 'challenge_digest') == ARGV[5] then
+    return 'duplicate'
+  end
+  return 'conflict'
+end
+if redis.call('HGET', KEYS[1], 'state') ~= 'request_claimed' then return 'not_ready' end
+redis.call('HSET', KEYS[1],
+  'state', 'challenge_ready',
+  'challenge_round_id', ARGV[3],
+  'challenge_envelope', ARGV[4],
+  'challenge_digest', ARGV[5])
+return 'stored'
+"""
+
+_SUBMIT_ENROLLMENT_PROOF = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'destination_key') ~= ARGV[2] then
+  return 'unavailable'
+end
+local existing = redis.call('HGET', KEYS[1], 'proof_round_id')
+if existing then
+  if existing == ARGV[1]
+      and redis.call('HGET', KEYS[1], 'proof_digest') == ARGV[4] then
+    return 'duplicate'
+  end
+  return 'conflict'
+end
+if redis.call('HGET', KEYS[1], 'state') ~= 'challenge_ready' then return 'not_ready' end
+redis.call('HSET', KEYS[1],
+  'state', 'proof_pending',
+  'proof_round_id', ARGV[1],
+  'proof_envelope', ARGV[3],
+  'proof_digest', ARGV[4],
+  'proof_claim_id', '')
+return 'stored'
+"""
+
+_PUBLISH_ENROLLMENT_DECISION = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'issuer_key') ~= ARGV[1]
+    or redis.call('HGET', KEYS[1], 'destination_key') ~= ARGV[2] then
+  return 'unavailable'
+end
+local existing = redis.call('HGET', KEYS[1], 'decision_round_id')
+if existing then
+  if existing == ARGV[3]
+      and redis.call('HGET', KEYS[1], 'decision_digest') == ARGV[5] then
+    return 'duplicate'
+  end
+  return 'conflict'
+end
+if redis.call('HGET', KEYS[1], 'state') ~= 'proof_claimed' then return 'not_ready' end
+redis.call('HSET', KEYS[1],
+  'state', 'closed',
+  'decision_round_id', ARGV[3],
+  'decision_envelope', ARGV[4],
+  'decision_digest', ARGV[5])
+return 'stored'
+"""
+
+_POLL_ENROLLMENT_REPLY = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'destination_key') ~= ARGV[1] then
+  return {'unavailable'}
+end
+local phase
+if redis.call('HGET', KEYS[1], 'decision_round_id') then
+  phase = 'decision'
+elseif redis.call('HGET', KEYS[1], 'challenge_round_id') then
+  phase = 'challenge'
+else
+  return {'pending'}
+end
+return {
+  'ready', phase,
+  redis.call('HGET', KEYS[1], phase .. '_round_id') or '',
+  redis.call('HGET', KEYS[1], phase .. '_envelope') or ''
+}
+"""
+
+_SUBMIT_ENROLLMENT_INSTALL_ACK = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'destination_key') ~= ARGV[2]
+    or redis.call('HGET', KEYS[1], 'decision_round_id') ~= ARGV[1] then
+  return 'unavailable'
+end
+local existing = redis.call('HGET', KEYS[1], 'install_ack_digest')
+if existing then
+  if existing == ARGV[3] then return 'duplicate' end
+  return 'conflict'
+end
+redis.call('HSET', KEYS[1],
+  'install_ack_frame', ARGV[4],
+  'install_ack_digest', ARGV[3])
+return 'stored'
+"""
+
+_POLL_ENROLLMENT_INSTALL_ACK = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'issuer_key') ~= ARGV[1] then
+  return {'unavailable'}
+end
+local frame = redis.call('HGET', KEYS[1], 'install_ack_frame')
+if not frame then return {'pending'} end
+return {'ready', frame}
+"""
+
 
 class _ShardedPubSub:
     """Adapter issuing Redis 7 SSUBSCRIBE with redis-py async PubSub."""
@@ -326,11 +1096,20 @@ class RedisRelayBackend:
         self._pending_routes: dict[str, asyncio.Future[bool]] = {}
         self._pending_probes: dict[str, asyncio.Future[bool]] = {}
         self._queued_rooms: set[str] = set()
-        self._work_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(
-            maxsize=max(32, limits.max_connections_per_node * 2)
+        self._processing_rooms: set[str] = set()
+        self._room_change_again: set[str] = set()
+        work_queue_items = min(
+            MAX_WORK_QUEUE_ITEMS, max(32, limits.max_connections_per_node * 2)
         )
+        self._work_queue: asyncio.Queue[tuple[str, dict[str, Any], int]] = (
+            asyncio.Queue(maxsize=work_queue_items)
+        )
+        # Count queued and currently processed messages. This keeps the memory
+        # budget in force while workers hold payloads after Queue.get().
+        self._work_queue_items = 0
+        self._work_queue_bytes = 0
         self._ack_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
-            maxsize=max(32, limits.max_connections_per_node)
+            maxsize=min(MAX_ACK_QUEUE_ITEMS, max(32, limits.max_connections_per_node))
         )
         self._workers: list[asyncio.Task[None]] = []
         self._ack_worker: asyncio.Task[None] | None = None
@@ -419,7 +1198,9 @@ class RedisRelayBackend:
             await self.close()
             if isinstance(exc, RelayBackendError):
                 raise
-            raise RelayBackendError("cannot connect to configured Redis-compatible backend") from exc
+            raise RelayBackendError(
+                "cannot connect to configured Redis-compatible backend"
+            ) from exc
 
     async def close(self) -> None:
         self._healthy = False
@@ -592,7 +1373,9 @@ class RedisRelayBackend:
             )
             if isinstance(exc, RelayBackendError):
                 raise
-            raise RelayBackendError("shared relay connection quota is unavailable") from exc
+            raise RelayBackendError(
+                "shared relay connection quota is unavailable"
+            ) from exc
 
     async def release_connection(
         self, connection_id: str, source_ip: str, reservation: str | None
@@ -641,9 +1424,7 @@ class RedisRelayBackend:
 
     async def list_room(self, room_hash: str) -> tuple[list[PeerRecord], bool]:
         try:
-            result = await self._redis.eval(
-                _LIST_ROOM, 2, *self._room_keys(room_hash)
-            )
+            result = await self._redis.eval(_LIST_ROOM, 2, *self._room_keys(room_hash))
             pruned = int(result[0]) > 0
             records = self._parse_hgetall(result[1:])
             return records, pruned
@@ -716,19 +1497,410 @@ class RedisRelayBackend:
                 raise
             raise RelayBackendError("relay lease renewal failed") from exc
 
-    async def notify_room_change(
-        self, room_hash: str, node_ids: set[str]
-    ) -> None:
+    async def consume_enrollment_rate(
+        self, source_hash: str, *, limit: int, window_ms: int
+    ) -> bool:
+        try:
+            result = await self._redis.eval(
+                _CONSUME_ENROLLMENT_RATE,
+                2,
+                self._enrollment_rate_key(source_hash),
+                self._enrollment_rate_index_key(),
+                limit,
+                window_ms,
+                source_hash,
+                ENROLLMENT_MAX_RATE_SOURCES,
+                ENROLLMENT_INDEX_CLEANUP_BATCH,
+            )
+            return int(result) == 1
+        except Exception as exc:
+            raise RelayBackendError("enrollment rate limiter is unavailable") from exc
+
+    async def consume_enrollment_nonce(
+        self,
+        principal_hash: str,
+        nonce_hash: str,
+        *,
+        ttl_ms: int,
+        capacity: int,
+    ) -> bool:
+        try:
+            result = int(
+                await self._redis.eval(
+                    _CONSUME_ENROLLMENT_NONCE,
+                    2,
+                    self._enrollment_nonce_key(principal_hash),
+                    self._enrollment_nonce_index_key(),
+                    nonce_hash,
+                    ttl_ms,
+                    capacity,
+                    ENROLLMENT_MAX_NONCES,
+                    principal_hash,
+                    ENROLLMENT_INDEX_CLEANUP_BATCH,
+                )
+            )
+            if result < 0:
+                raise RelayBackendError("enrollment nonce capacity is full")
+            return result == 1
+        except Exception as exc:
+            if isinstance(exc, RelayBackendError):
+                raise
+            raise RelayBackendError("enrollment nonce check is unavailable") from exc
+
+    async def enrollment_admission_usage(self) -> dict[str, int]:
+        try:
+            pipeline = self._redis.pipeline(transaction=False)
+            pipeline.zcard(self._enrollment_rate_index_key())
+            pipeline.zcard(self._enrollment_nonce_index_key())
+            rate_sources, nonce_records = await pipeline.execute()
+            return {
+                "rate_sources": int(rate_sources),
+                "nonce_records": int(nonce_records),
+            }
+        except Exception as exc:
+            raise RelayBackendError(
+                "enrollment admission usage is unavailable"
+            ) from exc
+
+    async def create_enrollment_offer(
+        self, offer_id: str, fields: dict[str, str], *, ttl_ms: int, capacity: int
+    ) -> str:
+        try:
+            stored_fields = {"state": "open", "failed_codes": "0", **fields}
+            args: list[str | int] = [
+                ttl_ms,
+                offer_id,
+                capacity,
+                fields["create_digest"],
+                ENROLLMENT_CAPACITY_INDEX_TTL_MS,
+            ]
+            for key, value in sorted(stored_fields.items()):
+                args.extend((key, value))
+            result = int(
+                await self._redis.eval(
+                    _CREATE_ENROLLMENT_OFFER,
+                    2,
+                    self._enrollment_key(offer_id),
+                    self._enrollment_capacity_key(),
+                    *args,
+                )
+            )
+            if result == 0:
+                return "capacity"
+            if result == -1:
+                return "conflict"
+            return (
+                "created" if result == 1 else "duplicate" if result == 2 else "conflict"
+            )
+        except Exception as exc:
+            if isinstance(exc, RelayBackendError):
+                raise
+            raise RelayBackendError("enrollment offer storage is unavailable") from exc
+
+    async def submit_enrollment_request(
+        self,
+        offer_id: str,
+        *,
+        round_id: str,
+        destination_key: str,
+        candidate_hash: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        try:
+            result = await self._redis.eval(
+                _SUBMIT_ENROLLMENT_REQUEST,
+                1,
+                self._enrollment_key(offer_id),
+                round_id,
+                destination_key,
+                candidate_hash,
+                envelope,
+                content_digest,
+                ENROLLMENT_MAX_FAILED_CODES,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError(
+                "enrollment request storage is unavailable"
+            ) from exc
+
+    async def claim_enrollment_round(
+        self, offer_id: str, *, issuer_key: str, claim_id: str
+    ) -> dict[str, str]:
+        try:
+            result = await self._redis.eval(
+                _CLAIM_ENROLLMENT_ROUND,
+                1,
+                self._enrollment_key(offer_id),
+                issuer_key,
+                claim_id,
+            )
+            values = [str(value) for value in result]
+            if values[0] != "claimed" or len(values) != 5:
+                return {"status": values[0]}
+            return {
+                "status": values[0],
+                "phase": values[1],
+                "round_id": values[2],
+                "destination_key": values[3],
+                "envelope": values[4],
+            }
+        except Exception as exc:
+            raise RelayBackendError("enrollment claim is unavailable") from exc
+
+    async def publish_enrollment_challenge(
+        self,
+        offer_id: str,
+        *,
+        issuer_key: str,
+        destination_key: str,
+        round_id: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        try:
+            result = await self._redis.eval(
+                _PUBLISH_ENROLLMENT_CHALLENGE,
+                1,
+                self._enrollment_key(offer_id),
+                issuer_key,
+                destination_key,
+                round_id,
+                envelope,
+                content_digest,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError(
+                "enrollment challenge storage is unavailable"
+            ) from exc
+
+    async def submit_enrollment_proof(
+        self,
+        offer_id: str,
+        *,
+        round_id: str,
+        destination_key: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        try:
+            result = await self._redis.eval(
+                _SUBMIT_ENROLLMENT_PROOF,
+                1,
+                self._enrollment_key(offer_id),
+                round_id,
+                destination_key,
+                envelope,
+                content_digest,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError("enrollment proof storage is unavailable") from exc
+
+    async def publish_enrollment_decision(
+        self,
+        offer_id: str,
+        *,
+        issuer_key: str,
+        destination_key: str,
+        round_id: str,
+        envelope: str,
+        content_digest: str,
+    ) -> str:
+        try:
+            result = await self._redis.eval(
+                _PUBLISH_ENROLLMENT_DECISION,
+                1,
+                self._enrollment_key(offer_id),
+                issuer_key,
+                destination_key,
+                round_id,
+                envelope,
+                content_digest,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError(
+                "enrollment decision storage is unavailable"
+            ) from exc
+
+    async def poll_enrollment_reply(
+        self, offer_id: str, *, destination_key: str
+    ) -> dict[str, str]:
+        try:
+            result = await self._redis.eval(
+                _POLL_ENROLLMENT_REPLY,
+                1,
+                self._enrollment_key(offer_id),
+                destination_key,
+            )
+            values = [str(value) for value in result]
+            if values[0] != "ready" or len(values) != 4:
+                return {"status": values[0]}
+            return {
+                "status": values[0],
+                "phase": values[1],
+                "round_id": values[2],
+                "envelope": values[3],
+            }
+        except Exception as exc:
+            raise RelayBackendError("enrollment reply poll is unavailable") from exc
+
+    async def submit_enrollment_install_ack(
+        self,
+        offer_id: str,
+        *,
+        round_id: str,
+        destination_key: str,
+        frame: dict[str, Any],
+        content_digest: str,
+    ) -> str:
+        try:
+            encoded_frame = json.dumps(
+                frame, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            result = await self._redis.eval(
+                _SUBMIT_ENROLLMENT_INSTALL_ACK,
+                1,
+                self._enrollment_key(offer_id),
+                round_id,
+                destination_key,
+                content_digest,
+                encoded_frame,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError(
+                "enrollment installation receipt storage is unavailable"
+            ) from exc
+
+    async def poll_enrollment_install_ack(
+        self, offer_id: str, *, issuer_key: str
+    ) -> dict[str, Any]:
+        try:
+            result = await self._redis.eval(
+                _POLL_ENROLLMENT_INSTALL_ACK,
+                1,
+                self._enrollment_key(offer_id),
+                issuer_key,
+            )
+            values = [item.decode("utf-8") if isinstance(item, bytes) else str(item) for item in result]
+            if values[0] != "ready" or len(values) != 2:
+                return {"status": values[0]}
+            try:
+                frame = json.loads(values[1])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise RelayBackendError(
+                    "enrollment installation receipt is malformed"
+                ) from exc
+            if not isinstance(frame, dict):
+                raise RelayBackendError(
+                    "enrollment installation receipt is malformed"
+                )
+            return {"status": "ready", "frame": frame}
+        except Exception as exc:
+            if isinstance(exc, RelayBackendError):
+                raise
+            raise RelayBackendError(
+                "enrollment installation receipt poll is unavailable"
+            ) from exc
+
+    async def store_contact_request(
+        self,
+        recipient_hash: str,
+        request_id: str,
+        fields: dict[str, Any],
+        *,
+        ttl_ms: int,
+    ) -> str:
+        try:
+            encoded = json.dumps(
+                fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            result = await self._redis.eval(
+                _STORE_CONTACT_REQUEST,
+                4,
+                self._contact_data_key(recipient_hash),
+                self._contact_recipient_index_key(recipient_hash),
+                self._contact_global_index_key(),
+                self._contact_decisions_key(recipient_hash),
+                request_id,
+                recipient_hash,
+                fields["content_digest"],
+                ttl_ms,
+                MAX_CONTACT_REQUESTS_PER_RECIPIENT,
+                MAX_ACTIVE_CONTACT_REQUESTS,
+                CONTACT_INDEX_CLEANUP_BATCH,
+                encoded,
+            )
+            return str(result)
+        except Exception as exc:
+            if isinstance(exc, RelayBackendError):
+                raise
+            raise RelayBackendError("contact request storage is unavailable") from exc
+
+    async def list_contact_requests(
+        self, recipient_hash: str, *, limit: int
+    ) -> list[dict[str, Any]]:
+        if not 1 <= limit <= MAX_CONTACT_REQUESTS_PER_RECIPIENT:
+            raise RelayBackendError("contact request list bound is invalid")
+        try:
+            result = await self._redis.eval(
+                _LIST_CONTACT_REQUESTS,
+                4,
+                self._contact_data_key(recipient_hash),
+                self._contact_recipient_index_key(recipient_hash),
+                self._contact_global_index_key(),
+                self._contact_decisions_key(recipient_hash),
+                recipient_hash,
+                limit,
+                CONTACT_INDEX_CLEANUP_BATCH,
+            )
+            values = [str(value) for value in result]
+            if len(values) % 2:
+                raise RelayBackendError("contact request storage returned invalid data")
+            rows = []
+            for offset in range(0, len(values), 2):
+                row = json.loads(values[offset + 1])
+                if not isinstance(row, dict) or row.get("request_id") != values[offset]:
+                    raise RelayBackendError("contact request storage returned invalid data")
+                rows.append(row)
+            return rows
+        except Exception as exc:
+            if isinstance(exc, RelayBackendError):
+                raise
+            raise RelayBackendError("contact request inbox is unavailable") from exc
+
+    async def decide_contact_request(
+        self, recipient_hash: str, request_id: str, decision: str
+    ) -> str:
+        try:
+            result = await self._redis.eval(
+                _DECIDE_CONTACT_REQUEST,
+                3,
+                self._contact_data_key(recipient_hash),
+                self._contact_recipient_index_key(recipient_hash),
+                self._contact_decisions_key(recipient_hash),
+                request_id,
+                decision,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError("contact request decision is unavailable") from exc
+
+    async def notify_room_change(self, room_hash: str, node_ids: set[str]) -> None:
         payload = {"type": "room_changed", "room_hash": room_hash}
         for node_id in sorted(node_ids):
             try:
                 await self._publish_node(node_id, payload)
             except Exception as exc:
-                raise RelayBackendError("could not publish room presence update") from exc
+                raise RelayBackendError(
+                    "could not publish room presence update"
+                ) from exc
 
-    async def forward(
-        self, destination: PeerRecord, route: dict[str, str]
-    ) -> bool:
+    async def forward(self, destination: PeerRecord, route: dict[str, str]) -> bool:
         if destination.node_id == self.node_id:
             if not await self.owner_valid():
                 return False
@@ -774,15 +1946,15 @@ class RedisRelayBackend:
             if not future.done():
                 future.cancel()
 
-    async def _publish_node(
-        self, node_id: str, payload: dict[str, Any]
-    ) -> int:
+    async def _publish_node(self, node_id: str, payload: dict[str, Any]) -> int:
         encoded = _bounded_json(payload)
         channel = self._node_channel_for(node_id)
         if self.cluster:
             node = self._redis.get_node_from_key(channel)
             if node is None:
-                raise RelayBackendError("cluster has no owner for destination worker inbox")
+                raise RelayBackendError(
+                    "cluster has no owner for destination worker inbox"
+                )
             value = await self._redis.execute_command(
                 "SPUBLISH", channel, encoded, target_nodes=node
             )
@@ -819,33 +1991,68 @@ class RedisRelayBackend:
                 if kind in {"probe", "ack"}:
                     self._handle_control_message(kind, payload)
                     continue
-                if kind == "room_changed":
-                    room_hash = payload["room_hash"]
-                    if room_hash in self._queued_rooms:
-                        continue
-                    self._queued_rooms.add(room_hash)
-                try:
-                    self._work_queue.put_nowait((kind, payload))
-                except asyncio.QueueFull:
-                    if kind == "room_changed":
-                        self._queued_rooms.discard(payload["room_hash"])
-                    elif kind == "route":
-                        try:
-                            self._ack_queue.put_nowait({
+                negative_ack = self._enqueue_work(kind, payload)
+                if negative_ack is not None:
+                    try:
+                        self._ack_queue.put_nowait(negative_ack)
+                    except asyncio.QueueFull:
+                        # Preserve an explicit overload result when the normal
+                        # ack queue is saturated. Awaiting here applies backpressure
+                        # to the Pub/Sub reader instead of allocating more tasks.
+                        await self._publish_node(
+                            negative_ack["reply_node"],
+                            {
                                 "type": "ack",
-                                "reply_node": payload["reply_node"],
-                                "route_id": payload["route_id"],
+                                "route_id": negative_ack["route_id"],
                                 "ok": False,
-                            })
-                        except asyncio.QueueFull:
-                            # Sender's own bounded three-second deadline reports offline.
-                            pass
+                            },
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:
             self._healthy = False
             if self._state is not None:
                 await self._state.backend_failed()
+
+    def _enqueue_work(
+        self, kind: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Queue validated backplane work within item and Python-payload budgets.
+
+        A returned acknowledgement means a route was rejected and must be
+        answered with ``ok=False``. Presence invalidations are coalesced by room;
+        a dropped invalidation is reconciled by the periodic room scan.
+        """
+        room_hash = payload["room_hash"] if kind == "room_changed" else None
+        if room_hash is not None and room_hash in self._queued_rooms:
+            if room_hash in self._processing_rooms:
+                self._room_change_again.add(room_hash)
+            return None
+
+        cost = _queued_work_cost(kind, payload)
+        over_capacity = (
+            self._work_queue_items >= self._work_queue.maxsize
+            or self._work_queue_bytes + cost > MAX_WORK_QUEUE_BYTES
+        )
+        if over_capacity:
+            if kind == "route":
+                return _negative_route_ack(payload)
+            return None
+
+        if room_hash is not None:
+            self._queued_rooms.add(room_hash)
+        try:
+            self._work_queue.put_nowait((kind, payload, cost))
+        except asyncio.QueueFull:
+            if room_hash is not None:
+                self._queued_rooms.discard(room_hash)
+            if kind == "route":
+                return _negative_route_ack(payload)
+            return None
+
+        self._work_queue_items += 1
+        self._work_queue_bytes += cost
+        return None
 
     def _parse_node_message(self, raw: str) -> tuple[str, dict[str, Any]] | None:
         try:
@@ -867,17 +2074,25 @@ class RedisRelayBackend:
                 return "ack", message
             return None
         if message["type"] == "room_changed":
-            if (
-                set(message) == {"type", "room_hash"}
-                and _is_room_hash(message["room_hash"])
+            if set(message) == {"type", "room_hash"} and _is_room_hash(
+                message["room_hash"]
             ):
                 return "room_changed", message
             return None
         if message["type"] != "route" or self._state is None:
             return None
         required = {
-            "type", "route_id", "reply_node", "room_hash", "connection_id", "to",
-            "to_session", "from", "session", "id", "ciphertext",
+            "type",
+            "route_id",
+            "reply_node",
+            "room_hash",
+            "connection_id",
+            "to",
+            "to_session",
+            "from",
+            "session",
+            "id",
+            "ciphertext",
         }
         if set(message) != required:
             return None
@@ -908,7 +2123,9 @@ class RedisRelayBackend:
 
     async def _work_loop(self) -> None:
         while True:
-            kind, payload = await self._work_queue.get()
+            kind, payload, cost = await self._work_queue.get()
+            if kind == "room_changed":
+                self._processing_rooms.add(payload["room_hash"])
             try:
                 if kind == "room_changed":
                     await self._state.room_changed(payload["room_hash"])
@@ -923,35 +2140,40 @@ class RedisRelayBackend:
                         "route_id": payload["route_id"],
                         "ok": delivered,
                     }
-                    try:
-                        self._ack_queue.put_nowait(ack)
-                    except asyncio.QueueFull:
-                        pass
+                    await self._ack_queue.put(ack)
             except Exception:
                 if kind == "route":
-                    try:
-                        self._ack_queue.put_nowait({
-                            "type": "ack",
-                            "reply_node": payload["reply_node"],
-                            "route_id": payload["route_id"],
-                            "ok": False,
-                        })
-                    except asyncio.QueueFull:
-                        pass
+                    await self._ack_queue.put(_negative_route_ack(payload))
             finally:
+                rerun_room = None
                 if kind == "room_changed":
-                    self._queued_rooms.discard(payload["room_hash"])
+                    room_hash = payload["room_hash"]
+                    self._processing_rooms.discard(room_hash)
+                    if room_hash in self._room_change_again:
+                        self._room_change_again.discard(room_hash)
+                        rerun_room = room_hash
+                    self._queued_rooms.discard(room_hash)
+                self._work_queue_items -= 1
+                self._work_queue_bytes -= cost
                 self._work_queue.task_done()
+                if rerun_room is not None:
+                    self._enqueue_work(
+                        "room_changed",
+                        {"type": "room_changed", "room_hash": rerun_room},
+                    )
 
     async def _ack_loop(self) -> None:
         while True:
             ack = await self._ack_queue.get()
             try:
-                await self._publish_node(ack["reply_node"], {
-                    "type": "ack",
-                    "route_id": ack["route_id"],
-                    "ok": ack["ok"],
-                })
+                await self._publish_node(
+                    ack["reply_node"],
+                    {
+                        "type": "ack",
+                        "route_id": ack["route_id"],
+                        "ok": ack["ok"],
+                    },
+                )
             except Exception:
                 self._healthy = False
                 if self._state is not None:
@@ -995,11 +2217,51 @@ class RedisRelayBackend:
 
     @staticmethod
     def _owner_key(node_id: str) -> str:
-        return f"kollab:relay:owner:{{node-{node_id}}}"
+        return relay_owner_key(node_id)
 
     @staticmethod
     def _ip_key(source_hash: str) -> str:
         return f"kollab:relay:quota:{{ip-{source_hash}}}:leases"
+
+    @staticmethod
+    def _enrollment_key(offer_id: str) -> str:
+        return f"kollab:relay:enrollment:{{mailbox}}:offer:{offer_id}"
+
+    @staticmethod
+    def _enrollment_capacity_key() -> str:
+        return "kollab:relay:enrollment:{mailbox}:active-offers"
+
+    @staticmethod
+    def _enrollment_rate_key(source_hash: str) -> str:
+        return f"kollab:relay:enrollment:{{mailbox}}:rate:{source_hash}"
+
+    @staticmethod
+    def _enrollment_rate_index_key() -> str:
+        return "kollab:relay:enrollment:{mailbox}:rate-sources"
+
+    @staticmethod
+    def _enrollment_nonce_key(principal_hash: str) -> str:
+        return f"kollab:relay:enrollment:{{mailbox}}:nonces:principal:{principal_hash}"
+
+    @staticmethod
+    def _enrollment_nonce_index_key() -> str:
+        return "kollab:relay:enrollment:{mailbox}:nonce-index"
+
+    @staticmethod
+    def _contact_data_key(recipient_hash: str) -> str:
+        return f"kollab:relay:contact:{{mailbox}}:recipient:{recipient_hash}:data"
+
+    @staticmethod
+    def _contact_recipient_index_key(recipient_hash: str) -> str:
+        return f"kollab:relay:contact:{{mailbox}}:recipient:{recipient_hash}:requests"
+
+    @staticmethod
+    def _contact_decisions_key(recipient_hash: str) -> str:
+        return f"kollab:relay:contact:{{mailbox}}:recipient:{recipient_hash}:decisions"
+
+    @staticmethod
+    def _contact_global_index_key() -> str:
+        return "kollab:relay:contact:{mailbox}:active-requests"
 
     @staticmethod
     def _node_channel_for(node_id: str) -> str:
@@ -1049,7 +2311,12 @@ def validate_backend_url(url: str, *, cluster: bool) -> None:
             raise ValueError
         parsed = urlsplit(url)
         if parsed.scheme == "unix":
-            if cluster or not parsed.path.startswith("/") or parsed.hostname or parsed.port is not None:
+            if (
+                cluster
+                or not parsed.path.startswith("/")
+                or parsed.hostname
+                or parsed.port is not None
+            ):
                 raise ValueError
             return
         if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
@@ -1079,7 +2346,9 @@ def validate_backend_url(url: str, *, cluster: bool) -> None:
                 raise ValueError
         if parsed.scheme == "redis":
             if address is not None:
-                allowed = address.is_private or address.is_loopback or address.is_link_local
+                allowed = (
+                    address.is_private or address.is_loopback or address.is_link_local
+                )
             else:
                 allowed = (
                     host == "localhost"
@@ -1102,6 +2371,28 @@ def _bounded_json(value: dict[str, Any]) -> str:
     return encoded
 
 
+def _negative_route_ack(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "ack",
+        "reply_node": payload["reply_node"],
+        "route_id": payload["route_id"],
+        "ok": False,
+    }
+
+
+def _queued_work_cost(kind: str, payload: dict[str, Any]) -> int:
+    """Estimate retained Python payload bytes, including the queue tuple.
+
+    Backplane payloads are flat dicts of scalar values after validation. Counting
+    their container, keys, values and tuple bounds retained payload memory; the
+    separate item cap bounds deque and task bookkeeping overhead.
+    """
+    item = (kind, payload, 0)
+    return sys.getsizeof(item) + sys.getsizeof(kind) + sys.getsizeof(payload) + sum(
+        sys.getsizeof(key) + sys.getsizeof(value) for key, value in payload.items()
+    )
+
+
 def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -1112,14 +2403,18 @@ def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _is_id(value: Any) -> bool:
-    return isinstance(value, str) and len(value) == 32 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        isinstance(value, str)
+        and len(value) == 32
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 
 def _is_public_key(value: Any) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 

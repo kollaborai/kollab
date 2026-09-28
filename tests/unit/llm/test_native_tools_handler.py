@@ -1,5 +1,6 @@
 """Tests for native tool-call routing in the TUI LLM path."""
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,8 +109,12 @@ async def test_registered_mcp_native_tool_remains_mcp_tool():
 
 
 @pytest.mark.asyncio
-async def test_global_mcp_disabled_skips_background_discovery():
-    mcp_integration = SimpleNamespace(discover_mcp_servers=AsyncMock())
+async def test_global_mcp_disabled_skips_discovery_but_loads_builtin_tools():
+    builtin_tools = [{"name": "file_read"}, {"name": "hub_spawn"}]
+    mcp_integration = SimpleNamespace(
+        discover_mcp_servers=AsyncMock(),
+        get_tool_definitions_for_api=Mock(return_value=builtin_tools),
+    )
     handler = NativeToolsHandler(
         mcp_integration=mcp_integration,
         profile_manager=FakeProfileManager(),
@@ -120,13 +125,17 @@ async def test_global_mcp_disabled_skips_background_discovery():
     await handler.background_discovery()
 
     mcp_integration.discover_mcp_servers.assert_not_awaited()
+    mcp_integration.get_tool_definitions_for_api.assert_called_once_with()
     assert handler.discovery_complete.is_set()
-    assert handler.tools is None
+    assert handler.tools == builtin_tools
 
 
 @pytest.mark.asyncio
-async def test_global_mcp_disabled_skips_native_tool_loading():
-    mcp_integration = SimpleNamespace(get_tool_definitions_for_api=Mock())
+async def test_global_mcp_disabled_loads_builtin_native_tool_schemas():
+    builtin_tools = [{"name": "file_read"}, {"name": "hub_spawn"}]
+    mcp_integration = SimpleNamespace(
+        get_tool_definitions_for_api=Mock(return_value=builtin_tools)
+    )
     handler = NativeToolsHandler(
         mcp_integration=mcp_integration,
         profile_manager=FakeProfileManager(),
@@ -136,5 +145,70 @@ async def test_global_mcp_disabled_skips_native_tool_loading():
 
     await handler.load_tools()
 
+    mcp_integration.get_tool_definitions_for_api.assert_called_once_with()
+    assert handler.tools == builtin_tools
+
+
+@pytest.mark.asyncio
+async def test_mcp_discovery_failure_still_loads_builtin_tool_schemas():
+    builtin_tools = [{"name": "file_read"}, {"name": "hub_spawn"}]
+    mcp_integration = SimpleNamespace(
+        discover_mcp_servers=AsyncMock(side_effect=RuntimeError("discovery failed")),
+        get_tool_definitions_for_api=Mock(return_value=builtin_tools),
+    )
+    handler = NativeToolsHandler(
+        mcp_integration=mcp_integration,
+        profile_manager=FakeProfileManager(),
+        api_service=FakeApiService([]),
+        config=FakeConfig(),
+    )
+
+    await handler.background_discovery()
+
+    mcp_integration.discover_mcp_servers.assert_awaited_once_with()
+    mcp_integration.get_tool_definitions_for_api.assert_called_once_with()
+    assert handler.discovery_complete.is_set()
+    assert handler.tools == builtin_tools
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_keeps_native_tools_disabled_for_profile():
+    mcp_integration = SimpleNamespace(
+        discover_mcp_servers=AsyncMock(side_effect=RuntimeError("discovery failed")),
+        get_tool_definitions_for_api=Mock(return_value=[{"name": "file_read"}]),
+    )
+    profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(
+            name="text-only", get_supports_tools=lambda: False
+        )
+    )
+    handler = NativeToolsHandler(
+        mcp_integration=mcp_integration,
+        profile_manager=profile_manager,
+        api_service=FakeApiService([]),
+        config=FakeConfig(),
+    )
+
+    await handler.background_discovery()
+
     mcp_integration.get_tool_definitions_for_api.assert_not_called()
+    assert handler.discovery_complete.is_set()
     assert handler.tools is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_discovery_still_signals_completion_and_propagates():
+    mcp_integration = SimpleNamespace(
+        discover_mcp_servers=AsyncMock(side_effect=asyncio.CancelledError())
+    )
+    handler = NativeToolsHandler(
+        mcp_integration=mcp_integration,
+        profile_manager=FakeProfileManager(),
+        api_service=FakeApiService([]),
+        config=FakeConfig(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await handler.background_discovery()
+
+    assert handler.discovery_complete.is_set()

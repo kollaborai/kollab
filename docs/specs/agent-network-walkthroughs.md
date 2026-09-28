@@ -5,7 +5,7 @@ Parent: [discovery, identity, and relaying design](agent-network-discovery-and-r
 
 Concrete discovery contract: [existing DNS shape, versioned lookup, and new-laptop enrollment](agent-domain-discovery-contract.md).
 
-These examples describe the feature to finish. `/hub dns connect` performs signed publisher discovery; `/connect <domain>` attaches to an advertised compatible relay without authorizing workspace access. The [beacon conversation walkthrough](agent-public-beacon.md#agent-conversation-commands-in-current-source) covers implemented `/connect agents`, `allow`, `send`, `task` and `cancel` commands and their remaining authorization/release gates. `kollabor.ai` is the correct public domain. Receiver commands for the separate narrow A2A adapter live in the [A2A operations guide](../operations/agent-a2a-workspace.md). Angle-bracket values are placeholders; abbreviated identities are display labels, never routing keys.
+`/connect <domain>` and `/hub dns connect <domain>` perform signed public discovery and attach to a compatible advertised relay. Current unreleased source keeps that public path and adds private device enrollment: bare `/connect` or `/connect enroll [domain]` opens code entry, `/connect offer [domain]` creates an offer, and `/connect requests|accept|reject` supports explicit local review. Acceptance issues a `conversation:send` credential and room invitation; when a supported active provider profile is available, it also sends allowlisted profile settings and one displayed provider credential category in a device-sealed bundle. The destination installs it atomically and returns a signed receipt before the issuer approves the peer. Enrollment grants no workspace or tool permission, and network revocation does not revoke a copied provider credential. The in-flight mailbox key and worker remain process-local. See the [beacon conversation walkthrough](agent-public-beacon.md#agent-conversation-commands-in-current-source) and [implementation ledger](agent-network-implementation-status.md). `kollabor.ai` is the correct public domain. Receiver commands for the separate narrow A2A adapter live in the [A2A operations guide](../operations/agent-a2a-workspace.md). Angle-bracket values are placeholders; abbreviated identities are display labels, never routing keys.
 
 Open-source requirement: all examples must also work on an operator's own domain or private peer network, using free/open-source software without a Kollabor account, paid API, proprietary relay SDK, or dependency on `kollabor.ai`. Discovery requires no model calls. Machine, bandwidth, and domain/hosting costs remain the operator's choices.
 
@@ -65,7 +65,11 @@ Local startup alone must instead report external reachability as unverified. DNS
 
 ## Scenario 2: Connect a new computer and join my family directory
 
-Required product flow, clarified 2026-09-27 UTC (not yet implemented):
+Required product flow, clarified 2026-09-27 UTC. It remains the acceptance
+contract; only the private code UI, offer/proof transport and local delegation
+are present in unreleased source. The product decision on whether code possession
+is final approval or is followed by an explicit trusted-agent decision is
+pending. Until decided, steps 5–6 remain required:
 
 1. On the existing computer, tell the trusted Kollab agent: "I'm connecting two
    new servers to my family network. Give me the codes and accept them."
@@ -94,18 +98,27 @@ receive no private configuration. Secrets remain outside model context on both
 the issuing and receiving sides. Full security and acceptance requirements are
 in [code enrollment and delegated approval](agent-device-pairing.md#code-enrollment-and-delegated-approval).
 
-The currently installed `/connect invite` still requires a private file; that is
-an implementation gap, not the intended final experience. Existing lower-level
-discovery/pairing mechanisms and broader directory proposals follow:
+The published 0.9.0 `/connect invite` still requires a private file. Current
+unreleased source adds `/connect` private code entry and `/connect offer`; each
+offer is bound to one device for five minutes and a durable delegation scoped to
+`conversation:send` plus a supported provider category when one is available.
+After verified code/device-key proof, the local issuer must explicitly accept or
+reject the request. Acceptance can include the allowlisted active profile and
+one provider credential in a device-sealed bundle, with atomic destination
+installation and a verified receipt before peer approval. Enrollment still
+grants no workspace or tool permission, and the mailbox key/worker remain
+process-local. Treat this as partial implementation, not required completion.
+Existing lower-level discovery/pairing mechanisms and broader directory
+proposals follow:
 
-On the new computer, launch Kollab in the workspace to connect:
+In the published 0.9.0 baseline, the new computer launches Kollab and connects:
 
 ```text
 /connect https://kollabor.ai
 /network identity
 ```
 
-Both implemented discovery commands follow the domain's `_agent` TXT `u`; with no TXT they use `/.well-known/agent-keys.json`. Discovery verifies the publisher and optional advertised Card. `/network identity` and the wider group commands below remain proposed. Follow the [current laptop sequence](agent-domain-discovery-contract.md#6-walkthrough-a-new-laptop-finds-my-existing-servers), [implemented pairing CLI](agent-device-pairing.md) and [receiver operations guide](../operations/agent-a2a-workspace.md) for commands that exist today.
+The discovery commands follow the domain's `_agent` TXT `u`; with no TXT they use `/.well-known/agent-keys.json`. Discovery verifies the publisher and optional advertised Card. `/connect <domain>` selects this public path; bare `/connect` opens the private code-entry view. `/network identity` and the wider group commands below remain proposed. Follow the [current laptop sequence](agent-domain-discovery-contract.md#6-walkthrough-a-new-laptop-finds-my-existing-servers), [implemented pairing CLI](agent-device-pairing.md) and [receiver operations guide](../operations/agent-a2a-workspace.md) for commands that exist today.
 
 Expected flow:
 
@@ -138,7 +151,9 @@ After enrollment, reconnect proves key possession and checks current membership,
 
 Goal: let strangers ask for contact without admitting them to a private directory or waking an agent automatically.
 
-The human tells their agent to contact a published service, or uses:
+The desired flow lets the human tell their agent to contact a published
+service, or use a dedicated contact form. The `/network contact` command below
+is illustrative and is not available in current source:
 
 ```text
 /network contact <published-agent-id> --reason "Ask about an order"
@@ -146,7 +161,7 @@ The human tells their agent to contact a published service, or uses:
 
 This is a contact request, not a task. It contains a verified cryptographic sender identity, any owner/group credentials the sender chooses to disclose, and a bounded introduction encrypted to the published recipient key. It is rate-limited, expiring, deduplicated, and addressed to a contact point the recipient deliberately published. Private unknown identities are not enumerable through differing error messages.
 
-The recipient's control plane places it in a pending queue. It does not put the introduction in the active model context or execute anything. The human can inspect it with:
+The recipient's local contact-review view places it in a pending queue. It does not put the introduction in the active model context or execute anything. The human can inspect it locally. Current source exposes private contact-entry and review views; it does not yet provide these illustrative `/network` commands.
 
 ```text
 /network requests
@@ -164,13 +179,20 @@ requested access: one conversation
 decision: pending
 ```
 
-The human can allow just that conversation:
+The intended product flow allows the human to grant only the requested
+conversation. The following command is part of that proposed flow, not an
+implemented command:
 
 ```text
 /network accept <request-id> --scope conversation --expires 30m
 ```
 
 Or deny/block it. Conversation acceptance does not expose the private roster, grant file access, add a group member, or subscribe the sender to future chats. Unknown peers remain data sources whose claims may be wrong; acceptance does not promote their messages into system instructions.
+
+Current source does less: accepting or rejecting an unknown-agent contact request
+only resolves its bounded receipt. It does not create a reply channel, approve
+room membership, grant conversation authority, expose a roster, or start a
+model. The one-conversation grant described above remains unimplemented.
 
 For a company claiming a domain, the verifier may fetch a proposed identity record over validated HTTPS from that domain. That establishes a domain-to-key binding under the chosen certificate/domain trust model. A DNS address lookup alone does not prove a person's identity. “Employee of this company” requires a delegation signed by an issuer trusted for that company. Self-signing “I am Jacob” proves key control, not that real-world claim.
 
@@ -219,8 +241,16 @@ The grant is enforced by the runtime, with:
 Current relay implementation: use `/connect send <full-address> <request>`
 for an exact human-authored request, or `/connect authorize <full-address>
 <request>` followed by `hub_msg` with that unchanged request and the returned
-`thread_id`. `Ask <full-address> to <request>` in human input records the grant
-without a second approval. Unique remote names can resolve from the cached
+grant. XML accepts `thread` and `thread_id` as aliases; the structured
+`hub-msg` schema includes optional `thread_id`, and the dynamic harness supplies
+the exact ID, recipient and request. An explicitly supplied unknown ID is
+rejected rather than substituted with another ready grant. The ID cannot create
+authority: recipient and initial content must still match the durable human
+grant. Focused source tests exercise normalized native dispatch into the relay
+fixture; this does not prove a live model-provider call or the deployed Mac to
+alzan-prod conversation. `Ask <full-address> to <request>` in human input
+records the grant without a second approval.
+Unique remote names can resolve from the cached
 roster only when no local or remote name conflicts. Quoted examples and negated
 instructions create no grant. The runtime binds the originating session, room,
 recipient, exact initial request, ID and deadline. Receipt retries do not execute
@@ -238,7 +268,7 @@ The prompt instruction is also explicit:
 
 Runtime checks cover tools, hooks, queued delivery, feeds, and MCP adapters, so ignoring the prompt cannot bypass the rule. Protocol heartbeats, bounded directory exchange, and transport receipts remain automatic; they contain no agent conversation. An agent-to-agent “are you there?” chat is subject to the grant even if called a ping.
 
-## Scenario 6: Direct connection, then encrypted relay fallback
+## Scenario 6: Target design for direct connection, then encrypted relay fallback
 
 An authorized laptop agent wants to contact an authorized server agent.
 
@@ -259,13 +289,19 @@ The protocol must keep the expected endpoint identities bound to the session whe
 ### Encryption contract
 
 - Private signing keys stay in protected local credential storage. Peers exchange public identity material and handshake proofs, never private keys. Proof of possession must include fresh, protocol-bound handshake context; replaying an old signature cannot open a new authorized session. TLS 1.3's `CertificateVerify` is a standard example of handshake-bound possession proof, not a complete selection of Kollab's identity protocol. [RFC 8446, section 4.4.3](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.4.3)
-- Select a maintained implementation of an authenticated secure-session protocol with ephemeral key agreement, authenticated encryption, forward secrecy, and defined replay handling. Signing and encryption are different operations. Do not implement an ad hoc combination of primitives in the relay plugin.
+- The current unreleased RelayAgent bridge establishes CPython/OpenSSL TLS 1.3 with mutual certificate authentication for same-room peers, but transports those TLS records through RelayClient; it does not implement step 3's direct socket dial or step 4's forwarding fallback. Each public self-signed Ed25519 certificate is checked against the already-approved device key; the first handshake packet carries only the sender's public certificate, never its private key. TLS session tickets and resumption are disabled. RelayClient's device-key Box envelope carries the TLS records, and the peer-key/relay-session/room binding is discarded when approval or either live RelayClient session changes. `message`, `status`, and `cancel` payloads use this TLS channel; direct unwrapped calls to those Hub operations are rejected. The TLS transcript, ALPN, device keys, current RelayClient sessions, and room feed the PeerLink session ID. Signing and encryption are different operations.
+- After TLS authentication, fixed receiver denials return `{id, state: "rejected", duplicate: false, reason}` with reasons `not_authorized`, `wrong_workspace`, `wrong_recipient`, `expired`, `replay`, or `recipient_unavailable`. The sender rejects malformed receipts. Offline, revoked, and unauthenticated transport failures remain separate from receiver authorization decisions. An incomplete inbound handshake expires after 30 seconds absolute age.
 - Encrypt agent conversation content, task arguments/results, and shared attachments before they enter any forwarding path. Keep plaintext out of forwarding logs and crash reports. TLS to the relay protects one connection; it does not itself provide agent-to-agent confidentiality. TURN makes this same transport/application security distinction. [RFC 8656, section 15](https://www.rfc-editor.org/rfc/rfc8656.html#section-15)
 - Bind the session to peer keys verified through pairing, an authorized group's signed credentials, or a separately trusted service identity. A malicious directory must not be able to substitute a key and become the recipient. First contact with an unverified self-generated key establishes only that new key's identity. Comparable signaling-server key substitution is explicitly addressed in WebRTC's security architecture. [RFC 8827, section 9.1](https://www.rfc-editor.org/rfc/rfc8827.html#section-9.1)
 - Minimize metadata but report its limits: a forwarding peer sees connections, timing, size, and enough routing information to deliver traffic. A directory serving readable records sees those records and queries. Public advertisements are intentionally public. E2EE for messages does not promise hidden presence, unlinkable identities, or invisible IP addresses.
 - Endpoint runtimes can read delivered content and may send it to their configured model provider. Provider use, local logs, and encryption at rest need separate explicit policies; network encryption does not protect content from its authorized endpoint.
 
-The concrete session protocol/library is still open. No E2EE implementation or audit is claimed here.
+The direct source path is covered by local tests, including an opaque-wire Hub
+conversation, packet replay/revocation handling, and matching pair-signed
+PeerLink session IDs. This is not a live two-host or published-install test,
+and the signed peer router is not wired into Hub; multihop and cross-room
+confidentiality remain unverified. No independent cryptographic audit is
+claimed.
 
 ## Scenario 7: The directory spreads among peers, like BitTorrent discovery
 

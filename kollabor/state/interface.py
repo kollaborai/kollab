@@ -561,6 +561,18 @@ class StateService(Protocol):
 
     # === Hub writes (phase 4.6 — attach mode msg/broadcast) ===
 
+    async def hub_enroll(self, domain: str, code: str) -> dict[str, str]:
+        """Submit a private device enrollment code through the owning daemon.
+
+        This typed RPC keeps the code out of slash-command strings and model
+        input. The result contains only a bounded status and optional receipt.
+        """
+        ...
+
+    async def hub_enrollment_offer(self, domain: str) -> dict[str, str]:
+        """Create a one-device code for display in the private connect view."""
+        ...
+
     async def hub_connect(self, command: str) -> str:
         """Run beacon commands on the daemon that owns workspace identity."""
         ...

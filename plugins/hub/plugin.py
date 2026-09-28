@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env
+from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
 from kollabor_ai.message_content import content_to_text
 from kollabor_events import EventType, Hook, HookPriority
@@ -410,6 +411,16 @@ class HubPlugin(BasePlugin):
                     "endpoint_advertise_host": "",
                     "endpoint_allow_insecure": False,
                     "discovery_private_origins": {},
+                    # Peer mesh data paths are separately opt-in. LAN
+                    # discovery never grants contact or tool authority.
+                    "peer_direct_enabled": False,
+                    "peer_forward_enabled": False,
+                    "peer_allow_private_network": False,
+                    "peer_discovery_scan_enabled": False,
+                    "peer_discovery_advertise_enabled": False,
+                    "peer_discovery_bind_address": "0.0.0.0",
+                    "peer_discovery_multicast_group": "239.255.77.77",
+                    "peer_discovery_port": 39531,
                 }
             }
         }
@@ -780,14 +791,16 @@ class HubPlugin(BasePlugin):
         #          <hub_msg to="x" wait="true">msg</hub_msg>
         #          <hub_msg to="x" force="true">msg</hub_msg>
         #          <hub_msg to="x" thread="tid">msg</hub_msg>
+        #          <hub_msg to="x" thread_id="tid">msg</hub_msg>
         #          <hub_msg to="x" reply_to="mid">msg</hub_msg>
         #          <hub_msg to="x">msg  (unclosed)
         hub_msg_pat = _re.compile(
             r'<hub_msg\s+to="([^"]+)"'
             r'(?:\s+wait="([^"]*)")?'
             r'(?:\s+force="([^"]*)")?'
-            r'(?:\s+thread="([^"]*)")?'
+            r'(?:\s+thread(?:_id)?="([^"]*)")?'
             r'(?:\s+reply_to="([^"]*)")?'
+            r'(?:\s+kind="([^"]*)")?'
             r"\s*>(.*?)(?:</hub_msg>|$)",
             _re.DOTALL | _re.IGNORECASE,
         )
@@ -799,7 +812,8 @@ class HubPlugin(BasePlugin):
                 "force_attr": (m.group(3) or "").lower(),
                 "thread_id": (m.group(4) or "").strip(),
                 "reply_to": (m.group(5) or "").strip(),
-                "content": m.group(6).strip(),
+                "kind": (m.group(6) or "").strip().lower(),
+                "content": m.group(7).strip(),
             }
 
         response_parser.register_plugin_tag(
@@ -2434,6 +2448,9 @@ class HubPlugin(BasePlugin):
         target = tool_data.get("to", tool_data.get("target", ""))
         wait_attr = tool_data.get("wait", tool_data.get("wait_attr", ""))
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
+        relay_kind = str(tool_data.get("kind", "") or "").strip().lower()
+        thread_id = str(tool_data.get("thread_id", "") or "").strip()
+        reply_to = str(tool_data.get("reply_to", "") or "").strip()
         content = tool_data.get("message", tool_data.get("content", ""))
 
         # Some native-tool calls incorrectly put the XML attribute text in the
@@ -2497,6 +2514,31 @@ class HubPlugin(BasePlugin):
                 ),
             )
 
+        if relay_kind not in {"", "message", "question", "answer"}:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                error="hub_msg kind must be message, question, or answer",
+            )
+        if relay_kind == "answer":
+            from .relay_state import ID
+
+            if (
+                not target.startswith("relay:")
+                or not ID.fullmatch(thread_id)
+                or not ID.fullmatch(reply_to)
+            ):
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=False,
+                    error=(
+                        "relay answer requires its exact target, thread_id, "
+                        "and question reply_to"
+                    ),
+                )
+
         # Auto-detect idle chatter
         any_wait = wait_attr in ("true", "yes", "1")
         if not any_wait:
@@ -2552,8 +2594,6 @@ class HubPlugin(BasePlugin):
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
-        thread_id = tool_data.get("thread_id", "").strip()
-        reply_to = tool_data.get("reply_to", "").strip()
         if is_reply and self._active_thread_id:
             # <hub_reply> — inherit active thread from last received message
             thread_id = thread_id or self._active_thread_id
@@ -2571,26 +2611,34 @@ class HubPlugin(BasePlugin):
                 sender_has_task = False
 
         metadata = {"wait": any_wait}
+        if relay_kind:
+            metadata["relay_kind"] = relay_kind
+        explicit_relay_grant = str(tool_data.get("thread_id", "") or "").strip()
+        if target.startswith("relay:") and explicit_relay_grant:
+            metadata["relay_grant_id"] = explicit_relay_grant
         task_id = str(tool_data.get("task_id", "") or "").strip()
         if task_id:
             metadata["task_id"] = task_id
-        if self._is_ack_only_content(content, sender_has_active_task=sender_has_task):
-            metadata["ack"] = True
-        elif self._has_report_evidence(
-            content,
-            sender_has_active_task=sender_has_task,
-            # A task id identifies the thread, but does not by itself prove
-            # that this outbound message is a report.  Otherwise every
-            # coordinator assignment carrying a task id is misclassified as
-            # a report and never records the expected reply.
-            metadata={"wait": any_wait},
-        ):
-            metadata["task_report"] = True
-        elif self._is_explicit_task_assignment(
-            content,
-            task_id=task_id,
-        ):
-            metadata["task_assignment"] = True
+        if relay_kind != "answer":
+            if self._is_ack_only_content(
+                content, sender_has_active_task=sender_has_task
+            ):
+                metadata["ack"] = True
+            elif self._has_report_evidence(
+                content,
+                sender_has_active_task=sender_has_task,
+                # A task id identifies the thread, but does not by itself prove
+                # that this outbound message is a report.  Otherwise every
+                # coordinator assignment carrying a task id is misclassified as
+                # a report and never records the expected reply.
+                metadata={"wait": any_wait},
+            ):
+                metadata["task_report"] = True
+            elif self._is_explicit_task_assignment(
+                content,
+                task_id=task_id,
+            ):
+                metadata["task_assignment"] = True
 
         # Route the message
         msg = HubMessage(
@@ -2635,13 +2683,11 @@ class HubPlugin(BasePlugin):
             parts = []
             for ident, reason in rejections:
                 parts.append(f"{ident}: {reason}")
-            output = (
-                f"[hub_msg] rejected: {'; '.join(parts)}. "
-                + (
-                    "Network grants and receiver permissions must authorize delivery."
-                    if target.startswith("relay:") or (self._relay_agent and self._relay_agent._turn.get())
-                    else 'send with force="true" to break through.'
-                )
+            output = f"[hub_msg] rejected: {'; '.join(parts)}. " + (
+                "Network grants and receiver permissions must authorize delivery."
+                if target.startswith("relay:")
+                or (self._relay_agent and self._relay_agent._turn.get())
+                else 'send with force="true" to break through.'
             )
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -3736,14 +3782,29 @@ class HubPlugin(BasePlugin):
         # guard runs after an awaited host permission prompt, so revocation
         # during that prompt cannot authorize a stale remote request.
         for name, event_type, callback, priority in (
-            ("hub_relay_human", EventType.USER_INPUT_PRE, self._relay_human_input, 1001),
-            ("hub_relay_model", EventType.LLM_REQUEST_PRE, self._relay_guard_model, 1001),
+            (
+                "hub_relay_human",
+                EventType.USER_INPUT_PRE,
+                self._relay_human_input,
+                1001,
+            ),
+            (
+                "hub_relay_model",
+                EventType.LLM_REQUEST_PRE,
+                self._relay_guard_model,
+                1001,
+            ),
             ("hub_relay_tool", EventType.TOOL_CALL_PRE, self._relay_guard_tool, 1),
         ):
             await self.event_bus.register_hook(
                 Hook(
-                    name=name, plugin_name=self.name, event_type=event_type,
-                    callback=callback, priority=priority, error_action="stop", retry_attempts=0,
+                    name=name,
+                    plugin_name=self.name,
+                    event_type=event_type,
+                    callback=callback,
+                    priority=priority,
+                    error_action="stop",
+                    retry_attempts=0,
                 )
             )
 
@@ -4317,6 +4378,7 @@ class HubPlugin(BasePlugin):
                             registry=self._dns_registry,
                             identity_manager=self._dns_identity,
                             require_auth=require_auth,
+                            local_designation=self._identity.identity,
                         )
                 except Exception as e:
                     logger.warning(f"Agent DNS initialization failed: {e}")
@@ -6368,6 +6430,21 @@ class HubPlugin(BasePlugin):
         relay = getattr(self, "_relay_agent", None)
         if relay and await relay.defer_local(message):
             return
+        is_correlated_relay_event = bool(
+            relay
+            and (
+                getattr(
+                    relay,
+                    "is_injected_correlated_event",
+                    lambda _message: False,
+                )(message)
+                or getattr(
+                    relay,
+                    "is_injected_answer_event",
+                    lambda _message: False,
+                )(message)
+            )
+        )
         if not relay and (message.from_identity or "").startswith("relay:"):
             return
         # Dedup check
@@ -6473,6 +6550,7 @@ class HubPlugin(BasePlugin):
         if (
             self._task_ledger
             and self._identity
+            and not is_correlated_relay_event
             and message.to == self._identity.identity
             and message.from_identity not in ("task-cron", "hub-cron")
         ):
@@ -6560,6 +6638,7 @@ class HubPlugin(BasePlugin):
         # Forward to bridge (skip system/cron noise)
         if (
             self._bridge
+            and not is_correlated_relay_event
             and message.from_identity not in ("hub-cron", "task-cron")
             and message.action != "roster_update"
         ):
@@ -6691,6 +6770,18 @@ class HubPlugin(BasePlugin):
                 f"[hub channel: {message.from_identity} -> {message.to}{thread_header}]\n"
                 f"{message.content}"
             )
+            if is_correlated_relay_event:
+                relay_metadata = message.metadata or {}
+                formatted += (
+                    "\n[relay event context: "
+                    f"kind={relay_metadata.get('relay_event', '')} "
+                    f"event_id={message.id} "
+                    f"thread_id={getattr(message, 'thread_id', '')} "
+                    f"reply_to={getattr(message, 'reply_to', '')} "
+                    "parent_reply_to="
+                    f"{relay_metadata.get('relay_parent_reply_to', '')} "
+                    f"peer={relay_metadata.get('relay_peer', message.from_identity)}]"
+                )
             if is_human_elsewhere:
                 formatted += (
                     f"\n(the human is typing in {source_agent}'s window. "
@@ -6747,6 +6838,21 @@ class HubPlugin(BasePlugin):
                         msg_metadata["bridge_platform"] = message.metadata[
                             "bridge_platform"
                         ]
+                    if is_correlated_relay_event:
+                        msg_metadata.update(
+                            {
+                                "relay_event_kind": message.metadata.get(
+                                    "relay_event", ""
+                                ),
+                                "relay_event_id": message.id,
+                                "relay_thread_id": getattr(message, "thread_id", ""),
+                                "relay_reply_to": getattr(message, "reply_to", ""),
+                                "relay_parent_reply_to": message.metadata.get(
+                                    "relay_parent_reply_to", ""
+                                ),
+                                "relay_peer": message.from_identity,
+                            }
+                        )
 
                 async with self._history_lock:
                     hud_content = formatted
@@ -7014,7 +7120,9 @@ class HubPlugin(BasePlugin):
         if self.config:
             auto_help = self.config.get("plugins.hub.auto_help", False)
 
-        lines.append("Only contact other agents when directed by the human or an authorized task.")
+        lines.append(
+            "Only contact other agents when directed by the human or an authorized task."
+        )
         relay = getattr(self, "_relay_agent", None)
         if relay:
             lines.extend(await relay.harness_context())
@@ -7721,18 +7829,42 @@ class HubPlugin(BasePlugin):
 
             if not relay:
                 return [(message.to, "network conversation service is not ready")]
-            if message.scope != MessageScope.DIRECT.value or message.action != "message":
-                return [(message.to, "remote routing accepts direct conversation messages only")]
+            if (
+                message.scope != MessageScope.DIRECT.value
+                or message.action != "message"
+            ):
+                return [
+                    (
+                        message.to,
+                        "remote routing accepts direct conversation messages only",
+                    )
+                ]
             try:
                 receipt = await relay.send(
-                    message.to, message.content,
-                    thread_id=message.thread_id if ID.fullmatch(message.thread_id or "") else "",
-                    reply_to=message.reply_to if ID.fullmatch(message.reply_to or "") else "",
+                    message.to,
+                    message.content,
+                    thread_id=(
+                        message.thread_id
+                        if ID.fullmatch(message.thread_id or "")
+                        else ""
+                    ),
+                    grant_id=message.metadata.get("relay_grant_id", ""),
+                    reply_to=(
+                        message.reply_to if ID.fullmatch(message.reply_to or "") else ""
+                    ),
+                    kind=message.metadata.get("relay_kind", "message"),
                 )
                 message.metadata["relay_receipt"] = receipt
-                if receipt["state"] in {"rejected", "failed", "cancelled", "interrupted"}:
+                if receipt["state"] in {
+                    "rejected",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                }:
                     return [(message.to, "remote task " + receipt["state"])]
-                self._trace_delivery(message, "remote_accepted", detail=receipt["state"])
+                self._trace_delivery(
+                    message, "remote_accepted", detail=receipt["state"]
+                )
                 return []
             except (RelayError, OSError, TimeoutError) as exc:
                 if str(exc) in {
@@ -7741,9 +7873,19 @@ class HubPlugin(BasePlugin):
                     "communication grant already used for a different message",
                 }:
                     return [(message.to, str(exc))]
-                return [(message.to, "remote conversation not accepted; check /connect status, grants and task status")]
+                return [
+                    (
+                        message.to,
+                        "remote conversation not accepted; check /connect status, grants and task status",
+                    )
+                ]
         if relay and relay._turn.get() is not None:
-            return [(message.to, "remote tasks may reply only to their authenticated sender")]
+            return [
+                (
+                    message.to,
+                    "remote tasks may reply only to their authenticated sender",
+                )
+            ]
 
         assert self._presence is not None
         rejections: List[Tuple[str, str]] = []
@@ -7895,15 +8037,24 @@ class HubPlugin(BasePlugin):
 
                     # Rule 2: remote-only record -> upgrade when we can auth.
                     addr = record.endpoint_uri or ""
+                    peer_public_key = getattr(record, "public_key", "") or ""
+                    try:
+                        has_peer_key = len(bytes.fromhex(peer_public_key)) == 32
+                    except (TypeError, ValueError):
+                        has_peer_key = False
                     if (
                         addr
                         and is_remote_uri(addr)
                         and self._dns_identity
                         and self._identity
+                        and record.approval_state == "approved"
+                        and has_peer_key
                     ):
                         auth: Dict[str, Any] = {
                             "identity_manager": self._dns_identity,
                             "designation": self._identity.identity,
+                            "expected_server_designation": designation,
+                            "expected_server_public_key": peer_public_key.lower(),
                         }
                         if self.config:
                             ca = (
@@ -8219,8 +8370,78 @@ class HubPlugin(BasePlugin):
             value = command_or_args.strip()
         else:
             value = " ".join(getattr(command_or_args, "args", None) or []).strip()
+        parts = value.split()
+        head = parts[0].lower() if parts else ""
+        enrollment_commands = {"", "enroll"}
+        if head in enrollment_commands:
+            if len(parts) > 2:
+                return "connect: enter the code only in the private enrollment form"
+            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
+            if domain.upper().startswith("K1-"):
+                return "connect: enter the code only in the private enrollment form"
+            return await self._open_connect_altview(domain)
+        if head == "offer":
+            if len(parts) > 2:
+                return "connect: use /connect offer [domain]"
+            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
+            if domain.upper().startswith("K1-"):
+                return "connect: use /connect offer [domain]"
+            return await self._open_connect_offer_altview(domain)
+        if head in {"contact", "contacts"}:
+            if len(parts) > 2:
+                return f"connect: use /connect {head} [relay-domain]"
+            if getattr(getattr(self, "_cli_args", None), "attach", None):
+                return (
+                    "connect: attached daemon does not support private contact requests"
+                )
+            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
+            if domain.upper().startswith("K1-"):
+                return "connect: use /connect contact [relay-domain]"
+            return (
+                await self._open_contact_request_altview(domain)
+                if head == "contact"
+                else await self._open_contact_review_altview(domain)
+            )
+        if head in {"requests", "accept", "reject"} and any(
+            part.upper().startswith("K1-") for part in parts[1:]
+        ):
+            return "connect: use a receipt ID; enter enrollment codes only in the private form"
+        connect_commands = {
+            "allow",
+            "agents",
+            "approve",
+            "accept",
+            "authorize",
+            "cancel",
+            "contact-point",
+            "deny",
+            "disconnect",
+            "grants",
+            "help",
+            "invite",
+            "join",
+            "peers",
+            "reject",
+            "requests",
+            "ping",
+            "revoke",
+            "rotate",
+            "send",
+            "status",
+            "task",
+            "withdraw",
+        }
+        if head not in connect_commands:
+            if len(parts) != 1:
+                return "connect: enter the code only in the private enrollment form"
+            if parts[0].upper().startswith("K1-"):
+                return "connect: enter the code only in the private enrollment form"
+            # A domain argument joins the public discovery/relay network. Device
+            # enrollment remains an explicit private flow via /connect enroll.
         if getattr(getattr(self, "_cli_args", None), "attach", None):
-            state = self.event_bus.get_service("state_service") if self.event_bus else None
+            state = (
+                self.event_bus.get_service("state_service") if self.event_bus else None
+            )
             handler = getattr(state, "hub_connect", None)
             if handler is None:
                 return "beacon: attached daemon must be updated to support /connect"
@@ -8230,6 +8451,337 @@ class HubPlugin(BasePlugin):
                 # Never create an alternate identity/connection in the viewer.
                 return "beacon: daemon connection command failed; no viewer connection opened"
         return await self._run_connect_command(value)
+
+    async def _open_connect_altview(self, domain: str = "kollabor.ai") -> str:
+        """Open the private enrollment form without putting its code in chat."""
+        if not self.event_bus:
+            return "connect: private enrollment view is unavailable"
+        try:
+            from plugins.altview.connect_altview import (
+                ConnectAltView,
+                ConnectOutcome,
+            )
+
+            async def submit(submission):
+                try:
+                    code = submission.code.reveal()
+                    if getattr(getattr(self, "_cli_args", None), "attach", None):
+                        state = self.event_bus.get_service("state_service")
+                        result = await state.hub_enroll(submission.domain, code)
+                    else:
+                        result = await self._run_connect_enrollment(
+                            submission.domain, code
+                        )
+                except Exception:
+                    return ConnectOutcome.error()
+
+                if not isinstance(result, dict):
+                    return ConnectOutcome.error()
+                status = result.get("status")
+                if status == "pending":
+                    receipt_id = result.get("receipt_id")
+                    try:
+                        return ConnectOutcome.pending(receipt_id)
+                    except (TypeError, ValueError):
+                        return ConnectOutcome.error()
+                if status == "approved":
+                    return ConnectOutcome.approved()
+                if status == "rejected":
+                    return ConnectOutcome.rejected()
+                return ConnectOutcome.error()
+
+            stack_mgr = None
+            try:
+                stack_mgr = self.event_bus.get_service("altview_stack_manager")
+            except Exception:
+                pass
+            if not stack_mgr:
+                from kollabor_tui.altview.stack_manager import AltViewStackManager
+
+                renderer = self.event_bus.get_service("renderer")
+                stack_mgr = AltViewStackManager(self.event_bus, renderer)
+                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+
+            await stack_mgr.push(
+                ConnectAltView(domain=domain, on_submit=submit),
+                "connect",
+                reuse=False,
+            )
+            return ""
+        except Exception:
+            # UI initialization failures must not include the private code.
+            return "connect: private enrollment view is unavailable"
+
+    async def _run_connect_enrollment(self, domain: str, code: str) -> dict[str, str]:
+        """Run typed enrollment in the daemon that owns the local identity."""
+        if (
+            not isinstance(domain, str)
+            or not domain
+            or len(domain) > 253
+            or not isinstance(code, str)
+            or not code
+            or len(code) > 128
+        ):
+            return {"error": "invalid connect enrollment request"}
+        try:
+            if self._identity is None or self._rpc_server is None:
+                return {"error": "connect enrollment is unavailable"}
+            await self._start_relay_agent()
+            enroll = getattr(self._relay_agent, "enroll_device", None)
+            if enroll is None:
+                return {"error": "connect enrollment is unavailable"}
+            result = await enroll(domain, code)
+        except Exception:
+            # Enrollment exceptions may contain secrets; keep this boundary
+            # deliberately quiet and return only a fixed status.
+            return {"error": "connect request could not be submitted"}
+        if not isinstance(result, dict):
+            return {"error": "connect request could not be submitted"}
+        status = result.get("status")
+        if status == "pending" and isinstance(result.get("receipt_id"), str):
+            return {"status": "pending", "receipt_id": result["receipt_id"]}
+        if isinstance(status, str) and status in {"approved", "rejected"}:
+            return {"status": status}
+        return {"error": "connect request could not be submitted"}
+
+    async def _open_connect_offer_altview(self, domain: str = "kollabor.ai") -> str:
+        """Create and display an enrollment code only in the private view."""
+        if not self.event_bus:
+            return "connect: private offer view is unavailable"
+        try:
+            from plugins.altview.connect_altview import ConnectOfferAltView
+
+            async def create_offer(target_domain: str) -> dict[str, str]:
+                try:
+                    if getattr(getattr(self, "_cli_args", None), "attach", None):
+                        state = self.event_bus.get_service("state_service")
+                        result = await state.hub_enrollment_offer(target_domain)
+                    else:
+                        result = await self._run_connect_enrollment_offer(target_domain)
+                except Exception:
+                    return {"error": "connect offer could not be created"}
+                return (
+                    result
+                    if isinstance(result, dict)
+                    else {"error": "connect offer could not be created"}
+                )
+
+            stack_mgr = None
+            try:
+                stack_mgr = self.event_bus.get_service("altview_stack_manager")
+            except Exception:
+                pass
+            if not stack_mgr:
+                from kollabor_tui.altview.stack_manager import AltViewStackManager
+
+                renderer = self.event_bus.get_service("renderer")
+                stack_mgr = AltViewStackManager(self.event_bus, renderer)
+                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+
+            await stack_mgr.push(
+                ConnectOfferAltView(domain=domain, on_create=create_offer),
+                "connect-offer",
+                reuse=False,
+            )
+            return ""
+        except Exception:
+            return "connect: private offer view is unavailable"
+
+    async def _open_contact_request_altview(self, domain: str) -> str:
+        """Open private entry for an opaque unknown-agent introduction."""
+        if not self.event_bus:
+            return "connect: private contact view is unavailable"
+        try:
+            from plugins.altview.contact_altview import (
+                ContactRequestAltView,
+                ContactSubmissionOutcome,
+            )
+
+            async def submit(submission):
+                try:
+                    result = await self._run_connect_contact_request(
+                        submission.domain,
+                        submission.recipient_key,
+                        submission.introduction.reveal(),
+                    )
+                except Exception:
+                    return ContactSubmissionOutcome()
+                receipt = result.get("receipt_id") if isinstance(result, dict) else None
+                try:
+                    return ContactSubmissionOutcome(receipt)
+                except (TypeError, ValueError):
+                    return ContactSubmissionOutcome()
+
+            stack_mgr = None
+            try:
+                stack_mgr = self.event_bus.get_service("altview_stack_manager")
+            except Exception:
+                pass
+            if not stack_mgr:
+                from kollabor_tui.altview.stack_manager import AltViewStackManager
+
+                renderer = self.event_bus.get_service("renderer")
+                stack_mgr = AltViewStackManager(self.event_bus, renderer)
+                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            await stack_mgr.push(
+                ContactRequestAltView(domain=domain, on_submit=submit),
+                "contact-request",
+                reuse=False,
+            )
+            return ""
+        except Exception:
+            return "connect: private contact view is unavailable"
+
+    async def _open_contact_review_altview(self, domain: str) -> str:
+        """Open the local-only review view for requests addressed to this key."""
+        if not self.event_bus:
+            return "connect: private contact review is unavailable"
+        try:
+            from plugins.altview.contact_altview import ContactReviewAltView
+            from plugins.hub.contact_requests import (
+                PendingContactRequest,
+                PrivateMessage,
+            )
+
+            async def load():
+                rows = await self._run_connect_contact_pending(domain)
+                requests = []
+                for row in rows:
+                    if (
+                        not isinstance(row, dict)
+                        or set(row)
+                        != {"receipt_id", "sender_key", "expires_at", "introduction"}
+                        or not isinstance(row["receipt_id"], str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", row["receipt_id"])
+                        or not isinstance(row["sender_key"], str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", row["sender_key"])
+                        or type(row["expires_at"]) is not int
+                        or not isinstance(row["introduction"], str)
+                    ):
+                        raise ValueError("invalid private contact request")
+                    requests.append(
+                        PendingContactRequest(
+                            row["receipt_id"],
+                            row["sender_key"],
+                            row["expires_at"],
+                            PrivateMessage(row["introduction"]),
+                        )
+                    )
+                return requests
+
+            async def decide(receipt_id: str, decision: str):
+                return await self._run_connect_contact_decision(
+                    domain, receipt_id, decision
+                )
+
+            stack_mgr = None
+            try:
+                stack_mgr = self.event_bus.get_service("altview_stack_manager")
+            except Exception:
+                pass
+            if not stack_mgr:
+                from kollabor_tui.altview.stack_manager import AltViewStackManager
+
+                renderer = self.event_bus.get_service("renderer")
+                stack_mgr = AltViewStackManager(self.event_bus, renderer)
+                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            await stack_mgr.push(
+                ContactReviewAltView(domain, load, decide),
+                "contact-review",
+                reuse=False,
+            )
+            return ""
+        except Exception:
+            return "connect: private contact review is unavailable"
+
+    async def _run_connect_contact_request(
+        self, domain: str, recipient_key: str, introduction: str
+    ) -> dict[str, str]:
+        if self._identity is None or self._rpc_server is None:
+            return {"error": "unavailable"}
+        try:
+            await self._start_relay_agent()
+            submit = getattr(self._relay_agent, "submit_contact_request", None)
+            if submit is None:
+                return {"error": "unavailable"}
+            return await submit(
+                domain,
+                recipient_key,
+                introduction,
+                source_agent=self._identity.agent_id,
+            )
+        except Exception:
+            return {"error": "transport"}
+
+    async def _run_connect_contact_pending(self, domain: str):
+        if self._identity is None or self._rpc_server is None:
+            raise ValueError("contact review unavailable")
+        await self._start_relay_agent()
+        pending = getattr(self._relay_agent, "pending_contact_requests", None)
+        if pending is None:
+            raise ValueError("contact review unavailable")
+        return await pending(domain, source_agent=self._identity.agent_id)
+
+    async def _run_connect_contact_decision(
+        self, domain: str, receipt_id: str, decision: str
+    ):
+        if self._identity is None or self._rpc_server is None:
+            raise ValueError("contact review unavailable")
+        await self._start_relay_agent()
+        decide = getattr(self._relay_agent, "decide_contact_request", None)
+        if decide is None:
+            raise ValueError("contact review unavailable")
+        return await decide(
+            domain,
+            receipt_id,
+            decision=decision,
+            source_agent=self._identity.agent_id,
+        )
+
+    async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
+        """Create a one-device enrollment offer in the owning relay daemon."""
+        if (
+            not isinstance(domain, str)
+            or not domain
+            or len(domain) > 253
+            or any(ord(char) < 32 or ord(char) == 127 for char in domain)
+        ):
+            return {"error": "invalid connect offer request"}
+        try:
+            if self._identity is None or self._rpc_server is None:
+                return {"error": "connect enrollment is unavailable"}
+            await self._start_relay_agent()
+            create = getattr(self._relay_agent, "create_enrollment_offer", None)
+            if create is None:
+                return {"error": "connect enrollment is unavailable"}
+            result = await create(domain)
+        except Exception:
+            return {"error": "connect offer could not be created"}
+        if not isinstance(result, dict) or result.get("error"):
+            return {"error": "connect offer could not be created"}
+        offer_id = result.get("offer_id")
+        expires_at = result.get("expires_at")
+        code = result.get("code")
+        if (
+            set(result) == {"status", "offer_id", "expires_at", "code"}
+            and result.get("status") == "offered"
+            and isinstance(offer_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", offer_id)
+            and isinstance(expires_at, str)
+            and expires_at.isdigit()
+            and isinstance(code, str)
+            and re.fullmatch(
+                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
+                code,
+            )
+        ):
+            return {
+                "status": "offered",
+                "offer_id": offer_id,
+                "expires_at": expires_at,
+                "code": code,
+            }
+        return {"error": "connect offer could not be created"}
 
     async def _run_connect_command(self, value: str) -> str:
         try:
@@ -8397,7 +8949,9 @@ class HubPlugin(BasePlugin):
         """Handle /hub dns subcommands: resolve, find, trust, leaderboard, endorse, keys, endpoint, connect."""
         parts = args.strip().split(maxsplit=1)
         if parts and parts[0] == "connect":
-            return await self._handle_connect_command(parts[1] if len(parts) > 1 else "")
+            return await self._handle_connect_command(
+                parts[1] if len(parts) > 1 else ""
+            )
         if not _DNS_AVAILABLE:
             return "dns: PyNaCl not installed\nrun: pip install pynacl"
         if not self._dns_registry:
@@ -10781,20 +11335,33 @@ class HubPlugin(BasePlugin):
     async def _inject_attacher_input(self, text: Any) -> None:
         """Inject input from a remote attacher as if the user typed it.
 
-        Routes through the event bus so all hooks (hub broadcast,
-        working state, etc) fire identically to local input. Structured
-        multimodal content is preserved across the attach boundary.
+        Routes through the canonical human-input entry point so all hooks
+        (authorization, Hub broadcast, and working state) receive a typed
+        authenticated-attachment source. Structured multimodal content is
+        preserved across the attach boundary.
         """
         if not self.event_bus:
             return
         try:
-            await self.event_bus.emit_with_hooks(
-                EventType.USER_INPUT,
-                {"message": text, "source": "attach"},
-                "hub_plugin",
+            llm = self.event_bus.get_service("llm_service")
+            submit = getattr(llm, "submit_human_input", None)
+            if not callable(submit):
+                logger.debug("Attached input rejected: LLM input pipeline unavailable")
+                return
+            result = await submit(
+                text,
+                source=UserInputSource.HUB_ATTACHMENT,
             )
+            if isinstance(result, dict) and result.get("status") in {
+                "cancelled",
+                "rejected",
+            }:
+                logger.debug(
+                    "Attached input rejected by the LLM input pipeline (%s)",
+                    result["status"],
+                )
         except Exception as e:
-            logger.debug(f"Attacher input inject error: {e}")
+            logger.debug("Attacher input inject error (%s)", type(e).__name__)
 
     async def _on_remote_shutdown(self, reason: str = "") -> None:
         """Handle shutdown signal received via hub socket.
@@ -10853,7 +11420,9 @@ class HubPlugin(BasePlugin):
                 await relay_start
             except asyncio.CancelledError:
                 pass
-        relay = getattr(self, "_relay_agent", None) or getattr(self, "_relay_commands", None)
+        relay = getattr(self, "_relay_agent", None) or getattr(
+            self, "_relay_commands", None
+        )
         if relay:
             await relay.close()
 

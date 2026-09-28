@@ -1113,6 +1113,8 @@ class AgentManager:
                     agent.load_skill(skill_name)
                     logger.debug(f"Auto-loaded default skill: {skill_name}")
 
+        self._apply_provisioned_active_skills(name, agent)
+
         logger.info(f"Activated agent: {old_agent} -> {name}")
 
         # Notify callback (e.g. to sync bundle scope)
@@ -1123,6 +1125,43 @@ class AgentManager:
                 logger.warning(f"on_agent_changed callback error: {e}")
 
         return True
+
+    @staticmethod
+    def _apply_provisioned_active_skills(name: str, agent: AgentRuntime) -> None:
+        """Apply explicit enrolled skills only to their selected default agent."""
+        try:
+            from kollabor_config.provisioned_state import ProvisionedStateFile
+
+            state = ProvisionedStateFile().read()
+        except Exception as exc:
+            logger.debug("Could not read private provisioned agent skills: %s", exc)
+            return
+
+        requested: tuple[str, ...] | None = None
+        for enrollment_id in sorted(state["installs"]):
+            settings = state["installs"][enrollment_id]["settings"]
+            if settings["default_agent"] != name or not settings["active_skills"]:
+                continue
+            candidate = tuple(settings["active_skills"])
+            if requested is not None and candidate != requested:
+                logger.warning("Conflicting provisioned skills for agent %s", name)
+                return
+            requested = candidate
+
+        if requested is None:
+            return
+        if any(skill_name not in agent.skills for skill_name in requested):
+            logger.warning(
+                "Provisioned skills for agent %s are no longer installed", name
+            )
+            return
+
+        for skill_name in list(agent.active_skills):
+            if skill_name not in requested:
+                agent.unload_skill(skill_name)
+        for skill_name in requested:
+            if skill_name not in agent.active_skills:
+                agent.load_skill(skill_name)
 
     def clear_active_agent(self) -> None:
         """Clear the active agent (use default or no agent)."""

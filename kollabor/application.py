@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from kollabor.user_input_source import UserInputSource
-
 from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import get_agent_tool_scope
@@ -1109,7 +1108,9 @@ class TerminalLLMChat:
 
     async def _submit_cli_initial_message(self, message: str) -> Dict[str, Any]:
         """Submit a CLI-provided initial prompt through user-input hooks."""
-        return await self.llm_service.submit_human_input(message, source=UserInputSource.CLI_INITIAL)
+        return await self.llm_service.submit_human_input(
+            message, source=UserInputSource.CLI_INITIAL
+        )
 
     async def _deferred_startup(self, initial_message: str | None = None) -> None:
         """Run heavy initialization in background after render loop starts.
@@ -1394,8 +1395,16 @@ class TerminalLLMChat:
                 piped_input, source=UserInputSource.PIPE
             )
             if submission.get("status") in {"cancelled", "rejected"}:
-                logger.warning("Pipe input was not submitted (%s)", submission["status"])
-                return
+                import sys
+
+                logger.warning(
+                    "Pipe input was not submitted (%s)", submission["status"]
+                )
+                print(
+                    "Error: piped input was not accepted by the input pipeline.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
             # Wait for processing to start (max 10 seconds)
             start_timeout = 10

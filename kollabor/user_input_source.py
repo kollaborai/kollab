@@ -10,6 +10,7 @@ class UserInputSource(StrEnum):
     STATE_RPC = "state_rpc"
     CLI_INITIAL = "cli_initial"
     PIPE = "pipe"
+    HUB_ATTACHMENT = "hub_attachment"
 
 
 HUMAN_USER_INPUT_SOURCES = frozenset(source.value for source in UserInputSource)

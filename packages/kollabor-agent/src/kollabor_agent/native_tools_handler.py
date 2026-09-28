@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 class NativeToolsHandler:
-    """Manages native tool calling via MCP integration.
+    """Manages native tool calling and MCP discovery.
 
     Responsibilities:
     - Background MCP server discovery
-    - Loading tool definitions for native API function calling
+    - Loading built-in and MCP definitions for native API function calling
     - Executing native tool calls from API responses
     - Handling malformed tool names (LLM confusion edge case)
     """
@@ -57,30 +57,37 @@ class NativeToolsHandler:
         Sets discovery_complete event when finished (success or failure).
         """
         try:
-            if not self._mcp_enabled():
-                logger.info("MCP disabled in global config; skipping discovery")
+            try:
+                if not self._mcp_enabled():
+                    logger.info("MCP disabled in global config; skipping discovery")
+                else:
+                    discovered_servers = (
+                        await self.mcp_integration.discover_mcp_servers()
+                    )
+                    logger.info(
+                        "Background MCP discovery: found %s servers",
+                        len(discovered_servers),
+                    )
+            except Exception as e:
+                # MCP is optional. A discovery failure must not hide the
+                # built-in schemas the active profile and tool scope permit.
+                logger.warning("Background MCP discovery failed: %s", e)
+
+            try:
+                await self.load_tools()
+            except Exception as e:
                 self.tools = None
-                return
-
-            discovered_servers = await self.mcp_integration.discover_mcp_servers()
-            logger.info(
-                f"Background MCP discovery: found {len(discovered_servers)} servers"
-            )
-
-            # Load native tools now that MCP is ready
-            await self.load_tools()
-        except Exception as e:
-            logger.warning(f"Background MCP discovery failed: {e}")
+                logger.warning("Background native tool loading failed: %s", e)
         finally:
-            # Signal completion even on failure (prevents hang)
+            # Cancellation must also release API calls waiting for discovery.
             self.discovery_complete.set()
 
     async def load_tools(self) -> None:
-        """Load MCP tools for native API function calling.
+        """Load native tool schemas for API function calling.
 
-        Populates self.tools with tool definitions from MCP integration
-        for passing to API calls. This enables native tool calling where the
-        LLM returns structured tool_calls instead of XML tags.
+        Populates self.tools with built-in tool definitions and, when enabled,
+        definitions from MCP integration. This enables native tool calling
+        where the LLM returns structured tool_calls instead of XML tags.
 
         Respects both:
         - Global config: core.llm.native_tool_calling (default: True)
@@ -89,11 +96,6 @@ class NativeToolsHandler:
         Both must be True for native tools to be loaded. When disabled,
         the LLM uses XML tags (<terminal>, <tool>, etc.) instead.
         """
-        if not self._mcp_enabled():
-            logger.info("MCP disabled in global config")
-            self.tools = None
-            return
-
         # Check global config setting
         if not self.tool_calling_enabled:
             logger.info("Native tool calling disabled in global config")
@@ -117,7 +119,7 @@ class NativeToolsHandler:
                 logger.info(f"Loaded {len(tools)} tools for native API calling")
             else:
                 self.tools = None
-                logger.debug("No MCP tools available for native calling")
+                logger.debug("No native tools available for native calling")
         except Exception as e:
             logger.warning(f"Failed to load native tools: {e}")
             self.tools = None

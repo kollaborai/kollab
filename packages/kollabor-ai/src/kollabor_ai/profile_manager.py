@@ -10,6 +10,7 @@ Manages named LLM configuration profiles that define:
 Profiles can be defined in config.json under core.llm.profiles.
 """
 
+import copy
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ from kollabor_config.config_utils import (
 )
 
 logger = logging.getLogger(__name__)
+_NO_API_KEY_UPDATE = object()
 
 # Sentinel prefix for keys stored in OS keyring
 KEYRING_SENTINEL_PREFIX = "secret:keyring:"
@@ -126,6 +128,17 @@ class LLMProfile:
     supports_tools: bool = True  # Enable tool/function calling
     auth_type: str = ""  # "oauth" for OAuth tokens, empty for api_key
     api_key_from_env: bool = False
+    is_provisioned: bool = False
+    context_window: Optional[int] = None
+    organization: Optional[str] = None
+    api_version: Optional[str] = None
+    azure_endpoint: Optional[str] = None
+    deployment_id: Optional[str] = None
+    http_referer: Optional[str] = None
+    x_title: Optional[str] = None
+    project_id: Optional[str] = None
+    location: Optional[str] = None
+    store_responses: Optional[bool] = None
 
     def _get_env_key(self, field: str) -> str:
         """Generate env var key for this profile and field.
@@ -296,20 +309,26 @@ class LLMProfile:
 
         Resolution order:
         1. Profile-specific env var (KOLLAB_{NAME}_API_KEY)
-        2. Global env var (KOLLAB_API_KEY)
-        3. Sentinel in config -> resolve from OS keyring
-        4. Keyring lookup by profile name (auto-migration path)
-        5. Plaintext from config (backwards compat fallback)
+        2. For provisioned profiles, the private enrolled credential
+        3. Global env var (KOLLAB_API_KEY) for ordinary profiles
+        4. Sentinel in config -> resolve from OS keyring
+        5. Keyring lookup by profile name (auto-migration path)
+        6. Plaintext from config (backwards compat fallback)
         """
         # 1-2. Environment variables (highest priority)
         env_val = self._get_env_value("API_KEY")
         if env_val:
             return env_val
+        raw = self.api_key or ""
+        if self.is_provisioned:
+            # A global key may belong to a different provider/account. A named
+            # provisioned profile must use its scoped private credential unless
+            # the operator supplies this profile's explicit environment key.
+            # It also must never migrate an enrolled key into the OS keyring.
+            return raw
         global_val = self._get_global_env_value("API_KEY")
         if global_val:
             return global_val
-
-        raw = self.api_key or ""
 
         # 3. Sentinel string -> resolve from keyring
         if raw.startswith(KEYRING_SENTINEL_PREFIX):
@@ -496,6 +515,22 @@ class LLMProfile:
         if self.extra_headers:
             result["extra_headers"] = self.extra_headers
 
+        for field_name in (
+            "context_window",
+            "organization",
+            "api_version",
+            "azure_endpoint",
+            "deployment_id",
+            "http_referer",
+            "x_title",
+            "project_id",
+            "location",
+            "store_responses",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                result[field_name] = value
+
         # Feature flags
         result["streaming"] = self.get_streaming()
         result["supports_tools"] = self.get_supports_tools()
@@ -548,6 +583,17 @@ class LLMProfile:
             supports_tools=data.get("supports_tools", True),
             auth_type=data.get("auth_type", ""),
             api_key_from_env=data.get("api_key_from_env", False),
+            is_provisioned=data.get("is_provisioned", False),
+            context_window=data.get("context_window"),
+            organization=data.get("organization"),
+            api_version=data.get("api_version"),
+            azure_endpoint=data.get("azure_endpoint"),
+            deployment_id=data.get("deployment_id"),
+            http_referer=data.get("http_referer"),
+            x_title=data.get("x_title"),
+            project_id=data.get("project_id"),
+            location=data.get("location"),
+            store_responses=data.get("store_responses"),
         )
 
 
@@ -1144,17 +1190,132 @@ class ProfileManager:
 
         if global_profiles or local_profiles:
             merged_profiles = {**global_profiles, **local_profiles}
-            return merged_profiles, active, default
+        elif self.config:
+            # Fallback to config object if config files are unavailable.
+            merged_profiles = self.config.get("kollabor.llm.profiles", {})
+            active = self.config.get("kollabor.llm.active_profile")
+            default = self.config.get("kollabor.llm.default_profile", "default")
+        else:
+            merged_profiles = {}
 
-        # Fallback to config object if file read fails
-        if self.config:
-            return (
-                self.config.get("kollabor.llm.profiles", {}),
-                self.config.get("kollabor.llm.active_profile"),
-                self.config.get("kollabor.llm.default_profile", "default"),
+        if not isinstance(merged_profiles, dict):
+            merged_profiles = {}
+        return self._add_provisioned_profiles(merged_profiles), active, default
+
+    @staticmethod
+    def _add_provisioned_profiles(profiles: Dict[str, Any]) -> Dict[str, Any]:
+        """Overlay installed profiles without shadowing user config profiles."""
+        try:
+            from kollabor_config.provisioned_state import ProvisionedStateFile
+
+            state = ProvisionedStateFile().read()
+        except Exception as exc:
+            logger.warning("Could not read private provisioned profiles: %s", exc)
+            return profiles
+
+        merged = dict(profiles)
+        for enrollment_id in sorted(state["installs"]):
+            record = state["installs"][enrollment_id]
+            provisioned = record["profile"]
+            if provisioned is None or record["profile_disabled"]:
+                continue
+            profile_name = provisioned["name"]
+            if profile_name in merged:
+                continue
+
+            profile_data = dict(provisioned)
+            profile_data.update(record["profile_overrides"])
+            profile_data["is_provisioned"] = True
+            if profile_data.get("auth_type") == "oauth":
+                token_set = None
+                if not record["oauth_tokens_disabled"]:
+                    for credential in record["credentials"]:
+                        if (
+                            credential["profile_name"] == profile_name
+                            and credential["category"]
+                            == "provider:openai:oauth_tokens"
+                        ):
+                            token_set = record["oauth_tokens_override"] or credential[
+                                "secret"
+                            ]
+                            break
+                profile_data["api_key"] = (
+                    token_set["access_token"] if token_set is not None else ""
+                )
+                if token_set is not None:
+                    headers = {"originator": "kollab"}
+                    if token_set.get("account_id"):
+                        headers["ChatGPT-Account-Id"] = token_set["account_id"]
+                    profile_data["extra_headers"] = headers
+            elif profile_data.get("auth_type") == "api_key":
+                if record["api_key_disabled"]:
+                    profile_data["api_key"] = ""
+                elif record["api_key_override"] is not None:
+                    profile_data["api_key"] = record["api_key_override"]
+                else:
+                    for credential in record["credentials"]:
+                        if (
+                            credential["profile_name"] == profile_name
+                            and credential["category"].endswith(":api_key")
+                        ):
+                            profile_data["api_key"] = credential["secret"]
+                            break
+            merged[profile_name] = profile_data
+        return merged
+
+    @staticmethod
+    def _persist_provisioned_profile(
+        profile: LLMProfile,
+        *,
+        api_key_update: str | object = _NO_API_KEY_UPDATE,
+    ) -> bool:
+        """Save profile edits only to the private enrollment overlay."""
+        from kollabor_config.provisioned_state import ProvisionedStateFile
+
+        preferences = {
+            "model": profile.model,
+            "temperature": profile.temperature,
+            "max_tokens": profile.max_tokens,
+            "timeout": profile.timeout,
+            "description": profile.description,
+            "extra_headers": dict(profile.extra_headers),
+            "base_url": profile.base_url or None,
+            "top_p": profile.top_p,
+            "effort": profile.effort or None,
+            "streaming": profile.streaming,
+            "supports_tools": profile.supports_tools,
+            "context_window": profile.context_window,
+            "organization": profile.organization,
+            "api_version": profile.api_version,
+            "azure_endpoint": profile.azure_endpoint,
+            "deployment_id": profile.deployment_id,
+            "http_referer": profile.http_referer,
+            "x_title": profile.x_title,
+            "project_id": profile.project_id,
+            "location": profile.location,
+            "store_responses": profile.store_responses,
+        }
+        try:
+            state_file = ProvisionedStateFile()
+            if api_key_update is _NO_API_KEY_UPDATE:
+                return state_file.update_profile_preferences(profile.name, preferences)
+            return state_file.update_profile_preferences(
+                profile.name, preferences, api_key_update=api_key_update
             )
+        except Exception:
+            # State validation errors must not print private credential values.
+            logger.error("Could not save private provisioned profile changes")
+            return False
 
-        return {}, None, "default"
+    @staticmethod
+    def _disable_provisioned_profile(name: str) -> bool:
+        from kollabor_config.provisioned_state import ProvisionedStateFile
+
+        try:
+            return ProvisionedStateFile().disable_profile(name)
+        except Exception:
+            logger.error("Could not remove private provisioned profile")
+            return False
 
     def get_profile(self, name: str) -> Optional[LLMProfile]:
         """
@@ -1415,6 +1576,8 @@ class ProfileManager:
         Returns:
             True if saved successfully
         """
+        if profile.is_provisioned:
+            return self._persist_provisioned_profile(profile)
         try:
             # Look up auto-profile metadata if this profile is an
             # env-sourced auto-profile (openrouter-auto, anthropic-auto,
@@ -1483,6 +1646,21 @@ class ProfileManager:
                     profile_dict["supports_tools"] = profile.supports_tools
                 if profile.extra_headers:
                     profile_dict["extra_headers"] = profile.extra_headers
+                for field_name in (
+                    "context_window",
+                    "organization",
+                    "api_version",
+                    "azure_endpoint",
+                    "deployment_id",
+                    "http_referer",
+                    "x_title",
+                    "project_id",
+                    "location",
+                    "store_responses",
+                ):
+                    value = getattr(profile, field_name, None)
+                    if value is not None:
+                        profile_dict[field_name] = value
                 if getattr(profile, "auth_type", None):
                     profile_dict["auth_type"] = profile.auth_type
                 return profile_dict
@@ -1662,6 +1840,10 @@ class ProfileManager:
             logger.error(f"Profile not found: {name}")
             return False
 
+        profile = self._profiles[name]
+        if profile.is_provisioned and not self._disable_provisioned_profile(name):
+            return False
+
         del self._profiles[name]
         logger.info(f"Removed profile: {name}")
         return True
@@ -1706,6 +1888,14 @@ class ProfileManager:
             return False
 
         profile = self._profiles[original_name]
+        if profile.is_provisioned and (
+            (new_name is not None and new_name != original_name)
+            or (provider is not None and provider != profile.provider)
+            or (api_key is not None and profile.auth_type == "oauth")
+        ):
+            logger.error("Provisioned profile identity and authentication are fixed")
+            return False
+        original_profile = copy.deepcopy(profile) if profile.is_provisioned else None
 
         # Update fields if provided
         if base_url is not None:
@@ -1744,7 +1934,19 @@ class ProfileManager:
 
         # Save to config if requested
         if save_to_config:
-            self.save_profile_values_to_config(profile)
+            if profile.is_provisioned:
+                saved = self._persist_provisioned_profile(
+                    profile,
+                    api_key_update=(
+                        api_key if api_key is not None else _NO_API_KEY_UPDATE
+                    ),
+                )
+                if not saved:
+                    assert original_profile is not None
+                    self._profiles[original_name] = original_profile
+                    return False
+            else:
+                self.save_profile_values_to_config(profile)
 
         logger.info(f"Updated profile: {profile.name}")
         return True
@@ -1773,11 +1975,15 @@ class ProfileManager:
             logger.error(f"Profile not found: {name}")
             return False
 
+        profile = self._profiles[name]
+        if profile.is_provisioned:
+            if not self._disable_provisioned_profile(name):
+                return False
+        else:
+            self._delete_profile_from_config(name)
+
         # Remove from memory
         del self._profiles[name]
-
-        # Remove from config file
-        self._delete_profile_from_config(name)
 
         logger.info(f"Deleted profile: {name}")
         return True

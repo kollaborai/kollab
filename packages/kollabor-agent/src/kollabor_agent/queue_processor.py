@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -31,6 +31,8 @@ from .tool_output_budget import (
 )
 
 logger = logging.getLogger(__name__)
+
+CancellationOrigin = Literal["human", "remote_task", "external"]
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -238,7 +240,9 @@ class QueueProcessor:
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
-        self.cancel_processing = False
+        self._cancel_processing = False
+        self._cancel_generation = 0
+        self._cancel_origin: CancellationOrigin | None = None
         self.cancellation_message_shown = False
         # Last provider/turn error, for typed outcomes (goal spec 8.6):
         # the goal driver pauses on provider errors instead of burning
@@ -255,7 +259,6 @@ class QueueProcessor:
         self.processing_start_time: Optional[float] = None
         self.question_gate_active = False
         self._last_tool_error_sig: Optional[str] = None
-
         # Watchdog heartbeat: monotonic timestamp of the last real forward
         # progress (a turn executed, a message processed). The TurnWatchdog
         # compares now - last_progress_at against a stuck threshold to detect
@@ -263,6 +266,54 @@ class QueueProcessor:
         # Bumped by mark_progress(); starts "now" so a fresh processor is not
         # instantly flagged.
         self.last_progress_at = time.monotonic()
+
+    @property
+    def cancel_processing(self) -> bool:
+        """Whether the current queue drain has been cancelled."""
+        return self._cancel_processing
+
+    @cancel_processing.setter
+    def cancel_processing(self, value: bool) -> None:
+        # Direct legacy writes are treated as external cancellation requests.
+        # This still advances the generation, so they supersede a relay-owned
+        # token rather than being cleared by an older relay cancellation.
+        if value:
+            self.request_cancellation(origin="external")
+        else:
+            self._cancel_processing = False
+            self._cancel_origin = None
+
+    @property
+    def cancel_generation(self) -> int:
+        return self._cancel_generation
+
+    @property
+    def cancel_origin(self) -> CancellationOrigin | None:
+        return self._cancel_origin
+
+    def request_cancellation(self, *, origin: CancellationOrigin) -> int:
+        """Set the cancellation latch and return its supersession generation."""
+        if origin not in {"human", "remote_task", "external"}:
+            raise ValueError("invalid cancellation origin")
+        self._cancel_generation += 1
+        self._cancel_processing = True
+        self._cancel_origin = origin
+        return self._cancel_generation
+
+    def clear_remote_task_cancellation(self, generation: int) -> bool:
+        """Clear an idle relay cancellation only if no newer request replaced it."""
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or self.is_processing
+            or not self._cancel_processing
+            or self._cancel_origin != "remote_task"
+            or self._cancel_generation != generation
+        ):
+            return False
+        self._cancel_processing = False
+        self._cancel_origin = None
+        return True
 
     def mark_progress(self) -> None:
         """Record that forward progress just happened (watchdog heartbeat).

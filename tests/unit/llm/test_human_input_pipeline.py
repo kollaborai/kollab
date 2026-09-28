@@ -75,7 +75,9 @@ class _StateLLMProxy:
         self.config = MagicMock()
 
     async def submit_human_input(self, message, *, source, pre_displayed=False):
-        return await self._service.submit_human_input(message, source=source, pre_displayed=pre_displayed)
+        return await self._service.submit_human_input(
+            message, source=source, pre_displayed=pre_displayed
+        )
 
     def create_background_task(self, coro, name=None):
         task = asyncio.create_task(coro, name=name)
@@ -116,6 +118,24 @@ async def test_state_rpc_uses_one_full_user_input_event_and_propagates_pre_data(
 
 
 @pytest.mark.asyncio
+async def test_state_rpc_does_not_acknowledge_missing_input_handler():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    proxy = _StateLLMProxy(service)
+    state = LocalStateService(
+        llm_service=proxy,
+        profile_manager=MagicMock(),
+        event_bus=bus,
+    )
+
+    result = await state.send_message("ordinary request")
+
+    assert result == {"accepted": False, "reason": "input_handler_unavailable"}
+    assert proxy.tasks == []
+
+
+@pytest.mark.asyncio
 async def test_cli_initial_prompt_uses_user_input_hooks_once():
     _, llm, calls, _ = await _pipeline()
     app = object.__new__(TerminalLLMChat)
@@ -147,8 +167,10 @@ async def test_pipe_input_uses_same_pipeline_and_stops_on_pre_cancellation():
     app._initialize_plugins = AsyncMock()
     app.cleanup = AsyncMock()
 
-    await app.start_pipe_mode("do not process")
+    with pytest.raises(SystemExit) as exc_info:
+        await app.start_pipe_mode("do not process")
 
+    assert exc_info.value.code == 1
     assert calls == [("pre", "pipe", "do not process")]
     pending_tool.assert_not_awaited()
     app.cleanup.assert_awaited_once()
@@ -175,7 +197,9 @@ async def test_native_tui_event_runs_pre_main_post_once():
 async def test_pre_cancellation_stops_model_and_pending_tool_execution():
     _, llm, calls, pending_tool = await _pipeline(cancel_pre=True)
 
-    result = await llm.submit_human_input("cancel before model", source=UserInputSource.STATE_RPC)
+    result = await llm.submit_human_input(
+        "cancel before model", source=UserInputSource.STATE_RPC
+    )
 
     assert result == {"status": "cancelled", "phase": "pre_user_input"}
     assert calls == [("pre", "state_rpc", "cancel before model")]
@@ -190,3 +214,44 @@ async def test_internal_caller_cannot_select_a_human_source_string():
 
     assert result == {"status": "rejected", "reason": "invalid_input_source"}
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_when_primary_input_handler_is_unregistered():
+    service = object.__new__(LLMService)
+    service.event_bus = EventBus()
+
+    result = await service.submit_human_input(
+        "no handler", source=UserInputSource.STATE_RPC
+    )
+
+    assert result == {
+        "status": "rejected",
+        "reason": "input_handler_unavailable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_when_primary_input_handler_fails():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+
+    async def fail(_data, _event):
+        raise RuntimeError("private failure detail")
+
+    assert await bus.register_hook(
+        Hook(
+            name="process_user_input",
+            plugin_name="llm_core",
+            event_type=EventType.USER_INPUT,
+            priority=HookPriority.LLM.value,
+            callback=fail,
+        )
+    )
+
+    result = await service.submit_human_input(
+        "handler error", source=UserInputSource.STATE_RPC
+    )
+
+    assert result == {"status": "rejected", "reason": "input_processing_failed"}
