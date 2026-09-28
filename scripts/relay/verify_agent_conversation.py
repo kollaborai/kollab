@@ -3947,30 +3947,33 @@ def _run_question_answer_exchange(
         question_hud=question_hud,
         answer_hud=answer_hud,
     )
-    if (
-        sender_qa_trace.get("sender_initial_wire_requests", 0) < 1
-        or sender_qa_trace.get("sender_question_wire_requests", 0) < 1
-        or sender_qa_trace.get("sender_answer_wire_requests", 0) < 1
-        or sender_qa_trace.get("answer_call_count") != 1
-        or sender_qa_trace.get("answer_receipt_count") != 1
-        or sender_qa_trace.get("answer_receipt_id") != answer_event_id
-        or sender_qa_trace.get("answer_receipt_state") != "running"
-        or sender_qa_trace.get("unexpected_tool_call_count") != 0
-        or not sender_qa_trace.get("providers")
-        or receiver_qa_trace.get("receiver_initial_wire_requests", 0) < 1
-        or receiver_qa_trace.get("receiver_answer_wire_requests", 0) < 1
-        or receiver_qa_trace.get("question_call_count") != 1
-        or receiver_qa_trace.get("question_receipt_count") != 1
-        or receiver_qa_trace.get("question_receipt_id") != question_id
-        or receiver_qa_trace.get("question_receipt_state") != "pending"
-        or receiver_qa_trace.get("file_create_call_count") != 1
-        or receiver_qa_trace.get("file_create_result_count") != 1
-        or receiver_qa_trace.get("file_read_call_count") != 1
-        or receiver_qa_trace.get("file_read_result_count") != 1
-        or receiver_qa_trace.get("file_tools_in_order") is not True
-        or receiver_qa_trace.get("unexpected_tool_call_count") != 0
-        or not receiver_qa_trace.get("providers")
-    ):
+    s_trace, r_trace = sender_qa_trace, receiver_qa_trace
+    qa_requirements = {
+        "sender_initial_wire": s_trace.get("sender_initial_wire_requests", 0) >= 1,
+        "sender_question_wire": s_trace.get("sender_question_wire_requests", 0) >= 1,
+        "sender_answer_wire": s_trace.get("sender_answer_wire_requests", 0) >= 1,
+        "answer_call_count": s_trace.get("answer_call_count") == 1,
+        "answer_receipt_count": s_trace.get("answer_receipt_count") == 1,
+        "answer_receipt_id": s_trace.get("answer_receipt_id") == answer_event_id,
+        "answer_receipt_state": s_trace.get("answer_receipt_state") == "running",
+        "sender_unexpected_tools": s_trace.get("unexpected_tool_call_count") == 0,
+        "sender_providers": bool(s_trace.get("providers")),
+        "receiver_initial_wire": r_trace.get("receiver_initial_wire_requests", 0) >= 1,
+        "receiver_answer_wire": r_trace.get("receiver_answer_wire_requests", 0) >= 1,
+        "question_call_count": r_trace.get("question_call_count") == 1,
+        "question_receipt_count": r_trace.get("question_receipt_count") == 1,
+        "question_receipt_id": r_trace.get("question_receipt_id") == question_id,
+        "question_receipt_state": r_trace.get("question_receipt_state") == "pending",
+        "file_create_call_count": r_trace.get("file_create_call_count") == 1,
+        "file_create_result_count": r_trace.get("file_create_result_count") == 1,
+        "file_read_call_count": r_trace.get("file_read_call_count") == 1,
+        "file_read_result_count": r_trace.get("file_read_result_count") == 1,
+        "file_tools_in_order": r_trace.get("file_tools_in_order") is True,
+        "receiver_unexpected_tools": r_trace.get("unexpected_tool_call_count") == 0,
+        "receiver_providers": bool(r_trace.get("providers")),
+    }
+    missing = sorted(name for name, ok in qa_requirements.items() if not ok)
+    if missing:
         if not _trace_scan_complete(sender_qa_trace) or not _trace_scan_complete(
             receiver_qa_trace
         ):
@@ -3978,9 +3981,11 @@ def _run_question_answer_exchange(
                 "trace_evidence_insufficient",
                 "the bounded provider trace windows could not prove the question-answer turns",
             )
+        # Requirement names only; no trace content or identifiers.
         raise AcceptanceError(
             "question_answer_provider_trace_missing",
-            "the provider wires, native question-answer receipts, or exact file tool trace were incomplete",
+            "the provider wires, native question-answer receipts, or exact file tool "
+            "trace were incomplete: " + ", ".join(missing),
         )
 
     file_trace = _inspect_model_and_tool_trace(
