@@ -1,0 +1,72 @@
+{
+  "name": "connect-palette-subcommands",
+  "description": "Typing /conn in the command menu lists /connect subcommands, and extending it to '/connect an' filters to 'answer' (issue #100). The hub stays enabled because it registers /connect; HOME is a temp dir, so the instance never joins the developer's mesh or relay.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":true}}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "subcommands appear under /connect"
+    },
+    {
+      "action": "send_keys",
+      "keys": "/conn"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "enroll",
+      "timeout": 6
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Create a one-device, five-minute enrollment code",
+      "description": "offer is listed with its description"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "List pending enrollment requests",
+      "description": "requests is listed"
+    },
+    {
+      "action": "section",
+      "title": "typing filters to answer"
+    },
+    {
+      "action": "type",
+      "text": "ect an",
+      "delay": 0.15
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Answer a pending question",
+      "timeout": 6
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "<event-id> <text>",
+      "description": "answer shows its arguments"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "List pending enrollment requests",
+      "description": "the filter hides other subcommands"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

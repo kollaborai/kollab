@@ -310,3 +310,25 @@ async def test_attach_mode_forwards_only_receipt_commands_to_the_owner_daemon():
     assert rejected_code == ("connect: use a receipt ID; enter enrollment codes only in the private form")
     assert state.hub_connect.await_count == 3
     assert code not in repr(state.hub_connect.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_connect_palette_lists_subcommands_and_each_reaches_the_owner_daemon():
+    registered = []
+    hub = HubPlugin.__new__(HubPlugin)
+    hub.name = "hub"
+    hub.command_registry = SimpleNamespace(register_command=registered.append)
+    hub._register_commands()
+    connect = next(cmd for cmd in registered if cmd.name == "connect")
+    names = [sub.name for sub in connect.subcommands]
+    assert {"offer", "requests", "send", "answer", "networks", "help"} <= set(names)
+
+    state = SimpleNamespace(hub_connect=AsyncMock(side_effect=lambda value: value))
+    hub._cli_args = SimpleNamespace(attach=True)
+    hub.event_bus = SimpleNamespace(get_service=lambda _name: state)
+    private_forms = {"enroll", "offer", "contact", "contacts"}
+    for name in names:
+        if name in private_forms:
+            continue
+        command = f"{name} {'a' * 32} two words"
+        assert await hub._handle_connect_command(command) == command
