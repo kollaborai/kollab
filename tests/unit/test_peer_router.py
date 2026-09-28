@@ -384,7 +384,10 @@ def test_router_requires_exact_live_session_and_bilateral_forwarding_consent():
         router.add_link(same_revision_conflict, now=now)
 
 
-def test_final_recipient_link_does_not_need_transit_consent():
+def test_relayed_final_edge_still_requires_forwarding_consent():
+    # Once a remote node relays, every edge it uses needs bilateral forwarding
+    # consent, including the edge into the destination (append_hop and the
+    # transit egress check enforce the same rule).
     now = 1_800_000_000
     keys, records, links, router = _diamond(now)
     final_link = _link(
@@ -397,7 +400,8 @@ def test_final_recipient_link_does_not_need_transit_consent():
     )
     router.add_link(final_link, now=now)
     routes = router.route_candidates(records["d"].peer_id, now=now)
-    assert (records["a"].peer_id, records["b"].peer_id, records["d"].peer_id) in routes
+    assert (records["a"].peer_id, records["b"].peer_id, records["d"].peer_id) not in routes
+    assert (records["a"].peer_id, records["c"].peer_id, records["d"].peer_id) in routes
 
 
 def test_expired_link_state_releases_bounded_route_capacity():

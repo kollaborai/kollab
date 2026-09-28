@@ -61,6 +61,8 @@ No saved specification matching the full, revised network idea was found in the 
 
 “Every instance can relay” establishes a capability. Whether forwarding is enabled by default, and for which peers, remains a policy decision.
 
+Current forwarding consent rule (`peer_router.py`, `peer_transport.py`): a peer link allows forwarding only when both endpoints hold the `forwarder` role, and every edge of a relayed route needs that consent, including the edge into the destination. Only a direct origin-to-destination link needs none. An agent that does not opt into forwarding is therefore reached directly or through the relay beacon, not through multi-hop peer routes.
+
 ## User stories
 
 ### Connect a new computer to my existing agents
