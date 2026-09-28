@@ -3308,6 +3308,18 @@ async def test_pending_question_matches_real_secure_store_and_outbox_receipt(bri
     assert result["question_state_sender"] == "pending"
     assert result["question_outbound_state_receiver"] == "delivered"
 
+    # Once the answer is admitted, the asking (receiver) side marks its own
+    # question answered; the post-answer correlation check relies on this.
+    await left.send(
+        bridge_address(right),
+        "Use the label ALPHA.",
+        thread_id=task_id,
+        reply_to=question_id,
+        kind="answer",
+    )
+    assert right.store.event(question_id)["state"] == "answered"
+    assert left.store.event(question_id)["state"] == "answered"
+
 
 def test_wait_for_sender_question_consumption_waits_for_wire_and_successful_response():
     task_id = "a" * 32

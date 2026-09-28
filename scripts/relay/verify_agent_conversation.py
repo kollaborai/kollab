@@ -3848,7 +3848,8 @@ def _run_question_answer_exchange(
         or sender_questions[0].get("id") != question_id
         or receiver_questions[0].get("reply_to") != task_id
         or sender_questions[0].get("reply_to") != task_id
-        or receiver_questions[0].get("state") != "pending"
+        # Answer admission marks the question answered at both endpoints.
+        or receiver_questions[0].get("state") != "answered"
         or sender_questions[0].get("state") != "answered"
         or len(receiver_question_deliveries) != 1
         or receiver_question_deliveries[0].get("state") != "delivered"
