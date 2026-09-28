@@ -3050,7 +3050,10 @@ def _inspect_sender_result_consumption(
         or not re.fullmatch(r"[0-9a-f]{64}", content_sha256)
         or not local_address.startswith("relay:")
         or not remote_address.startswith("relay:")
-        or not run_marker.startswith("KOLLAB_RELAY_ACCEPTANCE_")
+        # The core file task and the question/answer task both end in a result.
+        or not run_marker.startswith(
+            ("KOLLAB_RELAY_ACCEPTANCE_", "KOLLAB_RELAY_QUESTION_")
+        )
         or not relative_path
         or Path(relative_path).is_absolute()
         or ".." in Path(relative_path).parts

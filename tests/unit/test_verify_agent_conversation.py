@@ -1239,8 +1239,13 @@ async def test_actual_bridge_result_context_uses_event_reply_and_task_parent(bri
     ) in returned.content
 
 
+# The question/answer task reuses this check with its own marker (live run
+# b1295f72 was rejected as sender_result_scope_invalid).
+@pytest.mark.parametrize(
+    "marker_prefix", ["KOLLAB_RELAY_ACCEPTANCE_", "KOLLAB_RELAY_QUESTION_"]
+)
 def test_sender_result_consumption_joins_private_event_to_provider_request_and_reply(
-    tmp_path,
+    tmp_path, marker_prefix
 ):
     from kollabor.llm.llm_coordinator import LLMService
 
@@ -1250,7 +1255,7 @@ def test_sender_result_consumption_joins_private_event_to_provider_request_and_r
     runner, conversations, write_jsonl = _trace_fixture_runner(tmp_path, workspace)
     task_id = "a" * 32
     event_id = "b" * 32
-    marker = "KOLLAB_RELAY_ACCEPTANCE_result_fixture"
+    marker = f"{marker_prefix}result_fixture"
     relative_path = "relay-acceptance-result-fixture.txt"
     expected_content = "KOLLAB_RELAY_ACCEPTANCE result_fixture"
     local_address = f"relay:{LOCAL_KEY}:{LOCAL_WORKSPACE_ID}:lapis-id"
