@@ -15,7 +15,7 @@ from plugins.altview.connect_altview import (
     PrivateCode,
 )
 from plugins.altview.contact_altview import ContactRequestAltView, ContactReviewAltView
-from plugins.hub.plugin import HubPlugin
+from plugins.hub.plugin import CODE_IN_COMMAND, HubPlugin
 
 
 class _EventBus:
@@ -111,7 +111,7 @@ async def test_connect_subcommand_remains_on_existing_rpc_and_code_is_not_comman
 
     assert status == "beacon: status"
     state.hub_connect.assert_awaited_once_with("status")
-    assert rejected == "connect: enter the code only in the private enrollment form"
+    assert rejected == CODE_IN_COMMAND
     state.hub_enroll.assert_not_awaited()
     assert view_stack.push.await_count == 0
 
@@ -196,12 +196,9 @@ async def test_connect_code_is_rejected_from_command_text_and_offer_domain_is_bo
     )
     malformed_offer = await plugin._handle_connect_command("offer example.test extra")
 
-    assert pasted == "connect: enter the code only in the private enrollment form"
-    assert (
-        pasted_to_enroll
-        == "connect: enter the code only in the private enrollment form"
-    )
-    assert pasted_to_offer == "connect: use /connect offer [domain]"
+    assert pasted == CODE_IN_COMMAND
+    assert pasted_to_enroll == CODE_IN_COMMAND
+    assert pasted_to_offer == CODE_IN_COMMAND
     assert malformed_offer == "connect: use /connect offer [domain]"
     state.hub_enrollment_offer.assert_not_awaited()
     assert view_stack.push.await_count == 0
