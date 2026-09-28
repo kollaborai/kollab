@@ -30,14 +30,26 @@ Kollab 0.10.0's enrollment source registers these POST routes in
 `/relay/v1/enrollment/offers/{offer_id}/poll`,
 `/relay/v1/enrollment/offers/{offer_id}/challenge`,
 `/relay/v1/enrollment/offers/{offer_id}/proof`,
-`/relay/v1/enrollment/offers/{offer_id}/decision`, and
-`/relay/v1/enrollment/offers/{offer_id}/reply/poll`. A matching route stanza is
+`/relay/v1/enrollment/offers/{offer_id}/decision`,
+`/relay/v1/enrollment/offers/{offer_id}/reply/poll`,
+`/relay/v1/enrollment/offers/{offer_id}/ack`, and
+`/relay/v1/enrollment/offers/{offer_id}/ack/poll`. A matching route stanza is
 locally prepared in the companion checkout's `deploy/nginx.conf`, but is
 uncommitted and has not been shown deployed. It is POST-only, rejects query
 strings, caps bodies at 64 KiB and proxies to workers. The public GET probe of
 `/relay/v1/enrollment/offers` returned 404 on 2026-09-27; no POST acceptance or
 deployed proxy-route check has been performed. See the [implementation
 ledger](agent-network-implementation-status.md).
+
+The contact-request source registers three further POST routes, also in
+`plugins/hub/relay_service.py`: `/relay/v1/contact/requests` (submit a sealed
+introduction), `/relay/v1/contact/inbox` (list requests addressed to a key),
+and `/relay/v1/contact/decisions` (accept or reject one). Same constraints:
+POST-only, no query strings, 64 KiB application-wide body cap
+(`web.Application(client_max_size=...)`), proxy to workers. The companion
+`deploy/nginx.conf` checkout is not part of this source tree, so whether it
+proxies these routes could not be checked here; verify on the deployment host
+before relying on `/connect contact` against a public relay.
 
 The configured `origin` is the exact canonical external HTTPS origin, with no path or trailing slash. TLS and signed discovery must agree with it. The public descriptor advertises `control: <origin>/relay/v1` with `relay`/`rendezvous` roles only while the deployed service is intentionally published. The current public descriptor and service evidence are summarized above and in the deployment ledger.
 
@@ -164,6 +176,55 @@ New laptop to existing workspace:
 
 Automatic reconnect is scoped to the explicitly enabled workspace. Retries use bounded backoff; shutdown closes local sockets. The relay has no offline inbox. Current endpoint source admits typed messages into a bounded durable workspace queue only after separate receiver authorization, then uses Hub's normal model/tool pipeline. Presence and directory traffic never start model turns.
 
+### Discovering peers and agents
+
+There is no global directory to browse. `/connect <domain>` attaches this
+workspace to that domain's relay inside its own room; a fresh workspace's
+first attachment starts in a random, empty room with nobody else in it (see
+the product boundary above). Peers become visible only after an explicit
+pairing step puts two workspaces in the same room — the invitation-file flow
+above or an accepted enrollment offer.
+
+Once paired:
+
+1. `/connect peers` lists every other key currently online in this room and
+   whether it is locally approved.
+2. `/connect agents local` lists this machine's own agents (workspace ID,
+   agent ID, name) without opening a conversation or touching the network.
+3. `/connect agents <peer-public-key>` queries that one approved peer's agent
+   roster over the encrypted transport; `/connect agents` with no key queries
+   every currently approved peer in the room. Each row includes the full
+   `relay:<key>:<workspace-id>:<agent-id>` address the conversation commands
+   below need. Results are cached 15 seconds per peer/session.
+
+Only peers that share a relay room link in the peer mesh today; there is no
+cross-room or global agent search.
+
+### Approving unknown contact
+
+A stranger cannot enumerate or message this workspace without first knowing
+its contact route. Share yours deliberately: `/connect contact-point
+[domain]` (default: the currently attached relay's origin, else
+`kollabor.ai`) prints `<origin> ed25519:<64-hex-key>` for you to hand out
+through a trusted channel. Nothing here opens a room or changes local state.
+
+To reach a published contact point, run `/connect contact [domain]`; the
+private form (never chat/command history) asks for the domain, the 64-hex key
+only (drop the `ed25519:` prefix), and a short introduction, then submits it
+sealed to that key over `POST /relay/v1/contact/requests`. The recipient runs
+`/connect contacts [domain]` to open a private review list fetched from `POST
+/relay/v1/contact/inbox`, and explicitly accepts or rejects each one
+(`POST /relay/v1/contact/decisions`). `/connect contact` and `/connect
+contacts` are unavailable from an attached viewer session; run them on the
+daemon that owns the identity.
+
+Accepting only resolves that one bounded receipt. It does not create a reply
+channel, approve room membership, grant conversation authority, or expose a
+roster — a genuinely new relationship still needs its own invitation or
+enrollment offer before either side can talk. There is no owner-configured
+auto-accept policy in current source; every request needs an explicit local
+decision.
+
 ### Agent conversation commands in current source
 
 These commands are being verified for the corrected release. They are not a
@@ -208,6 +269,31 @@ The full contract still requires authorization across older direct/local paths,
 progress and follow-up conversation lifecycles, and live installed acceptance.
 The current exact initial request and single-result exchange is one implemented
 boundary within that contract, not completion of the whole network.
+
+### Revoking access
+
+- `/connect deny <peer-key> [local agent name]` revokes conversation grant(s)
+  to that peer — all of them, or just one local agent's if a name is given —
+  and cancels affected queued/running work. Presence approval is untouched;
+  the peer can still ping.
+- `/connect revoke <64-hex-key>` is the harder stop: it removes local
+  presence approval for that key *and* every conversation grant to it (the
+  same store-level effect as `deny` with no agent name), in one command.
+- `/connect withdraw <grant-id>` withdraws a local *sending* grant created by
+  `/connect authorize` or `/connect send`; it does not touch a peer's own
+  grants. Use `/connect cancel <address> <id>` to stop work already running
+  on the remote side.
+- `/connect rotate` replaces this endpoint's room capability and clears its
+  local peer approvals — a full reset for this workspace. It is not
+  server-side revocation: the relay cannot revoke a copied room capability,
+  so existing holders of the old invitation are not evicted by this alone
+  (see the encryption contract above). Disconnect/rotate every affected peer
+  to fully retire an old room.
+- `/connect disconnect` detaches and disables automatic reconnect for this
+  workspace; it revokes nothing by itself.
+
+None of these are reversible from the revoking side; restoring access needs a
+fresh invitation, enrollment offer, or `/connect approve`/`/connect allow`.
 
 ## Self-host and rollout evidence
 
