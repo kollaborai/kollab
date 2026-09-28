@@ -1139,7 +1139,8 @@ def test_bounded_trace_reader_enforces_total_byte_budget(tmp_path):
     runner, conversations, _write_jsonl = _trace_fixture_runner(tmp_path, workspace)
     raw_dir = conversations / "raw"
     raw_dir.mkdir(mode=0o755)
-    row = b'{"marker":"x"}\n'
+    # ~1 KiB rows keep the parse count low; tiny rows made this take ~10s on CI.
+    row = b'{"marker":"' + b"x" * 1000 + b'"}\n'
     payload = row * (harness.TRACE_FILE_READ_MAX_BYTES // len(row))
     # One more full-size file than the total budget holds.
     files = harness.TRACE_TOTAL_READ_MAX_BYTES // harness.TRACE_FILE_READ_MAX_BYTES + 1
