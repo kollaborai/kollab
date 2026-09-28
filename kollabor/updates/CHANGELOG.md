@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.7] - 2026-09-28
+
 ### Fixed
 
 - Relay conversations no longer fill the transcript with errors and filler. A
