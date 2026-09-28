@@ -66,6 +66,57 @@ async def test_supervisor_waits_for_expiring_owner_lease():
     assert worker.retry_at >= before + 2.59
 
 
+def test_startup_deadline_covers_a_previous_owners_lease():
+    worker = Worker(1)
+    now = time.monotonic()
+    worker.retry_at = now + 30  # previous owner's lease still has 30 s left
+    deadline = RelayRuntime._extend_first_ready_deadline(now + 45, worker)
+    assert deadline >= now + 30 + 45
+    # A lease that ends inside the window leaves the deadline alone.
+    worker.retry_at = now + 1
+    assert RelayRuntime._extend_first_ready_deadline(deadline, worker) == deadline
+
+
+@pytest.mark.asyncio
+async def test_spawned_worker_learns_its_supervisor_pid(monkeypatch):
+    import os
+
+    from plugins.hub import relay_runtime
+
+    runtime = RelayRuntime(_config())
+    runtime.backend_url = "redis://127.0.0.1:1/0"
+    captured = {}
+
+    class Process:
+        pid = 4242
+        stdout = asyncio.StreamReader()
+
+    async def fake_exec(*args, env=None, **kwargs):
+        captured["env"] = env
+        Process.stdout.feed_eof()
+        return Process()
+
+    monkeypatch.setattr(relay_runtime.asyncio, "create_subprocess_exec", fake_exec)
+    worker = Worker(1)
+    await runtime._spawn(worker)
+    await worker.log_task
+    assert captured["env"]["KOLLAB_RELAY_SUPERVISOR_PID"] == str(os.getpid())
+
+
+@pytest.mark.asyncio
+async def test_worker_stops_itself_when_its_supervisor_is_gone(monkeypatch):
+    import os
+    import signal
+
+    from plugins.hub import relay_service
+
+    sent = []
+    monkeypatch.setattr(relay_service.os, "getppid", lambda: 1)  # reparented to init
+    monkeypatch.setattr(relay_service.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    await asyncio.wait_for(relay_service._watch_supervisor(98765), timeout=1)
+    assert sent == [(os.getpid(), signal.SIGTERM)]
+
+
 @pytest.mark.asyncio
 async def test_supervisor_retries_persistent_lease_without_bypassing_fence():
     runtime = RelayRuntime(_config())
