@@ -11,6 +11,20 @@ Open-source requirement: all examples must also work on an operator's own domain
 
 Protocol reuse: [Grok Bot, Buzz and A2A comparison](agent-network-protocol-landscape.md). The recommendation is A2A for tasks/cards, with Kollab-specific discovery, membership and communication policy. A narrow A2A 1.0 workspace adapter and Card-signing profile are now implemented; deployment and evidence boundaries are tracked in the [implementation ledger](agent-network-implementation-status.md).
 
+## Implemented today: seven exact walkthroughs
+
+The rest of this document is design intent; large parts (`/network ...`, `kollab relay setup`, gossip/DHT discovery) are proposals with no matching code. The seven flows below are real in Kollab 0.10.0 source. Each links to the one place that carries its exact, copy-pasteable command sequence; treat this list as the index, not a restatement.
+
+1. **Hosting kollabor.ai** (relay + discovery publisher + static well-known + TLS front door): [discovery and relay operator guide](../operations/kollabor-ai-discovery-publication.md).
+2. **Self-hosting on your own domain**, including a private CA or a private/internal network: same guide, [Self-hosting on your own domain or a private network](../operations/kollabor-ai-discovery-publication.md#self-hosting-on-your-own-domain-or-a-private-network).
+3. **Enrolling a new laptop by code**: command table and sequence in [commands reference, Public beacon commands](../reference/commands.md#public-beacon-commands); security contract in [agent-public-beacon.md, Code-enrollment source](agent-public-beacon.md) and [delegated enrollment spec](agent-device-pairing.md#code-enrollment-and-delegated-approval).
+4. **Discovering existing servers/agents**: [Discovering peers and agents](agent-public-beacon.md#discovering-peers-and-agents). There is no global directory; discovery means attaching to one domain's relay room, then listing who else is already in it.
+5. **Approving contact from an unknown visitor**: [Approving unknown contact](agent-public-beacon.md#approving-unknown-contact).
+6. **Conversing** once paired: [Agent conversation commands in current source](agent-public-beacon.md#agent-conversation-commands-in-current-source).
+7. **Revoking access**: [Revoking access](agent-public-beacon.md#revoking-access).
+
+Known limits that apply across all seven: only peers in the same relay room link in the peer mesh today, so there is no cross-room discovery. The relay keeps no durable state, so a relay restart ends any in-flight enrollment. Enrollment codes expire five minutes after creation. Enrollment grants a `conversation:send` credential only — never a tool or workspace permission.
+
 ## The simple model
 
 Find an agent, verify the identity it presents, decide whether contact is authorized, and establish an encrypted conversation. Prefer a direct connection; use authorized forwarding peers when necessary.

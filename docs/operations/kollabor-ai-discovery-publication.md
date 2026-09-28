@@ -43,9 +43,22 @@ Configure the HTTPS reverse proxy for the same origin:
 - Serve `GET /.well-known/agent-keys.json` from the publisher output with `application/json` and `Cache-Control: no-store`.
 - Forward `GET /relay/v1/health` to the supervisor's private health listener.
 - Forward WebSocket upgrades at `/relay/v1/ws` to the private worker listeners.
+- Forward `POST /relay/v1/enrollment/` (path prefix) to the private worker listeners. Without this route, `/connect offer`, `/connect requests`, `/connect accept`, and `/connect reject` cannot reach the relay. See the [beacon HTTP contract](../specs/agent-public-beacon.md#http-and-websocket-contract) for the exact route list.
+- Forward `POST /relay/v1/contact/` (path prefix) to the private worker listeners. Without this route, `/connect contact` and `/connect contacts` cannot reach the relay.
 - Do not publish `/relay/v1/metrics`. Keep worker listeners and metrics private.
 
+Both prefixes are POST-only; the application rejects query strings and caps every request body at 64 KiB regardless of route.
+
 The `origin` in the service config, TLS endpoint, discovery publisher, and advertised relay URL must match exactly. Add a reverse-proxy address to `trusted_proxies` only when the relay must use `X-Real-IP`; use the exact immediate peer address. The relay does not trust `X-Forwarded-For`.
+
+## Self-hosting on your own domain or a private network
+
+Everything above works unchanged on any operator-controlled domain; substitute it for `example.org`. Two client-side settings extend `/connect <domain>` beyond the public-CA, publicly-routable case:
+
+- `plugins.hub.endpoint_tls_ca` (default `""`): absolute path to a PEM CA bundle file. When set, the connecting client verifies the relay's TLS certificate against this bundle instead of the system trust store — use this for a relay behind an internal/private CA. Because it replaces the system roots, a client that also connects to a public-CA relay such as `kollabor.ai` needs a bundle that contains both the private CA and the public roots (for example the private CA appended to certifi's `cacert.pem`). The same key is the CA for the direct hub endpoint.
+- `plugins.hub.discovery_private_origins` (default `{}`): a JSON object mapping an exact discovery origin to a list of CIDR strings, for example `{"https://relay.internal.example.com": ["10.0.0.0/8"]}`. By default discovery refuses to resolve any target to a non-public IP address (loopback, link-local, or private ranges are all rejected); listing an origin here permits its DNS answer to land inside the given CIDR(s) so a private-network relay can be discovered and joined at all.
+
+Neither key has a `/config` widget yet; set both directly in `config.json` (global `~/.kollab/config.json` or project `.kollab/config.json`) under `plugins.hub`. Neither setting affects the publisher or the relay service itself — both are read only by the connecting client's discovery step (`plugins/hub/relay_commands.py`).
 
 ## Queue bounds and worker recovery
 

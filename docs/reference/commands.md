@@ -162,6 +162,7 @@ Deployment and verification status are tracked in the
 
 ```text
 /connect <domain>                  verify public discovery and attach to its relay
+/connect networks                  list provisioned network IDs and their domains
 /connect                           open private code-entry form (default: kollabor.ai)
 /connect enroll [domain]           open the same private code-entry form
 /connect offer [domain]            create/display one private, one-device K1 code
@@ -172,8 +173,11 @@ Deployment and verification status are tracked in the
 /connect invite                    save a private invitation file; display its path only
 /connect join <local-file-path>     verify the invitation's origin, pin inviter, and join
 /connect peers                     list online keys and local approval state
+/connect contact-point [domain]     show this workspace's contact route to share out of band
+/connect contact [domain]          open the private form to send a sealed introduction
+/connect contacts [domain]         review pending introductions addressed to this key
 /connect approve <64-hex-key>       permit encrypted ping/presence with this peer
-/connect revoke <64-hex-key>        remove that local permission
+/connect revoke <64-hex-key>        remove that presence approval and every grant to that peer
 /connect ping <64-hex-key>          request an encrypted presence response
 /connect rotate                    replace the room capability and clear local approvals
 /connect disconnect                close the connection and disable reconnect on launch
@@ -186,6 +190,7 @@ Deployment and verification status are tracked in the
 /connect withdraw <grant-id>       withdraw local sending and correlated-return authority
 /connect task <address> <id>        inspect the receiving task state
 /connect cancel <address> <id>      cancel the remote task
+/connect answer <event-id> <text>   answer a pending question from an authorized peer
 ```
 
 Any agent connected to the relay can create an offer for its own private
@@ -217,6 +222,22 @@ operator commands. If the issuer worker or its in-memory code key is gone, the
 request cannot be decided in that process. See the
 [pairing spec](../specs/agent-device-pairing.md) and
 [implementation ledger](../specs/agent-network-implementation-status.md).
+
+`/connect contact-point [domain]` shows `<origin> ed25519:<64-hex-key>`; share
+that string with the other party out of band (it is how a stranger addresses
+you — there is no public directory to browse). To reach them, run
+`/connect contact [domain]`; the private form asks for the domain and the
+64-hex key only (drop the `ed25519:` prefix) plus a short introduction, then
+sends it sealed to that key over `POST /relay/v1/contact/requests`. On the
+receiving side, `/connect contacts [domain]` opens a private review list
+(`POST /relay/v1/contact/inbox`) with explicit accept/reject per request
+(`POST /relay/v1/contact/decisions`). `/connect contact` and `/connect
+contacts` both default to the `kollabor.ai` domain and are unavailable from an
+attached viewer session (`--attach`); run them on the daemon that owns the
+identity. Accepting a contact request only resolves that receipt — it does not
+open a room, grant a conversation, or expose your roster. To actually talk,
+pair separately through `/connect invite`/`/connect join` or code enrollment,
+then follow the conversation commands below.
 
 Privately transfer the invitation file to the joining computer. Do not paste its
 contents into chat or a command. Joining pins the inviter; the inviter approves
