@@ -1080,9 +1080,23 @@ class RelayAgentBridge:
             self._authorize_active(turn_id=self._turn.get())
             incoming = active.record["payload"]
             if target != incoming["from"]:
-                raise RelayError(
-                    "remote tasks may reply only to their authenticated sender"
-                )
+                # The only peer a remote task can answer is its sender. Accept
+                # the sender's key and workspace with a drifted or mistyped
+                # agent segment and route to the recorded sender address.
+                try:
+                    wanted = RelayAddress.parse(target)
+                    sender_address = RelayAddress.parse(incoming["from"])
+                except (RelayError, ValueError, TypeError):
+                    wanted = sender_address = None
+                if (
+                    wanted is None
+                    or wanted.key != sender_address.key
+                    or wanted.workspace_id != sender_address.workspace_id
+                ):
+                    raise RelayError(
+                        "remote tasks may reply only to their authenticated sender"
+                    )
+                target = incoming["from"]
             if kind == "message":
                 kind = "result"
             if kind not in {"progress", "question", "result", "error"}:

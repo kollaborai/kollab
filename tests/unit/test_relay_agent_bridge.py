@@ -771,6 +771,44 @@ async def test_tool_progress_is_bounded_and_does_not_forward_tool_arguments(brid
 
 
 @pytest.mark.asyncio
+async def test_remote_task_reply_binds_sender_with_drifted_agent_segment(bridges):
+    # Live run de0e2e0d: the receiver model addressed the sender with a stale
+    # agent segment (agent ids change on restart) and its question was refused.
+    members, _ = bridges
+    (left, _, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    sender = right.active.record["payload"]["from"]
+    key, workspace, _agent = sender.split(":")[1:]
+
+    stale = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question-stale-agent",
+                "to": f"relay:{key}:{workspace}:stale-agent",
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    assert stale.success, stale.error
+    assert left.store.event(stale.metadata["relay_receipt"]["id"])["kind"] == "question"
+
+    with pytest.raises(RelayError, match="authenticated sender"):
+        await in_turn(
+            right_model,
+            right.send(
+                f"relay:{'e' * 64}:{workspace}:stale-agent",
+                "Where?",
+                kind="progress",
+            ),
+        )
+
+
+@pytest.mark.asyncio
 async def test_question_answer_resumes_same_granted_thread_once(bridges):
     members, _ = bridges
     (left, left_hub, left_model, left_bus), (right, right_hub, right_model, _) = members
