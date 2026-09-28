@@ -2034,6 +2034,36 @@ def test_wait_for_task_rejects_unknown_untrusted_state_without_echoing_it():
     assert "sk-secret-value" not in str(raised.value)
 
 
+def test_wait_for_task_keeps_polling_through_reply_pending():
+    # Live run 5bbfad33 polled in the window after the receiver finished its
+    # work but before the result was delivered.
+    task_id = "f" * 32
+    states = iter(["running", "reply_pending", "completed"])
+
+    class SequenceRunner:
+        def python(self, _endpoint, _source, _arguments, **_kwargs):
+            return harness.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "ok": True,
+                        "owner_agent_id": "0123456789ab",
+                        "text": json.dumps({"id": task_id, "state": next(states)}),
+                    }
+                ),
+                "",
+            )
+
+    receipt = harness._wait_for_task(
+        SequenceRunner(),
+        harness.Endpoint("local", Path("/tmp/unused"), "lapis"),
+        "relay:" + REMOTE_KEY + ":" + "a" * 32 + ":koordinator",
+        task_id,
+        deadline_seconds=10,
+    )
+    assert receipt["state"] == "completed"
+
+
 def test_withdraw_probe_grant_verifies_exact_marker_grant_is_revoked():
     grant_id = "a" * 32
     marker = "KOLLAB_RELAY_PROBE_abc"

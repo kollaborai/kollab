@@ -4296,7 +4296,8 @@ def _wait_for_task(
             )
         if state in TERMINAL_STATES:
             return receipt
-        if state not in {"queued", "running"}:
+        # reply_pending: the work finished and the result is still being sent.
+        if state not in {"queued", "running", "reply_pending"}:
             raise AcceptanceError(
                 "task_status_invalid", "the remote task returned an unknown state"
             )
@@ -4877,7 +4878,7 @@ def _wait_until_running(
             )
         if state == "running":
             return receipt
-        if state in TERMINAL_STATES:
+        if state in TERMINAL_STATES or state == "reply_pending":
             raise AcceptanceError(
                 "cancel_window_missed",
                 "the remote task finished before cancellation could be requested",
