@@ -6,9 +6,13 @@ covered pairing, attached `/connect status`, the core model/tool/file
 exchange, question/answer, follow-up, cancellation, reconnect, and rejection
 of unauthorized, revoked, replayed and wrong-workspace requests. This is source
 evidence, not a release. The same checks then passed on a clean
-`pip install kollab==0.10.0` on both hosts (run `381f49e9`, 2026-09-28). Still
-open: live code enrollment, peer-mesh direct/LAN/multihop routes, and measured
-capacity.
+`pip install kollab==0.10.0` on both hosts (run `381f49e9`, 2026-09-28). Live
+code enrollment then passed on source for #89: a brand-new agent on the Mac,
+holding only a fake API key, issued a code through `https://kollabor.ai`; a
+brand-new device on `alzan-prod` entered it, the issuer accepted, and the device
+came online with the issuer approved and the sealed profile installed under the
+issuer's own network ID. Still open: that enrollment on a released package,
+peer-mesh direct/LAN/multihop routes, and measured capacity.
 0.10.0 let only the discovery domain's coordinator issue codes; current source
 lets any trusted agent issue codes for its own network (#89). The
 defects fixed on the way are listed in
