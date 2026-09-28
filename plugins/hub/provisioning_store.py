@@ -16,10 +16,8 @@ from kollabor_config.provisioned_state import ProvisionedStateFile
 
 from .provisioning import (
     InstalledRevision,
-    NetworkPreferences,
     OpenAIOAuthCredential,
     ProfilePreferences,
-    ProvisioningCredential,
     ProvisioningError,
     ProvisioningPayload,
     ProvisioningTransaction,

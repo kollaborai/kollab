@@ -1803,6 +1803,20 @@ async def test_remote_directory_requires_secure_conversation_transport(bridges):
 
 
 @pytest.mark.asyncio
+async def test_directory_keeps_relay_peers_when_peer_mesh_knows_none(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    previous, left.peer_mesh = left.peer_mesh, SimpleNamespace(
+        known_peer_keys=lambda requested="": []
+    )
+    try:
+        result = await left._rpc_directory({"peer": right.commands.client.public_key})
+    finally:
+        left.peer_mesh = previous
+    assert [row["address"] for row in result["agents"]] == [address(right)]
+
+
+@pytest.mark.asyncio
 async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity_on_takeover(
     tmp_path,
 ):

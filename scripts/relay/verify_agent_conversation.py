@@ -1858,8 +1858,8 @@ def _address_for_name(
     ]
     if not named_rows:
         raise AcceptanceError(
-            "agent_identity_ambiguous",
-            "the requested full agent identity was not unique",
+            "agent_identity_not_found",
+            "the requested agent was not in the peer's directory",
         )
     scoped = []
     for row in named_rows:
