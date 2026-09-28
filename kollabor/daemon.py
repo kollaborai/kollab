@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Env var the daemon sets so the hub plugin knows to signal readiness
 DAEMON_READY_FD_ENV = "KOLLAB_DAEMON_READY_FD"
+# The attach client runs as `--attach <identity>`; this keeps the command the
+# user launched so /upgrade can relaunch it with a fresh daemon.
+LAUNCH_ARGS_ENV = "KOLLAB_LAUNCH_ARGS"
 
 
 def fork_daemon(argv: list[str]) -> tuple[int, str]:
@@ -74,6 +77,31 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
         # This function never returns in the child
         _run_daemon(argv, write_fd)
         sys.exit(0)
+
+
+def stop_daemon(pid: int, grace_seconds: float = 5.0) -> None:
+    """SIGTERM an owned daemon and reap it, escalating to SIGKILL after the grace.
+
+    Reaping matters before an exec: an unreaped child stays a zombie, and a
+    daemon still shutting down can hold the hub socket the new one needs.
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                return
+        except ChildProcessError:
+            return  # not our child, or already reaped
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    except (ProcessLookupError, ChildProcessError):
+        pass
 
 
 def signal_daemon_ready(socket_path: str) -> None:

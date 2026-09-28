@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An attach client that cannot reach its daemon at startup (a stale socket
   after the daemon died) now explains how to start the agent and exits, instead
   of leaving a window with no agent behind it.
+## [0.10.5] - 2026-09-28
+
+### Fixed
+
+- `/upgrade` in the default daemon mode now stops and reaps its daemon and
+  relaunches the command you started Kollab with, so the restarted window gets
+  a fresh daemon on the new version. Before, it re-attached to the daemon it
+  had just stopped and left a window that could not reach its agent. `/connect`
+  in such a window now says it has no daemon connection.
 
 ## [0.10.4] - 2026-09-28
 

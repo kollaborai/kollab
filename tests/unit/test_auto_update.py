@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 
 import pytest
@@ -229,3 +230,43 @@ async def test_startup_only_notifies_when_auto_update_disabled(monkeypatch):
 
     messages = app.renderer.message_coordinator.messages
     assert any("Update available" in message for message in messages)
+
+
+def test_stop_daemon_reaps_its_child():
+    from kollabor.daemon import stop_daemon
+
+    pid = os.spawnlp(os.P_NOWAIT, "sleep", "sleep", "30")
+    stop_daemon(pid)
+
+    with pytest.raises(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)
+
+
+@pytest.mark.asyncio
+async def test_upgrade_relaunches_the_launch_command_not_the_dead_attach(monkeypatch):
+    from types import SimpleNamespace
+
+    import kollabor.commands.system_commands.handlers.system as system_module
+    import kollabor.daemon as daemon
+    import kollabor.updates as updates
+    from kollabor.commands.system_commands.handlers.system import SystemCommandHandler
+
+    handler = SimpleNamespace(
+        logger=system_module.logging.getLogger("test"),
+        event_bus=SimpleNamespace(get_service=lambda name: None),
+    )
+    stopped, execs = [], []
+    upgraded = updates.AutoUpdateResult(True, "Kollab upgraded: v0.10.3 -> v0.10.4 (via pip).", "pip")
+    monkeypatch.setattr(updates, "run_auto_update", lambda: upgraded)
+    monkeypatch.setattr(daemon, "stop_daemon", stopped.append)
+    monkeypatch.setattr(os, "execv", lambda *args: execs.append(args))
+    monkeypatch.setattr(sys, "argv", ["kollab", "--attach", "koordinator"])
+    monkeypatch.setenv("KOLLAB_DAEMON_PID", "4242")
+    monkeypatch.setenv(daemon.LAUNCH_ARGS_ENV, '["--agent", "lapis"]')
+
+    await SystemCommandHandler.handle_upgrade(handler, None)
+
+    assert stopped == [4242]
+    relaunched = execs[0][1]
+    assert relaunched[-2:] == ["--agent", "lapis"]
+    assert "--attach" not in relaunched

@@ -372,3 +372,14 @@ def test_log_lines_never_carry_enrollment_codes():
 
     assert code not in line
     assert line == "Executing highlighted menu command: /connect approve K1-[redacted]"
+
+
+@pytest.mark.asyncio
+async def test_connect_in_a_window_without_its_daemon_says_so():
+    hub = HubPlugin.__new__(HubPlugin)
+    hub._cli_args = SimpleNamespace(attach=True)
+    hub.event_bus = SimpleNamespace(get_service=lambda _name: None)
+
+    assert await hub._handle_connect_command("status") == (
+        "connect: this window is not connected to its agent daemon; restart kollab"
+    )
