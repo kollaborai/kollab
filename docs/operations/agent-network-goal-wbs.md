@@ -1,6 +1,6 @@
 # Agent networking goal: work breakdown and progress
 
-Updated: 2026-09-27
+Updated: 2026-09-28
 
 This is the execution tracker for the complete networking goal in
 `/Users/malmazan/.codex/attachments/1ab030ab-9bc6-415e-9822-e3c55a121d3c/goal-objective.md`.
@@ -28,20 +28,49 @@ published release; and clean installed-package acceptance on the Mac and
 
 | ID | Workstream | Current status | Exit evidence |
 | --- | --- | --- | --- |
-| 1 | Preserve and baseline the shared candidate | In progress | Current branch, dirty state and protected ownership recorded; no unrelated work overwritten. |
+| 1 | Preserve and baseline the shared candidate | Done: all Codex-session work committed on `codex/relay-agent-messaging`, backups kept under `backup/*` refs; draft PR #87 open with CI green  | Current branch, dirty state and protected ownership recorded; no unrelated work overwritten. |
 | 2 | Close source implementation blockers | In progress | Focused source changes and regressions for each listed blocker; no security boundary weakened. |
 | 2.1 | Issuer enrollment recovery | Source behavior and local regression sweep pass; live restart remains open | Exact approved request resumes only after rechecking owner, relay, origin, room, issuer workspace, recipient key, scope and expiry; it retries the same decision ciphertext. Expired/revoked incomplete rows revoke only the exact owner-signed credential after durable request/delegation checks. Completed peers are never revoked; receipted-but-unresolved and mismatched rows remain with fixed-code backoff. Confirm against a real relay process restart. |
 | 2.2 | Destination enrollment completion recovery | Source implementation and regressions pass; capped retry and redacted status added; live relay restart remains open | Persist the stable request before its first POST, then recover the same round through challenge, decision and ACK. Replay the exact signed ACK after a lost response/restart; finish credential import, invite join and attachment idempotently. Retry delay grows from 5 seconds to a 300-second cap; `/connect status` exposes only aggregate state and fixed error codes. |
-| 2.3 | Agent conversation and authorization | Partial | Normal Hub/model/tool path, correlated replies, Q&A, progress, errors, cancellation and deadlines work; verify duplicate, impersonation, replay, wrong-workspace, revoked and loop rejection. |
+| 2.3 | Agent conversation and authorization | Live-verified 2026-09-28 (run `0428cb8f`): human-granted send, receiver model and normal tools, correlated result, question/answer, follow-up, cancellation, reconnect; unauthorized, revoked, replay and wrong-workspace rejected at the receiver guard  | Normal Hub/model/tool path, correlated replies, Q&A, progress, errors, cancellation and deadlines work; verify duplicate, impersonation, replay, wrong-workspace, revoked and loop rejection. |
 | 2.4 | Peer route integration | Partial; lifecycle and local route tests pass, cross-host proof remains open | Same-host discovery, direct TLS connections, relay fallback and signed bounded forwarding are wired; live tests must still prove cross-host routing and that intermediaries cannot decrypt or invoke ordinary Hub hooks. |
 | 2.5 | Discovery, presence and reconnect reliability | Partial | Public/self-hosted DNS contract and quiet local discovery; authenticated expiring records, bounded propagation, truthful offline/revoked status, route changes and restart recovery. |
 | 2.6 | Shared-state and capacity limits | Partial | Classify prior load errors; measure the final topology, recovery and resource/backpressure limits; publish only demonstrated operating limits. |
-| 3 | Focused regressions and candidate verification | Partial; selected 195-test enrollment/RPC/relay/peer-session sweep passes | Run focused and cross-cutting suites for touched behavior; retain exact commands and results. Unit and simulated transport evidence remain separate from live proof. |
-| 4 | Source-level two-host acceptance | Partial | Current source on Mac and `alzan-prod`: actual models, remote file operation, artifact/hash, correlated reply consumed by sender, follow-up answer, cancellation/reconnect and negative authorization cases. |
+| 3 | Focused regressions and candidate verification | Full unit suite green on the branch; CI (security-scan, standards-check, tests) green on PR #87  | Run focused and cross-cutting suites for touched behavior; retain exact commands and results. Unit and simulated transport evidence remain separate from live proof. |
+| 4 | Source-level two-host acceptance | Passed 2026-09-28: run `0428cb8f` through `https://kollabor.ai`, all eleven checks, current source on the Mac and `alzan-prod`  | Current source on Mac and `alzan-prod`: actual models, remote file operation, artifact/hash, correlated reply consumed by sender, follow-up answer, cancellation/reconnect and negative authorization cases. |
 | 5 | Synchronize canonical docs and operator guidance | Partial | Specs, implementation ledger, walkthroughs, command help, harness and development skill match the implementation and verified limits. |
 | 6 | Prepare and publish a corrected release | Open | Version all packages consistently, changelog and CI pass, normal tag/release/PyPI workflow completes. |
 | 7 | Installed-package acceptance | Open | Clean `pip install kollab` environments on Mac and `alzan-prod`; repeat cross-network model/tool/reply flow and required recovery/negative cases. |
 | 8 | Final completion report | Open | Release identifiers, exact working commands, source and installed evidence, and measured limits; all unverified items named. |
+
+## Live acceptance on current source (2026-09-28)
+
+Runs `0428cb8fb09a47ea821fe673e9930093` and `b42ec1abb234489b9c0be37d3a762fac`
+both passed every check of
+`scripts/relay/verify_agent_conversation.py` between the Mac and `alzan-prod`
+through `https://kollabor.ai`: pairing, attached `/connect status` on both
+hosts, the core model/tool/file exchange, question/answer, follow-up,
+cancellation, reconnect, and receiver-guard rejection of unauthorized,
+revoked, replayed and wrong-workspace requests. The manifest is private under
+`~/.kollab/acceptance-evidence/` on the Mac.
+
+Getting there took 23 runs. Runtime defects found and fixed on the way:
+
+- The remote agent directory dropped relay peers once the peer mesh was active.
+- After pairing, secure packets were routed through `peer.forward`, which fails
+  live; relay-connected peers keep the native relay path unless direct dialing
+  is enabled.
+- Periodic mesh refresh re-signed unchanged peer links with new timestamps,
+  which peers rejected as equivocation, tearing down healthy sessions.
+- A relay-event turn could send a model-written answer to a remote question;
+  answers now need a human turn.
+- A task waiting on its question accepted a result and completed early.
+- Cancelling left the task's queued result deliverable.
+- Replies and answers required models to retype long IDs exactly; the runtime
+  now binds them to the active task or pending question record.
+
+The relay behind `kollabor.ai` runs release `20260928-789c657`, which adds the
+enrollment mailbox routes (`/relay/v1/enrollment/`, POST only).
 
 ## Evidence already recorded
 

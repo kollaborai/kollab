@@ -1,5 +1,15 @@
 # Agent network implementation status
 
+2026-09-28 UTC: the live two-host acceptance passed on the current source.
+Runs `0428cb8f` and `b42ec1ab` (back to back) between the Mac and `alzan-prod` through `https://kollabor.ai`
+covered pairing, attached `/connect status`, the core model/tool/file
+exchange, question/answer, follow-up, cancellation, reconnect, and rejection
+of unauthorized, revoked, replayed and wrong-workspace requests. This is source
+evidence, not a release. Still open: live code enrollment, installed-package
+acceptance, peer-mesh direct/LAN/multihop routes, and measured capacity. The
+defects fixed on the way are listed in
+[the goal tracker](../operations/agent-network-goal-wbs.md#live-acceptance-on-current-source-2026-09-28).
+
 Updated: 2026-09-27 UTC. The full networking design remains the acceptance contract. The 0.9.0 release baseline delivered discovery and encrypted presence, and did not satisfy the requested agent-to-agent workflow. Historical evidence below retains its original scope. A pre-existing direct Hub endpoint dialer can reach manually configured, approved remote endpoints for ordinary Hub messages. Separately, unreleased RelayAgent source carries message, status, cancellation, and reply traffic inside pinned TLS 1.3 peer sessions over RelayClient; this is not a direct socket route. Two real Mac-to-alzan-prod model/tool/file/reply exchanges and attached status checks passed on development source. A later guidance-candidate run admitted a same-task Q&A and delivered its question to the sender, but the verifier stopped before the human answer and task resumption were proven. Full live acceptance and published-package proof remain open. Enrollment is partial, and signed peer-mesh routing foundations are still not connected to Hub. The full network is not complete.
 
 ## Required enrollment UX clarification
