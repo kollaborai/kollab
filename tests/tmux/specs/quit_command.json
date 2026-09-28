@@ -1,0 +1,29 @@
+{
+  "name": "quit-command",
+  "description": "/quit exits Kollab the same way a second Ctrl+C does (issue #107).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":false}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon; echo KOLLAB-EXITED'",
+    "app_init_sleep": 8,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "type",
+      "text": "/quit",
+      "delay": 0.1
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "KOLLAB-EXITED",
+      "timeout": 15
+    }
+  ]
+}

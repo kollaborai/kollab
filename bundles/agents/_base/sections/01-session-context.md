@@ -1,7 +1,7 @@
 session context:
   date:              <trender>date '+%Y-%m-%d %Z'</trender>
   system:            <trender>uname -s</trender> <trender>uname -m</trender>
-  user:              <trender>whoami</trender> @ <trender>hostname</trender>
+  user:              <trender>whoami</trender> @ <trender>uname -n</trender>
   shell:             <trender>echo $SHELL</trender>
   working directory: <trender>pwd</trender>
 
