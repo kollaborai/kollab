@@ -254,6 +254,27 @@ async def test_remote_turn_and_wrong_local_agent_cannot_decide_enrollment(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_relay_session_change_reports_restart_instead_of_unauthorized(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "4" * 32
+    store, _, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    issued_session = bridge.commands.client._session_id
+
+    # A relay restart drops its ephemeral state and the client reconnects
+    # under a new session; the pending request can no longer be decided.
+    bridge.commands.client._session_id = "f" * 32
+    with pytest.raises(RelayError, match="relay connection restarted.*create a new code"):
+        await bridge.decide_enrollment_request(round_id, decision="accept", source_agent=AGENT_ID)
+
+    record = store.get_enrollment_request(round_id, agent_id=AGENT_ID, session_id=issued_session)
+    assert record.status == "pending"
+    assert store.get("human-action-01").consumed_new_devices == 0
+
+
+@pytest.mark.asyncio
 async def test_code_text_is_rejected_before_owner_command_dispatch(tmp_path):
     hub, bridge = _local_hub(tmp_path)
     code_text = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `/connect accept` explains when a relay restart or reconnect ended the relay
+  session a code was issued under, instead of reporting "unauthorized". The
+  relay keeps no durable state, so a restart ends in-flight enrollments; create
+  a new code (#94).
+
 ## [0.10.1] - 2026-09-28
 
 ### Fixed

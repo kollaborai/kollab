@@ -208,6 +208,10 @@ class DelegationAuthorizationError(EnrollmentDelegationError):
     """A delegation does not authorize the requested enrollment."""
 
 
+class DelegationSessionChangedError(DelegationAuthorizationError):
+    """The authorized agent's relay session ended; a reconnect cannot decide."""
+
+
 class DelegationCapacityError(EnrollmentDelegationError):
     """A bounded delegation or state ledger is full."""
 
@@ -536,12 +540,12 @@ class EnrollmentDelegationStore:
             if request is None:
                 raise DelegationNotFoundError("enrollment request not found")
             delegation = state["delegations"].get(request["human_action_id"])
-            if (
-                delegation is None
-                or delegation["authorized_agent_id"] != agent
-                or delegation["authorized_session_id"] != session
-            ):
+            if delegation is None or delegation["authorized_agent_id"] != agent:
                 raise DelegationAuthorizationError("agent session is not authorized for this enrollment")
+            if delegation["authorized_session_id"] != session:
+                # Same agent, new relay session: a relay restart or reconnect
+                # ended the session this code was issued under.
+                raise DelegationSessionChangedError("the relay session for this enrollment has ended")
             if delegation["revoked"] or delegation["expires_at"] <= timestamp or request["expires_at"] <= timestamp:
                 raise DelegationAuthorizationError("enrollment request is no longer active")
             return _to_request_model(request, delegation)

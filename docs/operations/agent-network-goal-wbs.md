@@ -100,6 +100,25 @@ The first attempt pasted the code into the domain field, which rendered it in
 clear text; the entry view now moves anything from `K1-` onward into the masked
 code field, and the second attempt exercised that path.
 
+## Installed 0.10.1: acceptance, enrollment and restarts (2026-09-28)
+
+- Both hosts reinstalled from PyPI (`pip install kollab==0.10.1`, fresh venvs);
+  run `c947b361acf84fe09c2eeb58b2f6c329` passed every conversation check.
+- Enrollment from the installed package: a brand-new Mac issuer holding only a
+  fake API key issued a code, a brand-new device on `alzan-prod` enrolled, the
+  issuer approved it, and the sealed profile landed under the issuer's own
+  network ID.
+- Device restart while its request was pending: the device process was killed
+  and restarted, the issuer accepted, and the device finished enrollment from
+  its recovery journal.
+- Relay restart (`systemctl restart kollab-relay.service`, healthy again in
+  about 5 s): the relay's managed Valkey keeps no durable state, so in-flight
+  enrollments end. With the restart before the decision, `/connect accept`
+  was refused (it now explains why, #94); with the restart one second after
+  accept, the issuer showed accepted but the device never received the bundle
+  and both sides retried until expiry. A new code is required after a relay
+  restart.
+
 ## Evidence already recorded
 
 - The 0.9.0 deployment proved encrypted relay ping/pong, not an agent

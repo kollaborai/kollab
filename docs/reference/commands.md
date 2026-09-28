@@ -207,7 +207,11 @@ the allowlisted profile settings and one displayed provider credential in a
 device-sealed bundle; the destination installs it atomically and returns a
 device-signed receipt before the issuer approves the peer. Network revocation
 does not revoke a copied credential at its provider. Rejection consumes no
-allowance. Enrollment grants no workspace or tool permission. The
+allowance. The relay keeps no durable state: if it restarts, or the issuer
+reconnects under a new relay session, while a code is in flight, that request
+can no longer be decided and `/connect accept` says so; an accepted enrollment
+cut off by a restart retries until its code expires. Create a new code.
+Enrollment grants no workspace or tool permission. The
 pending-request API is not exposed as a remote-agent tool; these are local
 operator commands. If the issuer worker or its in-memory code key is gone, the
 request cannot be decided in that process. See the
