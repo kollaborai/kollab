@@ -205,6 +205,11 @@ class InputHandler:
             self._modal_controller._handle_modal_keypress,
             self._modal_controller._handle_status_modal_keypress,
         )
+        # Paste placeholders must expand before command parsing on the
+        # command-mode path too (e.g. /goal <pasted objective>)
+        self._command_mode_handler.set_expand_paste_placeholders_callback(
+            self._paste_processor.expand_paste_placeholders
+        )
 
         # KeyPressHandler callbacks
         self._key_press_handler.set_callbacks(

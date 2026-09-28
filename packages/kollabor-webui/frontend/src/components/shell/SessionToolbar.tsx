@@ -2,10 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import {
   CheckCircle2,
   Eraser,
+  Pencil,
   Plug,
+  Plus,
   RefreshCw,
   Settings2,
   Terminal,
+  Trash2,
   Users,
 } from "lucide-react";
 import type {
@@ -30,6 +33,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -78,10 +82,24 @@ export function SessionToolbar({
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpDraft, setMcpDraft] = useState<{
+    original: string | null;
+    name: string;
+    command: string;
+    description: string;
+    enabled: boolean;
+    env: string;
+  } | null>(null);
   const [hubOpen, setHubOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<SessionState | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [editProfile, setEditProfile] = useState(
+    session.profile || profiles[0]?.name || "default",
+  );
+  const [editModel, setEditModel] = useState(session.model || "");
+  const [editEffort, setEditEffort] = useState(session.effort || "");
+  const [applyBusy, setApplyBusy] = useState(false);
 
   const fail = useCallback(
     (error: unknown) =>
@@ -137,6 +155,65 @@ export function SessionToolbar({
     }
   };
 
+  const startEditServer = (name: string, definition: McpServerConfig) => {
+    setMcpDraft({
+      original: name,
+      name,
+      command: definition.command || "",
+      description: definition.description || "",
+      enabled: definition.enabled ?? true,
+      env: definition.env
+        ? Object.entries(definition.env)
+            .map(([k, v]) => `${k}=${v}`)
+            .join("\n")
+        : "",
+    });
+  };
+
+  const saveServer = async () => {
+    if (!mcpDraft) return;
+    const env: Record<string, string> = {};
+    for (const line of mcpDraft.env.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq > 0) env[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+    }
+    const body = {
+      type: "stdio",
+      command: mcpDraft.command,
+      description: mcpDraft.description,
+      enabled: mcpDraft.enabled,
+      env,
+    };
+    try {
+      if (mcpDraft.original) {
+        await api.updateMcpServer(mcpDraft.original, body);
+      } else {
+        await api.createMcpServer({ name: mcpDraft.name, ...body });
+      }
+      setMcpDraft(null);
+      await loadMcp();
+      onStatus(
+        mcpDraft.original
+          ? `${mcpDraft.name}: updated`
+          : `${mcpDraft.name}: added`,
+      );
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  const deleteServer = async (serverName: string) => {
+    try {
+      await api.deleteMcpServer(serverName);
+      await loadMcp();
+      onStatus(`${serverName}: deleted`);
+    } catch (error) {
+      fail(error);
+    }
+  };
+
   const loadAgents = async () => {
     setAgentsLoading(true);
     try {
@@ -169,6 +246,33 @@ export function SessionToolbar({
     } catch (error) {
       fail(error);
     }
+  };
+
+  const applySessionSettings = async () => {
+    setApplyBusy(true);
+    try {
+      const updated = await api.setSessionProfile(
+        session.session_id,
+        editProfile,
+        editModel.trim() || undefined,
+        editEffort.trim() || undefined,
+      );
+      onSessionUpdated(updated);
+      setEditModel(updated.model || "");
+      setEditEffort(updated.effort || "");
+      onStatus(`Session settings applied: ${updated.model || editProfile}`);
+      await loadSettings();
+    } catch (error) {
+      fail(error);
+    } finally {
+      setApplyBusy(false);
+    }
+  };
+
+  const resetSessionSettings = () => {
+    setEditProfile(session.profile || profiles[0]?.name || "default");
+    setEditModel(session.model || "");
+    setEditEffort(session.effort || "");
   };
 
   const clearHistory = async () => {
@@ -290,19 +394,40 @@ export function SessionToolbar({
                           {info.tool_count || tools.length || 0} tools
                           {info.error ? ` · ${info.error}` : ""}
                         </span>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={connected ? "outline" : "default"}
-                          disabled={mcpBusy === name}
-                          onClick={() => void toggleMcp(name, connected)}
-                        >
-                          {mcpBusy === name
-                            ? "…"
-                            : connected
-                              ? "Disconnect"
-                              : "Connect"}
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            aria-label={`Edit ${name}`}
+                            onClick={() => startEditServer(name, definition)}
+                          >
+                            <Pencil className="size-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            aria-label={`Delete ${name}`}
+                            disabled={mcpBusy === name}
+                            onClick={() => void deleteServer(name)}
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={connected ? "outline" : "default"}
+                            disabled={mcpBusy === name}
+                            onClick={() => void toggleMcp(name, connected)}
+                          >
+                            {mcpBusy === name
+                              ? "…"
+                              : connected
+                                ? "Disconnect"
+                                : "Connect"}
+                          </Button>
+                        </div>
                       </div>
                       {tools.length ? (
                         <div className="flex flex-wrap gap-1">
@@ -331,6 +456,75 @@ export function SessionToolbar({
               )}
             </div>
           </ScrollArea>
+          {mcpDraft ? (
+            <div className="flex flex-col gap-2 rounded-lg border p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold">
+                  {mcpDraft.original ? `Edit ${mcpDraft.original}` : "Add server"}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setMcpDraft(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+              <Input
+                aria-label="Server name"
+                placeholder="name (e.g. github)"
+                value={mcpDraft.name}
+                disabled={Boolean(mcpDraft.original)}
+                onChange={(e) =>
+                  setMcpDraft({ ...mcpDraft, name: e.target.value })
+                }
+              />
+              <Input
+                aria-label="Server command"
+                placeholder="command (e.g. npx -y @modelcontextprotocol/server-github)"
+                value={mcpDraft.command}
+                onChange={(e) =>
+                  setMcpDraft({ ...mcpDraft, command: e.target.value })
+                }
+              />
+              <Input
+                aria-label="Server description"
+                placeholder="description"
+                value={mcpDraft.description}
+                onChange={(e) =>
+                  setMcpDraft({ ...mcpDraft, description: e.target.value })
+                }
+              />
+              <textarea
+                className="border-input bg-background placeholder:text-muted-foreground min-h-16 rounded-md border px-2 py-1.5 text-sm"
+                aria-label="Environment variables"
+                placeholder={"env vars, one per line:\nGITHUB_TOKEN=…"}
+                value={mcpDraft.env}
+                onChange={(e) =>
+                  setMcpDraft({ ...mcpDraft, env: e.target.value })
+                }
+              />
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={mcpDraft.enabled}
+                  onChange={(e) =>
+                    setMcpDraft({ ...mcpDraft, enabled: e.target.checked })
+                  }
+                />
+                enabled
+              </label>
+              <Button
+                type="button"
+                size="sm"
+                disabled={!mcpDraft.command.trim() || (!mcpDraft.original && !mcpDraft.name.trim())}
+                onClick={() => void saveServer()}
+              >
+                Save server
+              </Button>
+            </div>
+          ) : null}
           <DialogFooter>
             <Button
               type="button"
@@ -340,6 +534,24 @@ export function SessionToolbar({
             >
               <RefreshCw className="size-4" />
               Refresh
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                setMcpDraft({
+                  original: null,
+                  name: "",
+                  command: "",
+                  description: "",
+                  enabled: true,
+                  env: "",
+                })
+              }
+            >
+              <Plus className="size-4" />
+              Add server
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -449,7 +661,7 @@ export function SessionToolbar({
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3 text-sm">
-            <div className="grid grid-cols-[7rem_1fr] gap-2">
+            <div className="grid grid-cols-[7rem_1fr] items-center gap-2">
               <span className="text-muted-foreground">Session</span>
               <span className="break-all font-mono">
                 {sessionLabel}
@@ -458,8 +670,54 @@ export function SessionToolbar({
               <span>{session.identity || session.agent || "unassigned"}</span>
               <span className="text-muted-foreground">Workspace</span>
               <span className="break-all">{workspace}</span>
-              <span className="text-muted-foreground">Model</span>
-              <span>{session.model || session.profile || "unavailable"}</span>
+            </div>
+            <div className="grid gap-2">
+              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-profile">
+                Profile
+              </label>
+              <Select
+                value={editProfile}
+                onValueChange={setEditProfile}
+                disabled={applyBusy}
+              >
+                <SelectTrigger id="settings-profile" className="w-full" aria-label="Session profile">
+                  <SelectValue placeholder="default" />
+                </SelectTrigger>
+                <SelectContent>
+                  {profiles.length ? (
+                    profiles.map((profile) => (
+                      <SelectItem key={profile.name} value={profile.name}>
+                        {profile.name}
+                        {profile.model ? ` · ${profile.model}` : ""}
+                      </SelectItem>
+                    ))
+                  ) : (
+                    <SelectItem value={editProfile}>{editProfile}</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-model">
+                Model override (optional)
+              </label>
+              <Input
+                id="settings-model"
+                value={editModel}
+                onChange={(event) => setEditModel(event.target.value)}
+                placeholder={session.model || "profile default"}
+                disabled={applyBusy}
+                className="font-mono text-xs"
+              />
+              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-effort">
+                Effort override (optional)
+              </label>
+              <Input
+                id="settings-effort"
+                value={editEffort}
+                onChange={(event) => setEditEffort(event.target.value)}
+                placeholder={session.effort || "profile default"}
+                disabled={applyBusy}
+                className="font-mono text-xs"
+              />
             </div>
             <div className="bg-muted/30 rounded-md border p-3 text-xs">
               {settingsBusy ? (
@@ -493,10 +751,25 @@ export function SessionToolbar({
             <Button
               type="button"
               variant="outline"
+              onClick={resetSessionSettings}
+              disabled={applyBusy}
+            >
+              Reset
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
               onClick={() => void loadSettings()}
             >
               <RefreshCw className="size-4" />
               Refresh
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void applySessionSettings()}
+              disabled={applyBusy}
+            >
+              {applyBusy ? "Applying…" : "Apply"}
             </Button>
           </DialogFooter>
         </DialogContent>

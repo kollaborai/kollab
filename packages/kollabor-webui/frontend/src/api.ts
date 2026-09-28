@@ -3,6 +3,7 @@ export type Session = {
   name?: string;
   profile?: string;
   model?: string;
+  effort?: string;
   agent?: string;
   workspace?: string | null;
   approval_mode?: string;
@@ -73,6 +74,26 @@ export type Profile = {
   supports_vision?: boolean;
 };
 
+export type ProfileWrite = {
+  name: string;
+  provider: string;
+  model: string;
+  api_key?: string;
+  base_url?: string;
+  temperature?: number;
+  max_tokens?: number | null;
+  description?: string;
+  timeout?: number;
+  top_p?: number | null;
+  streaming?: boolean;
+  supports_tools?: boolean;
+  extra_headers?: Record<string, string>;
+};
+
+export type ProfileUpdate = Partial<Omit<ProfileWrite, "name">> & {
+  new_name?: string;
+};
+
 export type AgentPoolEntry = {
   name: string;
   identity?: string;
@@ -85,6 +106,14 @@ export type AgentPoolEntry = {
   state?: string;
   current_task?: string;
 };
+
+export type AgentBundleEntry = {
+  name: string;
+  description?: string;
+  profile?: string | null;
+  skills?: string[];
+};
+
 
 export type SlashParameter = {
   name: string;
@@ -496,12 +525,76 @@ export class EngineApi {
     return this.json<{ profiles: Profile[]; active?: string }>("/profiles");
   }
 
+  createProfile(body: ProfileWrite) {
+    return this.json<Profile & { created?: boolean }>("/profiles", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  updateProfile(name: string, body: ProfileUpdate) {
+    return this.json<Profile & { updated?: boolean }>(
+      `/profiles/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    );
+  }
+
+  deleteProfile(name: string) {
+    return this.json<{ deleted: boolean }>(
+      `/profiles/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  testProfile(name: string) {
+    return this.json<{
+      success: boolean;
+      message?: string;
+      error?: string;
+      latency_ms?: number;
+      warning?: string;
+    }>(`/profiles/${encodeURIComponent(name)}/test`, { method: "POST" });
+  }
+
   listAgentPool(refresh = false) {
     return this.json<{
       agents: AgentPoolEntry[];
       available?: string[];
       active?: string[];
     }>(`/agents${refresh ? "?refresh=true" : ""}`);
+  }
+
+  /**
+   * Agent bundles (`--agent <name>` in the CLI): the prompt+metadata tier,
+   * distinct from the gem identity pool. Any of these can be passed as the
+   * `agent` field when creating a session.
+   */
+  listAgentBundles() {
+    return this.json<{ bundles: AgentBundleEntry[]; count?: number }>(
+      "/agents/bundles",
+    );
+  }
+
+
+  createMcpServer(body: McpServerConfig & { name: string }) {
+    return this.json<McpServerConfig>("/mcp/servers", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  updateMcpServer(name: string, body: Partial<McpServerConfig>) {
+    return this.json<McpServerConfig>(`/mcp/servers/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  }
+
+  deleteMcpServer(name: string) {
+    return this.json<{ deleted: boolean }>(
+      `/mcp/servers/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
   }
 
   listMcpServers() {
