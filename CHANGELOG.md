@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The command menu now lists every `/connect` subcommand with its arguments;
+  typing `/conn` previously showed only the bare command. `/connect answer`
+  and `/connect networks <extra>` are routed instead of being rejected with the
+  enrollment-form message.
+
 ## [0.10.2] - 2026-09-28
 
 ### Added

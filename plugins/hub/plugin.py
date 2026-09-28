@@ -102,6 +102,40 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
+# One list feeds the command palette and the /connect router, so a documented
+# subcommand can't be listed without being routable (or the reverse).
+CONNECT_SUBCOMMANDS = [
+    SubcommandInfo("enroll", "[domain]", "Enter an enrollment code in the private form"),
+    SubcommandInfo("offer", "[domain]", "Create a one-device, five-minute enrollment code"),
+    SubcommandInfo("requests", "", "List pending enrollment requests"),
+    SubcommandInfo("accept", "<receipt-id>", "Accept a verified enrollment request"),
+    SubcommandInfo("reject", "<receipt-id>", "Reject a verified enrollment request"),
+    SubcommandInfo("networks", "", "List provisioned networks and their domains"),
+    SubcommandInfo("status", "", "Show transport state and this workspace's key"),
+    SubcommandInfo("peers", "", "List online peers and their approval state"),
+    SubcommandInfo("invite", "", "Save a private invitation file"),
+    SubcommandInfo("join", "<file>", "Join from a private invitation file"),
+    SubcommandInfo("contact-point", "[domain]", "Show the contact route to share"),
+    SubcommandInfo("contact", "[domain]", "Send a sealed introduction"),
+    SubcommandInfo("contacts", "[domain]", "Review introductions sent to this key"),
+    SubcommandInfo("approve", "<peer-key>", "Permit encrypted ping and presence"),
+    SubcommandInfo("revoke", "<peer-key>", "Remove a peer's approval and grants"),
+    SubcommandInfo("ping", "<peer-key>", "Request an encrypted presence response"),
+    SubcommandInfo("rotate", "", "Replace the room capability, clear approvals"),
+    SubcommandInfo("disconnect", "", "Close the connection, stop reconnecting"),
+    SubcommandInfo("agents", "[local|peer-key]", "List remote or local agents"),
+    SubcommandInfo("allow", "<peer-key> <agent>", "Let a peer talk to a local agent"),
+    SubcommandInfo("deny", "<peer-key> [agent]", "Revoke a peer's access, cancel work"),
+    SubcommandInfo("grants", "", "List receiving and sending grants"),
+    SubcommandInfo("authorize", "<address> <request>", "Authorize one exact request"),
+    SubcommandInfo("send", "<address> <request>", "Authorize and send one request"),
+    SubcommandInfo("withdraw", "<grant-id>", "Withdraw a sending grant"),
+    SubcommandInfo("task", "<address> <id>", "Inspect a remote task"),
+    SubcommandInfo("cancel", "<address> <id>", "Cancel a remote task"),
+    SubcommandInfo("answer", "<event-id> <text>", "Answer a pending question"),
+    SubcommandInfo("help", "", "Show usage for every subcommand"),
+]
+
 _TASK_CRON_ID_RE = re.compile(
     r"\[\s*task\s+reminder\s*:\s*([^\]\s]+)\s*\]",
     re.IGNORECASE,
@@ -8370,6 +8404,7 @@ class HubPlugin(BasePlugin):
                 plugin_name=self.name,
                 handler=self._handle_connect_command,
                 mode=CommandMode.INSTANT,
+                subcommands=CONNECT_SUBCOMMANDS,
             )
         )
 
@@ -8415,32 +8450,7 @@ class HubPlugin(BasePlugin):
             part.upper().startswith("K1-") for part in parts[1:]
         ):
             return "connect: use a receipt ID; enter enrollment codes only in the private form"
-        connect_commands = {
-            "allow",
-            "agents",
-            "approve",
-            "accept",
-            "authorize",
-            "cancel",
-            "contact-point",
-            "deny",
-            "disconnect",
-            "grants",
-            "help",
-            "invite",
-            "join",
-            "peers",
-            "reject",
-            "requests",
-            "ping",
-            "revoke",
-            "rotate",
-            "send",
-            "status",
-            "task",
-            "withdraw",
-        }
-        if head not in connect_commands:
+        if head not in {sub.name for sub in CONNECT_SUBCOMMANDS}:
             if len(parts) != 1:
                 return "connect: enter the code only in the private enrollment form"
             if parts[0].upper().startswith("K1-"):
