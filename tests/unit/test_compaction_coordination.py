@@ -20,13 +20,13 @@ import sys
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from plugins.context_compaction_plugin import (  # noqa: E402
-    ContextCompactionPlugin,
     _TASK_INDICATORS,
+    ContextCompactionPlugin,
 )
 
 

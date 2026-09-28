@@ -13,10 +13,8 @@ import asyncio
 import json
 import sys
 import unittest
-from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -67,7 +65,7 @@ class TestCompactionSummaryPersists(unittest.TestCase):
                 )
             )
             self.assertTrue(sf.exists())
-            records = [json.loads(l) for l in sf.read_text().splitlines()]
+            records = [json.loads(line) for line in sf.read_text().splitlines()]
             rec = records[0]
             self.assertEqual(rec["type"], "context_compaction")
             self.assertEqual(rec["role"], "user")
@@ -196,16 +194,17 @@ class TestLoaderReplaysCompaction(unittest.TestCase):
     def test_last_round_wins(self):
         with TemporaryDirectory() as d:
             sf = Path(d) / "session_2609-test.jsonl"
-            rec = lambda i, t: json.dumps(
-                {
-                    "type": "context_compaction",
-                    "uuid": f"c{i}",
-                    "timestamp": t,
-                    "compaction_round": i,
-                    "content": f"SUMMARY ROUND {i}",
-                    "role": "user",
-                }
-            )
+            def rec(i, t):
+                return json.dumps(
+                    {
+                        "type": "context_compaction",
+                        "uuid": f"c{i}",
+                        "timestamp": t,
+                        "compaction_round": i,
+                        "content": f"SUMMARY ROUND {i}",
+                        "role": "user",
+                    }
+                )
             lines = [
                 json.dumps(
                     {
