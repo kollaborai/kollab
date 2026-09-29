@@ -71,7 +71,8 @@ def _local_hub(tmp_path):
     return hub, bridge
 
 
-def test_connect_status_includes_redacted_destination_recovery_summary(tmp_path):
+@pytest.mark.asyncio
+async def test_test_connect_status_includes_redacted_destination_recovery_summary(tmp_path):
     _hub, bridge = _local_hub(tmp_path)
     offer_id = "0123456789abcdef0123456789abcdef"
     bridge._enrollment_issuer = SimpleNamespace(
@@ -85,7 +86,7 @@ def test_connect_status_includes_redacted_destination_recovery_summary(tmp_path)
         }
     )
 
-    status = bridge.commands.format_status()
+    status = await bridge.commands.format_status()
 
     assert (
         "device enrollment recovery: 3 pending (2 issuer, 1 destination), 1 running; "

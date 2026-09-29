@@ -494,7 +494,11 @@ class RelayAgentBridge:
         )
         from .enrollment_codes import looks_like_join_code
 
-        if any(looks_like_join_code(part) for part in value.split()):
+        parts = value.split()
+        if parts and (
+            looks_like_join_code(parts[0].upper())
+            or any(looks_like_join_code(part) for part in parts[1:])
+        ):
             raise RelayError("enrollment codes must use the private code-entry view")
         result = await self._owner_call(
             "relay.command", {"value": value, "agent_id": self.identity.agent_id}
@@ -806,7 +810,7 @@ class RelayAgentBridge:
                 raise RelayError(
                     "the relay connection restarted after this code was created, "
                     "so this request can no longer be decided; create a new code "
-                    "with /connect offer"
+                    "with /connect code"
                 ) from None
             if isinstance(code, str) and code.isidentifier():
                 raise RelayError(f"enrollment decision unavailable ({code})") from None

@@ -685,11 +685,11 @@ async def test_relay_status_reports_the_attached_workspace_and_agent_identity(br
     # Default /connect status shows names, not keys or workspace ids
     # (docs/specs/agent-network-simple-flow.md section 6); the agent's own
     # identity is always visible in the online list.
-    status = bridge.commands.format_status()
+    status = await bridge.commands.format_status()
     assert f"{bridge.identity.identity} (this device)" in status
     assert bridge.commands.client.public_key not in status
 
-    keyed = bridge.commands.format_status(show_keys=True)
+    keyed = await bridge.commands.format_status(show_keys=True)
     client_status = bridge.commands.client.status()
 
     assert f"workspace id: {client_status['workspace_id']}" in keyed

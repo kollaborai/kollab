@@ -308,7 +308,7 @@ class ConnectAltView(AltView):
             self._write_line(2, y + 3, self._validation_error, width)
         self._write_line(2, y + 5, "Tab: switch   Enter: submit   Esc: cancel", width)
         self._write_line(
-            2, y + 7, "No code? Run /connect offer on a device that is already connected.", width
+            2, y + 7, "No code? Run /connect code on a device that is already connected.", width
         )
 
     def _render_outcome(self, y: int, width: int) -> None:

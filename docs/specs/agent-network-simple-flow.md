@@ -446,12 +446,18 @@ How it stays secure with 40 bits:
   `HMAC(domain="lookup", network, code)` and the verifier
   `scrypt(code, salt=offer id)` as today. The relay stores hashes of both,
   never the code. The lookup tag finds the offer; the verifier proves it.
-- The relay burns an offer after 5 failed lookups or proofs from any source,
-  and rate-limits enrollment requests per source as it does today.
+- The relay burns an offer after 5 failed proofs from any source. A failed
+  lookup names no offer, so lookups are bounded by the per-source rate limit
+  and the 2^40 tag space inside the five-minute window.
 - The issuing human sees the joining device's fingerprint on the accept line
   and accepts by hand. A guessed code still needs a human to press `a`.
 - The code never enters a command, chat, or a log; the private form keeps
-  that guarantee. `/connect code` prints it once, to the screen only.
+  that guarantee. `/connect code` prints it once, to the screen only. The
+  command guard and the log redaction recognize the code as shown,
+  `XXXX-XXXX` in upper case; the private form also accepts lower case and no
+  dash.
+- 0.11.0 still accepts a `K1-…` code issued by a 0.10.x device, so a network
+  can upgrade one machine at a time. That acceptance goes away in 0.12.0.
 - The network secret and device keys are as today; the short code only opens
   the door once.
 

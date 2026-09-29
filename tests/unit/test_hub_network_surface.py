@@ -62,7 +62,8 @@ def _relay_commands(tmp_path, *, agent_bridge):
 # --------------------------------------------------------------------- #
 
 
-def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
+@pytest.mark.asyncio
+async def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
         device_name=lambda: "mac-kollab",
@@ -72,7 +73,7 @@ def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
     )
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
 
-    status = commands.format_status()
+    status = await commands.format_status()
 
     assert "network kollabor.ai via kollabor.ai  trust: open" in status
     assert "this device mac-kollab" in status
@@ -87,7 +88,8 @@ def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
     assert "workspace id" not in status
 
 
-def test_status_keys_appends_the_technical_block(tmp_path):
+@pytest.mark.asyncio
+async def test_test_status_keys_appends_the_technical_block(tmp_path):
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
         device_name=lambda: "mac-kollab",
@@ -97,7 +99,7 @@ def test_status_keys_appends_the_technical_block(tmp_path):
     )
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
 
-    status = commands.format_status(show_keys=True)
+    status = await commands.format_status(show_keys=True)
 
     assert commands.client.public_key in status
     assert "workspace id:" in status
@@ -348,7 +350,8 @@ async def test_broadcast_without_network_scope_stays_local():
 # --------------------------------------------------------------------- #
 
 
-def test_format_status_lists_remote_agents_with_device_online_state():
+@pytest.mark.asyncio
+async def test_format_status_lists_remote_agents_with_device_online_state():
     hub = HubPlugin.__new__(HubPlugin)
     hub._identity = SimpleNamespace(
         identity="koordinator",
@@ -364,6 +367,7 @@ def test_format_status_lists_remote_agents_with_device_online_state():
     hub._change_feed = None
     hub._relay_agent = SimpleNamespace(remote_agents=lambda: REMOTE_ROWS)
 
+    await hub._refresh_remote_agent_rows()
     status = hub._format_status()
 
     assert "infra@alzan-prod-home - idle (device online)" in status
@@ -415,3 +419,70 @@ async def test_roster_context_includes_network_line_and_remote_rows():
 
 async def _async_empty_list(*_args, **_kwargs):
     return []
+
+
+# --------------------------------------------------------------------- #
+# The real bridge's remote_agents()/resolve_handle() are coroutines. The
+# first build called them without await and every agent@device message
+# failed live; these tests use async fakes so that can't come back.
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_status_awaits_an_async_bridge(tmp_path):
+    async def remote_agents():
+        return REMOTE_ROWS
+
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        remote_agents=remote_agents,
+        plugin=SimpleNamespace(_presence=None, _identity=SimpleNamespace(identity="koordinator", agent_id="k1")),
+        _enrollment_issuer=None,
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+
+    status = await commands.format_status()
+
+    assert "  koordinator (this device)" in status
+    assert "  infra@alzan-prod-home - idle" in status
+    assert status.index("koordinator (this device)") < status.index("infra@alzan-prod-home")
+    assert "offline devices" not in status or "alzan-prod-home" in status
+
+
+@pytest.mark.asyncio
+async def test_route_message_awaits_resolve_handle():
+    hub = HubPlugin.__new__(HubPlugin)
+    sent = []
+
+    async def resolve_handle(handle):
+        assert handle == "infra@alzan-prod-home"
+        return REMOTE_ROWS[0]["address"]
+
+    async def send(address, content, kind="message"):
+        sent.append((address, content, kind))
+
+    hub._relay_agent = SimpleNamespace(resolve_handle=resolve_handle, send=send, trust_level=lambda: "open")
+    hub._trace_delivery = lambda *a, **k: None
+    message = HubMessage(from_identity="lapis", to="infra@alzan-prod-home", content="check the tunnel")
+
+    rejections = await hub._route_message(message)
+
+    assert rejections == []
+    assert sent == [(REMOTE_ROWS[0]["address"], "check the tunnel", "message")]
+    assert message.metadata["network"] == {"to": REMOTE_ROWS[0]["address"]}
+
+
+@pytest.mark.asyncio
+async def test_refresh_remote_agent_rows_awaits_and_snapshots():
+    hub = HubPlugin.__new__(HubPlugin)
+
+    async def remote_agents():
+        return REMOTE_ROWS
+
+    hub._relay_agent = SimpleNamespace(remote_agents=remote_agents)
+
+    assert hub._remote_agent_rows() == []
+    rows = await hub._refresh_remote_agent_rows()
+    assert [r["handle"] for r in rows] == ["infra@alzan-prod-home", "ops@alzan-prod-home"]
+    assert hub._remote_agent_rows() == rows

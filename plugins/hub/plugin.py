@@ -9,6 +9,7 @@ offer help or coordinate work.
 import asyncio
 import collections
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -3054,6 +3055,7 @@ class HubPlugin(BasePlugin):
                 error="hub not initialized",
             )
 
+        await self._refresh_remote_agent_rows()
         status = self._format_status()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -3075,6 +3077,7 @@ class HubPlugin(BasePlugin):
             )
 
         # Reuse the same status formatter as hub_status
+        await self._refresh_remote_agent_rows()
         status = self._format_status()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -7286,7 +7289,7 @@ class HubPlugin(BasePlugin):
 
         lines.append("")
 
-        remote_rows = self._remote_agent_rows()
+        remote_rows = await self._refresh_remote_agent_rows()
         if self._roster or remote_rows:
             lines.append("active agents:")
             for agent in self._roster:
@@ -8054,6 +8057,8 @@ class HubPlugin(BasePlugin):
                 return [(message.to, "network messaging is not available on this build")]
             try:
                 address = resolve(handle_str)
+                if inspect.isawaitable(address):
+                    address = await address
                 await send(address, message.content, kind="message")
             except RelayError as exc:
                 return [(message.to, str(exc))]
@@ -8426,22 +8431,31 @@ class HubPlugin(BasePlugin):
         return MessageScope.DIRECT.value
 
     def _remote_agent_rows(self) -> list:
-        """Rows from the relay bridge's remote_agents(), degrading to none.
+        """The last fetched remote rows (agent@device). Sync readers use this.
 
-        Slice A (relay_agent.py) owns the real implementation; this only
-        needs to survive its absence on older or partial builds.
+        `_refresh_remote_agent_rows()` fills it; the relay bridge's
+        `remote_agents()` is async, so anything synchronous (the trender
+        roster, `_format_status`) reads this snapshot instead.
         """
+        rows = getattr(self, "_remote_rows_snapshot", None)
+        return list(rows) if isinstance(rows, list) else []
+
+    async def _refresh_remote_agent_rows(self) -> list:
+        """Ask the relay bridge for remote agents and cache the answer."""
         relay = getattr(self, "_relay_agent", None)
         getter = getattr(relay, "remote_agents", None)
-        if not callable(getter):
-            return []
-        try:
-            rows = getter()
-        except Exception:
-            return []
+        rows: Any = []
+        if callable(getter):
+            try:
+                rows = getter()
+                if inspect.isawaitable(rows):
+                    rows = await rows
+            except Exception:
+                rows = []
         if not isinstance(rows, (list, tuple)):
-            return []
-        return [row for row in rows if isinstance(row, dict)]
+            rows = []
+        self._remote_rows_snapshot = [row for row in rows if isinstance(row, dict)]
+        return list(self._remote_rows_snapshot)
 
     def _relay_network_domain(self) -> str:
         """This device's network domain for display, without the scheme."""
@@ -8679,7 +8693,12 @@ class HubPlugin(BasePlugin):
         head = parts[0].lower() if parts else ""
         from .enrollment_codes import looks_like_join_code
 
-        if any(looks_like_join_code(part) for part in parts):
+        # A bare code in any case is never a domain; inside a subcommand only the
+        # upper-case form is treated as a code, so lower-case device names pass.
+        if parts and (
+            looks_like_join_code(parts[0].upper())
+            or any(looks_like_join_code(part) for part in parts[1:])
+        ):
             return CODE_IN_COMMAND
         if head == "help":
             show_all = len(parts) >= 2 and parts[1].lower() == "all"
@@ -8687,7 +8706,13 @@ class HubPlugin(BasePlugin):
         if head in CONNECT_REMOVED:
             return f"connect: {CONNECT_REMOVED[head]}"
         if head == "":
-            return await self._open_connect_altview("kollabor.ai")
+            if not self._relay_network_domain():
+                return await self._open_connect_altview("kollabor.ai")
+            # Already on a network: the screen is the status text until the
+            # dashboard altview lands (constitution section 6, `/connect`).
+            value = "status"
+            parts = ["status"]
+            head = "status"
         if head == "code":
             if len(parts) > 2:
                 return "connect: use /connect code [domain]"
@@ -9158,6 +9183,7 @@ class HubPlugin(BasePlugin):
             text = await self._read_hub_text_via_state_service("get_hub_status_text")
             if text is not None:
                 return text
+            await self._refresh_remote_agent_rows()
             return self._format_status()
         elif subcmd == "whoami":
             text = await self._read_hub_text_via_state_service("get_hub_whoami_text")
@@ -11239,7 +11265,7 @@ class HubPlugin(BasePlugin):
             if callable(resolve) and callable(send):
                 from .relay_state import RelayError
 
-                for row in self._remote_agent_rows():
+                for row in await self._refresh_remote_agent_rows():
                     if not row.get("online"):
                         continue
                     handle = row.get("handle") or format_handle(
@@ -11247,6 +11273,8 @@ class HubPlugin(BasePlugin):
                     )
                     try:
                         address = resolve(handle)
+                        if inspect.isawaitable(address):
+                            address = await address
                         await send(address, content, kind="message")
                         reached += 1
                     except RelayError:

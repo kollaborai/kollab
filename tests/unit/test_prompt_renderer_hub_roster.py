@@ -42,8 +42,7 @@ def test_no_peers_and_no_remote_agents_shows_empty_roster():
 def test_remote_agents_are_merged_as_agent_at_device():
     hub = SimpleNamespace(
         _presence=SimpleNamespace(get_cached_agents=lambda: [_agent("koordinator", is_coordinator=True)]),
-        _relay_agent=SimpleNamespace(
-            remote_agents=lambda: [
+        _remote_agent_rows=lambda: [
                 {"name": "infra", "device": "alzan-prod-home", "handle": "infra@alzan-prod-home", "state": "idle"},
                 {
                     "name": "ops",
@@ -52,8 +51,7 @@ def test_remote_agents_are_merged_as_agent_at_device():
                     "state": "working",
                     "task": "rotating logs",
                 },
-            ]
-        ),
+            ],
     )
     renderer = _renderer_with_hub(hub)
 
@@ -68,9 +66,7 @@ def test_remote_agents_alone_still_render_a_roster():
     """No local peers, but the network has agents -- still not 'no peers online'."""
     hub = SimpleNamespace(
         _presence=SimpleNamespace(get_cached_agents=lambda: []),
-        _relay_agent=SimpleNamespace(
-            remote_agents=lambda: [{"handle": "infra@alzan-prod-home", "state": "idle"}]
-        ),
+        _remote_agent_rows=lambda: [{"handle": "infra@alzan-prod-home", "state": "idle"}],
     )
     renderer = _renderer_with_hub(hub)
 

@@ -547,10 +547,10 @@ class PromptRenderer:
         # Slice A (plugins/hub/relay_agent.py) owns remote_agents(); degrade
         # to no rows when it is missing or errors.
         remote_rows = []
-        remote_getter = getattr(getattr(hub, "_relay_agent", None), "remote_agents", None)
-        if callable(remote_getter):
+        snapshot = getattr(hub, "_remote_agent_rows", None)
+        if callable(snapshot):
             try:
-                rows = remote_getter()
+                rows = snapshot()
                 if isinstance(rows, (list, tuple)):
                     remote_rows = [row for row in rows if isinstance(row, dict)]
             except Exception:

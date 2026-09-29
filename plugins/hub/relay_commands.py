@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import json
-import os
+import inspect
 import re
 import secrets
-import shlex
-import stat
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +16,10 @@ from .dns.discovery_store import DiscoveryStore
 
 MAX_VISIBLE_ENROLLMENT_REQUESTS = 24
 MAX_VISIBLE_ENROLLMENT_SCOPE_ITEMS = 4
+
+
+# Only valid under trust manual (docs/specs/agent-network-simple-flow.md section 6).
+MANUAL_TRUST_COMMANDS = frozenset({"authorize", "send", "withdraw", "answer", "task", "cancel"})
 
 
 class RelayCommands:
@@ -82,24 +83,54 @@ class RelayCommands:
                 pass
         return ""
 
-    def _remote_rows(self) -> list:
+    def _trust_level(self) -> str:
+        getter = getattr(self.agent_bridge, "trust_level", None)
+        try:
+            level = getter() if callable(getter) else DEFAULT_TRUST
+        except Exception:
+            level = DEFAULT_TRUST
+        return level if isinstance(level, str) and level else DEFAULT_TRUST
+
+    def _pending_request_lines(self) -> list[str]:
+        """`requests` lines for the status screen: who wants to join, by name."""
+        getter = getattr(self.agent_bridge, "pending_enrollment_requests", None)
+        if not callable(getter):
+            return []
+        try:
+            rows = list(getter())
+        except Exception:
+            return []
+        if not rows:
+            return ["requests none"]
+        lines = ["requests"]
+        for row in rows:
+            name = getattr(row, "device_name", "") or getattr(row, "enrollment_id", "")[:8]
+            fingerprint = getattr(row, "device_key_fingerprint", "")[:12]
+            lines.append(
+                f"  {name} wants to join   fingerprint {fingerprint}   /connect accept {name}"
+            )
+        return lines
+
+    async def _remote_rows(self) -> list:
         """Rows from the relay bridge's remote_agents(), degrading to none."""
         getter = getattr(self.agent_bridge, "remote_agents", None)
         if not callable(getter):
             return []
         try:
             rows = getter()
+            if inspect.isawaitable(rows):
+                rows = await rows
         except Exception:
             return []
         if not isinstance(rows, (list, tuple)):
             return []
         return [row for row in rows if isinstance(row, dict)]
 
-    def _resolve_peer_key(self, token: str) -> str:
+    async def _resolve_peer_key(self, token: str) -> str:
         """A 64-hex peer key is returned unchanged; a device name resolves to it."""
         if re.fullmatch(r"[0-9a-f]{64}", token):
             return token
-        for row in self._remote_rows():
+        for row in await self._remote_rows():
             if row.get("device") == token and row.get("address"):
                 try:
                     from .relay_conversations import RelayAddress
@@ -164,7 +195,7 @@ class RelayCommands:
             raise ValueError("Unsupported advertised relay control URL")
         return "wss://" + result.origin[len("https://") :] + "/relay/v1/ws"
 
-    def format_status(self, *, show_keys: bool = False) -> str:
+    async def format_status(self, *, show_keys: bool = False) -> str:
         """`/connect status`, redesigned per the constitution (sections 5-6).
 
         Names, not keys, appear here. ``show_keys`` appends the old
@@ -187,6 +218,12 @@ class RelayCommands:
         device_name = self._device_name()
         if device_name:
             lines.append(f"this device {device_name}")
+        try:
+            provisioned = self._format_networks()
+        except Exception:
+            provisioned = ""
+        if provisioned.startswith("provisioned networks:"):
+            lines.append(provisioned)
 
         if domain:
             fingerprint = hashlib.sha256(
@@ -197,15 +234,7 @@ class RelayCommands:
             lines.append("contact route none")
 
         lines.append("online")
-        remote_rows = self._remote_rows()
-        for row in remote_rows:
-            if not row.get("online"):
-                continue
-            handle = row.get("handle") or format_handle(
-                row.get("name", "?"), row.get("device", "?")
-            )
-            lines.append(f"  {handle} - {row.get('state', 'unknown')}")
-
+        remote_rows = await self._remote_rows()
         plugin = getattr(self.agent_bridge, "plugin", None)
         presence = getattr(plugin, "_presence", None)
         local_agents = []
@@ -224,6 +253,14 @@ class RelayCommands:
             name = getattr(agent, "identity", None)
             if name:
                 lines.append(f"  {name} (this device)")
+        for row in remote_rows:
+            if not row.get("online"):
+                continue
+            handle = row.get("handle") or format_handle(
+                row.get("name", "?"), row.get("device", "?")
+            )
+            lines.append(f"  {handle} - {row.get('state', 'unknown')}")
+        lines.extend(self._pending_request_lines())
 
         offline_devices = sorted(
             {
@@ -290,8 +327,8 @@ class RelayCommands:
             result.origin, ws_url=ws_url, ca=ca, private_cidrs=cidrs
         )
         return (
-            self.format_status()
-            + "\nNext: /connect offer shows a code; enter it with /connect on the other device."
+            await self.format_status()
+            + "\nNext: /connect code shows a code; enter it with /connect on the other device."
         )
 
     def _contacts(self):
@@ -412,19 +449,17 @@ class RelayCommands:
         return "connect: " + hint
 
     async def _run(self, value: str, *, source_agent=None) -> str:
-        from .relay_client import parse_invite
 
         head, _, rest = value.partition(" ")
         rest = rest.strip()
-        if head == "requests":
-            if rest:
-                return "usage: /connect requests"
-            if self.agent_bridge is None:
-                return "connect: local enrollment issuer is unavailable"
-            requests = self.agent_bridge.pending_enrollment_requests(
-                source_agent=source_agent
-            )
-            return self._format_enrollment_requests(requests)
+        if head in MANUAL_TRUST_COMMANDS:
+            level = self._trust_level()
+            if level != "manual":
+                return (
+                    f"connect: {head} is for trust manual; this network is {level}, "
+                    "so just message the agent with hub_msg. "
+                    "Run /connect trust manual to require a human on every message."
+                )
         if head in {"accept", "reject"}:
             fields = rest.split()
             if len(fields) != 1:
@@ -491,23 +526,14 @@ class RelayCommands:
             if not fields:
                 return f"usage: /connect {head} <device-or-peer-key> [agent]"
             try:
-                key = self._resolve_peer_key(fields[0])
+                key = await self._resolve_peer_key(fields[0])
             except ValueError as exc:
                 return f"connect: {exc}"
             new_rest = key if len(fields) == 1 else f"{key} {fields[1]}"
             return await self.agent_bridge.application_command(
                 head, new_rest, source_agent=source_agent
             )
-        if head in {
-            "grants",
-            "agents",
-            "authorize",
-            "withdraw",
-            "send",
-            "task",
-            "cancel",
-            "answer",
-        }:
+        if head in MANUAL_TRUST_COMMANDS:
             if self.agent_bridge is None:
                 return (
                     "connect: agent conversations require a running Kollab Hub session"
@@ -516,54 +542,22 @@ class RelayCommands:
                 head, rest, source_agent=source_agent
             )
         if head == "status":
-            return self.format_status(show_keys=rest.strip() == "keys")
-        if head == "networks":
-            if rest:
-                return "usage: /connect networks"
-            return self._format_networks()
-        if head == "peers":
-            peers = self.client.peers()
-            if not peers:
-                return "beacon: no other peers currently online in this invitation room"
-            return "beacon peers (routing visibility only):\n" + "\n".join(
-                peer["key"]
-                + ("  approved" if peer["approved"] else "  pending local approval")
-                for peer in peers
-            )
-        if head == "invite":
-            # Command events/history must never receive the bearer capability.
-            # Only a private file path reaches display and command hooks.
-            path = self.client.state_dir / ("invite-" + secrets.token_hex(4) + ".txt")
-            token = self.client.invite()
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "w") as stream:
-                stream.write(token + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            return (
-                f"Private invitation saved: {path}\n"
-                "Copy it privately to the other computer, then /connect join <local file path>."
-            )
-        if head in {"approve", "revoke"}:
+            return await self.format_status(show_keys=rest.strip() == "keys")
+        if head == "revoke":
             if not rest:
-                return f"usage: /connect {head} <device-name-or-peer-key>"
+                return "usage: /connect revoke <device>"
             try:
-                key = self._resolve_peer_key(rest)
+                key = await self._resolve_peer_key(rest)
             except ValueError as exc:
                 return f"connect: {exc}"
-            getattr(self.client, head)(key)
-            if head == "revoke" and self.agent_bridge is not None:
+            self.client.revoke(key)
+            if self.agent_bridge is not None:
                 self.agent_bridge._state()
                 self.agent_bridge.store.revoke(self.client.state.room, key)
             return (
-                f"peer presence {'approved' if head == 'approve' else 'revoked'}: {key}\n"
-                "Workspace tool permissions are separate."
+                f"device revoked: {rest}\n"
+                "Its grants are gone. Provider credentials it copied are not revoked at the provider."
             )
-        if head == "ping":
-            if not rest:
-                return "usage: /connect ping <full 64-hex peer public key>"
-            reply = await self.client.ping(rest)
-            return "encrypted peer response: " + json.dumps(reply, sort_keys=True)
         if head == "leave":
             await self.client.close(disable=True)
             return "left the network; automatic reconnect disabled for this workspace"
@@ -576,44 +570,6 @@ class RelayCommands:
                 return "beacon: relay not currently advertised; room unchanged"
             await self.client.close()
             self.client.rotate_room()
-            return await self._attach(result, ca, cidrs)
-        if head == "join":
-            if rest.startswith(("'", '"')):
-                try:
-                    paths = shlex.split(rest)
-                except ValueError:
-                    raise ValueError("invalid invitation path quoting") from None
-                if len(paths) != 1:
-                    raise ValueError("invalid invitation path quoting")
-                rest = paths[0]
-            if not rest or rest.startswith("kollab-invite-"):
-                return "usage: /connect join <private invitation file path>; do not paste invitation tokens into chat"
-            descriptor = os.open(
-                Path(rest).expanduser(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-            )
-            with os.fdopen(descriptor, "rb") as stream:
-                info = os.fstat(stream.fileno())
-                if (
-                    not stat.S_ISREG(info.st_mode)
-                    or info.st_uid != os.getuid()
-                    or info.st_mode & 0o077
-                ):
-                    raise ValueError("invitation must be an owned private regular file")
-                raw = stream.read(4097)
-            if len(raw) > 4096:
-                raise ValueError("invitation file is too large")
-            token = raw.decode("ascii").strip()
-            parsed = parse_invite(token)
-            # Reject before discovery or closing the existing connection.
-            if parsed["key"] == self.client.public_key:
-                raise ValueError("cannot join your own invitation")
-            result, ca, cidrs, _ = await self._discover(parsed["origin"])
-            if not self._relay_url(result):
-                return (
-                    "beacon: invitation origin does not advertise this relay protocol"
-                )
-            await self.client.close()
-            self.client.join_invite(token)
             return await self._attach(result, ca, cidrs)
         if head == "help":
             from .plugin import format_connect_help

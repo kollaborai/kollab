@@ -1,6 +1,6 @@
 {
   "name": "connect-palette-subcommands",
-  "description": "Typing /conn in the command menu lists /connect subcommands, and extending it to '/connect an' filters to 'answer' (issue #100). The hub stays enabled because it registers /connect; HOME is a temp dir, so the instance never joins the developer's mesh or relay.",
+  "description": "Typing /conn in the command menu lists the 13 shown /connect subcommands from the constitution (docs/specs/agent-network-simple-flow.md section 6), none of the removed Codex names, and '/connect kn' filters to knock/knocks (issue #121).",
   "config": {
     "command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":true}}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "app_init_sleep": 10,
@@ -14,7 +14,7 @@
     },
     {
       "action": "section",
-      "title": "subcommands appear under /connect"
+      "title": "the shown subcommands appear under /connect"
     },
     {
       "action": "send_keys",
@@ -22,7 +22,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "enroll",
+      "pattern": "Name this device",
       "timeout": 6
     },
     {
@@ -30,26 +30,41 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "Create a one-device, five-minute enrollment code",
-      "description": "offer is listed with its description"
+      "pattern": "Print a join code without the screen",
+      "description": "code is listed"
     },
     {
       "action": "assert_contains",
-      "pattern": "List pending enrollment requests",
-      "description": "requests is listed"
+      "pattern": "Trust level for this network",
+      "description": "trust is listed"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "enrollment code",
+      "description": "offer/enroll are gone from the palette"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "invitation file",
+      "description": "invite/join are gone from the palette"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Authorize one exact request",
+      "description": "advanced commands are not in the palette"
     },
     {
       "action": "section",
-      "title": "typing filters to answer"
+      "title": "typing filters to knock and knocks"
     },
     {
       "action": "type",
-      "text": "ect an",
+      "text": "ect kn",
       "delay": 0.15
     },
     {
       "action": "wait_for",
-      "pattern": "Answer a pending question",
+      "pattern": "Review introductions you received",
       "timeout": 6
     },
     {
@@ -57,12 +72,12 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "<event-id> <text>",
-      "description": "answer shows its arguments"
+      "pattern": "contact route",
+      "description": "knock shows its purpose"
     },
     {
       "action": "assert_not_contains",
-      "pattern": "List pending enrollment requests",
+      "pattern": "Name this device",
       "description": "the filter hides other subcommands"
     },
     {
