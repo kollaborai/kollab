@@ -22,7 +22,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Name this device",
+      "pattern": "Print a join code without the screen",
       "timeout": 6
     },
     {
@@ -30,13 +30,8 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "Print a join code without the screen",
-      "description": "code is listed"
-    },
-    {
-      "action": "assert_contains",
-      "pattern": "Trust level for this network",
-      "description": "trust is listed"
+      "pattern": "Accept a join or knock request by name",
+      "description": "accept is listed"
     },
     {
       "action": "assert_not_contains",
@@ -52,6 +47,36 @@
       "action": "assert_not_contains",
       "pattern": "Authorize one exact request",
       "description": "advanced commands are not in the palette"
+    },
+    {
+      "action": "section",
+      "title": "typing filters to trust"
+    },
+    {
+      "action": "type",
+      "text": "ect tr",
+      "delay": 0.15
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Trust level for this network",
+      "timeout": 6
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "sleep",
+      "seconds": 0.5
+    },
+    {
+      "action": "send_keys",
+      "keys": "/conn"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Print a join code without the screen",
+      "timeout": 6
     },
     {
       "action": "section",
