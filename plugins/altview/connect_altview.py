@@ -1,8 +1,9 @@
-"""Private code-entry view for device enrollment.
+"""Private views for device enrollment: the code-entry form and the Connect screen.
 
-This view deliberately has no history, event, logging, telemetry, clipboard,
-or persistence integration. The caller owns enrollment authority and receives
-the code only through the short-lived ``ConnectSubmission`` callback value.
+These views deliberately have no history, event, logging, telemetry,
+clipboard, or persistence integration. The caller owns enrollment authority
+and receives an entered code only through the short-lived
+``ConnectSubmission`` callback value; a code we issue is shown only here.
 """
 
 from __future__ import annotations
@@ -10,16 +11,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
-import textwrap
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Awaitable, Callable
 
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
+from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow
 
 _MAX_DOMAIN_LENGTH = 253
 _MAX_CODE_LENGTH = 4096
@@ -28,6 +29,10 @@ _SHORT_CODE_PASTE_RE = re.compile(
     r"[0-9A-HJKMNP-TV-Z]{4}-?[0-9A-HJKMNP-TV-Z]{4}", re.IGNORECASE
 )
 _REDACTED = "<redacted>"
+_LABEL_WIDTH = 13
+_POLL_SECONDS = 2.0
+_SHORT_CODE_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}")
+_OFFER_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
 class ConnectStatus(Enum):
@@ -226,7 +231,7 @@ class ConnectAltView(AltView):
 
         renderer.clear_screen()
         theme = T()
-        top = max(0, (height - 10) // 2)
+        top = max(0, (height - 12) // 2)
         renderer.write_at(
             0,
             top,
@@ -236,7 +241,7 @@ class ConnectAltView(AltView):
         renderer.write_at(
             0,
             top + 1,
-            solid(" Connect device ".ljust(width), theme.dark[1], theme.text, width),
+            solid(" Connect".ljust(width), theme.dark[1], theme.text, width),
             "",
         )
 
@@ -302,16 +307,17 @@ class ConnectAltView(AltView):
     def _render_entry(self, y: int, width: int) -> None:
         domain_marker = ">" if self._focus == "domain" else " "
         code_marker = ">" if self._focus == "code" else " "
+        self._write_line(1, y, "network".ljust(_LABEL_WIDTH) + "none", width)
         self._write_line(
-            2, y, f"{domain_marker} Domain: {self._visible_domain()}", width
+            2, y + 2, f"{domain_marker} Domain: {self._visible_domain()}", width
         )
         code_display = "********" if self._code_chars else "(enter privately)"
-        self._write_line(2, y + 1, f"{code_marker} Private code: {code_display}", width)
+        self._write_line(2, y + 3, f"{code_marker} Private code: {code_display}", width)
         if self._validation_error:
-            self._write_line(2, y + 3, self._validation_error, width)
-        self._write_line(2, y + 5, "Tab: switch   Enter: submit   Esc: cancel", width)
+            self._write_line(2, y + 5, self._validation_error, width)
+        self._write_line(2, y + 7, "Tab: switch   Enter: submit   Esc: cancel", width)
         self._write_line(
-            2, y + 7, "No code? Run /connect code on a device that is already connected.", width
+            2, y + 9, "No code? Run /connect code on a device that is already connected.", width
         )
 
     def _render_outcome(self, y: int, width: int) -> None:
@@ -319,9 +325,7 @@ class ConnectAltView(AltView):
         if outcome is None:
             message = "Connect request cancelled."
         elif outcome.status is ConnectStatus.PENDING:
-            self._write_line(2, y, "Request pending.", width)
-            self._write_line(2, y + 1, f"Receipt: {outcome.receipt_id}", width)
-            message = ""
+            message = "Request sent; waiting for approval on another device."
         elif outcome.status is ConnectStatus.APPROVED:
             message = "Connection approved."
         elif outcome.status is ConnectStatus.REJECTED:
@@ -458,17 +462,155 @@ class ConnectAltView(AltView):
         )[:limit]
 
 
-class ConnectOfferAltView(AltView):
-    """Privately display a one-time device code after an explicit human action."""
+@dataclass(frozen=True, slots=True)
+class ConnectScreenState:
+    """Everything ``connect_screen_lines`` needs; no terminal, no callbacks."""
+
+    snapshot: ConnectSnapshot | None = None
+    code: str = ""
+    code_remaining: int = 0
+    code_status: str = "creating"  # creating | active | expired | failed
+    selected: int = 0
+    notice: tuple[str, ...] = ()
+    code_only: bool = False
+
+
+def _fit(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _block(label: str, values: list[str], width: int) -> list[str]:
+    """`label` on the first row, blank label under it, values in one column."""
+    return [
+        _fit(" " + (label if index == 0 else "").ljust(_LABEL_WIDTH) + value, width)
+        for index, value in enumerate(values)
+    ]
+
+
+def _code_value(state: ConnectScreenState) -> str:
+    if state.code_status == "active":
+        minutes, seconds = divmod(max(0, state.code_remaining), 60)
+        return f"{state.code}   one device, expires in {minutes}:{seconds:02d}"
+    if state.code_status == "expired":
+        return "expired   press c for a new code"
+    if state.code_status == "creating":
+        return "creating…"
+    unreachable = state.snapshot is not None and not state.snapshot.relay_online
+    reason = "relay unreachable" if unreachable else "could not create a code"
+    return f"{reason}   press c to try again"
+
+
+def _request_rows(state: ConnectScreenState, width: int) -> list[str]:
+    requests = state.snapshot.requests if state.snapshot else ()
+    if not requests:
+        return ["none"]
+    room = width - 1 - _LABEL_WIDTH
+    rows: list[str] = []
+    for index, request in enumerate(requests):
+        marker = ("> " if index == state.selected else "  ") if len(requests) > 1 else ""
+        who = f"{marker}{request.device or 'unknown device'} wants to join"
+        tail = f"fingerprint {request.fingerprint}   [a]ccept [r]eject"
+        if len(who) + 3 + len(tail) <= room:
+            rows.append(f"{who}   {tail}")
+        else:
+            rows += [who, " " * len(marker) + tail]
+    return rows
+
+
+def _footer(state: ConnectScreenState) -> str:
+    keys = []
+    requests = state.snapshot.requests if state.snapshot and not state.code_only else ()
+    if len(requests) > 1:
+        keys.append("up/down select")
+    if requests:
+        keys += ["a accept", "r reject"]
+    keys += ["c new code", "esc close"]
+    return " " + "  ".join(keys)
+
+
+def _clip(lines: list[str], width: int, max_lines: int | None) -> list[str]:
+    if max_lines is None or len(lines) <= max_lines:
+        return lines
+    return lines[: max(1, max_lines - 1)] + [_fit(" …", width)]
+
+
+def connect_screen_lines(
+    state: ConnectScreenState, width: int, max_lines: int | None = None
+) -> list[str]:
+    """The Connect screen as plain lines, each at most ``width`` characters.
+
+    Pure: state in, strings out, so it is testable without a terminal. The
+    first line is the title. Names and short fingerprints only; keys, receipt
+    ids and relay addresses never reach this function.
+    """
+    lines = [_fit(" Connect code" if state.code_only else " Connect", width)]
+    snapshot = state.snapshot
+    if state.code_only:
+        lines += _block("join code", [_code_value(state)], width)
+        if state.code_status == "active":
+            lines.append(_fit(" type it into /connect on the other machine", width))
+    elif snapshot is None:
+        lines += _block("network", ["loading…"], width)
+        lines += _block("join code", [_code_value(state)], width)
+    else:
+        network = (
+            snapshot.domain
+            if snapshot.network == snapshot.domain
+            else f"{snapshot.network}  via {snapshot.domain}"
+        )
+        lines += _block("network", [f"{network}   trust: {snapshot.trust}"], width)
+        lines += _block("this device", [snapshot.device or "unnamed"], width)
+        lines += _block("join code", [_code_value(state)], width)
+        if snapshot.requests or not state.notice:
+            lines += _block("requests", _request_rows(state, width), width)
+        lines += [_fit(" " + text, width) for text in state.notice]
+        if snapshot.knocks:
+            lines += _block(
+                "knocks", [f"{snapshot.knocks} waiting   /connect knocks"], width
+            )
+        online = (
+            [f"{name} (this device)" for name in snapshot.local_agents]
+            + list(snapshot.remote_agents)
+            + [f"{device} (offline)" for device in snapshot.offline_devices]
+        )
+        lines += _block("online", online or ["none"], width)
+    lines += ["", _fit(_footer(state), width)]
+    return _clip(lines, width, max_lines)
+
+
+def _sent_summary(categories: tuple[str, ...]) -> str:
+    """What accepting copies to the new device, from the request's own scope."""
+    if any(category.endswith(":oauth_tokens") for category in categories):
+        return "profile settings and one sign-in"
+    if any(category.startswith("provider:") for category in categories):
+        return "profile settings and one api key"
+    return ""
+
+
+class ConnectScreenAltView(AltView):
+    """The Connect screen: join code, requests and roster on one page.
+
+    The code is created when the screen opens and lives only in a
+    ``PrivateCode`` that is wiped on expiry and on every exit. Requests and
+    the roster refresh from ``on_load`` in a background task, so a slow relay
+    never stalls rendering or input. With ``code_only`` it shows just the
+    code (``/connect code``); nothing but this private view ever holds it.
+    """
 
     def __init__(
         self,
         domain: str = "kollabor.ai",
         on_create: EnrollmentOfferCallback | None = None,
+        on_load: Callable[[], Any] | None = None,
+        on_decide: Callable[[JoinRequestRow, str], Any] | None = None,
+        *,
+        code_only: bool = False,
     ) -> None:
         metadata = AltViewMetadata(
-            plugin_type="connect-offer",
-            description="Create a private one-time device enrollment code",
+            plugin_type="connect-screen",
+            description="Join code, requests and online agents",
             version="1.0.0",
             author="Kollabor",
             category="internal",
@@ -478,14 +620,21 @@ class ConnectOfferAltView(AltView):
             supports_background=False,
         )
         super().__init__(metadata)
+        self.target_fps = 1.0
+        self.render_on_timer = True  # the code's countdown ticks
         self._domain = ConnectAltView._filter_text(domain, _MAX_DOMAIN_LENGTH)
         self._on_create = on_create
+        self._on_load = on_load
+        self._on_decide = on_decide
+        self.code_only = code_only
         self._renderer: Any = None
-        self._stage = "confirm"
         self._private_code: PrivateCode | None = None
-        self._offer_id = ""
         self._expires_at = 0
-        self.cancelled = False
+        self._code_status = "creating"
+        self._snapshot: ConnectSnapshot | None = None
+        self._selected = 0
+        self._notice: tuple[str, ...] = ()
+        self._deciding = False
 
     @property
     def domain(self) -> str:
@@ -493,9 +642,14 @@ class ConnectOfferAltView(AltView):
 
     async def on_enter(self, renderer: Any) -> None:
         self._renderer = renderer
-        self._stage = "confirm"
         self._clear_code()
-        self.cancelled = False
+        self._code_status = "creating"
+        self._snapshot = None
+        self._selected = 0
+        self._notice = ()
+        self._start_code()
+        if not self.code_only and self._on_load is not None:
+            self.spawn_background_task(self._poll(), "poll")
 
     async def render_frame(self, delta_time: float) -> bool:
         if self._renderer is None:
@@ -503,75 +657,41 @@ class ConnectOfferAltView(AltView):
         width, height = self._renderer.get_terminal_size()
         if width <= 0 or height <= 0:
             return True
+        lines = connect_screen_lines(self._screen_state(), width, height - 2)
         self._renderer.clear_screen()
         theme = T()
-        top = max(0, (height - 10) // 2)
         self._renderer.write_at(
-            0,
-            top,
-            solid_fg(str(C["half_bottom"]) * width, theme.dark[1]),
-            "",
+            0, 0, solid_fg(str(C["half_bottom"]) * width, theme.dark[1]), ""
         )
         self._renderer.write_at(
-            0,
-            top + 1,
-            solid(
-                " Create device code ".ljust(width), theme.dark[1], theme.text, width
-            ),
-            "",
+            0, 1, solid(lines[0].ljust(width), theme.dark[1], theme.text, width), ""
         )
-        if self._stage == "confirm":
-            self._write_line(2, top + 3, f"Network: {self._domain}", width)
-            self._write_line(
-                2, top + 5, "This authorizes one new device for five minutes.", width
-            )
-            self._write_line(
-                2, top + 6, "May include one provider profile credential.", width
-            )
-            self._write_line(
-                2,
-                top + 7,
-                "Review its exact scope before accepting.",
-                width,
-            )
-            self._write_line(
-                2,
-                top + 8,
-                "Network removal does not revoke copied credentials.",
-                width,
-            )
-            self._write_line(2, top + 10, "Enter: create code   Esc: cancel", width)
-        elif self._stage == "creating":
-            self._write_line(2, top + 4, "Creating one-time code…", width)
-        elif self._stage == "code":
-            self._render_code(top + 3, width)
-        else:
-            self._write_line(2, top + 4, "Could not create a device code.", width)
-            self._write_line(
-                2, top + 5, f"Check that /connect status shows {self._domain} online, then retry.", width
-            )
-            self._write_line(2, top + 7, "Enter or Esc: close", width)
+        for offset, line in enumerate(lines[1:]):
+            self._renderer.write_at(0, 3 + offset, line, "")
         return True
 
     async def handle_input(self, key_press: KeyPress) -> bool:
-        if self._stage == "confirm":
-            if key_press.name == "Escape":
-                self.cancelled = True
-                self._stage = "cancelled"
-                return True
-            if key_press.name == "Enter":
-                await self._create()
-                return False
-            return False
-        if self._stage == "creating":
-            return False
-        if key_press.name in ("Escape", "Enter"):
+        if key_press.name == "Escape" or (
+            self.code_only and key_press.name == "Enter"
+        ):
             return True
+        count = len(self._snapshot.requests) if self._snapshot else 0
+        if key_press.name == "ArrowUp":
+            self._selected = max(0, self._selected - 1)
+        elif key_press.name == "ArrowDown":
+            self._selected = max(0, min(count - 1, self._selected + 1))
+        else:
+            char = (key_press.char or "").lower()
+            if char == "c" and self._code_status != "creating":
+                self._start_code()
+            elif char in ("a", "r") and not self.code_only:
+                await self._decide("accept" if char == "a" else "reject")
+        self.request_render()
         return False
 
     async def on_suspend(self) -> None:
-        """Discard the displayed offer code on every AltView exit."""
-        self._clear_code()
+        """Discard the code and stop polling on every AltView exit."""
+        await self._stop()
         invalidate_render_cache = getattr(
             self._renderer, "invalidate_render_cache", None
         )
@@ -580,11 +700,42 @@ class ConnectOfferAltView(AltView):
         await super().on_suspend()
 
     async def on_complete(self) -> None:
-        self._clear_code()
+        await self._stop()
         await super().on_complete()
 
+    async def _stop(self) -> None:
+        tasks = self.background_tasks
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._clear_code()
+
+    def _start_code(self) -> None:
+        self.spawn_background_task(self._create(), "code")
+
+    async def _poll(self) -> None:
+        while True:
+            await self._refresh()
+            await asyncio.sleep(_POLL_SECONDS)
+
+    async def _refresh(self) -> None:
+        """Reload requests and roster; on any failure keep what is on screen."""
+        try:
+            result = self._on_load() if self._on_load is not None else None
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, ConnectSnapshot):
+                self._snapshot = result
+                self._selected = max(0, min(self._selected, len(result.requests) - 1))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        self.request_render()
+
     async def _create(self) -> None:
-        self._stage = "creating"
+        self._clear_code()
+        self._code_status = "creating"
         self.request_render()
         try:
             if self._on_create is None:
@@ -605,65 +756,87 @@ class ConnectOfferAltView(AltView):
             if (
                 result["status"] != "offered"
                 or not isinstance(offer_id, str)
-                or not re.fullmatch(r"[0-9a-f]{32}", offer_id)
+                or not _OFFER_ID_RE.fullmatch(offer_id)
                 or not isinstance(expires_at, str)
                 or not expires_at.isdigit()
                 or int(expires_at) <= int(time.time())
                 or not isinstance(code, str)
-                or not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
+                or not _SHORT_CODE_RE.fullmatch(code)
             ):
                 raise ValueError("invalid enrollment offer")
             self._private_code = PrivateCode(code)
-            self._offer_id = offer_id
             self._expires_at = int(expires_at)
-            self._stage = "code"
+            self._code_status = "active"
         except asyncio.CancelledError:
             self._clear_code()
-            self._stage = "error"
+            self._code_status = "failed"
             raise
         except Exception:
+            # Callback errors may carry the code; show only the fixed line.
             self._clear_code()
-            self._stage = "error"
+            self._code_status = "failed"
         self.request_render()
 
-    def _render_code(self, y: int, width: int) -> None:
-        if self._private_code is None:
-            self._write_line(2, y, "This code is no longer available.", width)
-            self._write_line(2, y + 2, "Enter or Esc: close", width)
+    async def _decide(self, decision: str) -> None:
+        snapshot = self._snapshot
+        if (
+            snapshot is None
+            or not snapshot.requests
+            or self._on_decide is None
+            or self._deciding
+        ):
             return
-        remaining = self._expires_at - int(time.time())
-        if remaining <= 0:
-            self._clear_code()
-            self._write_line(2, y, "This code has expired.", width)
-            self._write_line(2, y + 2, "Enter or Esc: close", width)
-            return
+        row = snapshot.requests[self._selected]
+        who = row.device or "that device"
+        self._deciding = True
         try:
-            full_code = self._private_code.reveal() if self._private_code else ""
-        except RuntimeError:
-            full_code = ""
-        minutes, seconds = divmod(max(0, remaining), 60)
-        code_lines = textwrap.wrap(
-            full_code,
-            width=max(1, width - 4),
-            break_long_words=True,
-            break_on_hyphens=False,
+            reason = self._on_decide(row, decision)
+            if inspect.isawaitable(reason):
+                reason = await reason
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            reason = "try again"
+        finally:
+            self._deciding = False
+        if isinstance(reason, str) and reason:
+            self._notice = (f"could not {decision} {who}: {reason}",)
+            return
+        if decision == "accept":
+            notice = [
+                f"accepted {who}. it is now a trusted device on {snapshot.network}."
+            ]
+            sent = _sent_summary(row.categories)
+            if sent:
+                notice.append(f"sent to {who}: {sent}")
+            self._notice = tuple(notice)
+        else:
+            self._notice = (f"rejected {who}.",)
+        remaining = tuple(item for item in snapshot.requests if item is not row)
+        self._snapshot = replace(snapshot, requests=remaining)
+        self._selected = max(0, min(self._selected, len(remaining) - 1))
+
+    def _screen_state(self) -> ConnectScreenState:
+        remaining = 0
+        code = ""
+        if self._code_status == "active":
+            remaining = self._expires_at - int(time.time())
+            if remaining <= 0 or self._private_code is None:
+                self._clear_code()
+                self._code_status = "expired"
+            else:
+                code = self._private_code.reveal()
+        return ConnectScreenState(
+            snapshot=self._snapshot,
+            code=code,
+            code_remaining=remaining,
+            code_status=self._code_status,
+            selected=self._selected,
+            notice=self._notice,
+            code_only=self.code_only,
         )
-        for index, line in enumerate(code_lines):
-            self._write_line(2, y + index, line, width)
-        status_y = y + len(code_lines) + 1
-        self._write_line(
-            2, status_y, f"one device, expires in {minutes}:{seconds:02d}", width
-        )
-        self._write_line(
-            2, status_y + 2, "type it into /connect on the other machine", width
-        )
-        self._write_line(2, status_y + 4, "Enter or Esc: close", width)
 
     def _clear_code(self) -> None:
         if self._private_code is not None:
             self._private_code.clear()
             self._private_code = None
-
-    def _write_line(self, x: int, y: int, text: str, width: int) -> None:
-        if self._renderer is not None and x < width:
-            self._renderer.write_at(x, y, text[: max(0, width - x)], "")

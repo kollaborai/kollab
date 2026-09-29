@@ -1,7 +1,6 @@
 """Security and input behavior for the private connect AltView."""
 
 import re
-from unittest.mock import Mock
 
 import pytest
 
@@ -9,7 +8,6 @@ from kollabor_tui.altview.session import AltViewSession
 from kollabor_tui.key_parser import KeyParser, KeyPress, KeyType
 from plugins.altview.connect_altview import (
     ConnectAltView,
-    ConnectOfferAltView,
     ConnectOutcome,
     ConnectStatus,
     ConnectSubmission,
@@ -79,21 +77,7 @@ async def test_private_code_is_masked_and_length_is_not_rendered():
 
 
 @pytest.mark.asyncio
-async def test_offer_confirmation_discloses_provider_credential_copy_boundary():
-    view = ConnectOfferAltView("kollabor.ai")
-    renderer = _FakeRenderer(size=(80, 16))
-
-    await view.on_enter(renderer)
-    await view.render_frame(0.0)
-    rendered = renderer.text()
-
-    assert "one provider profile credential" in rendered
-    assert "Review its exact scope before accepting." in rendered
-    assert "Network removal does not revoke copied credentials." in rendered
-
-
-@pytest.mark.asyncio
-async def test_submit_passes_private_wrapper_then_only_pending_receipt_is_shown():
+async def test_submit_passes_private_wrapper_then_pending_request_shows_no_receipt():
     captured = {}
 
     async def submit(submission: ConnectSubmission) -> ConnectOutcome:
@@ -123,8 +107,8 @@ async def test_submit_passes_private_wrapper_then_only_pending_receipt_is_shown(
 
     await view.render_frame(0.0)
     rendered = renderer.text()
-    assert "Request pending." in rendered
-    assert "Receipt: enroll-7f2a" in rendered
+    assert "Request sent; waiting for approval on another device." in rendered
+    assert "enroll-7f2a" not in rendered
     assert "kollabor.ai" not in rendered
     assert "s3cr3t-value" not in rendered
     assert "member" not in rendered.lower()
@@ -376,67 +360,6 @@ async def test_domain_filters_terminal_controls_and_submit_requires_both_fields(
 
 
 @pytest.mark.asyncio
-async def test_offer_code_is_shown_only_in_private_view_and_wiped_on_destroy(
-    monkeypatch,
-):
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = "ABCD-EFGH"
-    called = []
-
-    async def create(domain):
-        called.append(domain)
-        return {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1300",
-            "code": code,
-        }
-
-    view = ConnectOfferAltView("example.test", on_create=create)
-    renderer = _FakeRenderer()
-    await view.on_enter(renderer)
-    await view.handle_input(_named("Enter"))
-    await view.render_frame(0.0)
-
-    assert called == ["example.test"]
-    assert code in renderer.text()
-    assert "one device, expires in" in renderer.text()
-    assert "type it into /connect on the other machine" in renderer.text()
-    private_code = view._private_code
-    assert private_code is not None
-    assert repr(private_code) == "PrivateCode(<redacted>)"
-    await view.on_complete()
-    with pytest.raises(RuntimeError, match="cleared"):
-        private_code.reveal()
-
-
-@pytest.mark.asyncio
-async def test_offer_view_accepts_the_short_code_format(monkeypatch):
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = "7QK4-M2XP"
-
-    async def create(domain):
-        return {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1300",
-            "code": code,
-        }
-
-    view = ConnectOfferAltView("example.test", on_create=create)
-    renderer = _FakeRenderer()
-    await view.on_enter(renderer)
-    await view.handle_input(_named("Enter"))
-    await view.render_frame(0.0)
-
-    assert view._stage == "code"
-    assert code in renderer.text()
-    assert "one device, expires in" in renderer.text()
-
-
-@pytest.mark.asyncio
 async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
     captured = {}
 
@@ -460,77 +383,14 @@ async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
 
 
 @pytest.mark.asyncio
-async def test_offer_code_is_cleared_on_real_session_exit(monkeypatch):
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = "ABCD-EFGH"
-    view = ConnectOfferAltView(
-        on_create=lambda _domain: {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1300",
-            "code": code,
-        }
-    )
-    session = AltViewSession(view, event_bus=None, session_name="connect-offer")
-    invalidate_render_cache = Mock(wraps=session.renderer.invalidate_render_cache)
-    session.renderer.invalidate_render_cache = invalidate_render_cache
-    await view.on_enter(session.renderer)
-    await view.handle_input(_named("Enter"))
-    private_code = view._private_code
-    assert private_code is not None
-
-    # AltViewStackManager's reusable close path calls session.exit(), which
-    # suspends the view but does not destroy the session.
-    await session.exit()
-
-    assert view._private_code is None
-    invalidate_render_cache.assert_called_once_with()
-    with pytest.raises(RuntimeError, match="cleared"):
-        private_code.reveal()
-
-
-@pytest.mark.asyncio
-async def test_offer_code_is_cleared_from_view_after_expiry(monkeypatch):
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = "ABCD-EFGH"
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 900)
-    view = ConnectOfferAltView(
-        on_create=lambda _domain: {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1000",
-            "code": code,
-        }
-    )
-    renderer = _FakeRenderer()
+async def test_join_form_is_titled_connect_with_network_none_above_the_code_field():
+    view = ConnectAltView()
+    renderer = _FakeRenderer(size=(80, 24))
     await view.on_enter(renderer)
-    await view.handle_input(_named("Enter"))
-    await view.render_frame(0.0)
-    assert code in renderer.text()
-
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1001)
     await view.render_frame(0.0)
 
-    assert "This code has expired." in renderer.text()
-    assert code not in renderer.text()
-    assert view._private_code is None
-
-
-@pytest.mark.asyncio
-async def test_offer_callback_failure_never_renders_exception_text(caplog):
-    secret = "private-error-detail-token"
-
-    def fail(_domain):
-        raise RuntimeError(secret)
-
-    view = ConnectOfferAltView(on_create=fail)
-    renderer = _FakeRenderer()
-    await view.on_enter(renderer)
-    await view.handle_input(_named("Enter"))
-    await view.render_frame(0.0)
-
-    assert "Could not create a device code." in renderer.text()
-    assert "/connect status shows kollabor.ai online" in renderer.text()
-    assert secret not in renderer.text()
-    assert secret not in caplog.text
+    rows = [line for _, _, line in renderer.lines]
+    assert any(line.strip() == "Connect" for line in rows)
+    network = next(i for i, line in enumerate(rows) if line.strip() == "network      none")
+    code_field = next(i for i, line in enumerate(rows) if "Private code:" in line)
+    assert network < code_field

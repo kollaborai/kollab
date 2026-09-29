@@ -14,10 +14,12 @@ The design contract for this feature is [the agent network spec](../specs/agent-
 
 You do this once per machine. Call the machine that is already connected A, and the new one B.
 
-1. On A, run `/connect code`. A code appears, eight characters shown as `XXXX-XXXX`. It works for one device, for five minutes.
+1. On A, run `/connect`. The Connect screen opens with a code, eight characters shown as `XXXX-XXXX`, counting down. It works for one device, for five minutes. On a small terminal, `/connect code` shows just the code.
 2. On B, run `/connect` with nothing after it. Type the code into the private form and press Enter. Upper or lower case, with or without the dash. B joins as `<hostname>-<folder>`; rename it any time with `/connect name <name>`.
-3. On A, run `/connect`. It shows `alzan-prod-home wants to join   fingerprint 4d04…9f2e`. Press `a` to accept, or run `/connect accept alzan-prod-home`.
-4. Run `/connect status` on either machine. Every device on the network is listed with its agents as `agent@device`.
+3. Within a couple of seconds A's screen shows `alzan-prod-home wants to join   fingerprint 4d04…9f2e   [a]ccept [r]eject`. Press `a` to accept (with several requests, Up and Down pick one first), or run `/connect accept alzan-prod-home`. The screen then prints `accepted alzan-prod-home. it is now a trusted device on marco-home.` and lists it under `online`.
+4. Every device on the network is listed on that screen and in `/connect status`, with its agents as `agent@device`.
+
+The code has expired when the line reads `expired   press c for a new code`; press `c`. The screen closes with `Esc`. If you are attached to a daemon (`kollab --attach`), `/connect` prints the daemon's `/connect status` text instead of the screen; codes still come from `/connect code`.
 
 Codes go only in that private form. If you type a code into a command or into chat, Kollab refuses it, and codes never reach its logs.
 
@@ -62,7 +64,7 @@ Today a knock is an introduction only. Messages between two different networks a
 | `connect: unknown subcommand '…'` | Check the spelling with `/connect help`. |
 | `connect: codes never go in a command…` | Run `/connect` alone and type the code into the form. |
 | `unknown agent@device: run /connect status to see who is online` | The device is offline or the name is wrong. `/connect status` lists what is reachable. |
-| `…the relay connection restarted after this code was created…` | That code can't be used any more. Create a new one with `/connect code`. |
+| `…the relay connection restarted after this code was created…` | That code can't be used any more. Press `c` on the `/connect` screen, or run `/connect code`, for a new one. |
 | A device is listed as offline | Kollab has to be running on it. Start it there. |
 | `connect: this window is not connected to its agent daemon; restart kollab` | Quit with `/quit` and start `kollab` again. |
 

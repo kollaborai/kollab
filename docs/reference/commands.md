@@ -158,8 +158,9 @@ New to `/connect`? Start with the [connect guide](../guides/connect.md).
 
 `/hub dns connect [domain]` is an alias for `/connect [domain]`. An explicit
 domain performs signed public discovery and attaches the current workspace to
-the advertised relay. Bare `/connect` opens the private device-enrollment form
-(`kollabor.ai` by default; `enroll` was removed, see below). Public relay
+the advertised relay. Bare `/connect` opens the Connect screen on a device that
+is on a network, and the private code form on one that is not (`kollabor.ai` by
+default; `enroll` was removed, see below). Public relay
 attachment does not enroll a device in a private group; a fresh attachment
 starts in an empty workspace room and does not expose a public roster. Once a
 network exists, its remote agents appear in the roster as `agent@device` and
@@ -221,6 +222,35 @@ Removed. Each prints its redirect for one release instead of running:
 /connect disconnect                use /connect leave
 /connect grants                    use /connect status
 ```
+
+**The Connect screen** (bare `/connect` on a connected device) is one page:
+
+```text
+ Connect
+ network      marco-home  via kollabor.ai   trust: open
+ this device  mac-kollab
+ join code    7QK4-M2XP   one device, expires in 4:58
+ requests     alzan-prod-home wants to join   fingerprint 4d04…9f2e   [a]ccept [r]eject
+ knocks       1 waiting   /connect knocks
+ online       koordinator (this device)
+              koordinator@alzan-prod-home
+```
+
+- The join code is created when the screen opens and counts down. When it
+  expires the line reads `expired   press c for a new code`; `c` creates a new
+  one. If the relay is unreachable the line says so and the rest still renders.
+- Requests and the roster refresh about every two seconds. With more than one
+  request, Up and Down select a row; `a` accepts and `r` rejects it. Accepting
+  prints what it sent: the request's profile settings and one login (an api
+  key, or a ChatGPT sign-in) when the active profile has one, nothing else.
+  A duplicate device name or any other refusal is printed on the screen.
+- Rows that do not fit the terminal split or end in `…`; nothing wraps.
+- `Esc` closes it. The code exists only in this private view, never in chat,
+  history or logs.
+- `/connect code` opens the same view with just the code (small terminals).
+  With no network, bare `/connect` opens the code form under `network      none`.
+- An attached window (`kollab --attach`) prints the daemon's `/connect status`
+  text instead of the screen.
 
 Trust is one setting per network, defaulting to `open`: every accepted device's
 agents may message every other, under hub rules (no grants, no task envelope,

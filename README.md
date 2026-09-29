@@ -194,10 +194,10 @@ the network observes it, like the local hub. Start with the
 
 ```text
 # on the machine that is already connected
-/connect code                   # an 8-character code, one device, five minutes
+/connect                        # the screen: an 8-character code, one device, five minutes
 # on the new machine
 /connect                        # type the code into the private form
-# back on the first machine: press a on the request, or
+# back on the first machine, the request shows up on the screen: press a, or
 /connect accept alzan-prod-home
 # then, from any agent or a shell
 kollab --hub msg ops@alzan-prod-home "check the tunnel"

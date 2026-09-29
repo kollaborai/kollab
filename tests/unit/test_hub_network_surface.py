@@ -103,7 +103,10 @@ async def test_status_shows_a_16_hex_contact_route_and_a_short_join_fingerprint(
         remote_agents=lambda: [],
         plugin=SimpleNamespace(_presence=None, _identity=None),
         _enrollment_issuer=None,
-        pending_enrollment_requests=lambda: [row],
+        identity=SimpleNamespace(agent_id="k1"),
+        pending_enrollment_requests=lambda *, source_agent: (
+            [row] if source_agent == "k1" else []
+        ),
     )
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
 
@@ -116,6 +119,120 @@ async def test_status_shows_a_16_hex_contact_route_and_a_short_join_fingerprint(
     assert short_fingerprint(fingerprint) == "4d04\u20269f2e"
     assert fingerprint not in status
     assert "a" * 32 not in status
+
+
+async def _async_remote_agents():
+    return REMOTE_ROWS
+
+
+@pytest.mark.asyncio
+async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_path):
+    fingerprint = "4d04" + "0" * 56 + "9f2e"
+    row = SimpleNamespace(
+        enrollment_id="a" * 32,
+        device_name="ana-laptop",
+        device_key_fingerprint=fingerprint,
+        credential_categories=("conversation:send", "provider:openai:api_key"),
+    )
+    offline_key = "b" * 64
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        network_name=lambda: "marco-home",
+        remote_agents=_async_remote_agents,
+        identity=SimpleNamespace(agent_id="k1"),
+        plugin=SimpleNamespace(
+            _presence=None, _identity=SimpleNamespace(identity="koordinator", agent_id="k1")
+        ),
+        pending_enrollment_requests=lambda *, source_agent: [row],
+        _state=lambda: SimpleNamespace(
+            state=SimpleNamespace(peer_devices={offline_key: "laptop-kollab"})
+        ),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    commands.client.state.approvals = [offline_key]
+
+    async def no_knocks(_domain):
+        return []
+
+    commands.pending_contact_requests = no_knocks
+
+    snapshot = await commands.connect_snapshot()
+
+    assert (snapshot.network, snapshot.domain, snapshot.trust) == (
+        "marco-home",
+        "kollabor.ai",
+        "open",
+    )
+    assert snapshot.device == "mac-kollab"
+    assert snapshot.relay_online is True
+    assert snapshot.local_agents == ("koordinator",)
+    assert snapshot.remote_agents == ("infra@alzan-prod-home",)
+    assert "laptop-kollab" in snapshot.offline_devices
+    [request] = snapshot.requests
+    assert request.device == "ana-laptop"
+    assert request.fingerprint == short_fingerprint(fingerprint)
+    assert request.categories == ("conversation:send", "provider:openai:api_key")
+    assert snapshot.knocks == 0
+    assert fingerprint not in repr(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_connect_snapshot_counts_knocks_at_most_every_few_seconds(tmp_path):
+    from plugins.hub import relay_commands as module
+
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        remote_agents=_async_remote_agents,
+        plugin=SimpleNamespace(_presence=None, _identity=None),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    cleared = []
+    calls = []
+
+    class _Introduction:
+        def clear(self):
+            cleared.append(True)
+
+    async def pending(domain):
+        calls.append(domain)
+        return [SimpleNamespace(introduction=_Introduction())] * 2
+
+    commands.pending_contact_requests = pending
+
+    first = await commands.connect_snapshot()
+    second = await commands.connect_snapshot()
+
+    assert (first.knocks, second.knocks) == (2, 2)
+    assert calls == ["kollabor.ai"]  # cached inside the interval
+    assert len(cleared) == 2  # introductions are wiped after counting
+    commands._knock_count_cache = (-module.KNOCK_COUNT_TTL_SECONDS * 2, 2)
+    await commands.connect_snapshot()
+    assert calls == ["kollabor.ai", "kollabor.ai"]
+
+
+@pytest.mark.asyncio
+async def test_connect_snapshot_with_the_relay_down_still_returns_and_skips_knocks(tmp_path):
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        remote_agents=_async_remote_agents,
+        plugin=SimpleNamespace(_presence=None, _identity=None),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    commands.client._state = "reconnecting"
+
+    async def hang(_domain):
+        raise AssertionError("no knock fetch while the relay is down")
+
+    commands.pending_contact_requests = hang
+
+    snapshot = await commands.connect_snapshot()
+
+    assert snapshot.relay_online is False
+    assert snapshot.knocks == 0
+    assert snapshot.device == "mac-kollab"
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,8 @@ import errno
 import inspect
 import re
 import secrets
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,37 @@ from .dns.discovery_store import DiscoveryStore
 
 MAX_VISIBLE_ENROLLMENT_REQUESTS = 24
 MAX_VISIBLE_ENROLLMENT_SCOPE_ITEMS = 4
+KNOCK_COUNT_TTL_SECONDS = 15.0
+KNOCK_COUNT_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class JoinRequestRow:
+    """One device asking to join, as the Connect screen shows it.
+
+    ``enrollment_id`` is the receipt the decision needs; it is never rendered.
+    """
+
+    enrollment_id: str
+    device: str
+    fingerprint: str
+    categories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectSnapshot:
+    """Everything the Connect screen shows except the join code."""
+
+    network: str
+    domain: str
+    trust: str
+    device: str
+    relay_online: bool
+    requests: tuple[JoinRequestRow, ...] = ()
+    knocks: int = 0
+    local_agents: tuple[str, ...] = ()
+    remote_agents: tuple[str, ...] = ()
+    offline_devices: tuple[str, ...] = ()
 
 
 # Only valid under trust manual (docs/specs/agent-network-simple-flow.md section 6).
@@ -77,6 +110,7 @@ class RelayCommands:
         self._lock = asyncio.Lock()
         self._closed = False
         self._contact_manager = None
+        self._knock_count_cache = (float("-inf"), 0)
         # Public discovery pins remain separate from transport invitations.
         if state_dir is None:
             from .dns.storage import get_dns_dir
@@ -129,15 +163,22 @@ class RelayCommands:
             level = DEFAULT_TRUST
         return level if isinstance(level, str) and level else DEFAULT_TRUST
 
-    def _pending_request_lines(self) -> list[str]:
-        """`requests` lines for the status screen: who wants to join, by name."""
+    def _pending_rows(self) -> list:
+        """Pending join requests for this device's issuer agent, never raising."""
         getter = getattr(self.agent_bridge, "pending_enrollment_requests", None)
         if not callable(getter):
             return []
+        source = getattr(getattr(self.agent_bridge, "identity", None), "agent_id", None)
         try:
-            rows = list(getter())
+            return list(getter(source_agent=source))
         except Exception:
             return []
+
+    def _pending_request_lines(self) -> list[str]:
+        """`requests` lines for the status screen: who wants to join, by name."""
+        if not callable(getattr(self.agent_bridge, "pending_enrollment_requests", None)):
+            return []
+        rows = self._pending_rows()
         if not rows:
             return ["requests none"]
         lines = ["requests"]
@@ -148,6 +189,80 @@ class RelayCommands:
                 f"  {name} wants to join   fingerprint {fingerprint}   /connect accept {name}"
             )
         return lines
+
+    def _local_agent_names(self) -> list[str]:
+        """Agents running on this device: presence first, this window's agent always."""
+        plugin = getattr(self.agent_bridge, "plugin", None)
+        presence = getattr(plugin, "_presence", None)
+        agents = []
+        if presence is not None:
+            try:
+                agents = list(presence.get_cached_agents())
+            except Exception:
+                agents = []
+        own = getattr(plugin, "_identity", None)
+        if own is not None and not any(
+            getattr(a, "agent_id", None) == getattr(own, "agent_id", None)
+            for a in agents
+        ):
+            agents = [own] + agents
+        return [n for n in (getattr(a, "identity", None) for a in agents) if n]
+
+    async def _knock_count(self, domain: str) -> int:
+        """How many knocks wait, fetched at most every KNOCK_COUNT_TTL_SECONDS."""
+        checked, count = self._knock_count_cache
+        now = time.monotonic()
+        if now - checked < KNOCK_COUNT_TTL_SECONDS:
+            return count
+        self._knock_count_cache = (now, count)
+        try:
+            rows = await asyncio.wait_for(
+                self.pending_contact_requests(domain), KNOCK_COUNT_TIMEOUT_SECONDS
+            )
+        except Exception:
+            return count
+        for row in rows:
+            row.introduction.clear()
+        self._knock_count_cache = (now, len(rows))
+        return len(rows)
+
+    async def connect_snapshot(self) -> ConnectSnapshot:
+        """The Connect screen's data: names and short fingerprints, never keys."""
+        state = self.client.status()
+        origin = state["origin"] or ""
+        domain = origin[len("https://") :] if origin.startswith("https://") else origin
+        online = state.get("state") == "online"
+        remote_rows = await self._remote_rows()
+        requests = tuple(
+            JoinRequestRow(
+                enrollment_id=getattr(row, "enrollment_id", ""),
+                device=getattr(row, "device_name", "") or "",
+                fingerprint=short_fingerprint(getattr(row, "device_key_fingerprint", "")),
+                categories=tuple(getattr(row, "credential_categories", ()) or ()),
+            )
+            for row in self._pending_rows()
+        )
+        return ConnectSnapshot(
+            network=self._network_name(domain),
+            domain=domain,
+            trust=self._trust_level(),
+            device=self._device_name(),
+            relay_online=online,
+            requests=requests,
+            knocks=await self._knock_count(domain) if online and domain else 0,
+            local_agents=tuple(self._local_agent_names()),
+            remote_agents=tuple(
+                row.get("handle")
+                or format_handle(row.get("name", "?"), row.get("device", "?"))
+                for row in remote_rows
+                if row.get("online")
+            ),
+            offline_devices=tuple(
+                offline_device_names(
+                    self.agent_bridge, remote_rows, self.client.state.approvals
+                )
+            ),
+        )
 
     async def _remote_rows(self) -> list:
         """Rows from the relay bridge's remote_agents(), degrading to none."""
@@ -280,24 +395,9 @@ class RelayCommands:
 
         lines.append("online")
         remote_rows = await self._remote_rows()
-        plugin = getattr(self.agent_bridge, "plugin", None)
-        presence = getattr(plugin, "_presence", None)
-        local_agents = []
-        if presence is not None:
-            try:
-                local_agents = list(presence.get_cached_agents())
-            except Exception:
-                local_agents = []
-        own_identity = getattr(plugin, "_identity", None)
-        if own_identity is not None and not any(
-            getattr(a, "agent_id", None) == getattr(own_identity, "agent_id", None)
-            for a in local_agents
-        ):
-            local_agents = [own_identity] + local_agents
-        for agent in local_agents:
-            name = getattr(agent, "identity", None)
-            if name:
-                lines.append(f"  {name} (this device)")
+        own_identity = getattr(getattr(self.agent_bridge, "plugin", None), "_identity", None)
+        for name in self._local_agent_names():
+            lines.append(f"  {name} (this device)")
         network_trust = self._trust_level()
         effective_trust = getattr(self.agent_bridge, "effective_trust", None)
         for row in remote_rows:

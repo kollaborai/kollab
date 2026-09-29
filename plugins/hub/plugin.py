@@ -182,7 +182,7 @@ CODE_IN_COMMAND = (
 def format_connect_help(show_all: bool = False) -> str:
     """Aligned /connect usage built from the same lists as the command menu."""
     rows = [
-        ("/connect", "Join with a code from a connected device (private form)"),
+        ("/connect", "The screen: code, requests, agents (no network: enter a code)"),
         ("/connect <domain>", "Connect this agent to a network, e.g. kollabor.ai"),
     ]
     rows += [
@@ -8725,18 +8725,16 @@ class HubPlugin(BasePlugin):
         if head in CONNECT_REMOVED:
             return f"connect: {CONNECT_REMOVED[head]}"
         if head == "":
-            if not self._relay_network_domain():
-                return await self._open_connect_altview("kollabor.ai")
-            # Already on a network: the screen is the status text until the
-            # dashboard altview lands (constitution section 6, `/connect`).
-            value = "status"
-            parts = ["status"]
-            head = "status"
+            return await self._connect_home()
         if head == "code":
             if len(parts) > 2:
                 return "connect: use /connect code [domain]"
-            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            return await self._open_connect_offer_altview(domain)
+            domain = (
+                parts[1]
+                if len(parts) == 2
+                else self._relay_network_domain() or "kollabor.ai"
+            )
+            return await self._open_connect_screen(domain, code_only=True)
         if head == "knock":
             return await self._run_connect_knock(value.partition(" ")[2].strip())
         if head == "knocks":
@@ -8759,20 +8757,36 @@ class HubPlugin(BasePlugin):
             # A domain argument joins the public discovery/relay network. Device
             # enrollment remains an explicit private flow via bare /connect.
         if getattr(getattr(self, "_cli_args", None), "attach", None):
-            state = (
-                self.event_bus.get_service("state_service") if self.event_bus else None
-            )
-            if state is None:
-                return "connect: this window is not connected to its agent daemon; restart kollab"
-            handler = getattr(state, "hub_connect", None)
-            if handler is None:
-                return "beacon: attached daemon must be updated to support /connect"
-            try:
-                return await handler(value)
-            except Exception:
-                # Never create an alternate identity/connection in the viewer.
-                return "beacon: daemon connection command failed; no viewer connection opened"
+            return await self._attached_connect(value)
         return await self._run_connect_command(value)
+
+    async def _attached_connect(self, value: str) -> str:
+        """Hand one /connect command to the daemon that owns this identity."""
+        state = self.event_bus.get_service("state_service") if self.event_bus else None
+        if state is None:
+            return "connect: this window is not connected to its agent daemon; restart kollab"
+        handler = getattr(state, "hub_connect", None)
+        if handler is None:
+            return "beacon: attached daemon must be updated to support /connect"
+        try:
+            return await handler(value)
+        except Exception:
+            # Never create an alternate identity/connection in the viewer.
+            return "beacon: daemon connection command failed; no viewer connection opened"
+
+    async def _connect_home(self) -> str:
+        """Bare /connect: the Connect screen on a network, the code form off one."""
+        if getattr(getattr(self, "_cli_args", None), "attach", None):
+            # The screen runs on this process's relay, which an attached window
+            # does not have: it shows the daemon's status text instead.
+            status = await self._attached_connect("status")
+            if str(status).startswith("network: none"):
+                return await self._open_connect_altview("kollabor.ai")
+            return status
+        domain = self._relay_network_domain()
+        if not domain:
+            return await self._open_connect_altview("kollabor.ai")
+        return await self._open_connect_screen(domain)
 
     async def _open_connect_altview(self, domain: str = "kollabor.ai") -> str:
         """Open the private enrollment form without putting its code in chat."""
@@ -8866,12 +8880,20 @@ class HubPlugin(BasePlugin):
             return {"status": status}
         return {"error": "connect request could not be submitted"}
 
-    async def _open_connect_offer_altview(self, domain: str = "kollabor.ai") -> str:
-        """Create and display an enrollment code only in the private view."""
+    async def _open_connect_screen(
+        self, domain: str, *, code_only: bool = False
+    ) -> str:
+        """Open the Connect screen; `/connect code` opens only its private code.
+
+        The join code is created here and shown only in the private view: it
+        never goes through the message coordinator, history, or a log.
+        """
         if not self.event_bus:
-            return "connect: private offer view is unavailable"
+            return "connect: the Connect screen is unavailable"
         try:
-            from plugins.altview.connect_altview import ConnectOfferAltView
+            from plugins.altview.connect_altview import ConnectScreenAltView
+
+            from .relay_state import RelayError
 
             async def create_offer(target_domain: str) -> dict[str, str]:
                 try:
@@ -8888,6 +8910,26 @@ class HubPlugin(BasePlugin):
                     else {"error": "connect offer could not be created"}
                 )
 
+            async def load():
+                commands = self._relay_commands
+                if commands is None:
+                    raise ValueError("connect screen unavailable")
+                return await commands.connect_snapshot()
+
+            async def decide(row, decision: str):
+                """None when decided; otherwise the reason it was not."""
+                try:
+                    await self._relay_agent.decide_enrollment_request(
+                        row.enrollment_id,
+                        decision=decision,
+                        source_agent=self._identity.agent_id,
+                    )
+                except RelayError as exc:
+                    return str(exc)  # already operator-safe text
+                except Exception:
+                    return "try again"
+                return None
+
             stack_mgr = None
             try:
                 stack_mgr = self.event_bus.get_service("altview_stack_manager")
@@ -8901,13 +8943,19 @@ class HubPlugin(BasePlugin):
                 self.event_bus.register_service("altview_stack_manager", stack_mgr)
 
             await stack_mgr.push(
-                ConnectOfferAltView(domain=domain, on_create=create_offer),
-                "connect-offer",
+                ConnectScreenAltView(
+                    domain=domain,
+                    on_create=create_offer,
+                    on_load=None if code_only else load,
+                    on_decide=None if code_only else decide,
+                    code_only=code_only,
+                ),
+                "connect-code" if code_only else "connect-screen",
                 reuse=False,
             )
             return ""
         except Exception:
-            return "connect: private offer view is unavailable"
+            return "connect: the Connect screen is unavailable"
 
     async def _run_connect_knock(self, rest: str) -> str:
         """`/connect knock <route> "text"` -- no private form, no keys.
