@@ -187,19 +187,20 @@ from the WSS relay and the standard A2A workspace receiver. See the
 
 ### Connect agents across machines
 
-`/connect` puts your agents on different machines into one private, end-to-end
-encrypted network through a beacon such as kollabor.ai, so one agent can hand
-another a task. Start with the [connect guide](docs/guides/connect.md):
+`/connect` makes the agents on your other machines part of the same hub. A hub
+message to `agent@device` reaches that machine and wakes that agent; the rest of
+the network observes it, like the local hub. Start with the
+[connect guide](docs/guides/connect.md):
 
 ```text
-# on the machine that is already set up
-/connect kollabor.ai
-/connect offer                  # shows a one-device, five-minute code
+# on the machine that is already connected
+/connect code                   # an 8-character code, one device, five minutes
 # on the new machine
-/connect                        # paste the code into the private form
-# back on the first machine
-/connect requests
-/connect accept <receipt-id>
+/connect                        # type the code into the private form
+# back on the first machine: press a on the request, or
+/connect accept alzan-prod-home
+# then, from any agent or a shell
+kollab --hub msg ops@alzan-prod-home "check the tunnel"
 ```
 
 Self-host the beacon with `kollab relay run --config /private/relay.json`. The
@@ -498,7 +499,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/save` | Save conversation output |
 | `/hub` | Manage the agent hub |
 | `/hub dns` | Resolve agents, inspect trust, find capabilities, and show Agent DNS keys |
-| `/connect` | Verify domain discovery, join an advertised beacon, and approve encrypted peer presence |
+| `/connect` | Join machines into one agent network, name devices, set trust, and reach `agent@device` |
 | `/terminal` | Manage terminal sessions |
 | `/permissions` | Configure tool approval modes |
 | `/login` | Run provider login flows |

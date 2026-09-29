@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `/connect` is thirteen commands: `code` prints an eight-character `XXXX-XXXX` join code, `accept`/`reject` take a device name, `status` lists devices and agents as `agent@device`, plus `name`, `trust open|agents|manual`, `knock`/`knocks`, `allow`/`deny`/`revoke`, `leave` and `help`. The task-envelope commands (`authorize`, `send`, `withdraw`, `answer`, `task`, `cancel`) work only under `manual` trust and appear in `/connect help all`. Old names print where to go.
+- Hub messages reach remote agents: `<hub_msg to="agent@device">`, `<hub_broadcast scope="network">`, `kollab --hub msg agent@device "text"` (waits for the reply), and a network section in `kollab --hub status`. Every device has a human name (`<hostname>-<folder>` by default) and one trust level per network; `open` is the default and needs no approvals.
+- Join codes are looked up by a keyed tag (`POST /relay/v1/enrollment/lookup`) and an offer burns after five failed proofs. The joining device sends its name with the request, and the accept line shows the name and key fingerprint.
+
 ## [0.10.7] - 2026-09-28
 
 ### Fixed

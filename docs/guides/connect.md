@@ -1,76 +1,77 @@
 # Connect agents across machines
 
-`/connect` puts your Kollab agents on different machines into one private network, so one agent can hand another a task. Traffic between machines is end-to-end encrypted. kollabor.ai only routes it, and nothing is shared until you approve it.
+`/connect` makes the agents on your other machines part of the same hub. A hub message to `agent@device` is delivered to that machine, wakes that agent, and is seen by everyone else on the network, exactly like a message on the local hub. Traffic between machines is end-to-end encrypted; the directory (kollabor.ai, or your own) only routes it.
 
-This guide covers what most people need. The other subcommands are explained under [Other commands](#other-commands).
+The design contract for this feature is [the agent network spec](../specs/agent-network-simple-flow.md). If a command you find is not in this guide or in `/connect help`, it is a leftover and not part of the design.
 
 ## What you need
 
-- Kollab 0.10.7 or newer on each machine. `kollab --upgrade` updates an existing install.
-- A terminal on each machine for the first setup. On a server, that means one SSH session: start `kollab`, then paste a code.
-- Kollab running on a machine whenever its agent should receive work. On a server, keep it open in `tmux`, or run `kollab --detached`.
+- Kollab 0.11.0 or newer on every machine. `kollab --upgrade` updates an existing install. Codes from 0.11.0 do not work with 0.10.x, so upgrade every machine first.
+- A terminal on each machine for the first setup. On a server, that means one SSH session: start `kollab`, then type a code.
+- Kollab running on a machine whenever its agents should be reachable. On a server, keep it open in `tmux`, or run `kollab --detached`.
 
-## Connect two machines
+## Join a machine to your network
 
-You do this once. Call the machine that is already set up A, and the new one B.
+You do this once per machine. Call the machine that is already connected A, and the new one B.
 
-1. On A, run `/connect kollabor.ai`. Kollab verifies kollabor.ai's signed key and connects. It reconnects on every launch after that.
-2. On A, run `/connect offer` and press Enter. A code appears. It works for one device, for five minutes.
-3. On B, type `/connect` with nothing after it and press Enter. In the form, press Tab to reach **Private code**, paste the code, and press Enter. You get a receipt ID.
-4. On A, run `/connect requests` to see the request, then `/connect accept <receipt-id>`.
-5. Check both machines with `/connect status`. You should see `beacon: online` and `online peers: 1`.
+1. On A, run `/connect code`. A code appears, eight characters shown as `XXXX-XXXX`. It works for one device, for five minutes.
+2. On B, run `/connect` with nothing after it. Type the code into the private form and press Enter. Upper or lower case, with or without the dash. B joins as `<hostname>-<folder>`; rename it any time with `/connect name <name>`.
+3. On A, run `/connect`. It shows `alzan-prod-home wants to join   fingerprint 4d04…9f2e`. Press `a` to accept, or run `/connect accept alzan-prod-home`.
+4. Run `/connect status` on either machine. Every device on the network is listed with its agents as `agent@device`.
 
-Codes go only in that private form. If you paste a code into a command or into chat, Kollab refuses it, and codes never reach its logs.
+Codes go only in that private form. If you type a code into a command or into chat, Kollab refuses it, and codes never reach its logs.
 
-**What accepting copies.** Accepting sends B the model settings and one login from A's active profile, sealed so only B can open them. B stores them as a separate profile named `kollab-…` and keeps using its own login. If A's login is a ChatGPT sign-in, don't switch B to the copied profile. Both machines would then share one refresh token, and the first refresh on either side signs the other one out.
+**What accepting copies.** Accepting sends B the model settings and one login from A's active profile, sealed so only B can open them. B stores them as a separate profile named `kollab-…` and keeps using its own login. If A's login is a ChatGPT sign-in, don't switch B to the copied profile: both machines would share one refresh token, and the first refresh on either side signs the other one out.
 
-## Give another agent a task
+## Message an agent on another machine
 
-Agents only talk to each other when a human asks, so you approve each first message.
+Nothing to approve first. On the default trust level, every agent on every device you accepted can message every other, under the hub's own rules.
 
-On the machine that will do the work (B):
+- **Through your agent.** Tell it: "ask ops@alzan-prod-home to check the tunnel." It sends `<hub_msg to="ops@alzan-prod-home">…</hub_msg>`. The reply comes back as a hub message from `ops@alzan-prod-home`, and your agent picks it up.
+- **From a shell or cron.** `kollab --hub msg ops@alzan-prod-home "check the tunnel"` sends the message, waits for the reply, and prints it. `kollab --hub status` shows the network section.
+- **Everyone sees it.** The other agents on the network observe the exchange, dimmed, the way the local hub shows messages between two other agents.
 
-1. Run `/connect allow <A's public key> <agent name>`. A's key is the `your public key:` line of A's `/connect status`, and the agent name is the `agent identity:` line of B's. You do this once per peer.
+Your agent's hub context lists the remote agents it can reach, so "who is online" is `/connect status` for you and a glance at the roster for it.
 
-On the machine that is asking (A):
+## Trust
 
-2. Run `/connect agents <B's public key>`. It lists B's agents that allowed you. Copy the `relay:…` address.
-3. Send the request one of two ways:
-   - Yourself: `/connect send <address> <request>`.
-   - Through your agent: `/connect authorize <address> <request>`, then tell your agent "Send the authorized request." It sends exactly that text with its `hub_msg` tool.
-4. Wait for the reply:
-   - `[relay progress]` lines appear while B's agent works with its own tools, under B's permissions.
-   - If B's agent needs something, it asks once: `[relay question] …`. Tell your agent the answer, and it sends it back.
-   - The finished answer arrives as `[relay result] …`.
+Trust is one setting per network, `/connect trust <level>`:
 
-One authorization covers one exact request for ten minutes. A new task needs a new `/connect authorize` or `/connect send`.
+| Level | Meaning |
+|---|---|
+| `open` (default) | Every agent on every accepted device may message every other. Hub rules only. |
+| `agents` | Each device lists which of its agents are reachable: `/connect allow <device> <agent>`, `/connect deny <device> [agent]`. |
+| `manual` | Every first message needs a human `/connect authorize` or `/connect send`; replies come back through a task envelope; questions wait for a human answer. `/connect help all` lists these commands. |
+
+## Strangers
+
+Someone outside your network can introduce themselves. Your `/connect status` shows a contact route such as `kollabor.ai/c/8f3a2c1d9e4b7a60`. Give it to them; they run:
+
+```text
+/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Webceive. Can your ops agent review a nginx config?"
+```
+
+`/connect knocks` shows what you received, with the sender's device name and fingerprint, and `a` accepts or `r` rejects. Accepting records the device with `agents` trust and nothing allowed until you `/connect allow <device> <agent>`.
+
+Today a knock is an introduction only. Messages between two different networks are not delivered yet; that step is listed as open in the spec.
 
 ## If something goes wrong
 
 | You see | Do this |
 |---|---|
 | `connect: unknown subcommand '…'` | Check the spelling with `/connect help`. |
-| `connect: codes never go in a command…` | Run `/connect` alone and paste the code into the form. |
-| `Check that /connect status shows kollabor.ai online, then retry.` | Run `/connect kollabor.ai` first, then `/connect offer` again. |
-| `…the relay connection restarted after this code was created…` | That code can't be used any more. Create a new one with `/connect offer`. |
-| `online peers: 0` | Kollab has to be running on both machines. Start it on the other one. |
+| `connect: codes never go in a command…` | Run `/connect` alone and type the code into the form. |
+| `unknown agent@device: run /connect status to see who is online` | The device is offline or the name is wrong. `/connect status` lists what is reachable. |
+| `…the relay connection restarted after this code was created…` | That code can't be used any more. Create a new one with `/connect code`. |
+| A device is listed as offline | Kollab has to be running on it. Start it there. |
 | `connect: this window is not connected to its agent daemon; restart kollab` | Quit with `/quit` and start `kollab` again. |
 
 To update Kollab, run `/upgrade` inside Kollab or `kollab --upgrade` in a shell. After the restart, the connection comes back by itself.
 
 ## Other commands
 
-You can ignore these unless you need them. Each one exists because a security decision has its own switch.
+- `/connect leave` goes offline and stops reconnecting. `/connect revoke <device>` removes a device from your network.
+- `/connect help` lists the 13 commands above. `/connect help all` adds the `manual` trust commands and `rotate`.
+- The old names from before this design (`offer`, `enroll`, `requests`, `peers`, `agents`, `contact`, `invite`, `join`, `disconnect`, and others) print where to go now.
 
-| Group | Commands | What for |
-|---|---|---|
-| Inspect | `status`, `peers`, `agents`, `networks`, `grants`, `task <address> <id>` | See what is connected, allowed and running |
-| Control a task | `cancel <address> <id>`, `answer <event-id> <text>` | Stop a remote task, or answer its question yourself instead of through your agent |
-| Take access back | `deny <peer-key> [agent]`, `withdraw <grant-id>`, `revoke <peer-key>`, `reject <receipt-id>` | Undo an allow, an authorization, a peer approval, or turn down an enrollment request |
-| Presence | `approve <peer-key>`, `ping <peer-key>` | Approve a peer by hand, or check that it is alive. Enrollment approves the peer for you. |
-| Strangers | `contact-point`, `contact`, `contacts` | Let someone outside your network introduce themselves |
-| Older pairing | `invite`, `join <file>` | Pair by copying a private file instead of using a code |
-| Reset | `rotate`, `disconnect` | Replace the room secret, which clears approvals; or go offline and stop reconnecting |
-| Alias | `enroll [domain]` | Opens the same form as `/connect` alone |
-
-`/connect help` lists every subcommand with one line each. For full details, see the [command reference](../reference/commands.md).
+For full details, see the [command reference](../reference/commands.md).
