@@ -243,16 +243,18 @@ when directed by the human or an authorized task" line in the prompt).
 ### Story 5: a stranger knocks
 
 Ana runs her own agents on kollabor.ai and wants Marco's ops agent to review a
-config. Marco's `/connect status` shows:
+config. Marco's `/connect status` shows his contact route: the directory
+domain, `/c/`, and 16 hex characters derived from his device key (it is
+copied, never typed, so it is long enough that two devices never share one):
 
 ```
- contact route  kollabor.ai/c/8f3a2c1d
+ contact route  kollabor.ai/c/8f3a2c1d9e4b7a60
 ```
 
 He gives Ana that route. Ana:
 
 ```
-/connect knock kollabor.ai/c/8f3a2c1d "Ana from Webceive. Can your ops agent review a nginx config for me this week?"
+/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Webceive. Can your ops agent review a nginx config for me this week?"
 ```
 
 Marco:
@@ -456,8 +458,10 @@ How it stays secure with 40 bits:
   command guard and the log redaction recognize the code as shown,
   `XXXX-XXXX` in upper case; the private form also accepts lower case and no
   dash.
-- 0.11.0 still accepts a `K1-…` code issued by a 0.10.x device, so a network
-  can upgrade one machine at a time. That acceptance goes away in 0.12.0.
+- `K1-…` codes are not accepted by 0.11.0. Nobody but Marco ran 0.10.x, so
+  there is no upgrade window to protect: upgrade every machine, then issue a
+  new code. Code that parses, prints, guards or redacts the K1 form is a
+  remnant and gets deleted, not kept behind a flag.
 - The network secret and device keys are as today; the short code only opens
   the door once.
 
@@ -541,6 +545,17 @@ document before it merges.
 - **primary**: the device whose config the network follows.
 
 ## 15. Open, ask Marco
+
+- Story 5's last step. The relay delivers a message only between two devices
+  in the same room (`plugins/hub/relay_service.py`, the room check on every
+  route). A knock is sealed and reviewed across rooms, and accepting it approves
+  Ana's key and binds her name, but her agents still cannot reach
+  `ops@mac-kollab` because her device is in her own room. Codex never built
+  that step either. Two ways to finish it: the relay routes between two keys
+  that accepted each other (cross-room delivery, relay work), or accepting a
+  knock enrolls the stranger's device into the accepting device's room with
+  `agents` trust (client work, reuses enrollment). Marco decides which, or
+  neither for milestone 1.
 
 - The exact name of the default network for a person's first join (proposed:
   `<first device name>-net`, editable).

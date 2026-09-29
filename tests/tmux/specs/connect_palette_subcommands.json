@@ -63,15 +63,12 @@
       "timeout": 6
     },
     {
-      "action": "escape"
-    },
-    {
-      "action": "sleep",
-      "seconds": 0.5
+      "action": "send_keys",
+      "keys": "BSpace"
     },
     {
       "action": "send_keys",
-      "keys": "/conn"
+      "keys": "BSpace"
     },
     {
       "action": "wait_for",
@@ -84,7 +81,7 @@
     },
     {
       "action": "type",
-      "text": "ect kn",
+      "text": "kn",
       "delay": 0.15
     },
     {
