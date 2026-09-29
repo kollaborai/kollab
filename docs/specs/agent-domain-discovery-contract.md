@@ -1,5 +1,11 @@
 # Kollab Domain-to-Agent Discovery Contract
 
+> **Superseded for the command surface.** The `/connect` commands, names and flows below are Codex's
+> original design (September 2026). The contract is now
+> [agent-network-simple-flow.md](agent-network-simple-flow.md): thirteen commands, `agent@device`
+> handles, one trust level per network. Wire formats and security reasoning here still apply where
+> that document does not say otherwise. A command that appears here and not there is a remnant.
+
 Status: the 0.9.0 release baseline includes signed discovery and encrypted presence, with dated deployment evidence on kollabor.ai. Kollab 0.10.0 uses `/connect <domain>` for public discovery/relay attachment; bare `/connect` and `/connect enroll [domain]` open private device-code entry. `/connect offer`, redacted request listing, and explicit local accept/reject commands are implemented. Code and device-key proof create a pending request, not approval. After explicit acceptance, the issuer sends a `conversation:send` credential, room invitation, and—when a supported active profile is available—allowlisted profile settings plus one provider credential in a device-sealed, workspace-scoped bundle. The destination installs atomically and returns a device-signed receipt before peer approval. This grants no workspace or tool permission, and network revocation does not revoke a copied provider credential. The in-flight mailbox key and worker are process-local; accepted delivery can still become unrecoverable if it fails before a receipt is durably recorded. A2A Cards, owner/device pairing, private directory access and the narrow workspace receiver remain development-build implementations with local evidence. Broader peer networking remains incomplete; see the implementation ledger and [dated public deployment summary](../operations/relay-deployment-2026-09-27.md) for evidence boundaries.
 
 Related: [network design](agent-network-discovery-and-relaying.md), [scenario walkthroughs](agent-network-walkthroughs.md), [existing remote endpoint](hub-remote-endpoint.md).

@@ -1,5 +1,11 @@
 # Kollab Agent Network: Discovery, Identity, and Relaying
 
+> **Superseded for the command surface.** The `/connect` commands, names and flows below are Codex's
+> original design (September 2026). The contract is now
+> [agent-network-simple-flow.md](agent-network-simple-flow.md): thirteen commands, `agent@device`
+> handles, one trust level per network. Wire formats and security reasoning here still apply where
+> that document does not say otherwise. A command that appears here and not there is a remnant.
+
 Status: full implementation acceptance contract reconstructed from Marco's conversations; work in progress.
 Created: 2026-09-26.
 Implementation status: signed discovery and encrypted-presence forwarding have dated deployment evidence on kollabor.ai. The same Kollab app runs managed workers with shared Valkey state. The two-host result was ping/pong, not a model/tool conversation. Current source adds the machine-wide catalog and the normal Hub conversation bridge; live model execution, complete human grant enforcement and broader peer discovery/routing remain required. Capacity measurements include a high-rate error boundary; million-connection capacity is unproven. See the [beacon contract](agent-public-beacon.md), [deployment record](../operations/relay-deployment-2026-09-27.md) and [implementation ledger](agent-network-implementation-status.md).

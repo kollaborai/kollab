@@ -1,5 +1,11 @@
 # Kollab public beacon and encrypted agent transport
 
+> **Superseded for the command surface.** The `/connect` commands, names and flows below are Codex's
+> original design (September 2026). The contract is now
+> [agent-network-simple-flow.md](agent-network-simple-flow.md): thirteen commands, `agent@device`
+> handles, one trust level per network. Wire formats and security reasoning here still apply where
+> that document does not say otherwise. A command that appears here and not there is a remnant.
+
 Status: 0.9.0 release baseline plus Kollab 0.10.0's conversation and partial enrollment source. The public relay had a successful deployment check on 2026-09-27: two independent client hosts completed approved encrypted ping/pong through public WSS. See the [dated deployment summary](../operations/relay-deployment-2026-09-27.md). Those observations do not prove current liveness or real model conversations. Current source separates `/connect <domain>` public discovery/relay attachment from bare `/connect` private code entry. One-device/five-minute offers, proof handling, redacted request listing and explicit local accept/reject commands are present. When a supported active profile is available, acceptance also delivers allowlisted profile settings and one provider credential in a device-sealed bundle; roster access, workspace grants, and tool permissions remain unprovisioned. Current source integration and remaining full-network acceptance gates are tracked in the [implementation ledger](agent-network-implementation-status.md).
 
 ## Product boundary

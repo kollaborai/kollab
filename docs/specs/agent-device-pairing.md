@@ -1,5 +1,11 @@
 # Private device pairing and conversation grants
 
+> **Superseded for the command surface.** The `/connect` commands, names and flows below are Codex's
+> original design (September 2026). The contract is now
+> [agent-network-simple-flow.md](agent-network-simple-flow.md): thirteen commands, `agent@device`
+> handles, one trust level per network. Wire formats and security reasoning here still apply where
+> that document does not say otherwise. A command that appears here and not there is a remnant.
+
 Status: unreleased source contains the private `/connect` code-entry view,
 `/connect offer`, K1 code/device-key proof handling, durable pending-request
 metadata, and an issuer API that requires a separate accept/reject after proof.

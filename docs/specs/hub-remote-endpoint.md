@@ -121,10 +121,10 @@ path rejects imports. A discovered key grants no workspace membership or tool
 access.
 
 If the verified descriptor advertises a compatible relay, the commands open an
-outbound WSS connection. Current unreleased source adds bare `/connect` and
-`/connect enroll [domain]` as private code entry, plus `/connect offer` and
-explicit local request review. After code/device-key proof, the issuer records
-a pending request; the local human must explicitly accept or reject it.
+outbound WSS connection. Bare `/connect` is the private code entry and
+`/connect code` prints a join code; after the code/device-key proof the issuer
+records a pending request that the local human accepts by device name (see
+[agent-network-simple-flow.md](agent-network-simple-flow.md)).
 Acceptance issues only a `conversation:send` credential and room invitation,
 not configuration, private roster, workspace, or tool permissions. These
 enrollment changes are partial and unreleased; see the [pairing contract](agent-device-pairing.md)

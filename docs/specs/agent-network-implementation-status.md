@@ -1,5 +1,11 @@
 # Agent network implementation status
 
+> **Superseded for the command surface.** The `/connect` commands, names and flows below are Codex's
+> original design (September 2026). The contract is now
+> [agent-network-simple-flow.md](agent-network-simple-flow.md): thirteen commands, `agent@device`
+> handles, one trust level per network. Wire formats and security reasoning here still apply where
+> that document does not say otherwise. A command that appears here and not there is a remnant.
+
 2026-09-28 UTC: the live two-host acceptance passed on the current source.
 Runs `0428cb8f` and `b42ec1ab` (back to back) between the Mac and `alzan-prod` through `https://kollabor.ai`
 covered pairing, attached `/connect status`, the core model/tool/file
