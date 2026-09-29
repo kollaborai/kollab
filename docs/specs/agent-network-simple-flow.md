@@ -27,9 +27,11 @@ lines, tags, docs, specs, walkthroughs, tests. Its presence does not make it
 valid. Do not extend a remnant, document it, or build on it. Remove or rename
 it as this document says, and when this document does not say, ask Marco
 before doing anything with it. In particular, the following are remnants and
-not design: `docs/specs/agent-network-walkthroughs.md` scenarios 1 to 8, the
-"Proposed shell commands" in it (`kollab relay setup/start/status`,
-`/relay setup`, `/network ...`), the one-question-per-task rule, the
+not design: Codex's walkthrough, design-narrative and implementation-ledger
+docs (deleted from `docs/specs/` on 2026-09-28; their wire contracts survive
+in `agent-public-beacon.md`, `agent-domain-discovery-contract.md` and
+`agent-device-pairing.md`), the proposed `kollab relay setup/start/status`,
+`/relay setup` and `/network ...` commands, the one-question-per-task rule, the
 human-only-answer rule, the `invite`/`join` file pairing, and the `K1-…`
 60-character join code.
 

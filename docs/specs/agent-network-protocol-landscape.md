@@ -2,7 +2,7 @@
 
 Research date: 2026-09-26. Status: source-backed comparison complete; recommendations are not a claim of implemented interoperability.
 
-Related: [domain discovery contract](agent-domain-discovery-contract.md), [network design](agent-network-discovery-and-relaying.md), [walkthroughs](agent-network-walkthroughs.md).
+Related: [domain discovery contract](agent-domain-discovery-contract.md), [network design](agent-network-simple-flow.md), [walkthroughs](agent-network-simple-flow.md).
 
 ## Recommendation
 
@@ -118,14 +118,14 @@ The subsequent contract fixes the locator/Card link, owner/device credential for
 
 ## Implementation follow-through (2026-09-26)
 
-The ranked actions above are the original research recommendation. Subsequent implementation is recorded in the [evidence ledger](agent-network-implementation-status.md): the independent public discovery slice is deployed; thin locator/Card resolution and the explicit JWS profile are implemented; Python/Node and official Python SDK signature checks pass. The combined local validation covers device-bound pairing, private-directory access, receiver-side revocation/grants and a deterministic one-workspace A2A file-tool exchange. The Card defines generic interfaces/skills; Kollab credentials define admission and human-approved scope. This is local HTTP execution evidence, not a public A2A deployment or general LLM coding service. No full Buzz stack, paid Grok dependency or DHT was adopted.
+The ranked actions above are the original research recommendation. Subsequent implementation is recorded in the [evidence ledger](agent-network-simple-flow.md): the independent public discovery slice is deployed; thin locator/Card resolution and the explicit JWS profile are implemented; Python/Node and official Python SDK signature checks pass. The combined local validation covers device-bound pairing, private-directory access, receiver-side revocation/grants and a deterministic one-workspace A2A file-tool exchange. The Card defines generic interfaces/skills; Kollab credentials define admission and human-approved scope. This is local HTTP execution evidence, not a public A2A deployment or general LLM coding service. No full Buzz stack, paid Grok dependency or DHT was adopted.
 
 Historical relay follow-through observation (2026-09-27 06:07 UTC): signed
 discovery advertised `https://kollabor.ai/relay/v1`; public health reported two
 ready workers and both discovery aliases were identical at revision 256.
 A newer direct read at 09:44 UTC returned identical aliases at revision 472
 (SHA-256 `66dc9ebf58960cb8dd073f9c23f91b26697d091468c0f8e05e2f010a2e7ac920`)
-and health with two of two workers ready; see the [implementation ledger](agent-network-implementation-status.md)
+and health with two of two workers ready; see the [implementation ledger](agent-network-simple-flow.md)
 for DNS/HTTPS fields and limits. The ranked research actions above are historical
 recommendations, not permission to defer the accepted networking goal. The active
 Hub bridge and enrollment work ships in Kollab 0.10.0, and full network acceptance

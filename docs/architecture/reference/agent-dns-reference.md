@@ -7,7 +7,7 @@ status: reference
 ---
 # Agent DNS: Discovery, Identity & Trust
 
-Update, 2026-09-27: public discovery follows the [domain discovery contract](../../specs/agent-domain-discovery-contract.md): signed descriptors go into a separate cache and grant no workspace access. Automatic coordinator publication/import has been removed. Current unreleased source uses `/connect <domain>` for signed public discovery and connects to a compatible advertised relay; bare `/connect` and `/connect enroll [domain]` open private device-code entry. The published 0.9.0 baseline also performs direct discovery/relay attachment. The [public beacon](../../specs/agent-public-beacon.md) adds outbound WSS connections and encrypted peer presence; the [implementation ledger](../../specs/agent-network-implementation-status.md) records verification and deployment status. The local registry and historical direct TCP/TLS endpoint described below remain separate from both the beacon and standard A2A workspace receiver.
+Update, 2026-09-27: public discovery follows the [domain discovery contract](../../specs/agent-domain-discovery-contract.md): signed descriptors go into a separate cache and grant no workspace access. Automatic coordinator publication/import has been removed. Current unreleased source uses `/connect <domain>` for signed public discovery and connects to a compatible advertised relay; bare `/connect` and `/connect enroll [domain]` open private device-code entry. The published 0.9.0 baseline also performs direct discovery/relay attachment. The [public beacon](../../specs/agent-public-beacon.md) adds outbound WSS connections and encrypted peer presence; the [implementation ledger](../../specs/agent-network-simple-flow.md) records verification and deployment status. The local registry and historical direct TCP/TLS endpoint described below remain separate from both the beacon and standard A2A workspace receiver.
 
 ## Overview
 
@@ -50,7 +50,7 @@ running A2A receiver can publish an optional canonical `agent_card` locator;
 its standard Agent Card describes its actual interfaces and skills.
 See the [discovery contract](../../specs/agent-domain-discovery-contract.md),
 [workspace receiver](../../operations/agent-a2a-workspace.md) and
-[implementation ledger](../../specs/agent-network-implementation-status.md).
+[implementation ledger](../../specs/agent-network-simple-flow.md).
 
 ## Beacon connection and authorization
 
@@ -339,7 +339,7 @@ IPs, stable public keys, room membership, timing and ciphertext sizes. Invitatio
 holders can see peer keys in their room; approved endpoints disclose their
 workspace label inside encrypted ping/presence responses. This profile does not
 promise unlinkability or forward secrecy. Public route availability and exact
-deployment changes belong in the [implementation ledger](../../specs/agent-network-implementation-status.md)
+deployment changes belong in the [implementation ledger](../../specs/agent-network-simple-flow.md)
 and [publication runbook](../../operations/kollabor-ai-discovery-publication.md).
 
 The historical direct listener remains opt-in and is not opened by `/connect`.

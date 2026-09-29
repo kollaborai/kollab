@@ -1,6 +1,6 @@
 # Hub Direct TCP/TLS Endpoint (Historical Transport)
 
-Status update, 2026-09-26: this is Kollab's existing raw TCP/TLS stream transport. Its legacy A2A and `ws`/`wss` labels do not implement the standard A2A API or WebSocket framing. The [public beacon](agent-public-beacon.md) supplies the separate outbound WSS presence path. Public discovery follows the [signed discovery contract](agent-domain-discovery-contract.md) and cannot admit direct messaging peers or authorize workspace tools. Current verification and deployment state is recorded in the [implementation ledger](agent-network-implementation-status.md).
+Status update, 2026-09-26: this is Kollab's existing raw TCP/TLS stream transport. Its legacy A2A and `ws`/`wss` labels do not implement the standard A2A API or WebSocket framing. The [public beacon](agent-public-beacon.md) supplies the separate outbound WSS presence path. Public discovery follows the [signed discovery contract](agent-domain-discovery-contract.md) and cannot admit direct messaging peers or authorize workspace tools. Current verification and deployment state is recorded in the [implementation ledger](agent-network-simple-flow.md).
 
 Off-box transport for the hub mesh. A remote agent authenticates the server's
 pinned Ed25519 key and proves its own approved key before using the TCP/TLS
@@ -128,7 +128,7 @@ records a pending request that the local human accepts by device name (see
 Acceptance issues only a `conversation:send` credential and room invitation,
 not configuration, private roster, workspace, or tool permissions. These
 enrollment changes are partial and unreleased; see the [pairing contract](agent-device-pairing.md)
-and [implementation ledger](agent-network-implementation-status.md). The legacy
+and [implementation ledger](agent-network-simple-flow.md). The legacy
 WSS flow does not use this raw-stream listener or inject peer traffic into Hub
 message/LLM hooks.
 

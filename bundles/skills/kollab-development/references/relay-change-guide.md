@@ -46,11 +46,9 @@ the wire formats and configuration. Recheck them before editing or deploying.
 
 Canonical docs:
 
+- `docs/specs/agent-network-simple-flow.md` (the contract; commands, trust, stories)
 - `docs/specs/agent-domain-discovery-contract.md`
 - `docs/specs/agent-public-beacon.md`
-- `docs/specs/agent-network-discovery-and-relaying.md`
-- `docs/specs/agent-network-walkthroughs.md`
-- `docs/specs/agent-network-implementation-status.md`
 - `docs/specs/agent-device-pairing.md`
 - `docs/reference/commands.md`
 - `docs/architecture/reference/agent-dns-reference.md`

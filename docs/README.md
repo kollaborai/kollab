@@ -45,8 +45,8 @@ status: active
 ## Agent Networking
 
 - [Connect Guide](guides/connect.md) - Start here: connect machines with a code and hand tasks between agents
-- [Public Beacon](specs/agent-public-beacon.md) - `/connect`, private invitations, encrypted peer presence, and self-hosted relay runtime
-- [Implementation Ledger](specs/agent-network-implementation-status.md) - Verified behavior, deployment evidence, and remaining boundaries
+- [Agent Network](specs/agent-network-simple-flow.md) - The contract: thirteen `/connect` commands, `agent@device`, trust levels, user stories
+- [Public Beacon](specs/agent-public-beacon.md) - Relay wire contract: HTTP and WebSocket routes, quotas, endpoint encryption
 - [Domain Discovery](specs/agent-domain-discovery-contract.md) - Signed descriptors and origin pins, separate from workspace authorization
 - [Agent DNS Reference](architecture/reference/agent-dns-reference.md) - Local identity registry and historical direct TCP/TLS transport
 - [A2A Workspace Receiver](operations/agent-a2a-workspace.md) - Explicit receiver setup, device membership, and scoped tool grants

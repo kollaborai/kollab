@@ -4,7 +4,7 @@ Review date: 2026-09-27. Base commit: `ee60e381721d1d9e98c8ea6d1a573f350fbca849`
 The reviewed candidate includes uncommitted networking changes. Results here
 are observations of that candidate, not proof of an immutable release artifact.
 The complete acceptance scope remains in
-[implementation status](../specs/agent-network-implementation-status.md) and the
+[implementation status](../specs/agent-network-simple-flow.md) and the
 linked networking specifications. This review does not reduce that scope.
 
 ## Reproduced issues and required fixes

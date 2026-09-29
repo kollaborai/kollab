@@ -174,8 +174,7 @@ into a private network with a short code, so its agents can message agents on
 other devices exactly like local hub peers. The full model, the trust levels,
 and the reasoning behind this surface are the
 [agent network constitution](../specs/agent-network-simple-flow.md) — it wins
-over this page when they disagree. Deployment and verification status are
-tracked in the [implementation ledger](../specs/agent-network-implementation-status.md).
+over this page when they disagree.
 
 Shown in the palette and in `/connect help`:
 

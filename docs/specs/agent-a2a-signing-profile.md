@@ -1,6 +1,6 @@
 # Kollab A2A Agent Card signing profile
 
-Status: signing and resolver wiring included in Kollab 0.9.0; A2A service validation is tracked in the [implementation ledger](agent-network-implementation-status.md).
+Status: signing and resolver wiring included in Kollab 0.9.0; A2A service validation is tracked in the [implementation ledger](agent-network-simple-flow.md).
 
 This profile lets Kollab point from its signed domain-discovery descriptor to
 the standard A2A Agent Card path and verify that Card with the descriptor's

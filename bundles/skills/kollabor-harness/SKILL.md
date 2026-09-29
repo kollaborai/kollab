@@ -217,7 +217,7 @@ contact with other recipients. Normal final responses return through the
 authenticated reply route. Do not forward them again or create acknowledgment
 loops. Revocation, cancellation or human preemption ends the old task's authority.
 
-For maintenance, consult `docs/specs/agent-network-implementation-status.md`:
+For maintenance, consult `docs/specs/agent-network-simple-flow.md`:
 source support, published-package support and live execution proof are separate.
 
 ## event bus + hooks (python)
