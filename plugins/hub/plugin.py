@@ -380,6 +380,13 @@ class HubPlugin(BasePlugin):
         self._relay_commands = None
         self._relay_agent = None
         self._relay_startup_task = None
+        # CLI `kollab --hub msg agent@device` waiters (docs/specs/
+        # agent-network-simple-flow.md, CLI bullet). Keyed by the local
+        # outbound HubMessage's thread_id, with a fallback keyed by handle
+        # since the relay send path does not thread thread_id across a hop
+        # today. _on_message_received resolves whichever matches first.
+        self._cli_waiters: Dict[str, "asyncio.Future"] = {}
+        self._cli_waiters_by_handle: Dict[str, "asyncio.Future"] = {}
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
@@ -4265,6 +4272,8 @@ class HubPlugin(BasePlugin):
                 on_get_output=self._get_output_lines,
                 on_shutdown=self._on_remote_shutdown,
                 on_input_inject=self._inject_attacher_input,
+                on_network_status=self._handle_network_status_request,
+                on_network_send=self._handle_network_send_request,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -6606,6 +6615,24 @@ class HubPlugin(BasePlugin):
             self._seen_messages[msg_id] = None
             while len(self._seen_messages) > 1000:
                 self._seen_messages.popitem(last=False)
+
+        # `kollab --hub msg agent@device` waiter: fulfil a pending CLI wait
+        # the moment this handle's first reply arrives. Matched by thread_id
+        # when the remote echoed it, else by handle (see _cli_waiters in
+        # __init__). This never blocks or consumes the message -- it still
+        # goes through the normal display and model path below. getattr:
+        # some tests construct HubPlugin via __new__ without running
+        # __init__, the same reason _relay_agent above is read with getattr.
+        cli_waiters = getattr(self, "_cli_waiters", None)
+        cli_waiters_by_handle = getattr(self, "_cli_waiters_by_handle", None)
+        if cli_waiters or cli_waiters_by_handle:
+            waiter = cli_waiters.pop(message.thread_id, None)
+            if waiter is None:
+                waiter = cli_waiters_by_handle.pop(message.from_identity, None)
+            else:
+                cli_waiters_by_handle.pop(message.from_identity, None)
+            if waiter is not None and not waiter.done():
+                waiter.set_result((message.from_identity, message.content))
 
         # Context control-plane traffic — dispatch without vault/display
         if message.action == "context_ledger_update":
@@ -11652,6 +11679,114 @@ class HubPlugin(BasePlugin):
                 )
         except Exception as e:
             logger.debug("Attacher input inject error (%s)", type(e).__name__)
+
+    async def _handle_network_status_request(self) -> Dict[str, Any]:
+        """Answer the CLI's `network_status` socket request.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: `kollab --hub
+        status` asks one online local agent for the network section instead
+        of reading relay state off disk itself. Never raises -- an
+        unavailable relay is "not connected", not a CLI crash.
+        """
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            try:
+                await self._start_relay_agent()
+            except Exception as e:
+                logger.debug("network_status: relay agent unavailable: %s", e)
+            relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            return {"device": "", "trust": "", "agents": []}
+
+        agents: List[dict] = []
+        try:
+            result = relay.remote_agents()
+            if asyncio.iscoroutine(result):
+                result = await result
+            if isinstance(result, list):
+                agents = result
+        except Exception as e:
+            logger.debug("network_status: remote_agents failed: %s", e)
+
+        device, trust = "", ""
+        try:
+            device = relay.device_name() or ""
+            trust = relay.trust_level() or ""
+        except Exception as e:
+            logger.debug("network_status: device/trust unavailable: %s", e)
+
+        return {"device": device, "trust": trust, "agents": agents}
+
+    async def _handle_network_send_request(
+        self, to: str, content: str, wait_seconds: int
+    ) -> Dict[str, Any]:
+        """Answer the CLI's `network_send` socket request.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: deliver
+        ``content`` to the ``agent@device`` handle ``to`` as an ordinary hub
+        message (so it shows on this daemon's screen and the receiving
+        agent runs it with its own tools), then wait up to ``wait_seconds``
+        for that handle's first reply. ``wait_seconds <= 0`` returns right
+        after sending (``--no-wait``).
+        """
+        handle = parse_handle(to)
+        if handle is None:
+            return {"type": "error", "msg": f"not an agent@device handle: {to!r}"}
+        handle_str = format_handle(*handle)
+
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            try:
+                await self._start_relay_agent()
+            except Exception:
+                pass
+            relay = getattr(self, "_relay_agent", None)
+        resolve = getattr(relay, "resolve_handle", None)
+        if relay is None or resolve is None:
+            return {"type": "error", "msg": "network messaging is not available on this build"}
+
+        from .relay_state import RelayError
+
+        try:
+            result = resolve(handle_str)
+            if asyncio.iscoroutine(result):
+                await result
+        except RelayError as exc:
+            return {"type": "error", "msg": str(exc)}
+
+        msg = HubMessage(
+            action="message",
+            from_agent=(self._identity.agent_id if self._identity else ""),
+            from_identity=(self._identity.identity if self._identity else ""),
+            to=handle_str,
+            content=content,
+            scope=MessageScope.DIRECT.value,
+        )
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._cli_waiters[msg.thread_id] = future
+        self._cli_waiters_by_handle[handle_str] = future
+        try:
+            rejections = await self._route_message(msg)
+            self._display_outgoing_message(handle_str, content)
+            if rejections:
+                return {"type": "error", "msg": rejections[0][1]}
+            if wait_seconds <= 0:
+                return {"type": "network_sent", "to": handle_str}
+            try:
+                from_identity, reply_content = await asyncio.wait_for(
+                    future, timeout=wait_seconds
+                )
+                return {
+                    "type": "network_reply",
+                    "from": from_identity,
+                    "content": reply_content,
+                }
+            except asyncio.TimeoutError:
+                return {"type": "network_timeout"}
+        finally:
+            self._cli_waiters.pop(msg.thread_id, None)
+            if self._cli_waiters_by_handle.get(handle_str) is future:
+                self._cli_waiters_by_handle.pop(handle_str, None)
 
     async def _on_remote_shutdown(self, reason: str = "") -> None:
         """Handle shutdown signal received via hub socket.
