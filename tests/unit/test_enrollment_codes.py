@@ -121,7 +121,7 @@ def test_generation_rejects_invalid_offer_ids(offer_id: str):
         codes.generate_enrollment_code(offer_id)
 
 
-def test_generation_uses_100_bits_and_formats_secret_in_crockford_groups(monkeypatch):
+def test_generation_uses_40_bits_and_formats_secret_as_a_short_code(monkeypatch):
     requested_lengths: list[int] = []
 
     def fixed_random_bytes(length: int) -> bytes:
@@ -131,11 +131,13 @@ def test_generation_uses_100_bits_and_formats_secret_in_crockford_groups(monkeyp
     monkeypatch.setattr(codes.secrets, "token_bytes", fixed_random_bytes)
     code = codes.generate_enrollment_code(OFFER_ID)
 
-    assert requested_lengths == [13]
-    assert code.for_private_display() == (f"K1-{OFFER_ID}-000G-40R4-0M30-E209-185G")
-    assert codes.parse_enrollment_code(
-        code.for_private_display()
-    ).for_private_display() == (code.for_private_display())
+    assert requested_lengths == [5]
+    assert code.for_private_display() == "000G-40R4"
+    assert codes.is_short_enrollment_code(code.for_private_display())
+    assert (
+        codes.parse_short_enrollment_code(code.for_private_display())
+        == b"000G40R4"
+    )
 
 
 def test_code_and_verifier_string_representations_redact_values():
@@ -187,3 +189,62 @@ def test_explicit_wipe_clears_code_and_verifier_buffers():
         verifier.for_protocol()
     with pytest.raises(ValueError, match="^enrollment envelope key has been cleared$"):
         envelope_key.for_envelope_encryption()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["ABCD-1234", "abcd-1234", "AbCd-1234", "ABCD1234", "abcd1234", "  ABCD-1234  "],
+)
+def test_short_code_parses_either_case_dashless_and_padded(value: str):
+    assert codes.is_short_enrollment_code(value)
+    assert codes.parse_short_enrollment_code(value) == b"ABCD1234"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ABC-1234",  # too short
+        "ABCDE-1234",  # too long
+        "ABCI-1234",  # I is not in the alphabet
+        "ABCD_1234",  # wrong separator
+        DISPLAY_CODE,  # a K1 code, not a short one
+        "",
+    ],
+)
+def test_short_code_rejects_malformed_input(value: str):
+    assert not codes.is_short_enrollment_code(value)
+    with pytest.raises(ValueError, match="^invalid enrollment code$"):
+        codes.parse_short_enrollment_code(value)
+
+
+def test_lookup_tag_is_deterministic_and_bound_to_the_origin():
+    secret = codes.parse_short_enrollment_code("ABCD-1234")
+
+    tag = codes.derive_enrollment_lookup_tag(secret, "https://relay.example")
+
+    assert tag == codes.derive_enrollment_lookup_tag(secret, "https://relay.example")
+    assert tag != codes.derive_enrollment_lookup_tag(secret, "https://other.example")
+    assert tag != codes.derive_enrollment_lookup_tag(b"WXYZ5678", "https://relay.example")
+
+
+def test_lookup_hash_is_deterministic_and_never_reverses_to_the_tag():
+    secret = codes.parse_short_enrollment_code("ABCD-1234")
+    tag = codes.derive_enrollment_lookup_tag(secret, "https://relay.example")
+
+    hashed = codes.enrollment_lookup_hash(tag)
+
+    assert hashed == codes.enrollment_lookup_hash(tag)
+    assert tag not in hashed
+    with pytest.raises(ValueError, match="^invalid lookup tag$"):
+        codes.enrollment_lookup_hash("not-base64url-!!")
+
+
+def test_code_for_lookup_tag_matches_the_free_function():
+    code = codes.generate_enrollment_code(OFFER_ID)
+
+    tag = code.for_lookup_tag("https://relay.example")
+
+    assert tag == codes.derive_enrollment_lookup_tag(
+        codes.parse_short_enrollment_code(code.for_private_display()),
+        "https://relay.example",
+    )

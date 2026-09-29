@@ -9,6 +9,7 @@ This module never logs or persists either value.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import secrets
@@ -17,12 +18,15 @@ from dataclasses import dataclass, field
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _CROCKFORD_LOWER = _CROCKFORD_ALPHABET.lower()
 _OFFER_ID_LENGTH = 32
-_SECRET_LENGTH = 20
-_SECRET_BYTES = 13  # 104 random bits; the top 100 bits are used below.
+_SECRET_LENGTH = 8  # short join code: 8 chars from a 32-symbol alphabet = 40 bits.
+_SECRET_BYTES = 5
+_LEGACY_SECRET_LENGTH = 20  # K1 codes issued before short codes; parsing only.
+_LEGACY_SECRET_BYTES = 13  # 104 random bits; the top 100 bits are used below.
 _KDF_DOMAIN = b"kollab-relay-enrollment-code-v1\0"
 _VERIFIER_DOMAIN = b"kollab-relay-enrollment-verifier-v1\0"
 _ENVELOPE_SALT_DOMAIN = b"kollab-relay-enrollment-envelope-salt-v1\0"
 _ENVELOPE_INFO_DOMAIN = b"kollab-relay-enrollment-envelope-key-v1\0"
+_LOOKUP_DOMAIN = b"kollab-relay-enrollment-lookup-v1\0"
 
 
 def _validate_offer_id(offer_id: str) -> bytes:
@@ -36,15 +40,16 @@ def _validate_offer_id(offer_id: str) -> bytes:
 
 
 def _validate_secret(secret: bytes | bytearray) -> bytearray:
-    if not isinstance(secret, (bytes, bytearray)) or len(secret) != _SECRET_LENGTH:
+    if not isinstance(secret, (bytes, bytearray)) or len(secret) not in (
+        _SECRET_LENGTH,
+        _LEGACY_SECRET_LENGTH,
+    ):
         raise ValueError("invalid enrollment code secret")
     try:
         text = bytes(secret).decode("ascii")
     except UnicodeDecodeError:
         raise ValueError("invalid enrollment code secret") from None
-    if len(text) != _SECRET_LENGTH or any(
-        char not in _CROCKFORD_ALPHABET for char in text
-    ):
+    if any(char not in _CROCKFORD_ALPHABET for char in text):
         raise ValueError("invalid enrollment code secret")
     return bytearray(text.encode("ascii"))
 
@@ -69,10 +74,16 @@ class EnrollmentCode:
     def for_private_display(self) -> str:
         """Return the canonical code for a private, human-only display surface."""
         secret = self._secret_text()
+        if len(secret) == _SECRET_LENGTH:
+            return f"{secret[:4]}-{secret[4:]}"
         groups = "-".join(
-            secret[offset : offset + 4] for offset in range(0, _SECRET_LENGTH, 4)
+            secret[offset : offset + 4] for offset in range(0, _LEGACY_SECRET_LENGTH, 4)
         )
         return f"K1-{self.offer_id}-{groups}"
+
+    def for_lookup_tag(self, origin: str) -> str:
+        """Return this short code's lookup tag for a signed enrollment request."""
+        return derive_enrollment_lookup_tag(self._secret_bytes(), origin)
 
     def wipe(self) -> None:
         """Best-effort zero the mutable secret buffer held by this object."""
@@ -81,7 +92,7 @@ class EnrollmentCode:
         self._secret.clear()
 
     def _secret_bytes(self) -> bytes:
-        if len(self._secret) != _SECRET_LENGTH:
+        if len(self._secret) not in (_SECRET_LENGTH, _LEGACY_SECRET_LENGTH):
             raise ValueError("enrollment code has been cleared")
         return bytes(self._secret)
 
@@ -165,17 +176,50 @@ class EnrollmentEnvelopeKey:
 
 
 def generate_enrollment_code(offer_id: str) -> EnrollmentCode:
-    """Generate a 100-bit Crockford code bound to a lowercase offer ID."""
+    """Generate a 40-bit Crockford short code; the offer id is looked up, not embedded."""
     _validate_offer_id(offer_id)
     random_value = secrets.token_bytes(_SECRET_BYTES)
     if len(random_value) != _SECRET_BYTES:
         raise ValueError("could not generate enrollment code")
-    secret_value = int.from_bytes(random_value, "big") >> 4
+    secret_value = int.from_bytes(random_value, "big")
     secret = "".join(
-        _CROCKFORD_ALPHABET[(secret_value >> (95 - 5 * index)) & 0x1F]
+        _CROCKFORD_ALPHABET[(secret_value >> (5 * (_SECRET_LENGTH - 1 - index))) & 0x1F]
         for index in range(_SECRET_LENGTH)
     )
     return EnrollmentCode(offer_id, bytearray(secret.encode("ascii")))
+
+
+def is_short_enrollment_code(value: str) -> bool:
+    """True when ``value`` looks like an ``XXXX-XXXX`` short code, not a K1 code."""
+    try:
+        parse_short_enrollment_code(value)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_short_enrollment_code(value: str) -> bytearray:
+    """Parse an 8-character short code: either case, dash optional, into its secret."""
+    if not isinstance(value, str):
+        raise ValueError("invalid enrollment code")
+    stripped = value.strip()
+    if len(stripped) == _SECRET_LENGTH + 1 and stripped[4] == "-":
+        digits = stripped[:4] + stripped[5:]
+    elif len(stripped) == _SECRET_LENGTH:
+        digits = stripped
+    else:
+        raise ValueError("invalid enrollment code")
+    normalized: list[str] = []
+    for char in digits:
+        if not char.isascii():
+            raise ValueError("invalid enrollment code")
+        if char in _CROCKFORD_ALPHABET:
+            normalized.append(char)
+        elif char in _CROCKFORD_LOWER:
+            normalized.append(char.upper())
+        else:
+            raise ValueError("invalid enrollment code")
+    return bytearray("".join(normalized).encode("ascii"))
 
 
 def parse_enrollment_code(value: str) -> EnrollmentCode:
@@ -240,6 +284,34 @@ def derive_enrollment_envelope_key(code: EnrollmentCode) -> EnrollmentEnvelopeKe
     return EnrollmentEnvelopeKey(code.offer_id, bytearray(key))
 
 
+def derive_enrollment_lookup_tag(secret: bytes | bytearray, origin: str) -> str:
+    """Return the base64url lookup tag a joiner sends to find its short-code offer.
+
+    Only meaningful for a short code's secret; a K1 code carries its offer id
+    directly and never needs a lookup.
+    """
+    if not isinstance(secret, (bytes, bytearray)) or len(secret) != _SECRET_LENGTH:
+        raise ValueError("invalid enrollment code secret")
+    if not isinstance(origin, str) or not origin:
+        raise ValueError("invalid origin")
+    key = _LOOKUP_DOMAIN + origin.encode("ascii")
+    tag = hmac.new(key, bytes(secret), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(tag).rstrip(b"=").decode("ascii")
+
+
+def enrollment_lookup_hash(lookup: str) -> str:
+    """Return the relay-storable hash of a lookup tag; the tag is bearer-equivalent."""
+    if not isinstance(lookup, str) or not lookup:
+        raise ValueError("invalid lookup tag")
+    try:
+        tag = base64.urlsafe_b64decode(lookup + "=" * (-len(lookup) % 4))
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid lookup tag") from exc
+    if len(tag) != 32:
+        raise ValueError("invalid lookup tag")
+    return hashlib.sha256(tag).hexdigest()
+
+
 def enrollment_verifier_hash(offer_id: str, verifier: EnrollmentCodeVerifier) -> str:
     """Return the HMAC-SHA256 value stored for an offer's verifier."""
     offer_id_bytes = _validate_offer_id(offer_id)
@@ -275,7 +347,11 @@ __all__ = [
     "EnrollmentCodeVerifier",
     "derive_enrollment_code_verifier",
     "derive_enrollment_envelope_key",
+    "derive_enrollment_lookup_tag",
+    "enrollment_lookup_hash",
     "enrollment_verifier_hash",
     "generate_enrollment_code",
+    "is_short_enrollment_code",
     "parse_enrollment_code",
+    "parse_short_enrollment_code",
 ]

@@ -606,9 +606,12 @@ class ConnectOfferAltView(AltView):
                 or not expires_at.isdigit()
                 or int(expires_at) <= int(time.time())
                 or not isinstance(code, str)
-                or not re.fullmatch(
-                    rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
-                    code,
+                or not (
+                    re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
+                    or re.fullmatch(
+                        rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
+                        code,
+                    )
                 )
             ):
                 raise ValueError("invalid enrollment offer")
@@ -626,36 +629,37 @@ class ConnectOfferAltView(AltView):
         self.request_render()
 
     def _render_code(self, y: int, width: int) -> None:
-        self._write_line(2, y, f"Offer: {self._offer_id}", width)
         if self._private_code is None:
-            self._write_line(2, y + 1, "This code is no longer available.", width)
-            self._write_line(2, y + 3, "Enter or Esc: close", width)
+            self._write_line(2, y, "This code is no longer available.", width)
+            self._write_line(2, y + 2, "Enter or Esc: close", width)
             return
         remaining = self._expires_at - int(time.time())
         if remaining <= 0:
             self._clear_code()
-            self._write_line(2, y + 1, "This code has expired.", width)
-            self._write_line(2, y + 3, "Enter or Esc: close", width)
+            self._write_line(2, y, "This code has expired.", width)
+            self._write_line(2, y + 2, "Enter or Esc: close", width)
             return
-        self._write_line(
-            2, y + 1, "Private code (send it only to the new device):", width
-        )
         try:
             full_code = self._private_code.reveal() if self._private_code else ""
         except RuntimeError:
             full_code = ""
+        minutes, seconds = divmod(max(0, remaining), 60)
         code_lines = textwrap.wrap(
             full_code,
             width=max(1, width - 4),
             break_long_words=True,
             break_on_hyphens=False,
         )
-        code_y = y + 3
         for index, line in enumerate(code_lines):
-            self._write_line(2, code_y + index, line, width)
-        expiry_y = code_y + len(code_lines) + 1
-        self._write_line(2, expiry_y, f"Expires in {remaining} seconds.", width)
-        self._write_line(2, expiry_y + 2, "Enter or Esc: close", width)
+            self._write_line(2, y + index, line, width)
+        status_y = y + len(code_lines) + 1
+        self._write_line(
+            2, status_y, f"one device, expires in {minutes}:{seconds:02d}", width
+        )
+        self._write_line(
+            2, status_y + 2, "type it into /connect on the other machine", width
+        )
+        self._write_line(2, status_y + 4, "Enter or Esc: close", width)
 
     def _clear_code(self) -> None:
         if self._private_code is not None:

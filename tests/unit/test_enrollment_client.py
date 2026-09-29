@@ -34,6 +34,7 @@ from plugins.hub.enrollment_codes import (
     derive_enrollment_envelope_key,
     enrollment_verifier_hash,
     generate_enrollment_code,
+    parse_enrollment_code,
 )
 from plugins.hub.enrollment_delegations import EnrollmentDelegationStore
 from plugins.hub.enrollment_recovery import (
@@ -428,8 +429,11 @@ async def _run_enrollment(
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = generate_enrollment_code(offer_id)
-    code_text = code.for_private_display()
+    # A fixed legacy K1 code: this helper exercises the deep pairing protocol
+    # (challenge/proof/decision/ack), not code-format parsing, and a K1 code
+    # skips the lookup round trip a short code's FakeTransport doesn't model.
+    code_text = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = parse_enrollment_code(code_text)
     verifier = derive_enrollment_code_verifier(code)
     envelope_key = derive_enrollment_envelope_key(code)
     owner_signing_key = SigningKey.generate()
@@ -994,10 +998,14 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
 
     assert result["status"] == "offered"
     assert result["offer_id"] == transport.request[0]
-    parsed = enrollment_client.parse_enrollment_code(result["code"])
+    secret = enrollment_client.parse_short_enrollment_code(result["code"])
+    parsed = enrollment_client.EnrollmentCode(result["offer_id"], secret)
     verifier = derive_enrollment_code_verifier(parsed)
     try:
         assert transport.request[1]["code_verifier_hash"] == enrollment_verifier_hash(result["offer_id"], verifier)
+        assert transport.request[1]["lookup_hash"] == enrollment_client.enrollment_lookup_hash(
+            parsed.for_lookup_tag(discovery.origin)
+        )
     finally:
         parsed.wipe()
         verifier.wipe()
@@ -1252,6 +1260,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
                         "round_id": round_id,
                         "destination_key": destination_public_key,
                         "envelope": request_envelope,
+                        "device_name": "",
                     }
                 return {
                     "status": "claimed",
@@ -1259,6 +1268,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
                     "round_id": round_id,
                     "destination_key": destination_public_key,
                     "envelope": self.proof_envelope,
+                    "device_name": "",
                 }
             if path.endswith("/challenge"):
                 challenge = decrypt_enrollment_envelope(envelope_key, fields["envelope"])
@@ -1734,3 +1744,144 @@ async def test_issuer_requires_explicit_decision_after_proof(
         assert relay.state.approvals == []
         assert owner_directory.members() == ()
         assert delegation_store.get(human_action_id).consumed_new_devices == 0
+
+
+@pytest.mark.asyncio
+async def test_lookup_enrollment_offer_resolves_via_the_lookup_route(monkeypatch):
+    client = SimpleNamespace(
+        _store=SimpleNamespace(key=SigningKey.generate()),
+        public_key="a" * 64,
+    )
+    discovery = SimpleNamespace(origin="https://kollabor.ai")
+    secret = bytearray(b"ABCD1234")
+    offer_id = "1" * 32
+    seen = {}
+
+    class FakeTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, path, frame, **_kwargs):
+            seen["path"] = path
+            seen["frame"] = frame
+            return {"offer_id": offer_id}
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: FakeTransport()
+    )
+
+    result = await enrollment_client._lookup_enrollment_offer(client, discovery, "", (), secret)
+
+    assert result == offer_id
+    assert seen["path"] == enrollment_client.ENROLLMENT_LOOKUP_PATH
+    assert seen["frame"]["destination_key"] == client.public_key
+    assert seen["frame"]["lookup"] == enrollment_client.derive_enrollment_lookup_tag(
+        secret, discovery.origin
+    )
+
+
+@pytest.mark.asyncio
+async def test_lookup_enrollment_offer_returns_none_on_a_miss_or_bad_response(monkeypatch):
+    client = SimpleNamespace(
+        _store=SimpleNamespace(key=SigningKey.generate()),
+        public_key="a" * 64,
+    )
+    discovery = SimpleNamespace(origin="https://kollabor.ai")
+    secret = bytearray(b"ABCD1234")
+
+    class MissTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, _frame, **_kwargs):
+            raise EnrollmentProtocolError("unavailable")
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: MissTransport()
+    )
+    assert await enrollment_client._lookup_enrollment_offer(
+        client, discovery, "", (), secret
+    ) is None
+
+    class MalformedTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, _frame, **_kwargs):
+            return {"offer_id": "not-hex"}
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: MalformedTransport()
+    )
+    assert await enrollment_client._lookup_enrollment_offer(
+        client, discovery, "", (), secret
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_enroll_device_short_code_looks_up_then_submits_the_request(tmp_path, monkeypatch):
+    """A short code has no offer id embedded: enroll_device must resolve one
+    through the lookup route before it can journal or submit anything."""
+    origin = "https://kollabor.ai"
+    offer_id = "2" * 32
+    code = generate_enrollment_code(offer_id)
+    code_text = code.for_private_display()
+    verifier = derive_enrollment_code_verifier(code)
+    expected_verifier = verifier.for_protocol()
+
+    destination = RelayClient(
+        tmp_path / "destination-workspace",
+        state_dir=tmp_path / "destination-network",
+        label="destination",
+    )
+    discovery = SimpleNamespace(
+        origin=origin,
+        manifest={
+            "coordinator": {"public_key": "0" * 64},
+            "endpoints": {"control": origin + "/relay/v1"},
+        },
+    )
+    commands = SimpleNamespace(
+        client=destination,
+        _discover=AsyncMock(return_value=(discovery, "", (), False)),
+        _relay_url=lambda _discovery: "wss://kollabor.ai/relay/v1/ws",
+    )
+
+    class LookupOnlyTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, path, _frame, **_kwargs):
+            assert path == enrollment_client.ENROLLMENT_LOOKUP_PATH
+            return {"offer_id": offer_id}
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: LookupOnlyTransport()
+    )
+    drive = AsyncMock(return_value={"status": "stubbed"})
+    monkeypatch.setattr(enrollment_client, "_drive_destination_enrollment", drive)
+
+    try:
+        result = await enroll_device(commands, "kollabor.ai", code_text)
+    finally:
+        code.wipe()
+        verifier.wipe()
+
+    assert result == {"status": "stubbed"}
+    drive.assert_awaited_once()
+    _commands, journaled_record, _journal, _envelope_key = drive.await_args.args
+    assert journaled_record["offer_id"] == offer_id
+    assert journaled_record["code_verifier"] == expected_verifier
+    assert journaled_record["device_name"]

@@ -18,6 +18,7 @@ import ssl
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -27,6 +28,7 @@ from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
 from nacl.signing import SigningKey, VerifyKey
 
+from .device_names import NAME_RE, default_device_name
 from .dns.discovery import DiscoveryError, _PublicResolver, normalize_target
 from .dns.private_directory import (
     PrivateDirectory,
@@ -39,9 +41,13 @@ from .enrollment_codes import (
     EnrollmentEnvelopeKey,
     derive_enrollment_code_verifier,
     derive_enrollment_envelope_key,
+    derive_enrollment_lookup_tag,
+    enrollment_lookup_hash,
     enrollment_verifier_hash,
     generate_enrollment_code,
+    is_short_enrollment_code,
     parse_enrollment_code,
+    parse_short_enrollment_code,
 )
 from .enrollment_delegations import (
     DelegationSessionChangedError,
@@ -83,8 +89,9 @@ _ALLOWED_ERRORS = {
     "backend_unavailable",
 }
 _PATH = re.compile(
-    r"/relay/v1/enrollment/(?:offers|offers/[0-9a-f]{32}/(?:request|poll|challenge|proof|decision|reply/poll|ack|ack/poll))\Z"
+    r"/relay/v1/enrollment/(?:offers|lookup|offers/[0-9a-f]{32}/(?:request|poll|challenge|proof|decision|reply/poll|ack|ack/poll))\Z"
 )
+ENROLLMENT_LOOKUP_PATH = "/relay/v1/enrollment/lookup"
 
 
 class EnrollmentProtocolError(ValueError):
@@ -144,6 +151,29 @@ def signed_enrollment_frame(
     frame = {
         "v": 1,
         "offer_id": offer_id,
+        "issued_at": int(time.time()) if now is None else int(now),
+        "nonce": secrets.token_hex(16),
+        **fields,
+    }
+    signature = signing_key.sign(enrollment_signature_message(origin, "POST", path, frame)).signature.hex()
+    return {**frame, "signature": signature}
+
+
+def signed_lookup_frame(
+    signing_key: SigningKey,
+    origin: str,
+    path: str,
+    fields: dict[str, Any],
+    *,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Create a fresh signed POST frame for the offer-id-less lookup route."""
+    if not _PATH.fullmatch(path):
+        raise EnrollmentProtocolError("invalid_request")
+    if not isinstance(fields, dict) or {"v", "issued_at", "nonce", "signature"} & fields.keys():
+        raise EnrollmentProtocolError("invalid_request")
+    frame = {
+        "v": 1,
         "issued_at": int(time.time()) if now is None else int(now),
         "nonce": secrets.token_hex(16),
         **fields,
@@ -849,6 +879,7 @@ def _validate_destination_recovery_record(record: Any, offer_id: str) -> dict[st
         "retry_attempts",
         "retry_after",
         "last_error_code",
+        "device_name",
     }
     if not isinstance(record, dict) or set(record) != fields:
         raise EnrollmentProtocolError("invalid_response")
@@ -877,6 +908,9 @@ def _validate_destination_recovery_record(record: Any, offer_id: str) -> dict[st
         or not re.fullmatch(r"[A-Za-z0-9_-]{43}", record["envelope_key"])
         or not isinstance(record["request_envelope"], str)
         or len(record["request_envelope"]) > 32768
+        or not isinstance(record["device_name"], str)
+        or (record["device_name"] and not NAME_RE.fullmatch(record["device_name"]))
+        or len(record["device_name"]) > 63
     ):
         raise EnrollmentProtocolError("invalid_response")
     issuer_key = record["issuer_relay_key"]
@@ -973,6 +1007,39 @@ async def _discover_destination(commands, domain: str):
     if not relay_url or control != discovery.origin + "/relay/v1":
         raise EnrollmentProtocolError("unavailable")
     return discovery, ca, private_cidrs
+
+
+async def _lookup_enrollment_offer(
+    client,
+    discovery: Any,
+    ca: str,
+    private_cidrs: tuple[str, ...],
+    secret: bytearray,
+) -> str | None:
+    """Resolve a short code's secret to its offer id, or None on any failure.
+
+    A miss, an expired offer, an already-used offer, and a burned offer are
+    all indistinguishable by design -- the caller cannot and must not probe
+    which case it hit.
+    """
+    lookup_tag = derive_enrollment_lookup_tag(secret, discovery.origin)
+    frame = signed_lookup_frame(
+        client._store.key,
+        discovery.origin,
+        ENROLLMENT_LOOKUP_PATH,
+        {"destination_key": client.public_key, "lookup": lookup_tag},
+    )
+    try:
+        async with EnrollmentHTTPClient(discovery.origin, ca=ca, private_cidrs=private_cidrs) as transport:
+            response = await transport.post(ENROLLMENT_LOOKUP_PATH, frame, expected_statuses={200})
+    except EnrollmentProtocolError:
+        return None
+    if not isinstance(response, dict) or set(response) != {"offer_id"}:
+        return None
+    offer_id = response["offer_id"]
+    if not isinstance(offer_id, str) or not re.fullmatch(r"[0-9a-f]{32}", offer_id):
+        return None
+    return offer_id
 
 
 def _decode_destination_challenge(
@@ -1360,16 +1427,19 @@ async def _drive_destination_enrollment(
                 journal.delete(offer_id)
                 raise EnrollmentProtocolError("unavailable")
             request_path = f"/relay/v1/enrollment/offers/{offer_id}/request"
+            request_fields = {
+                "destination_key": record["destination_key"],
+                "round_id": record["round_id"],
+                "code_verifier": record["code_verifier"],
+                "envelope": record["request_envelope"],
+            }
+            if record.get("device_name"):
+                request_fields["device_name"] = record["device_name"]
             submitted = await transport.post_signed_retry(
                 signing_key,
                 request_path,
                 offer_id,
-                {
-                    "destination_key": record["destination_key"],
-                    "round_id": record["round_id"],
-                    "code_verifier": record["code_verifier"],
-                    "envelope": record["request_envelope"],
-                },
+                request_fields,
             )
             _require_shape(submitted, {"status", "receipt"})
             if submitted["status"] != "pending" or submitted["receipt"] != record["round_id"]:
@@ -1617,9 +1687,22 @@ async def enroll_device(commands, domain: str, private_code: str) -> dict[str, s
     journal = None
     record = None
     client = commands.client
+    discovery = None
     try:
-        code = parse_enrollment_code(private_code)
-        offer_id = code.offer_id
+        if is_short_enrollment_code(private_code):
+            secret = parse_short_enrollment_code(private_code)
+            discovery, _lookup_ca, _lookup_cidrs = await _discover_destination(commands, domain)
+            offer_id = await _lookup_enrollment_offer(
+                client, discovery, _lookup_ca, _lookup_cidrs, secret
+            )
+            if offer_id is None:
+                raise EnrollmentProtocolError("unavailable")
+            code = EnrollmentCode(offer_id, secret)
+            for index in range(len(secret)):
+                secret[index] = 0
+        else:
+            code = parse_enrollment_code(private_code)
+            offer_id = code.offer_id
         if not _claim_destination_recovery(client, offer_id):
             raise EnrollmentProtocolError("unavailable")
         claimed = True
@@ -1641,7 +1724,11 @@ async def enroll_device(commands, domain: str, private_code: str) -> dict[str, s
         else:
             if not _destination_state_empty(client):
                 raise EnrollmentProtocolError("conflict")
-            discovery, _ca, _private_cidrs = await _discover_destination(commands, domain)
+            if discovery is None:
+                discovery, _ca, _private_cidrs = await _discover_destination(commands, domain)
+            device_name = getattr(client.state, "device_name", "") or default_device_name(
+                Path.cwd()
+            )
             round_id = secrets.token_hex(16)
             request_envelope = encrypt_enrollment_envelope(
                 envelope_key,
@@ -1681,6 +1768,7 @@ async def enroll_device(commands, domain: str, private_code: str) -> dict[str, s
                 "retry_attempts": 0,
                 "retry_after": 0,
                 "last_error_code": None,
+                "device_name": device_name,
             }
             _validate_destination_recovery_record(record, offer_id)
             # The stable round and exact request are durable before the first
@@ -1770,6 +1858,7 @@ class EnrollmentApprovalRequest:
     remaining_new_devices: int
     decision_available: bool
     profile_summary: str | None = None
+    device_name: str = ""
 
 
 @dataclass(slots=True)
@@ -1782,6 +1871,7 @@ class _LiveEnrollmentRequest:
     proof_token: str = field(repr=False)
     decision_event: asyncio.Event = field(repr=False)
     decision: str | None = None
+    device_name: str = ""
 
 
 class EnrollmentIssuer:
@@ -2538,6 +2628,7 @@ class EnrollmentIssuer:
                         if live is not None and live.offer.provisioning_plan is not None
                         else None
                     ),
+                    device_name=live.device_name if live is not None else "",
                 )
             )
         return tuple(pending)
@@ -2868,6 +2959,7 @@ class EnrollmentIssuer:
             code = generate_enrollment_code(offer_id)
             verifier = derive_enrollment_code_verifier(code)
             envelope_key = derive_enrollment_envelope_key(code)
+            lookup_hash = enrollment_lookup_hash(code.for_lookup_tag(discovery.origin))
             signing_key = client._store.key
             path = "/relay/v1/enrollment/offers"
             async with EnrollmentHTTPClient(discovery.origin, ca=ca, private_cidrs=private_cidrs) as transport:
@@ -2881,6 +2973,7 @@ class EnrollmentIssuer:
                         "session": session_id,
                         "expires_at": expires_at,
                         "code_verifier_hash": enrollment_verifier_hash(offer_id, verifier),
+                        "lookup_hash": lookup_hash,
                     },
                 )
             _require_shape(response, {"status", "offer_id", "expires_at"})
@@ -2994,6 +3087,7 @@ class EnrollmentIssuer:
         destination_key = ""
         round_id = ""
         proof_token = ""
+        device_name = ""
         issued_credential = None
         device_authorized = False
         receipt_persisted = False
@@ -3017,6 +3111,7 @@ class EnrollmentIssuer:
                         round_id = recovery_request["round_id"]
                         challenge_token = recovery_request["challenge_token"]
                         proof_token = recovery_request["proof_token"]
+                        device_name = recovery_request.get("device_name", "")
                         request = {"workspace_id": recovery_request["workspace_id"]}
                         proof_envelope = encrypt_enrollment_envelope(
                             offer.envelope_key,
@@ -3035,6 +3130,7 @@ class EnrollmentIssuer:
                             "round_id": round_id,
                             "destination_key": destination_key,
                             "envelope": proof_envelope,
+                            "device_name": recovery_request.get("device_name", ""),
                         }
                     else:
                         phase_for_claim = "proof" if challenge_token else "request"
@@ -3068,6 +3164,7 @@ class EnrollmentIssuer:
                         "round_id",
                         "destination_key",
                         "envelope",
+                        "device_name",
                     }:
                         return
                     phase = polled["phase"]
@@ -3097,6 +3194,11 @@ class EnrollmentIssuer:
                         destination_key = request["destination_key"]
                         round_id = request["round_id"]
                         if not re.fullmatch(r"[0-9a-f]{64}", destination_key):
+                            return
+                        device_name = polled.get("device_name", "")
+                        if not isinstance(device_name, str) or (
+                            device_name and not NAME_RE.fullmatch(device_name)
+                        ) or len(device_name) > 63:
                             return
                         try:
                             store.check_eligible(
@@ -3266,6 +3368,7 @@ class EnrollmentIssuer:
                         challenge_token=challenge_token,
                         proof_token=proof_token,
                         decision_event=asyncio.Event(),
+                        device_name=device_name,
                     )
                     self._live_requests[round_id] = live_request
                     if offer.recovery_mode:

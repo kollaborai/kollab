@@ -35,7 +35,7 @@ ENROLLMENT_RATE_LIMIT = 10
 ENROLLMENT_RATE_WINDOW_MS = 60_000
 ENROLLMENT_MAX_RATE_SOURCES = 65_536
 ENROLLMENT_INDEX_CLEANUP_BATCH = 256
-ENROLLMENT_MAX_FAILED_CODES = 8
+ENROLLMENT_MAX_FAILED_CODES = 5
 ENROLLMENT_MAX_NONCES_PER_PRINCIPAL = 4096
 ENROLLMENT_MAX_NONCES = 131_072
 MAX_ACTIVE_CONTACT_REQUESTS = 4096
@@ -98,6 +98,7 @@ class InMemoryBackend:
         self.source_counts: Counter[str] = Counter()
         self.rooms: dict[str, dict[str, PeerRecord]] = {}
         self.enrollment_offers: dict[str, dict[str, Any]] = {}
+        self.enrollment_lookup_index: dict[str, str] = {}
         self.enrollment_rate: dict[str, tuple[int, float]] = {}
         self.enrollment_nonces: dict[str, dict[str, float]] = {}
         self.enrollment_nonce_count = 0
@@ -203,7 +204,13 @@ class InMemoryBackend:
             if float(offer["_expires_monotonic"]) <= now
         ]
         for offer_id in expired:
-            self.enrollment_offers.pop(offer_id, None)
+            self._delete_enrollment_offer(offer_id)
+
+    def _delete_enrollment_offer(self, offer_id: str) -> None:
+        offer = self.enrollment_offers.pop(offer_id, None)
+        lookup_hash = offer.get("lookup_hash") if offer else None
+        if lookup_hash:
+            self.enrollment_lookup_index.pop(lookup_hash, None)
 
     def _prune_enrollment_nonces(
         self, now: float, principal_hash: str | None = None
@@ -305,11 +312,27 @@ class InMemoryBackend:
             {
                 "state": "open",
                 "failed_codes": "0",
+                "device_name": "",
                 "_expires_monotonic": now + ttl_ms / 1000,
             }
         )
         self.enrollment_offers[offer_id] = record
+        lookup_hash = fields.get("lookup_hash")
+        if lookup_hash:
+            self.enrollment_lookup_index[lookup_hash] = offer_id
         return "created"
+
+    async def find_enrollment_offer_by_lookup(self, lookup_hash: str) -> str | None:
+        """Resolve a short code's lookup hash to an unexpired, unused offer id."""
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer_id = self.enrollment_lookup_index.get(lookup_hash)
+        if offer_id is None:
+            return None
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("state") != "open":
+            return None
+        return offer_id
 
     async def submit_enrollment_request(
         self,
@@ -320,6 +343,7 @@ class InMemoryBackend:
         candidate_hash: str,
         envelope: str,
         content_digest: str,
+        device_name: str = "",
     ) -> str:
         now = time.monotonic()
         self._prune_enrollment_offers(now)
@@ -339,15 +363,15 @@ class InMemoryBackend:
             return "unavailable"
         failures = int(offer.get("failed_codes", "0"))
         if failures >= ENROLLMENT_MAX_FAILED_CODES:
-            return "rate_limited"
+            self._delete_enrollment_offer(offer_id)
+            return "unavailable"
         if not hmac.compare_digest(offer["code_verifier_hash"], candidate_hash):
             failures += 1
             offer["failed_codes"] = str(failures)
-            return (
-                "rate_limited"
-                if failures >= ENROLLMENT_MAX_FAILED_CODES
-                else "invalid_code"
-            )
+            if failures >= ENROLLMENT_MAX_FAILED_CODES:
+                self._delete_enrollment_offer(offer_id)
+                return "unavailable"
+            return "invalid_code"
         offer.update(
             {
                 "state": "request_pending",
@@ -356,6 +380,7 @@ class InMemoryBackend:
                 "request_digest": content_digest,
                 "request_envelope": envelope,
                 "request_claim_id": "",
+                "device_name": device_name,
             }
         )
         return "accepted"
@@ -387,6 +412,7 @@ class InMemoryBackend:
             "round_id": offer[f"{phase}_round_id"],
             "destination_key": offer["destination_key"],
             "envelope": offer[f"{phase}_envelope"],
+            "device_name": offer.get("device_name", ""),
         }
 
     async def publish_enrollment_challenge(
@@ -839,13 +865,17 @@ local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[3]) then return 0 end
-for i = 6, #ARGV, 2 do
+for i = 7, #ARGV, 2 do
   redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
 end
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[1]))
 redis.call('ZADD', KEYS[2], now + tonumber(ARGV[1]), ARGV[2])
 -- Keep the active index alive longer than every service-enforced offer TTL.
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[5]))
+if ARGV[6] ~= '' then
+  redis.call('SET', KEYS[3], ARGV[2])
+  redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[1]))
+end
 return 1
 """
 
@@ -861,8 +891,18 @@ if existing then
   return 'bound'
 end
 if redis.call('HGET', KEYS[1], 'state') ~= 'open' then return 'unavailable' end
+local function burn()
+  local lookup_hash = redis.call('HGET', KEYS[1], 'lookup_hash')
+  redis.call('DEL', KEYS[1])
+  if lookup_hash and lookup_hash ~= '' then
+    redis.call('DEL', 'kollab:relay:enrollment:{mailbox}:lookup:' .. lookup_hash)
+  end
+end
 local failed = tonumber(redis.call('HGET', KEYS[1], 'failed_codes') or '0')
-if failed >= tonumber(ARGV[6]) then return 'rate_limited' end
+if failed >= tonumber(ARGV[6]) then
+  burn()
+  return 'unavailable'
+end
 local stored = redis.call('HGET', KEYS[1], 'code_verifier_hash') or ''
 local difference = 0
 for i = 1, 64 do
@@ -870,7 +910,10 @@ for i = 1, 64 do
 end
 if #stored ~= 64 or #ARGV[3] ~= 64 or difference ~= 0 then
   failed = redis.call('HINCRBY', KEYS[1], 'failed_codes', 1)
-  if failed >= tonumber(ARGV[6]) then return 'rate_limited' end
+  if failed >= tonumber(ARGV[6]) then
+    burn()
+    return 'unavailable'
+  end
   return 'invalid_code'
 end
 redis.call('HSET', KEYS[1],
@@ -879,8 +922,17 @@ redis.call('HSET', KEYS[1],
   'request_round_id', ARGV[1],
   'request_digest', ARGV[5],
   'request_envelope', ARGV[4],
-  'request_claim_id', '')
+  'request_claim_id', '',
+  'device_name', ARGV[7])
 return 'accepted'
+"""
+
+_FIND_ENROLLMENT_OFFER_BY_LOOKUP = """
+local offer_id = redis.call('GET', KEYS[1])
+if not offer_id then return false end
+local offer_key = 'kollab:relay:enrollment:{mailbox}:offer:' .. offer_id
+if redis.call('HGET', offer_key, 'state') ~= 'open' then return false end
+return offer_id
 """
 
 _CLAIM_ENROLLMENT_ROUND = """
@@ -907,7 +959,8 @@ return {
   'claimed', phase,
   redis.call('HGET', KEYS[1], phase .. '_round_id') or '',
   redis.call('HGET', KEYS[1], 'destination_key') or '',
-  redis.call('HGET', KEYS[1], phase .. '_envelope') or ''
+  redis.call('HGET', KEYS[1], phase .. '_envelope') or '',
+  redis.call('HGET', KEYS[1], 'device_name') or ''
 }
 """
 
@@ -1566,22 +1619,35 @@ class RedisRelayBackend:
         self, offer_id: str, fields: dict[str, str], *, ttl_ms: int, capacity: int
     ) -> str:
         try:
-            stored_fields = {"state": "open", "failed_codes": "0", **fields}
+            lookup_hash = fields.get("lookup_hash", "")
+            stored_fields = {
+                "state": "open",
+                "failed_codes": "0",
+                "device_name": "",
+                **fields,
+            }
             args: list[str | int] = [
                 ttl_ms,
                 offer_id,
                 capacity,
                 fields["create_digest"],
                 ENROLLMENT_CAPACITY_INDEX_TTL_MS,
+                lookup_hash,
             ]
             for key, value in sorted(stored_fields.items()):
                 args.extend((key, value))
+            lookup_key = (
+                self._enrollment_lookup_key(lookup_hash)
+                if lookup_hash
+                else self._enrollment_key(offer_id)
+            )
             result = int(
                 await self._redis.eval(
                     _CREATE_ENROLLMENT_OFFER,
-                    2,
+                    3,
                     self._enrollment_key(offer_id),
                     self._enrollment_capacity_key(),
+                    lookup_key,
                     *args,
                 )
             )
@@ -1597,6 +1663,17 @@ class RedisRelayBackend:
                 raise
             raise RelayBackendError("enrollment offer storage is unavailable") from exc
 
+    async def find_enrollment_offer_by_lookup(self, lookup_hash: str) -> str | None:
+        try:
+            result = await self._redis.eval(
+                _FIND_ENROLLMENT_OFFER_BY_LOOKUP,
+                1,
+                self._enrollment_lookup_key(lookup_hash),
+            )
+            return str(result) if result else None
+        except Exception as exc:
+            raise RelayBackendError("enrollment lookup storage is unavailable") from exc
+
     async def submit_enrollment_request(
         self,
         offer_id: str,
@@ -1606,6 +1683,7 @@ class RedisRelayBackend:
         candidate_hash: str,
         envelope: str,
         content_digest: str,
+        device_name: str = "",
     ) -> str:
         try:
             result = await self._redis.eval(
@@ -1618,6 +1696,7 @@ class RedisRelayBackend:
                 envelope,
                 content_digest,
                 ENROLLMENT_MAX_FAILED_CODES,
+                device_name,
             )
             return str(result)
         except Exception as exc:
@@ -1637,7 +1716,7 @@ class RedisRelayBackend:
                 claim_id,
             )
             values = [str(value) for value in result]
-            if values[0] != "claimed" or len(values) != 5:
+            if values[0] != "claimed" or len(values) != 6:
                 return {"status": values[0]}
             return {
                 "status": values[0],
@@ -1645,6 +1724,7 @@ class RedisRelayBackend:
                 "round_id": values[2],
                 "destination_key": values[3],
                 "envelope": values[4],
+                "device_name": values[5],
             }
         except Exception as exc:
             raise RelayBackendError("enrollment claim is unavailable") from exc
@@ -2226,6 +2306,10 @@ class RedisRelayBackend:
     @staticmethod
     def _enrollment_key(offer_id: str) -> str:
         return f"kollab:relay:enrollment:{{mailbox}}:offer:{offer_id}"
+
+    @staticmethod
+    def _enrollment_lookup_key(lookup_hash: str) -> str:
+        return f"kollab:relay:enrollment:{{mailbox}}:lookup:{lookup_hash}"
 
     @staticmethod
     def _enrollment_capacity_key() -> str:

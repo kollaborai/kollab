@@ -401,13 +401,62 @@ async def test_offer_code_is_shown_only_in_private_view_and_wiped_on_destroy(
 
     assert called == ["example.test"]
     assert code in renderer.text()
-    assert "send it only to the new device" in renderer.text()
+    assert "one device, expires in" in renderer.text()
+    assert "type it into /connect on the other machine" in renderer.text()
     private_code = view._private_code
     assert private_code is not None
     assert repr(private_code) == "PrivateCode(<redacted>)"
     await view.on_complete()
     with pytest.raises(RuntimeError, match="cleared"):
         private_code.reveal()
+
+
+@pytest.mark.asyncio
+async def test_offer_view_accepts_the_short_code_format(monkeypatch):
+    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
+    offer_id = "0123456789abcdef0123456789abcdef"
+    code = "7QK4-M2XP"
+
+    async def create(domain):
+        return {
+            "status": "offered",
+            "offer_id": offer_id,
+            "expires_at": "1300",
+            "code": code,
+        }
+
+    view = ConnectOfferAltView("example.test", on_create=create)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    assert view._stage == "code"
+    assert code in renderer.text()
+    assert "one device, expires in" in renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
+    captured = {}
+
+    async def submit(submission: ConnectSubmission) -> ConnectOutcome:
+        captured["code"] = submission.code.reveal()
+        return ConnectOutcome.approved()
+
+    for typed in ("7qk4m2xp", "7QK4-M2XP"):
+        captured.clear()
+        view = ConnectAltView(on_submit=submit)
+        renderer = _FakeRenderer()
+        await view.on_enter(renderer)
+        await _type_code(view, typed)
+        await view.render_frame(0.0)
+
+        assert "Private code: ********" in renderer.text()
+        assert typed not in renderer.text()
+
+        await view.handle_input(_named("Enter"))
+        assert captured["code"] == typed
 
 
 @pytest.mark.asyncio
