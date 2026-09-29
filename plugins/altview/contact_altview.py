@@ -17,7 +17,13 @@ from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
 from plugins.hub.contact_requests import PendingContactRequest
-from plugins.hub.device_names import device_key_fingerprint, short_fingerprint
+from plugins.hub.device_names import (
+    clip_display,
+    device_key_fingerprint,
+    display_name,
+    request_row,
+    short_fingerprint,
+)
 
 _MAX_DOMAIN = 253
 
@@ -140,20 +146,25 @@ class ContactReviewAltView(AltView):
             self._write_wrapped(top + 4, self._message, width)
             self._write(2, top + 8, "enter/esc close", width)
         else:
-            visible = max(1, height - (top + 10))
-            first = min(max(0, self._selected - visible + 1), max(0, len(self._requests) - visible))
-            shown = self._requests[first : first + visible]
+            room = max(1, height - (top + 10))
             many = len(self._requests) > 1
-            for offset, request in enumerate(shown):
-                number = first + offset + 1
-                current = first + offset == self._selected
-                self._write(
-                    2,
-                    top + 3 + offset,
-                    self._row(request, number, width - 2, current, many),
-                    width,
-                )
-            self._write_wrapped(top + 4 + len(shown), self._message, width)
+            blocks = [
+                self._row(request, index + 1, width - 2, index == self._selected, many)
+                for index, request in enumerate(self._requests)
+            ]
+            first = 0
+            while first < self._selected and (
+                sum(map(len, blocks[first : self._selected + 1])) > room
+            ):
+                first += 1
+            y = top + 3
+            for block in blocks[first:]:
+                if y - (top + 3) + len(block) > room:
+                    break
+                for line in block:
+                    self._write(2, y, line, width)
+                    y += 1
+            self._write_wrapped(y + 1, self._message, width)
             self._write(2, height - 3, self._footer(many), width)
         self._armed = True
         return True
@@ -169,18 +180,19 @@ class ContactReviewAltView(AltView):
         width: int,
         current: bool = True,
         many: bool = False,
-    ) -> str:
+    ) -> list[str]:
+        """One knock as one or two lines, each at most `width` columns."""
         fingerprint = short_fingerprint(device_key_fingerprint(request.sender_key))
-        marker = ("> " if current else "  ") if many else ""
-        prefix = f'{marker}{number}. {request.device_name}  fingerprint {fingerprint}   "'
-        suffix = '"   [a]ccept [r]eject' if current else '"'
-        budget = max(0, width - len(prefix) - len(suffix))
-        introduction = _safe_display_text(request.introduction.reveal()).replace(
-            "\n", " "
+        lead = f"{('> ' if current else '  ') if many else ''}{number}. "
+        return request_row(
+            lead + display_name(request.device_name),
+            f"fingerprint {fingerprint}",
+            width,
+            hint="[a]ccept [r]eject" if current else "",
+            quote=_safe_display_text(request.introduction.reveal()).replace("\n", " "),
+            indent=" " * len(lead),
+            gap="  ",
         )
-        if len(introduction) > budget:
-            introduction = introduction[: max(0, budget - 1)] + "…"
-        return prefix + introduction + suffix
 
     async def handle_input(self, key_press: KeyPress) -> bool:
         if key_press.name == "Escape":
@@ -204,6 +216,7 @@ class ContactReviewAltView(AltView):
     async def _decide(self, decision: str) -> None:
         request = self._requests[self._selected]
         verb = "accept" if decision == "accept" else "reject"
+        who = display_name(request.device_name)
         try:
             reason = self._on_decide(request, decision)
             if inspect.isawaitable(reason):
@@ -213,7 +226,7 @@ class ContactReviewAltView(AltView):
         except Exception:
             reason = "try again"
         if isinstance(reason, str) and reason:
-            self._message = f"could not {verb} {request.device_name}: {reason}"
+            self._message = f"could not {verb} {who}: {reason}"
             self.request_render()
             return
         request.introduction.clear()
@@ -221,10 +234,10 @@ class ContactReviewAltView(AltView):
         self._selected = max(0, min(self._selected, len(self._requests) - 1))
         self._armed = False
         self._message = (
-            f"accepted {request.device_name}. it is a peer with agents trust; "
-            f"nothing is allowed until /connect allow {request.device_name} <agent>."
+            f"accepted {who}. it is a peer with agents trust; "
+            f"nothing is allowed until /connect allow {who} <agent>."
             if decision == "accept"
-            else f"rejected {request.device_name}."
+            else f"rejected {who}."
         )
         self.request_render()
 
@@ -239,4 +252,4 @@ class ContactReviewAltView(AltView):
 
     def _write(self, x: int, y: int, text: str, width: int) -> None:
         if self._renderer is not None and x < width:
-            self._renderer.write_at(x, y, text[: max(0, width - x)], "")
+            self._renderer.write_at(x, y, clip_display(text, width - x), "")

@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The knock review has a selection (up/down) and `a`/`r` act on the marked row; a held key cannot decide the next knock or request unseen. One malformed knock no longer hides the others.
 - The code form starts a network on the directory when the code is left empty (first device), prints `joined <network> as <device>. trust: <level>` after an approved join, and keeps a pasted hyphenated or eight-letter domain out of the masked code field. Accepting a join no longer offers an OAuth login; each device runs its own `/login`.
 - Offline devices are not listed while the relay is unreachable, for accepted strangers, or for peers the relay shows online. `hub_capture`, `hub_spawn` and `hub_stop` refuse an `agent@device` target with a hint to message it.
+- Accepting a knock or a join from a key that already has a name is refused (`could not accept <name>: this device is already on your network as <old-name>`) instead of renaming it, and a name held by this device, a peer or any device in the live roster is refused. A failed accept puts approvals, names and trust back exactly as they were. The joining device now records the issuer's name too.
+- Knock and join-request rows fit 60, 80 and 120 columns whatever name or introduction a sender chooses: names are capped at 20 columns, tabs are dropped, wide characters are measured by their width and the `[a]ccept [r]eject` hint is never cut.
+- `/connect authorize`, `send`, `task` and `cancel` take and print `agent@device`, not a relay address. A full approval table says so instead of "try again". The relay's contact route index sets its expiry atomically and no longer unlists a device that just reconnected. `repr()` of a request, offer or outcome never shows a key, receipt id or join code.
 
 ## [0.10.7] - 2026-09-28
 

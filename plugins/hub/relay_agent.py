@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import contextlib
 import contextvars
 import json
 import logging
 import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
@@ -85,6 +84,7 @@ _CONTACT_ERRORS = {
     "unknown_route",
     "ambiguous_route",
     "name_taken",
+    "already_named",
 }
 
 
@@ -127,7 +127,7 @@ def _safe_enrollment_offer_result(value) -> dict[str, str]:
 
 @dataclass
 class ActiveRelayTask:
-    record: dict
+    record: dict = field(repr=False)  # peer key, addresses and message ids
     started_at: float
     replied: bool = False
     finished: bool = False
@@ -177,38 +177,43 @@ class RelayAgentBridge:
     def _bind_knock_peer(self, sender_key: str, device_name: str):
         """Turn an accepted knock into a peer: name it, trust `agents`, approve it.
 
-        The name is bound first so a duplicate fails before anything else is
+        The name is bound first so a refusal fails before anything else is
         written; trust is set before the approval so a failure between the two
         never leaves an approved key on the network default (`open`); nothing
-        is allowed until `/connect allow`. Returns an ``undo`` function that
-        removes only what this call added, so a key that was already approved
-        keeps its approval. Failures are never swallowed; a failed step undoes
-        the earlier ones.
+        is allowed until `/connect allow`. A failure at any step restores this
+        key's approval, name and trust to what they were before the call, and
+        the same restore is returned as ``undo`` for a later failure (the
+        relay refusing the decision). Failures are never swallowed.
         """
         client = self.commands.client
         was_approved = sender_key in client.state.approvals
-        previous_trust = self._state().state.peer_trust.get(sender_key)
-        created = self.bind_peer_device(sender_key, device_name)
+        state = self._state().state
+        name = state.peer_devices.get(sender_key)
+        trust = state.peer_trust.get(sender_key)
 
         def undo() -> None:
-            if not was_approved:
-                client.revoke(sender_key)  # also drops the name and the trust
-                return
-            store = self._state()
-            if created:
-                store.state.peer_devices.pop(sender_key, None)
-            if previous_trust is None:
-                store.state.peer_trust.pop(sender_key, None)
-            else:
-                store.state.peer_trust[sender_key] = previous_trust
-            store.save()
+            try:
+                if not was_approved and sender_key in client.state.approvals:
+                    client.revoke(sender_key)  # also drops the name and trust
+                store = self._state()
+                for mapping, before in (
+                    (store.state.peer_devices, name),
+                    (store.state.peer_trust, trust),
+                ):
+                    if before is None:
+                        mapping.pop(sender_key, None)
+                    else:
+                        mapping[sender_key] = before
+                store.save()
+            except Exception:
+                logger.warning("could not restore a peer after a failed accept")
 
         try:
+            self.bind_peer_device(sender_key, device_name)
             self.set_peer_trust(sender_key, "agents")
             client.approve(sender_key)
         except Exception:
-            with contextlib.suppress(Exception):
-                undo()
+            undo()
             raise
         return undo
 
@@ -258,7 +263,7 @@ class RelayAgentBridge:
         except ValueError as exc:
             raise RelayError(str(exc)) from exc
         store = self._state()
-        if name in store.state.peer_devices.values():
+        if name != self.device_name() and name in self._known_device_names():
             raise RelayError(
                 f"device name '{name}' is already on this network; choose a different name"
             )
@@ -311,28 +316,43 @@ class RelayAgentBridge:
         if store.state.peer_trust.pop(peer_key, None) is not None:
             store.save()
 
+    def _known_device_names(self, *, except_key: str = "") -> set[str]:
+        """Every device name this device knows: its own, each bound peer and
+        each device in the live roster. `except_key` leaves one peer out."""
+        state = self._state().state
+        names = {self.device_name(), *state.peer_devices.values()}
+        for (_session, peer_key, _peer_session), (_time, rows) in self._cache.items():
+            if peer_key != except_key:
+                names.update(row["device"] for row in rows if row.get("device"))
+        return names
+
     def bind_peer_device(self, key: str, name: str) -> bool:
         """Bind a human device name to a peer's key at accept time.
 
         Idempotent when the same (key, name) pair repeats. Fails with a
-        RelayError, and writes nothing, when the name is this device's own
-        name or is already bound to a different key
-        (docs/specs/agent-network-simple-flow.md §4). Returns whether this
-        call created a new binding (False when the pair already matched).
+        RelayError, and writes nothing, when the key is already bound under a
+        different name (it is never silently renamed) or when the name belongs
+        to any device this one knows (docs/specs/agent-network-simple-flow.md
+        §4). Returns whether this call created a new binding (False when the
+        pair already matched).
         """
         self._require_human_network_context("remote model turns cannot bind peer devices")
         if not isinstance(name, str) or not NAME_RE.fullmatch(name):
             name = key_label(key)
         store = self._state()
-        if store.state.peer_devices.get(key) == name:
+        bound = store.state.peer_devices.get(key)
+        if bound == name:
             return False
-        if name == self.device_name() or name in store.state.peer_devices.values():
-            error = RelayError(
-                f"device name '{name}' is already on this network; "
-                "that device must run /connect name <other-name> and request a new code"
+        if bound is not None:
+            raise RelayError(
+                f"this device is already on your network as {bound}", "already_named"
             )
-            error.code = "name_taken"  # the contact RPC reports it by code
-            raise error
+        if name in self._known_device_names(except_key=key):
+            raise RelayError(
+                f"device name '{name}' is already on this network; "
+                "that device must run /connect name <other-name> and request a new code",
+                "name_taken",  # the contact RPC reports it by code
+            )
         store.state.peer_devices[key] = name
         store.save()
         return True
@@ -2241,9 +2261,10 @@ class RelayAgentBridge:
             result = await self._rpc_directory({"peer": rest})
             return json.dumps(result, indent=2)
         if head in {"authorize", "send"}:
-            target, sep, content = rest.partition(" ")
+            handle, sep, content = rest.partition(" ")
             if not sep:
-                return f"usage: /connect {head} <full relay agent address> <purpose or message>"
+                return f"usage: /connect {head} <agent@device> <purpose or message>"
+            target = await self.resolve_handle(handle)
             destination = RelayAddress.parse(target)
             if destination.key not in client.state.approvals:
                 raise RelayError("approve the peer before authorizing contact")
@@ -2257,7 +2278,7 @@ class RelayAgentBridge:
                 client.state.room, sender, target, content, ttl=TASK_TIMEOUT
             )
             if head == "authorize":
-                return f"communication authorized: {grant['id']}; expires at {grant['expires']}; recipient {target}"
+                return f"communication authorized: {grant['id']}; expires at {grant['expires']}; recipient {handle}"
             receipt = await self.send(
                 target,
                 content,
@@ -2268,7 +2289,7 @@ class RelayAgentBridge:
             return "remote receipt: " + json.dumps(receipt, sort_keys=True)
         if head == "withdraw":
             if len(parts) != 1:
-                return "usage: /connect withdraw <communication grant id>"
+                return "usage: /connect withdraw <grant-id>"
             self.store.withdraw_contact(client.state.room, parts[0])
             return (
                 "communication withdrawn; late replies cannot start work here; "
@@ -2277,7 +2298,7 @@ class RelayAgentBridge:
         if head == "answer":
             question_id, sep, content = rest.partition(" ")
             if not sep or not content.strip():
-                return "usage: /connect answer <question event id> <answer>"
+                return "usage: /connect answer <event-id> <text>"
             question = self.store.event(question_id)
             if (
                 question is None
@@ -2317,8 +2338,8 @@ class RelayAgentBridge:
             return "conversation answer: " + json.dumps(receipt, sort_keys=True)
         if head in {"task", "cancel"}:
             if len(parts) != 2:
-                return f"usage: /connect {head} <full relay agent address> <message id>"
-            address = RelayAddress.parse(parts[0])
+                return f"usage: /connect {head} <agent@device> <message id>"
+            address = RelayAddress.parse(await self.resolve_handle(parts[0]))
             if self.secure_transport is None:
                 raise RelayError("secure conversation transport is unavailable")
             receipt = await self.secure_transport.request(
@@ -2610,7 +2631,7 @@ class RelayAgentBridge:
         self.plugin._active_thread_msg_id = ""
         # Recognize only an explicit, anchored instruction from human input.
         # Quoted examples, negations and model-provided approval flags never
-        # mint authority. Ambiguous names require the complete directory address.
+        # mint authority. Ambiguous names require the full agent@device.
         text = content_to_text(data.get("message") or "").strip()
         match = re.fullmatch(
             r"(?:please\s+)?(?:ask|tell)\s+(\S+)\s+to\s+(.+)",
@@ -2620,12 +2641,16 @@ class RelayAgentBridge:
         if match:
             target, purpose = match.groups()
             try:
-                if not target.startswith("relay:"):
+                if parse_handle(target) is None:
+                    # A bare name works only when it names exactly one remote
+                    # agent; the grant is then minted for its agent@device.
                     directory = await self._owner_call(
                         "relay.directory", {"peer": "", "cached": True}
                     )
                     matches = {
-                        r["address"] for r in directory["agents"] if r["name"] == target
+                        format_handle(r["name"], r["device"])
+                        for r in directory["agents"]
+                        if r["name"] == target
                     }
                     if len(matches) != 1 or any(
                         a.name == target for a in self.directory.agents()

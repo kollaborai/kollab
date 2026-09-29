@@ -398,6 +398,7 @@ async def _run_enrollment(
     lose_ack_response=False,
     publisher_key=None,
     claim_other_owner=False,
+    issuer_device_name=None,
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
@@ -447,6 +448,9 @@ async def _run_enrollment(
         ),
         _discover=AsyncMock(return_value=(discovery, "", (), False)),
         _relay_url=lambda _discovery: "wss://kollabor.ai/relay/v1/ws",
+        agent_bridge=SimpleNamespace(
+            bound=[], bind_peer_device=lambda key, name: commands.agent_bridge.bound.append((key, name))
+        ),
     )
 
     async def attach(_discovery, _ca, _cidrs):
@@ -590,6 +594,7 @@ async def _run_enrollment(
                         "provisioning_bundle": base64.urlsafe_b64encode(provisioning_bundle)
                         .rstrip(b"=")
                         .decode("ascii"),
+                        **({"issuer_device_name": issuer_device_name} if issuer_device_name else {}),
                     },
                 )
                 self.decision_envelope = encrypt_enrollment_envelope(self.envelope_key, decision)
@@ -692,6 +697,49 @@ async def test_device_enrollment_completes_signed_encrypted_pairing(tmp_path, mo
         "reply/poll",
         "ack",
     ]
+
+
+@pytest.mark.asyncio
+async def test_joining_device_records_the_issuers_device_name(tmp_path, monkeypatch):
+    result, commands, destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="mac-kollab"
+    )
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.bound == [(destination.state.inviter, "mac-kollab")]
+
+
+@pytest.mark.asyncio
+async def test_joining_an_older_issuer_without_a_name_still_completes(tmp_path, monkeypatch):
+    result, commands, _destination, _transport, _directory = await _run_enrollment(tmp_path, monkeypatch)
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.bound == []
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_issuer_device_name_is_rejected_before_any_state_change(tmp_path, monkeypatch):
+    result, commands, destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="Not A Name"
+    )
+
+    assert result == {"error": "invalid_response"}
+    assert commands.agent_bridge.bound == []
+    assert not destination.state.approvals
+
+
+def test_a_refused_issuer_name_never_fails_a_join_that_already_committed(caplog):
+    def refuse(_key, _name):
+        raise RuntimeError("name taken")
+
+    commands = SimpleNamespace(agent_bridge=SimpleNamespace(bind_peer_device=refuse))
+
+    with caplog.at_level("WARNING"):
+        enrollment_client._bind_issuer_name(commands, "a" * 64, "mac-kollab")
+
+    assert "could not record the issuer's device name" in caplog.text
+    enrollment_client._bind_issuer_name(SimpleNamespace(), "a" * 64, "mac-kollab")  # no bridge
+    enrollment_client._bind_issuer_name(commands, "a" * 64, None)  # older issuer
 
 
 @pytest.mark.asyncio
@@ -1148,6 +1196,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
             _dns_identity=identity_manager,
         ),
         _closed=False,
+        device_name=lambda: "mac-kollab",
     )
     issuer = EnrollmentIssuer(bridge)
     provisioning_plan = await issuer._make_provisioning_plan(offer_id)
@@ -1283,6 +1332,8 @@ async def test_issuer_requires_explicit_decision_after_proof(
                 self.decision_envelope = fields["envelope"]
                 enrollment_client.verify_enrollment_payload(owner_signing_key.verify_key.encode(), self.decision)
                 if self.decision["status"] == "approved":
+                    # the joiner learns the issuer's device name from the signed decision
+                    assert self.decision["issuer_device_name"] == "mac-kollab"
                     bundle = base64.urlsafe_b64decode(
                         self.decision["provisioning_bundle"] + "=" * (-len(self.decision["provisioning_bundle"]) % 4)
                     )

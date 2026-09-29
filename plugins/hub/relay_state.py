@@ -26,7 +26,16 @@ INVITE_PREFIX = "kollab-invite-v1:"
 
 
 class RelayError(ValueError):
-    """A safe, operator-visible relay failure."""
+    """A safe, operator-visible relay failure.
+
+    `code` is set when a caller reports the failure to a screen by code
+    (`capacity`, `name_taken`, ...) instead of by text.
+    """
+
+    def __init__(self, message: str = "", code: str | None = None):
+        super().__init__(message)
+        if code is not None:
+            self.code = code
 
 
 def strict_json(raw: str | bytes, *, limit: int = 65536) -> dict:

@@ -92,12 +92,16 @@ class PrivateMessage:
         return "<redacted>"
 
 
-@dataclass(frozen=True, slots=True, repr=False)
+@dataclass(frozen=True, slots=True)
 class PendingContactRequest:
-    """Verified sender metadata and decrypted introduction for local review."""
+    """Verified sender metadata and decrypted introduction for local review.
 
-    receipt_id: str
-    sender_key: str
+    The key, the receipt id and the introduction stay out of repr: only the
+    device name and the expiry are printable.
+    """
+
+    receipt_id: str = field(repr=False)
+    sender_key: str = field(repr=False)
     expires_at: int
     introduction: PrivateMessage = field(repr=False)
     # The sender's device name, sealed inside the introduction envelope so
@@ -105,22 +109,10 @@ class PendingContactRequest:
     # contact route when missing or invalid -- never the raw key.
     device_name: str = ""
 
-    @property
-    def sender_identity(self) -> str:
-        return "ed25519:" + self.sender_key
-
-    def __repr__(self) -> str:
-        return (
-            "PendingContactRequest("
-            f"receipt_id={self.receipt_id!r}, sender={self.sender_identity!r}, "
-            f"device_name={self.device_name!r}, "
-            f"expires_at={self.expires_at}, introduction=<redacted>)"
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class ContactDecision:
-    receipt_id: str
+    receipt_id: str = field(repr=False)
     status: str
 
     def __post_init__(self) -> None:

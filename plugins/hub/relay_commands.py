@@ -7,7 +7,7 @@ import inspect
 import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from .device_names import (
 )
 from .dns.discovery import DiscoveryError, discover, fetch_agent_card, normalize_target
 from .dns.discovery_store import DiscoveryStore
+from .relay_state import RelayError
 
 KNOCK_COUNT_TTL_SECONDS = 15.0
 KNOCK_COUNT_TIMEOUT_SECONDS = 5.0
@@ -34,7 +35,7 @@ class JoinRequestRow:
     ``enrollment_id`` is the receipt the decision needs; it is never rendered.
     """
 
-    enrollment_id: str
+    enrollment_id: str = field(repr=False)
     device: str
     fingerprint: str
     categories: tuple[str, ...] = ()
@@ -609,10 +610,13 @@ class RelayCommands:
                 return f"connect: no pending request matches '{token}'"
             row = matches[0]
             decision = "accept" if head == "accept" else "reject"
-            await self.agent_bridge.decide_enrollment_request(
-                row.enrollment_id, decision=decision, source_agent=source_agent
-            )
             who = getattr(row, "device_name", "") or "that device"
+            try:
+                await self.agent_bridge.decide_enrollment_request(
+                    row.enrollment_id, decision=decision, source_agent=source_agent
+                )
+            except RelayError as exc:
+                return f"connect: could not {decision} {who}: {exc}"
             if decision == "reject":
                 return f"rejected {who}."
             domain = self.client.state.origin.removeprefix("https://")

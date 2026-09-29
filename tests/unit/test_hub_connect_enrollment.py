@@ -193,6 +193,31 @@ async def test_private_contact_review_always_opens_a_fresh_session():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error, reason",
+    [
+        ("capacity", "too many approved devices or pending knocks"),
+        ("already_named", "this device is already on your network as ana-laptop"),
+        ("name_taken", "that device name is already on this network"),
+        ("transport", "try again"),
+    ],
+)
+async def test_knock_review_tells_the_human_why_an_accept_failed(error, reason):
+    from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
+
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
+    plugin._relay_agent = SimpleNamespace(_peer_name=lambda _key: "ana-laptop")
+    plugin._run_connect_contact_decision = AsyncMock(return_value={"error": error})
+    await plugin._open_contact_review_altview("example.test")
+    view = view_stack.push.await_args.args[0]
+    request = PendingContactRequest("b" * 32, "c" * 64, 1_800_000_000, PrivateMessage("hi"), "ana-2")
+
+    assert await view._on_decide(request, "accept") == reason
+
+
+@pytest.mark.asyncio
 async def test_connect_code_is_rejected_from_command_text_and_code_domain_is_bounded():
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(hub_enrollment_offer=AsyncMock(), hub_connect=AsyncMock())

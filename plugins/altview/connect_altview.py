@@ -14,13 +14,14 @@ import re
 import textwrap
 import time
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Awaitable, Callable
 
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
+from plugins.hub.device_names import clip_display, display_name, request_row
 from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow, network_label
 
 _MAX_DOMAIN_LENGTH = 253
@@ -123,7 +124,7 @@ class ConnectOutcome:
     """A bounded result; pending requests expose only their receipt ID."""
 
     status: ConnectStatus
-    receipt_id: str | None = None
+    receipt_id: str | None = field(default=None, repr=False)
     # One line of non-secret text shown in place of the generic one, e.g.
     # `joined marco-home as alzan-prod-home. trust: open`.
     detail: str = ""
@@ -536,7 +537,7 @@ class ConnectScreenState:
     """Everything ``connect_screen_lines`` needs; no terminal, no callbacks."""
 
     snapshot: ConnectSnapshot | None = None
-    code: str = ""
+    code: str = field(default="", repr=False)
     code_remaining: int = 0
     code_status: str = "creating"  # creating | active | expired | failed
     selected: int = 0
@@ -545,9 +546,7 @@ class ConnectScreenState:
 
 
 def _fit(text: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    return text if len(text) <= width else text[: width - 1] + "…"
+    return clip_display(text, width)
 
 
 def _block(label: str, values: list[str], width: int) -> list[str]:
@@ -579,12 +578,14 @@ def _request_rows(state: ConnectScreenState, width: int) -> list[str]:
     rows: list[str] = []
     for index, request in enumerate(requests):
         marker = ("> " if index == state.selected else "  ") if len(requests) > 1 else ""
-        who = f"{marker}{request.device or 'unknown device'} wants to join"
-        tail = f"fingerprint {request.fingerprint}   [a]ccept [r]eject"
-        if len(who) + 3 + len(tail) <= room:
-            rows.append(f"{who}   {tail}")
-        else:
-            rows += [who, " " * len(marker) + tail]
+        who = f"{marker}{display_name(request.device or 'unknown device')} wants to join"
+        rows += request_row(
+            who,
+            f"fingerprint {request.fingerprint}",
+            room,
+            hint="[a]ccept [r]eject",
+            indent=" " * len(marker),
+        )
     return rows
 
 
@@ -860,7 +861,7 @@ class ConnectScreenAltView(AltView):
         ):
             return
         row = snapshot.requests[self._selected]
-        who = row.device or "that device"
+        who = display_name(row.device or "that device")
         self._deciding = True
         try:
             reason = self._on_decide(row, decision)

@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import ssl
@@ -1109,9 +1110,16 @@ def _decode_destination_decision(
             "invite",
             "provisioning_bundle",
             "owner_signature",
-        },
+        }
+        # The issuer's own device name rides along so both sides record names.
+        | ({"issuer_device_name"} if "issuer_device_name" in decision else set()),
     )
     verify_enrollment_payload(owner_key, decision)
+    if "issuer_device_name" in decision and (
+        not isinstance(decision["issuer_device_name"], str)
+        or not NAME_RE.fullmatch(decision["issuer_device_name"])
+    ):
+        raise EnrollmentProtocolError("invalid_response")
     if (
         decision["status"] != "approved"
         or decision["origin"] != record["origin"]
@@ -1166,6 +1174,21 @@ def _destination_state_matches_invite(client, invite: dict[str, str]) -> bool:
         and state.inviter == invite["key"]
         and invite["key"] in state.approvals
     )
+
+
+def _bind_issuer_name(commands, issuer_key: str, name: str | None) -> None:
+    """Record the issuer's device name on the joining device.
+
+    Repeating it is harmless (same key, same name). A refusal never fails a
+    join that already committed: the issuer then shows under its stand-in name.
+    """
+    binder = getattr(getattr(commands, "agent_bridge", None), "bind_peer_device", None)
+    if not name or not callable(binder):
+        return
+    try:
+        binder(issuer_key, name)
+    except Exception:
+        logging.getLogger(__name__).warning("could not record the issuer's device name")
 
 
 async def _finish_destination_enrollment(
@@ -1317,6 +1340,7 @@ async def _finish_destination_enrollment(
             raise EnrollmentProtocolError("conflict")
         if not _destination_state_matches_invite(client, invite):
             raise EnrollmentProtocolError("invalid_response")
+        _bind_issuer_name(commands, invite["key"], decision.get("issuer_device_name"))
         _store_destination_recovery(journal, record, "invite_joined")
 
     status = client.status()
@@ -1779,18 +1803,19 @@ def _device_key_fingerprint(public_key_hex: str) -> str:
 
 @dataclass(slots=True)
 class _ActiveEnrollmentOffer:
-    offer_id: str
+    # Keys, ids and the room capability never print: a repr lands in logs.
+    offer_id: str = field(repr=False)
     expires_at: int
-    human_action_id: str
-    session_id: str
-    issuer_key: str
-    room_capability: str
+    human_action_id: str = field(repr=False)
+    session_id: str = field(repr=False)
+    issuer_key: str = field(repr=False)
+    room_capability: str = field(repr=False)
     origin: str
     issuer_principal_id: str
     network_ids: tuple[str, ...]
     profile: str | None
-    envelope_key: EnrollmentEnvelopeKey
-    owner_signing_key: SigningKey
+    envelope_key: EnrollmentEnvelopeKey = field(repr=False)
+    owner_signing_key: SigningKey = field(repr=False)
     discovery: Any
     ca: str
     private_cidrs: tuple[str, ...]
@@ -1810,8 +1835,8 @@ class _ActiveEnrollmentOffer:
 class EnrollmentApprovalRequest:
     """Secret-free request metadata for a trusted issuer decision."""
 
-    enrollment_id: str
-    device_key_fingerprint: str
+    enrollment_id: str = field(repr=False)
+    device_key_fingerprint: str = field(repr=False)
     issuer: str
     network_ids: tuple[str, ...]
     configuration_profile: str | None
@@ -1828,7 +1853,7 @@ class EnrollmentApprovalRequest:
 class _LiveEnrollmentRequest:
     offer: _ActiveEnrollmentOffer = field(repr=False)
     destination_key: str = field(repr=False)
-    round_id: str
+    round_id: str = field(repr=False)
     workspace_id: str
     challenge_token: str = field(repr=False)
     proof_token: str = field(repr=False)
@@ -1848,6 +1873,15 @@ class EnrollmentIssuer:
         self._approved_offer_ids: set[str] = set()
         self._recovery_task: asyncio.Task | None = None
         self._destination_tasks: dict[str, asyncio.Task] = {}
+
+    def _issuer_device_name_field(self) -> dict[str, str]:
+        """`{"issuer_device_name": name}` when this device has a valid name."""
+        getter = getattr(self.bridge, "device_name", None)
+        try:
+            name = getter() if callable(getter) else ""
+        except Exception:
+            name = ""
+        return {"issuer_device_name": name} if isinstance(name, str) and NAME_RE.fullmatch(name) else {}
 
     def _recovery_journal(self, client) -> EnrollmentRecoveryJournal:
         return EnrollmentRecoveryJournal(
@@ -3555,6 +3589,7 @@ class EnrollmentIssuer:
                                 "credential": issued_credential.token,
                                 "invite": client.invite(),
                                 "provisioning_bundle": base64.urlsafe_b64encode(bundle).rstrip(b"=").decode("ascii"),
+                                **self._issuer_device_name_field(),
                             },
                         )
                         envelope = encrypt_enrollment_envelope(offer.envelope_key, payload)

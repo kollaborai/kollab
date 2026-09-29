@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import secrets
 import sys
 import time
@@ -22,6 +23,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .device_names import contact_route_hex
+
+logger = logging.getLogger(__name__)
 
 LEASE_SECONDS = 35
 LEASE_RENEW_SECONDS = 10
@@ -171,10 +174,10 @@ class InMemoryBackend:
         if room is None or room.get(member.key) != member:
             return False, list(room.values()) if room else []
         del room[member.key]
-        self._discard_contact_route(member.key)
         if not room:
             del self.rooms[room_hash]
-            return True, []
+        if not any(member.key in other for other in self.rooms.values()):
+            self._discard_contact_route(member.key)
         return True, list(room.values())
 
     def _discard_contact_route(self, key: str) -> None:
@@ -749,6 +752,13 @@ local roster = redis.call('HGETALL', KEYS[1])
 local result = {1}
 for _, value in ipairs(roster) do table.insert(result, value) end
 return result
+"""
+
+# One key, one script: the route set can never exist without its TTL.
+_TOUCH_CONTACT_ROUTE = """
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
 """
 
 _RENEW_ROOM = """
@@ -1524,7 +1534,7 @@ class RedisRelayBackend:
             )
             removed = int(result[0]) == 1
             if removed:
-                await self._discard_contact_route(member.key)
+                await self._discard_contact_route(member.key, room_hash)
             return removed, self._parse_hgetall(result[1:])
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
@@ -1532,23 +1542,34 @@ class RedisRelayBackend:
             raise RelayBackendError("shared peer removal is unavailable") from exc
 
     async def _touch_contact_route(self, key: str) -> None:
-        # ponytail: a plain SADD+EXPIRE beside the atomic room Lua script,
-        # not inside it -- a knock lookup can be briefly stale (up to
-        # LEASE_SECONDS) after a room change; fold into _JOIN_ROOM/_RENEW_ROOM
-        # if that window ever matters.
+        # The route index sits beside the atomic room scripts, not inside
+        # them (its key lives in another hash slot), so a knock lookup can be
+        # briefly stale after a room change. A failure is logged, never
+        # raised: it only ages the entry out within LEASE_SECONDS.
         try:
-            route = contact_route_hex(key)
-            await self._redis.sadd(self._contact_route_key(route), key)
-            await self._redis.expire(self._contact_route_key(route), LEASE_SECONDS)
+            await self._redis.eval(
+                _TOUCH_CONTACT_ROUTE,
+                1,
+                self._contact_route_key(contact_route_hex(key)),
+                key,
+                LEASE_SECONDS,
+            )
         except Exception:
-            pass
+            logger.warning("contact route index could not be updated")
 
-    async def _discard_contact_route(self, key: str) -> None:
+    async def _discard_contact_route(self, key: str, room_hash: str) -> None:
+        """Unlist a key whose room membership just ended, unless it is back.
+
+        A reconnect can register the key between the room removal and this
+        call; the membership check after the SREM lists it again instead of
+        leaving a live device unreachable until its next renewal.
+        """
         try:
-            route = contact_route_hex(key)
-            await self._redis.srem(self._contact_route_key(route), key)
+            await self._redis.srem(self._contact_route_key(contact_route_hex(key)), key)
+            if await self._redis.hexists(self._room_keys(room_hash)[0], key):
+                await self._touch_contact_route(key)
         except Exception:
-            pass
+            logger.warning("contact route index could not be updated")
 
     async def lookup_contact_route(self, route_hex: str) -> list[str]:
         """Keys currently registered under this route (0, 1, or >1 = ambiguous)."""

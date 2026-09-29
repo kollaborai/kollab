@@ -326,6 +326,49 @@ async def test_accept_rejects_a_joiner_name_matching_this_devices_own_name(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_accept_refuses_to_rename_a_key_that_is_already_bound(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "5" * 32
+    store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    bridge.bind_peer_device(live.destination_key, "laptop-kollab")
+    live.device_name = "laptop-two"
+
+    result = await hub._handle_connect_command(f"accept {round_id}")
+
+    assert "could not accept laptop-two: this device is already on your network as laptop-kollab" in result
+    assert live.decision is None
+    assert bridge._state().state.peer_devices == {live.destination_key: "laptop-kollab"}
+    pending = store.get_enrollment_request(
+        round_id, agent_id=AGENT_ID, session_id=bridge.commands.client._session_id
+    )
+    assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_accept_refuses_a_joiner_name_held_by_a_device_in_the_roster(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "6" * 32
+    _store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    live.device_name = "alzan-prod-home"
+    bridge._cache[("session", "e" * 64, "peer-session")] = (
+        time.monotonic(),
+        [{"name": "ops", "device": "alzan-prod-home", "handle": "ops@alzan-prod-home"}],
+    )
+
+    result = await hub._handle_connect_command(f"accept {round_id}")
+
+    assert "already on this network" in result
+    assert live.decision is None
+    assert live.destination_key not in bridge._state().state.peer_devices
+
+
+@pytest.mark.asyncio
 async def test_accept_rejects_a_joiner_name_already_bound_to_another_key(tmp_path):
     hub, bridge = _local_hub(tmp_path)
     issuer = EnrollmentIssuer(bridge)

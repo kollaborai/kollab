@@ -827,23 +827,26 @@ executed by: plugins/agent_orchestrator/plugin.py
     <broadcast to="*">stop what you're doing, new priority from the user</broadcast>
 
 
-### hub messaging (local mesh and authorized relay communication)
+### hub messaging (local mesh and network)
 
 parsed by: plugins/hub/plugin.py (response hook)
-These tags reach local Hub peers by identity. The XML response parser also
-accepts a full `relay:<key>:<workspace-id>:<agent-id>` address for an authorized
-remote send. A remote address is not a local Hub identity.
+These tags reach local Hub peers by identity. An agent on another device of the
+network is named `agent@device` (for example `infra@alzan-prod-home`) and is
+messaged with the same tag. Under trust `manual` the send also needs a human
+grant (see below).
 
 #### <hub_msg> - send message to hub peer
 
   syntax:
     <hub_msg to="identity">message content</hub_msg>
-    <hub_msg to="relay:<key>:<workspace-id>:<agent-id>" thread="<grant-id>">exact authorized request</hub_msg>
+    <hub_msg to="agent@device">message content</hub_msg>
+    <hub_msg to="agent@device" thread="<grant-id>">exact authorized request</hub_msg>   (trust manual only)
 
   how it works:
     - local identity targets use the local Hub message path
-    - a full relay address uses the remote relay path and requires a matching
-      human communication grant
+    - an agent@device target is delivered to that device like a hub message:
+      under trust `open` and `agents` it needs no human grant; under `manual`
+      it needs a matching human communication grant
     - message is delivered via unix socket when online, or queued in the
       durable identity inbox for a known offline pool identity
     - the receiving agent sees it injected into their conversation
@@ -854,9 +857,10 @@ remote send. A remote address is not a local Hub identity.
 
   limitations:
     - local target must be a known hub identity (e.g. "lapis", "jarvis")
-    - remote target must be the complete directory address; display names alone
-      are ambiguous
-    - remote sends require human authorization for the exact request and address
+    - remote target must be the exact agent@device from the roster; agent names
+      alone are ambiguous across devices
+    - under trust `manual`, remote sends require human authorization for the
+      exact request and agent@device
     - the XML parser's grant attribute is `thread`; the structured `hub-msg`
       tool schema does not currently expose a grant/thread parameter
     - offline delivery is supported for durable pool identities; capture still

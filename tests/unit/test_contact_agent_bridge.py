@@ -1,5 +1,6 @@
 """Contact requests cross only the trusted local Hub RPC boundary."""
 
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -267,6 +268,144 @@ async def test_a_failed_approval_rolls_back_even_a_non_relay_error(tmp_path):
 
     disk = _disk(tmp_path)
     assert disk.peer_devices == {} and disk.peer_trust == {} and disk.approvals == []
+    await bridge.close()
+
+
+def _state_of(tmp_path):
+    disk = _disk(tmp_path)
+    return list(disk.approvals), dict(disk.peer_devices), dict(disk.peer_trust)
+
+
+@pytest.mark.asyncio
+async def test_a_second_knock_from_a_bound_key_under_a_new_name_is_refused_not_renamed(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+    await bridge._rpc_contact_decide(_decision("accept", "ana-laptop"))
+    before = _state_of(tmp_path)
+
+    decided = await bridge._rpc_contact_decide(_decision("accept", "ana-desktop"))
+
+    assert decided == {"error": "already_named"}
+    assert bridge.commands.decisions == [("b" * 32, "accept")]  # the relay was not asked again
+    assert _state_of(tmp_path) == before
+    assert bridge._peer_name(_SENDER) == "ana-laptop"
+    with pytest.raises(RelayError, match="already on your network as ana-laptop"):
+        bridge.bind_peer_device(_SENDER, "ana-desktop")
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_repeating_the_same_name_is_idempotent(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+    await bridge._rpc_contact_decide(_decision("accept", "ana-laptop"))
+
+    again = await bridge._rpc_contact_decide(_decision("accept", "ana-laptop"))
+
+    assert again == {"status": "accepted", "receipt_id": "b" * 32}
+    assert _disk(tmp_path).peer_devices == {_SENDER: "ana-laptop"}
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_accept_restores_approvals_names_and_trust_exactly(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+    other = SigningKey.generate().verify_key.encode().hex()
+    await bridge._rpc_contact_decide(_decision("accept", "ana-laptop") | {"sender_key": other})
+    await bridge._rpc_contact_decide(_decision("accept", "ana-laptop"))  # taken: refused
+    await bridge._rpc_contact_decide(_decision("accept", "bob-desktop"))
+    before = _state_of(tmp_path)
+    assert before[0] == [other, _SENDER]
+
+    bridge.commands.decision_error = RelayError("relay is down")
+    decided = await bridge._rpc_contact_decide(_decision("accept", "bob-desktop"))
+
+    assert decided == {"error": "transport"}
+    assert _state_of(tmp_path) == before  # approvals, peer_devices and peer_trust, untouched
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_at", ["bind", "trust", "approve"])
+async def test_every_failing_step_of_an_accept_leaves_a_known_peer_as_it_was(tmp_path, fail_at):
+    _plugin, bridge = _bridge(tmp_path)
+    await bridge._rpc_contact_decide(_decision("accept", "ana-laptop"))
+    before = _state_of(tmp_path)
+
+    def boom(*_args):
+        raise OSError("disk full")
+
+    if fail_at == "bind":
+        bridge.bind_peer_device = boom
+    elif fail_at == "trust":
+        bridge.set_peer_trust = boom
+    else:
+        bridge.commands.client.approve = boom
+
+    with pytest.raises(OSError):
+        bridge._bind_knock_peer(_SENDER, "ana-laptop")
+
+    assert _state_of(tmp_path) == before
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_a_knock_cannot_take_a_name_from_this_device_or_a_device_in_the_roster(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+    bridge.set_device_name("mac-kollab")
+    peer = SigningKey.generate().verify_key.encode().hex()
+    bridge._cache[("session", peer, "peer-session")] = (
+        time.monotonic(),
+        [{"name": "ops", "device": "alzan-prod-home", "handle": "ops@alzan-prod-home"}],
+    )
+
+    own = await bridge._rpc_contact_decide(_decision("accept", "mac-kollab"))
+    roster = await bridge._rpc_contact_decide(_decision("accept", "alzan-prod-home"))
+
+    assert own == {"error": "name_taken"} and roster == {"error": "name_taken"}
+    assert _state_of(tmp_path) == ([], {}, {})
+    assert bridge.commands.decisions == []  # the relay never recorded either accept
+    with pytest.raises(RelayError, match="already on this network"):
+        bridge.set_device_name("alzan-prod-home")
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_a_peers_own_roster_rows_do_not_block_its_own_name(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+    bridge._cache[("session", _SENDER, "peer-session")] = (
+        time.monotonic(),
+        [{"name": "ops", "device": "ana-laptop", "handle": "ops@ana-laptop"}],
+    )
+
+    decided = await bridge._rpc_contact_decide(_decision("accept", "ana-laptop"))
+
+    assert decided == {"status": "accepted", "receipt_id": "b" * 32}
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_a_full_approval_table_is_reported_as_capacity_and_leaves_no_trace(tmp_path, monkeypatch):
+    monkeypatch.setattr("plugins.hub.relay_client.MAX_APPROVALS", 0)
+    _plugin, bridge = _bridge(tmp_path)
+
+    with pytest.raises(RelayError) as refused:
+        bridge.commands.client.approve(_SENDER)
+    decided = await bridge._rpc_contact_decide(_decision("accept"))
+
+    assert refused.value.code == "capacity"
+    assert decided == {"error": "capacity"}
+    assert _state_of(tmp_path) == ([], {}, {})
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_accepting_a_knock_allows_no_agent_until_the_human_says_so(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+
+    await bridge._rpc_contact_decide(_decision("accept"))
+
+    room = bridge.commands.client.state.room
+    assert bridge.store.grants(room) == []  # the allow list stays empty
+    assert bridge.effective_trust(_SENDER) == "agents"
     await bridge.close()
 
 

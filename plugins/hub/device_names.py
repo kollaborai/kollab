@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import socket
+import unicodedata
 from pathlib import Path
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
@@ -95,3 +96,89 @@ def key_label(public_key_hex: str) -> str:
     exposes exactly this much.
     """
     return contact_route_hex(public_key_hex)[:8]
+
+
+# --- one row on a human screen -------------------------------------------------
+# A sender picks the name and the introduction a review row shows, so every
+# screen that lists requests (the Connect screen, the knock review) builds its
+# rows here: measured in terminal columns, never in characters.
+
+NAME_DISPLAY_MAX = 20
+_MIN_QUOTE = 8
+_SEP = "   "
+
+
+def _char_width(char: str) -> int:
+    if unicodedata.combining(char) or unicodedata.category(char) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def display_width(text: str) -> int:
+    """Terminal columns: wide (CJK) characters take two, combining marks none."""
+    return sum(_char_width(char) for char in text)
+
+
+def clip_display(text: str, width: int) -> str:
+    """`text` cut to at most `width` columns, an ellipsis marking the cut."""
+    if width <= 0:
+        return ""
+    if display_width(text) <= width:
+        return text
+    kept, used = [], 0
+    for char in text:
+        step = _char_width(char)
+        if used + step > width - 1:
+            break
+        kept.append(char)
+        used += step
+    return "".join(kept) + "\u2026"
+
+
+def display_name(name: str, limit: int = NAME_DISPLAY_MAX) -> str:
+    """A sender-chosen name safe for one row: no control characters, no tabs,
+    capped at `limit` columns with an ellipsis."""
+    printable = "".join(
+        char
+        for char in str(name)
+        if char.isprintable() and not unicodedata.category(char).startswith("C")
+    )
+    return clip_display(printable, limit)
+
+
+def request_row(
+    head: str,
+    tail: str,
+    width: int,
+    *,
+    hint: str = "",
+    quote: str = "",
+    indent: str = "",
+    gap: str = _SEP,
+) -> list[str]:
+    """`head<gap>tail   "quote"   hint` as one line, or two when it is too wide.
+
+    Two lines are `head` over `indent + tail ...`. Nothing exceeds `width`
+    columns. The quote is the only part cut (with an ellipsis, and dropped when
+    fewer than eight columns are left); the hint is whole or absent, never cut
+    mid-token. `head`, `tail` and `hint` arrive already capped; `quote` must be
+    printable text on one line.
+    """
+
+    def build(lead: str, last_resort: bool) -> tuple[str, bool]:
+        parts = [tail, hint] if hint else [tail]
+        fixed = display_width(lead) + sum(map(display_width, parts))
+        fixed += len(_SEP) * (len(parts) - 1)
+        if last_resort and fixed > width and hint:
+            parts = [tail]
+            fixed = display_width(lead) + display_width(tail)
+        room = width - fixed - len(_SEP) - 2
+        shown = bool(quote) and room >= _MIN_QUOTE
+        if shown:
+            parts.insert(1, f'"{clip_display(quote, room)}"')
+        return lead + _SEP.join(parts), fixed <= width and (shown or not quote)
+
+    line, fits = build(head + gap, False)
+    if fits:
+        return [line]
+    return [clip_display(head, width), clip_display(build(indent, True)[0], width)]

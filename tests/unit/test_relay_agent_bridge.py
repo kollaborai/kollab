@@ -255,6 +255,13 @@ def address(bridge):
     )
 
 
+async def handle(origin, target):
+    """The `agent@device` name `origin` sees for `target`, from its live roster."""
+    await origin._rpc_directory({"peer": ""})
+    (row,) = [r for r in await origin.remote_agents() if r["address"] == address(target)]
+    return row["handle"]
+
+
 def allow(origin, target):
     target.store.grant(
         target.commands.client.state.room,
@@ -2055,7 +2062,7 @@ async def test_model_send_without_human_contact_is_denied_then_identical_retry_w
     assert not denied.success and len(wire.sent) == before
     assert not right.store.queued(right.identity.agent_id)
     await left.human_input(
-        {"message": f"Ask {address(right)} to Create proof.txt"},
+        {"message": f"Ask {await handle(left, right)} to Create proof.txt"},
         SimpleNamespace(source="user"),
     )
     assert len(left.store.contacts(left.commands.client.state.room)) == 1
@@ -2151,7 +2158,7 @@ async def test_authenticated_attacher_input_mints_scoped_contact_grant(
                 json.dumps(
                     {
                         "type": "input",
-                        "text": f"Ask {address(right)} to Create proof.txt",
+                        "text": f"Ask {await handle(left, right)} to Create proof.txt",
                     }
                 )
                 + "\n"
@@ -2373,7 +2380,7 @@ async def test_human_send_command_records_grant_and_transmits(bridges):
     members, _ = bridges
     (left, _, _, _), (right, _, _, _) = members
     allow(left, right)
-    text = await left.command(f"send {address(right)} Create proof.txt")
+    text = await left.command(f"send {await handle(left, right)} Create proof.txt")
     assert "queued" in text
     contacts = left.store.contacts(left.commands.client.state.room)
     assert len(contacts) == 1 and contacts[0]["state"] == "sent"
@@ -2451,3 +2458,52 @@ async def test_first_model_send_cannot_substitute_another_task(bridges):
         }
     )
     assert correct.success
+
+
+@pytest.mark.asyncio
+async def test_manual_commands_take_and_print_agent_at_device_never_a_relay_address(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    allow(left, right)
+    target = await handle(left, right)
+    agent, _, device = target.partition("@")
+    assert agent and device
+
+    authorized = await left.command(f"authorize {target} Create proof.txt")
+
+    assert f"recipient {target}" in authorized
+    assert "relay:" not in authorized
+    grant = left.store.contacts(left.commands.client.state.room)[0]
+    assert grant["recipient"] == address(right)  # the stored grant still binds the exact address
+    text = await left.command(f"send {target} Create proof.txt")
+    assert "relay:" not in text
+
+    for usage in ("authorize", "send"):
+        assert await left.command(f"{usage} {target}") == (
+            f"usage: /connect {usage} <agent@device> <purpose or message>"
+        )
+    for usage in ("task", "cancel"):
+        assert await left.command(f"{usage} {target}") == (
+            f"usage: /connect {usage} <agent@device> <message id>"
+        )
+    assert await left.command("withdraw") == "usage: /connect withdraw <grant-id>"
+
+
+@pytest.mark.asyncio
+async def test_manual_commands_refuse_a_relay_address_and_an_unknown_handle(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    allow(left, right)
+    await handle(left, right)  # fills the live roster
+
+    for target in (address(right), "nobody@nowhere", "ops"):
+        for command in (
+            f"authorize {target} Create proof.txt",
+            f"send {target} Create proof.txt",
+            f"task {target} {'a' * 32}",
+            f"cancel {target} {'a' * 32}",
+        ):
+            refused = await left.command(command)
+            assert refused.startswith("connect: unknown agent@device"), (command, refused)
+            assert "relay:" not in refused
+    assert left.store.contacts(left.commands.client.state.room) == []

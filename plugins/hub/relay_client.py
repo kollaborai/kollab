@@ -277,7 +277,7 @@ class RelayClient:
         if newly_approved:
             self._adopt_bridge_fields()
             if len(self.state.approvals) >= MAX_APPROVALS:
-                raise RelayError("local peer approval capacity reached")
+                raise RelayError("local peer approval capacity reached", "capacity")
             self.state.approvals.append(key)
             try:
                 self._store.save()

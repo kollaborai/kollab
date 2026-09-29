@@ -9114,6 +9114,12 @@ class HubPlugin(BasePlugin):
                 if isinstance(result, dict) and "status" in result:
                     return None
                 error = result.get("error") if isinstance(result, dict) else None
+                if error == "already_named":
+                    try:
+                        old = self._relay_agent._peer_name(request.sender_key)
+                    except Exception:
+                        old = "another name"
+                    return f"this device is already on your network as {old}"
                 return {
                     "name_taken": "that device name is already on this network",
                     "capacity": "too many approved devices or pending knocks",

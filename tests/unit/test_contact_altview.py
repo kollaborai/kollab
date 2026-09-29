@@ -6,7 +6,7 @@ import time
 import pytest
 
 from kollabor_tui.key_parser import KeyPress, KeyType
-from plugins.altview.contact_altview import ContactReviewAltView
+from plugins.altview.contact_altview import ContactReviewAltView, _safe_display_text
 from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
 from plugins.hub.device_names import device_key_fingerprint
 
@@ -261,3 +261,19 @@ async def test_knock_review_row_flattens_tabs_so_it_stays_one_row():
 
     assert "\t" not in renderer.text()
     assert "[a]ccept" in renderer.text()
+
+
+def test_safe_display_text_strips_escape_c1_bidi_and_other_controls():
+    hostile = (
+        "a\x1b[31mred\x1b[0m"  # ESC sequences lose their ESC
+        "\x85b\x9bc"  # C1 controls (NEL, CSI)
+        "\u202edcba\u2066x\u2069"  # bidi override and isolates
+        "\u200bz\x00\x7f\tq"  # zero-width space, NUL, DEL, tab
+        "\nr"
+    )
+
+    cleaned = _safe_display_text(hostile)
+
+    assert cleaned == "a[31mred[0mbcdcbaxzq\nr"
+    assert not any(ord(char) < 32 and char != "\n" for char in cleaned)
+    assert not any(0x7F <= ord(char) <= 0x9F or char in "\u202e\u2066\u2069\u200b" for char in cleaned)
