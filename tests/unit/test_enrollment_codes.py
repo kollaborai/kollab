@@ -248,3 +248,14 @@ def test_code_for_lookup_tag_matches_the_free_function():
         codes.parse_short_enrollment_code(code.for_private_display()),
         "https://relay.example",
     )
+
+
+def test_looks_like_join_code_catches_codes_not_device_names():
+    from plugins.hub.enrollment_codes import looks_like_join_code
+
+    assert looks_like_join_code("7QK4-M2XP")
+    assert looks_like_join_code("K1-" + "0" * 32 + "-AAAA-BBBB-CCCC-DDDD-EEEE")
+    assert not looks_like_join_code("mac-home")
+    assert not looks_like_join_code("alzan-prod-home")
+    assert not looks_like_join_code("kollabor.ai")
+    assert not looks_like_join_code("7qk4-m2xp")  # lower case is left to the private form

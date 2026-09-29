@@ -53,6 +53,7 @@ TASK_TIMEOUT = 600
 _ENROLLMENT_CODE_SHAPE = re.compile(
     r"K1-([0-9a-f]{32})-([0-9A-HJKMNP-TV-Z]{4}-){4}[0-9A-HJKMNP-TV-Z]{4}\Z"
 )
+_SHORT_CODE_SHAPE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
     "invalid_contact",
@@ -105,14 +106,15 @@ def _safe_enrollment_offer_result(value) -> dict[str, str]:
         raise RelayError("invalid local enrollment offer result")
     code = value["code"]
     match = _ENROLLMENT_CODE_SHAPE.fullmatch(code) if isinstance(code, str) else None
+    short = _SHORT_CODE_SHAPE.fullmatch(code) is not None if isinstance(code, str) else False
     if (
         value["status"] != "offered"
         or not isinstance(value["offer_id"], str)
         or not re.fullmatch(r"[0-9a-f]{32}", value["offer_id"])
         or not isinstance(value["expires_at"], str)
         or not value["expires_at"].isdigit()
-        or match is None
-        or match.group(1) != value["offer_id"]
+        or (match is None and not short)
+        or (match is not None and match.group(1) != value["offer_id"])
     ):
         raise RelayError("invalid local enrollment offer result")
     return {
@@ -490,7 +492,9 @@ class RelayAgentBridge:
         self._require_human_network_context(
             "remote model turns cannot issue human network commands"
         )
-        if any(part.upper().startswith("K1-") for part in value.split()):
+        from .enrollment_codes import looks_like_join_code
+
+        if any(looks_like_join_code(part) for part in value.split()):
             raise RelayError("enrollment codes must use the private code-entry view")
         result = await self._owner_call(
             "relay.command", {"value": value, "agent_id": self.identity.agent_id}

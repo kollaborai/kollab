@@ -65,6 +65,14 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
+_SHORT_JOIN_CODE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
+
+
+def _looks_like_join_code(part: str) -> bool:
+    """A K1 code or an upper-case XXXX-XXXX join code; never allowed in a command."""
+    return isinstance(part, str) and (part.upper().startswith("K1-") or _SHORT_JOIN_CODE.fullmatch(part) is not None)
+
+
 CHECKS = (
     "ui-command",
     "follow-up",
@@ -646,7 +654,7 @@ class ProcessRunner:
         if (
             len(encoded_command) > 4096
             or any(ord(char) < 32 or ord(char) == 127 for char in command_text)
-            or any(part.upper().startswith("K1-") for part in connect_arguments)
+            or any(_looks_like_join_code(part) for part in connect_arguments)
         ):
             raise AcceptanceError(
                 "interactive_command_rejected",
@@ -1454,7 +1462,7 @@ def _relay_command_value(parts: Sequence[str]) -> str:
         or any(not isinstance(value, str) or not value for value in values)
         or any(
             any(ord(char) < 32 or ord(char) == 127 for char in value)
-            or value.upper().startswith("K1-")
+            or _looks_like_join_code(value)
             for value in values
         )
         or len(" ".join(values).encode("utf-8")) > 4096
@@ -1542,7 +1550,9 @@ def address(value):
     return isinstance(value,str) and re.fullmatch(pattern,value)
 def valid_command(parts):
     if not isinstance(parts,list) or not parts or any(not isinstance(v,str) or not v for v in parts): return False
-    if any(any(ord(c)<32 or ord(c)==127 for c in v) or v.upper().startswith("K1-") for v in parts): return False
+    short=re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
+    def bad(v): return any(ord(c)<32 or ord(c)==127 for c in v) or v.upper().startswith("K1-") or short.fullmatch(v)
+    if any(bad(v) for v in parts): return False
     if len(" ".join(parts).encode("utf-8"))>4096: return False
     head=parts[0]
     if head in {"status","peers","grants","invite","disconnect"}: return len(parts)==1

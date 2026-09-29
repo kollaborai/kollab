@@ -8650,7 +8650,9 @@ class HubPlugin(BasePlugin):
             value = " ".join(getattr(command_or_args, "args", None) or []).strip()
         parts = value.split()
         head = parts[0].lower() if parts else ""
-        if any(part.upper().startswith("K1-") for part in parts):
+        from .enrollment_codes import looks_like_join_code
+
+        if any(looks_like_join_code(part) for part in parts):
             return CODE_IN_COMMAND
         if head == "help":
             show_all = len(parts) >= 2 and parts[1].lower() == "all"
@@ -9022,7 +9024,8 @@ class HubPlugin(BasePlugin):
             and expires_at.isdigit()
             and isinstance(code, str)
             and re.fullmatch(
-                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
+                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}"
+                r"|[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}",
                 code,
             )
         ):

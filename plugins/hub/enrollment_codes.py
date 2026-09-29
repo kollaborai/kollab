@@ -12,6 +12,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import re
 import secrets
 from dataclasses import dataclass, field
 
@@ -187,6 +188,20 @@ def generate_enrollment_code(offer_id: str) -> EnrollmentCode:
         for index in range(_SECRET_LENGTH)
     )
     return EnrollmentCode(offer_id, bytearray(secret.encode("ascii")))
+
+
+_SHORT_CODE_IN_TEXT = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}")
+
+
+def looks_like_join_code(part: str) -> bool:
+    """True for a K1 code or an upper-case ``XXXX-XXXX`` join code typed as one word.
+
+    Device names are lower-case by rule, so an upper-case short code cannot be a
+    device name; lower-case short codes are left to the private form.
+    """
+    if not isinstance(part, str):
+        return False
+    return part.upper().startswith("K1-") or _SHORT_CODE_IN_TEXT.fullmatch(part) is not None
 
 
 def is_short_enrollment_code(value: str) -> bool:
