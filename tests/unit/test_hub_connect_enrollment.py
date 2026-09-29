@@ -342,7 +342,9 @@ async def test_bare_connect_off_a_network_still_opens_the_code_form():
 
 
 @pytest.mark.asyncio
-async def test_bare_connect_attached_to_a_connected_daemon_prints_status_text():
+async def test_bare_connect_attached_to_a_daemon_without_a_snapshot_prints_status_text():
+    """Only a daemon too old to send a Connect snapshot falls back to text; a
+    current one feeds the screen (tests/unit/test_connect_attached_and_waiting.py)."""
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(
         hub_connect=AsyncMock(return_value="network marco-home via kollabor.ai")

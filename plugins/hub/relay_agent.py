@@ -622,13 +622,20 @@ class RelayAgentBridge:
         )
         return result["text"]
 
-    async def enroll_device(self, domain: str, code: str) -> dict[str, str]:
-        """Submit a private enrollment code through a typed local RPC."""
+    async def enroll_device(
+        self, domain: str, code: str, on_submitted=None
+    ) -> dict[str, str]:
+        """Submit a private enrollment code through a typed local RPC.
+
+        ``on_submitted`` fires once the relay holds the request. Only the
+        workspace owner can say so; a non-owner window has one blocking RPC to
+        the owner and never calls it.
+        """
         self._require_human_network_context("remote model turns cannot enroll devices")
         await self._ensure_owner()
         params = {"agent_id": self.identity.agent_id, "domain": domain, "code": code}
         if self.commands is not None:
-            return await self._rpc_enroll_device(params)
+            return await self._rpc_enroll_device(params, on_submitted=on_submitted)
         record = self.owner.owner()
         if record is None:
             raise RelayError("workspace relay owner is starting; retry shortly")
@@ -969,7 +976,7 @@ class RelayAgentBridge:
                 raise RelayError(f"enrollment decision unavailable ({code})") from None
             raise RelayError("enrollment decision unavailable") from None
 
-    async def _rpc_enroll_device(self, params):
+    async def _rpc_enroll_device(self, params, on_submitted=None):
         self._require_human_network_context("remote model turns cannot enroll devices")
         if self.commands is None or set(params) != {"agent_id", "domain", "code"}:
             raise RelayError("invalid local enrollment request")
@@ -987,7 +994,12 @@ class RelayAgentBridge:
         from .enrollment_client import enroll_device
 
         return _safe_enrollment_result(
-            await enroll_device(self.commands, params["domain"], params["code"])
+            await enroll_device(
+                self.commands,
+                params["domain"],
+                params["code"],
+                on_submitted=on_submitted,
+            )
         )
 
     async def _rpc_enrollment_offer(self, params):

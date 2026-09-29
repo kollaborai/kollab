@@ -399,6 +399,7 @@ async def _run_enrollment(
     publisher_key=None,
     claim_other_owner=False,
     issuer_device_name=None,
+    submitted_probe=None,
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
@@ -632,7 +633,12 @@ async def _run_enrollment(
     )
     monkeypatch.setattr(enrollment_client.asyncio, "sleep", no_sleep)
     try:
-        result = await enroll_device(commands, "kollabor.ai", code_text)
+        result = await enroll_device(
+            commands,
+            "kollabor.ai",
+            code_text,
+            on_submitted=submitted_probe(fake_transport) if submitted_probe else None,
+        )
         return result, commands, destination, fake_transport, owner_directory
     finally:
         for secret in (code, verifier, envelope_key):
@@ -670,6 +676,24 @@ async def _restart_and_recover_destination(
         await asyncio.gather(*tasks)
     transport.envelope_key.wipe()
     return restarted, issuer
+
+
+@pytest.mark.asyncio
+async def test_enrollment_reports_the_submit_once_before_waiting_for_the_decision(
+    tmp_path, monkeypatch
+):
+    """The join form says "request sent" only after the relay has the request."""
+    seen = []
+
+    def probe(transport):
+        return lambda: seen.append(
+            [path.rsplit("/", 1)[-1] for path, _ in transport.requests]
+        )
+
+    result, *_rest = await _run_enrollment(tmp_path, monkeypatch, submitted_probe=probe)
+
+    assert result == {"status": "approved"}
+    assert seen == [["request"]]
 
 
 @pytest.mark.asyncio

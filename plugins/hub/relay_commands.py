@@ -56,6 +56,123 @@ class ConnectSnapshot:
     remote_agents: tuple[str, ...] = ()
     offline_devices: tuple[str, ...] = ()
 
+    def to_wire(self) -> dict[str, Any]:
+        """Plain JSON types, for the daemon's reply to an attached window.
+
+        The request's ``enrollment_id`` crosses the local RPC because deciding
+        needs it; it is still never rendered.
+        """
+        return {
+            "network": self.network,
+            "domain": self.domain,
+            "trust": self.trust,
+            "device": self.device,
+            "relay_online": self.relay_online,
+            "knocks": self.knocks,
+            "local_agents": list(self.local_agents),
+            "remote_agents": list(self.remote_agents),
+            "offline_devices": list(self.offline_devices),
+            "requests": [
+                {
+                    "enrollment_id": row.enrollment_id,
+                    "device": row.device,
+                    "fingerprint": row.fingerprint,
+                    "categories": list(row.categories),
+                }
+                for row in self.requests
+            ],
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> ConnectSnapshot:
+        """Validate a daemon reply; anything off-shape raises ValueError.
+
+        Strict on purpose: every field is bounded printable text, so a wrong
+        or hostile reply cannot put control characters or a key on screen.
+        """
+        fields = {
+            "network",
+            "domain",
+            "trust",
+            "device",
+            "relay_online",
+            "knocks",
+            "local_agents",
+            "remote_agents",
+            "offline_devices",
+            "requests",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("invalid connect snapshot")
+        knocks = value["knocks"]
+        if (
+            not isinstance(value["relay_online"], bool)
+            or not isinstance(knocks, int)
+            or isinstance(knocks, bool)
+            or not 0 <= knocks <= 100_000
+        ):
+            raise ValueError("invalid connect snapshot")
+        requests = value["requests"]
+        if not isinstance(requests, list) or len(requests) > _WIRE_MAX_ROWS:
+            raise ValueError("invalid connect snapshot")
+        rows = []
+        for item in requests:
+            if not isinstance(item, dict) or set(item) != {
+                "enrollment_id",
+                "device",
+                "fingerprint",
+                "categories",
+            }:
+                raise ValueError("invalid connect snapshot")
+            enrollment_id = item["enrollment_id"]
+            if not isinstance(enrollment_id, str) or not _WIRE_ID_RE.fullmatch(
+                enrollment_id
+            ):
+                raise ValueError("invalid connect snapshot")
+            rows.append(
+                JoinRequestRow(
+                    enrollment_id=enrollment_id,
+                    device=_wire_text(item["device"]),
+                    fingerprint=_wire_text(item["fingerprint"], 32),
+                    categories=_wire_texts(item["categories"]),
+                )
+            )
+        trust = _wire_text(value["trust"], 16)
+        validate_trust(trust)
+        return cls(
+            network=_wire_text(value["network"]),
+            domain=_wire_text(value["domain"], 253),
+            trust=trust,
+            device=_wire_text(value["device"]),
+            relay_online=value["relay_online"],
+            requests=tuple(rows),
+            knocks=knocks,
+            local_agents=_wire_texts(value["local_agents"]),
+            remote_agents=_wire_texts(value["remote_agents"]),
+            offline_devices=_wire_texts(value["offline_devices"]),
+        )
+
+
+_WIRE_MAX_ROWS = 64
+_WIRE_TEXT_MAX = 200
+_WIRE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}")
+
+
+def _wire_text(value: Any, limit: int = _WIRE_TEXT_MAX) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > limit
+        or not all(char.isprintable() for char in value)
+    ):
+        raise ValueError("invalid connect snapshot")
+    return value
+
+
+def _wire_texts(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > _WIRE_MAX_ROWS:
+        raise ValueError("invalid connect snapshot")
+    return tuple(_wire_text(item) for item in value)
+
 
 # Only valid under trust manual (docs/specs/agent-network-simple-flow.md section 6).
 MANUAL_TRUST_COMMANDS = frozenset({"authorize", "send", "withdraw", "answer", "task", "cancel"})

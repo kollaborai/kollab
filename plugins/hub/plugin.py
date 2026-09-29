@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import time
 import uuid
@@ -172,6 +173,9 @@ CONNECT_REMOVED = {
     "disconnect": "use /connect leave",
     "grants": "use /connect status",
 }
+
+# A finished join stays readable this long for a window that is still polling.
+_CONNECT_JOIN_KEEP_SECONDS = 900.0
 
 CODE_IN_COMMAND = (
     "connect: codes never go in a command. Run /connect with nothing after it "
@@ -418,6 +422,10 @@ class HubPlugin(BasePlugin):
         self._relay_commands = None
         self._relay_agent = None
         self._relay_startup_task = None
+        # Joins this device started with a code, keyed by an opaque receipt:
+        # the task waits for the other device's decision (see
+        # `_run_connect_enrollment`).
+        self._connect_joins: Dict[str, "asyncio.Task"] = {}
         # CLI `kollab --hub msg agent@device` waiters (docs/specs/
         # agent-network-simple-flow.md, CLI bullet), keyed by the outbound
         # HubMessage's thread_id. The thread id crosses the wire in the relay
@@ -8895,27 +8903,49 @@ class HubPlugin(BasePlugin):
             # Never create an alternate identity/connection in the viewer.
             return "beacon: daemon connection command failed; no viewer connection opened"
 
+    def _attached(self) -> bool:
+        """True in a window attached to a daemon, which owns the relay."""
+        return bool(getattr(getattr(self, "_cli_args", None), "attach", None))
+
+    async def _attached_connect_snapshot(self):
+        """The daemon's Connect snapshot, or None when it cannot supply one."""
+        from .relay_commands import ConnectSnapshot
+
+        state = self.event_bus.get_service("state_service") if self.event_bus else None
+        handler = getattr(state, "hub_connect_snapshot", None)
+        if handler is None:
+            return None
+        try:
+            return ConnectSnapshot.from_wire(await handler())
+        except Exception:
+            return None
+
     async def _connect_home(self) -> str:
         """Bare /connect: the Connect screen on a network, the code form off one."""
         from .relay_commands import NO_NETWORK
 
         status = None
-        if getattr(getattr(self, "_cli_args", None), "attach", None):
-            # The screen runs on the process that owns the relay. An attached
-            # window shows the daemon's status text instead.
-            status = str(await self._attached_connect("status"))
-        elif self._relay_commands is None:
-            # A second window in the workspace does not own the relay either;
-            # asking for status also starts the bridge, which may elect this
-            # window the owner after all.
-            status = str(await self._run_connect_command("status"))
-            if self._relay_commands is not None:
-                status = None
+        if self._attached():
+            # The daemon owns the relay, so the screen's data and decisions
+            # come from it over the state service. A daemon too old to send a
+            # snapshot only has its status text to show.
+            snapshot = await self._attached_connect_snapshot()
+            if snapshot is None:
+                status = str(await self._attached_connect("status"))
+            domain = snapshot.domain if snapshot is not None else ""
+        else:
+            if self._relay_commands is None:
+                # A second window in the workspace does not own the relay
+                # either; asking for status also starts the bridge, which may
+                # elect this window the owner after all.
+                status = str(await self._run_connect_command("status"))
+                if self._relay_commands is not None:
+                    status = None
+            domain = self._relay_network_domain()
         if status is not None:
             if status.splitlines()[:1] == [NO_NETWORK]:
                 return await self._open_connect_altview("kollabor.ai")
             return status
-        domain = self._relay_network_domain()
         if not domain:
             return await self._open_connect_altview("kollabor.ai")
         return await self._open_connect_screen(domain)
@@ -8930,10 +8960,32 @@ class HubPlugin(BasePlugin):
                 ConnectOutcome,
             )
 
+            def outcome_of(result, domain: str):
+                if not isinstance(result, dict):
+                    return ConnectOutcome.error()
+                status = result.get("status")
+                if status == "pending":
+                    try:
+                        return ConnectOutcome.pending(result.get("receipt_id"))
+                    except (TypeError, ValueError):
+                        return ConnectOutcome.error()
+                if status == "approved":
+                    # The daemon names the network, device and trust level; a
+                    # window cannot know them, and an older daemon sends none.
+                    try:
+                        return ConnectOutcome.approved(
+                            result.get("detail") or self._joined_line(domain)
+                        )
+                    except (TypeError, ValueError):
+                        return ConnectOutcome.approved()
+                if status == "rejected":
+                    return ConnectOutcome.rejected()
+                return ConnectOutcome.error()
+
             async def submit(submission):
                 try:
                     code = submission.code.reveal()
-                    if getattr(getattr(self, "_cli_args", None), "attach", None):
+                    if self._attached():
                         state = self.event_bus.get_service("state_service")
                         result = await state.hub_enroll(submission.domain, code)
                     else:
@@ -8942,24 +8994,16 @@ class HubPlugin(BasePlugin):
                         )
                 except Exception:
                     return ConnectOutcome.error()
+                return outcome_of(result, submission.domain)
 
-                if not isinstance(result, dict):
-                    return ConnectOutcome.error()
-                status = result.get("status")
-                if status == "pending":
-                    receipt_id = result.get("receipt_id")
-                    try:
-                        return ConnectOutcome.pending(receipt_id)
-                    except (TypeError, ValueError):
-                        return ConnectOutcome.error()
-                if status == "approved":
-                    try:
-                        return ConnectOutcome.approved(self._joined_line(submission.domain))
-                    except (TypeError, ValueError):
-                        return ConnectOutcome.approved()
-                if status == "rejected":
-                    return ConnectOutcome.rejected()
-                return ConnectOutcome.error()
+            async def wait(receipt_id: str, target_domain: str):
+                """Where the request stands; raises when that cannot be told."""
+                if self._attached():
+                    state = self.event_bus.get_service("state_service")
+                    result = await state.hub_enroll_status(receipt_id)
+                else:
+                    result = await self._connect_enrollment_status(receipt_id)
+                return outcome_of(result, target_domain)
 
             async def attach(domain: str) -> bool:
                 """No code: this is the first device, so start a network."""
@@ -8990,7 +9034,9 @@ class HubPlugin(BasePlugin):
                 self.event_bus.register_service("altview_stack_manager", stack_mgr)
 
             await stack_mgr.push(
-                ConnectAltView(domain=domain, on_submit=submit, on_attach=attach),
+                ConnectAltView(
+                    domain=domain, on_submit=submit, on_attach=attach, on_wait=wait
+                ),
                 "connect",
                 reuse=False,
             )
@@ -9008,7 +9054,15 @@ class HubPlugin(BasePlugin):
         return f"joined {network} as {device}. trust: {self._relay_trust_level()}"
 
     async def _run_connect_enrollment(self, domain: str, code: str) -> dict[str, str]:
-        """Run typed enrollment in the daemon that owns the local identity."""
+        """Start typed enrollment in the daemon that owns the local identity.
+
+        Returns as soon as the relay holds the join request: ``pending`` plus
+        an opaque receipt for ``_connect_enrollment_status``. The wait for the
+        other device's decision goes on in a task here, so no caller (an
+        attached window's RPC loop included) blocks for as long as a person
+        takes to answer. A failure before the request is submitted comes back
+        as the final result.
+        """
         if (
             not isinstance(domain, str)
             or not domain
@@ -9018,6 +9072,7 @@ class HubPlugin(BasePlugin):
             or len(code) > 128
         ):
             return {"error": "invalid connect enrollment request"}
+        failed = {"error": "connect request could not be submitted"}
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -9025,19 +9080,81 @@ class HubPlugin(BasePlugin):
             enroll = getattr(self._relay_agent, "enroll_device", None)
             if enroll is None:
                 return {"error": "connect enrollment is unavailable"}
-            result = await enroll(domain, code)
         except Exception:
             # Enrollment exceptions may contain secrets; keep this boundary
             # deliberately quiet and return only a fixed status.
-            return {"error": "connect request could not be submitted"}
-        if not isinstance(result, dict):
-            return {"error": "connect request could not be submitted"}
-        status = result.get("status")
-        if status == "pending" and isinstance(result.get("receipt_id"), str):
-            return {"status": "pending", "receipt_id": result["receipt_id"]}
-        if isinstance(status, str) and status in {"approved", "rejected"}:
-            return {"status": status}
-        return {"error": "connect request could not be submitted"}
+            return failed
+        submitted = asyncio.Event()
+
+        async def run() -> dict[str, str]:
+            try:
+                result = await enroll(domain, code, on_submitted=submitted.set)
+            except Exception:
+                return failed
+            status = result.get("status") if isinstance(result, dict) else None
+            if status == "approved":
+                try:
+                    return {"status": "approved", "detail": self._joined_line(domain)}
+                except Exception:
+                    return {"status": "approved"}
+            return {"status": "rejected"} if status == "rejected" else failed
+
+        joins = self.__dict__.setdefault("_connect_joins", {})
+        receipt = secrets.token_hex(8)
+        task = asyncio.ensure_future(run())
+        joins[receipt] = task  # the dict is what keeps a detached task alive
+        task.add_done_callback(
+            lambda _task: asyncio.get_running_loop().call_later(
+                _CONNECT_JOIN_KEEP_SECONDS, joins.pop, receipt, None
+            )
+        )
+        waiter = asyncio.ensure_future(submitted.wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if task.done():
+            joins.pop(receipt, None)
+            return failed if task.cancelled() else task.result()
+        return {"status": "pending", "receipt_id": receipt}
+
+    async def _connect_enrollment_status(self, receipt_id: str) -> dict[str, str]:
+        """Where a started join stands, without waiting.
+
+        ``failed`` means the daemon ended the attempt (the offer expired, was
+        used, or the relay refused); an unknown receipt raises, because the
+        daemon cannot say what became of a request it no longer tracks.
+        """
+        task = self.__dict__.get("_connect_joins", {}).get(receipt_id)
+        if task is None:
+            raise ValueError("connect request is not tracked")
+        if not task.done():
+            return {"status": "pending", "receipt_id": receipt_id}
+        result = {} if task.cancelled() else task.result()
+        return result if result.get("status") else {"status": "failed"}
+
+    async def _connect_snapshot(self):
+        """The Connect screen's data; only the process that owns the relay has it."""
+        commands = self._relay_commands
+        if commands is None:
+            raise ValueError("connect screen unavailable")
+        return await commands.connect_snapshot()
+
+    async def _decide_join_request(self, enrollment_id: str, decision: str) -> str:
+        """Accept or reject one join request; "" when decided, else the reason."""
+        from .relay_state import RelayError
+
+        try:
+            await self._relay_agent.decide_enrollment_request(
+                enrollment_id,
+                decision=decision,
+                source_agent=self._identity.agent_id,
+            )
+        except RelayError as exc:
+            return str(exc)  # already operator-safe text
+        except Exception:
+            return "try again"
+        return ""
 
     async def _open_connect_screen(
         self, domain: str, *, code_only: bool = False
@@ -9052,11 +9169,11 @@ class HubPlugin(BasePlugin):
         try:
             from plugins.altview.connect_altview import ConnectScreenAltView
 
-            from .relay_state import RelayError
+            from .relay_commands import ConnectSnapshot
 
             async def create_offer(target_domain: str) -> dict[str, str]:
                 try:
-                    if getattr(getattr(self, "_cli_args", None), "attach", None):
+                    if self._attached():
                         state = self.event_bus.get_service("state_service")
                         result = await state.hub_enrollment_offer(target_domain)
                     else:
@@ -9070,24 +9187,21 @@ class HubPlugin(BasePlugin):
                 )
 
             async def load():
-                commands = self._relay_commands
-                if commands is None:
-                    raise ValueError("connect screen unavailable")
-                return await commands.connect_snapshot()
+                if self._attached():
+                    state = self.event_bus.get_service("state_service")
+                    return ConnectSnapshot.from_wire(await state.hub_connect_snapshot())
+                return await self._connect_snapshot()
 
             async def decide(row, decision: str):
                 """None when decided; otherwise the reason it was not."""
-                try:
-                    await self._relay_agent.decide_enrollment_request(
-                        row.enrollment_id,
-                        decision=decision,
-                        source_agent=self._identity.agent_id,
+                if self._attached():
+                    state = self.event_bus.get_service("state_service")
+                    reason = await state.hub_connect_decide(row.enrollment_id, decision)
+                else:
+                    reason = await self._decide_join_request(
+                        row.enrollment_id, decision
                     )
-                except RelayError as exc:
-                    return str(exc)  # already operator-safe text
-                except Exception:
-                    return "try again"
-                return None
+                return reason or None
 
             stack_mgr = None
             try:
