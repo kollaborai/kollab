@@ -129,7 +129,7 @@ hub_broadcast = ToolDefinition(
     requires_permission=False,
     xml_tag="hub_broadcast",
     xml_form="mixed",
-    xml_attributes=["force"],
+    xml_attributes=["force", "scope"],
     xml_body_param="message",
     parameters=[
         ToolParameter(
