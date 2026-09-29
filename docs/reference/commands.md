@@ -145,6 +145,8 @@ interactive equivalents:
 /hub dns exposes the local identity registry and the historical direct
 TCP/TLS endpoint. `/hub dns endpoint` inspects that listener; its legacy
 "a2a endpoint" label does not indicate standard A2A or WebSocket support.
+New to `/connect`? Start with the [connect guide](../guides/connect.md).
+
 `/hub dns connect [domain]` is an alias for `/connect [domain]`. An explicit
 domain performs signed public discovery and attaches the current workspace to
 the advertised relay. Bare `/connect` and `/connect enroll [domain]` open the
