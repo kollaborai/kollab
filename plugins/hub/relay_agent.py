@@ -80,6 +80,9 @@ _CONTACT_ERRORS = {
     "transport",
     "invalid_response",
     "discovery",
+    "unknown_route",
+    "ambiguous_route",
+    "name_taken",
 }
 
 
@@ -168,6 +171,26 @@ class RelayAgentBridge:
         self.secure_transport: SecureConversationTransport | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
+
+    def _bind_knock_peer(self, sender_key: str, device_name: str) -> bool:
+        """Turn an accepted knock into a peer: name it, approve it, trust `agents`.
+
+        The name is bound first so a duplicate fails before anything else is
+        written; nothing is allowed until `/connect allow`. Returns whether
+        this call created the name binding. Failures are never swallowed; a
+        failed approval undoes the binding this call created.
+        """
+        created = self.bind_peer_device(sender_key, device_name)
+        try:
+            self.commands.client.approve(sender_key)
+            self.set_peer_trust(sender_key, "agents")
+        except RelayError:
+            if created:
+                store = self._state()
+                store.state.peer_devices.pop(sender_key, None)
+                store.save()
+            raise
+        return created
 
     @property
     def identity(self):
@@ -284,10 +307,12 @@ class RelayAgentBridge:
         if store.state.peer_devices.get(key) == name:
             return False
         if name == self.device_name() or name in store.state.peer_devices.values():
-            raise RelayError(
+            error = RelayError(
                 f"device name '{name}' is already on this network; "
                 "that device must run /connect name <other-name> and request a new code"
             )
+            error.code = "name_taken"  # the contact RPC reports it by code
+            raise error
         store.state.peer_devices[key] = name
         store.save()
         return True
@@ -600,12 +625,17 @@ class RelayAgentBridge:
     async def submit_contact_request(
         self,
         domain: str,
-        recipient_key: str,
+        route: str,
         introduction: str,
         *,
         source_agent: str,
     ) -> dict[str, str]:
-        """Submit a sealed introduction through a typed local-only RPC."""
+        """Resolve a knock's route and submit a sealed introduction.
+
+        The raw recipient key never leaves this bridge: it is resolved from
+        `route` here (or in the owner process) and only used to seal and post
+        the request.
+        """
         self._require_human_network_context(
             "remote model turns cannot submit contact requests"
         )
@@ -613,8 +643,9 @@ class RelayAgentBridge:
         params = {
             "agent_id": source_agent,
             "domain": domain,
-            "recipient_key": recipient_key,
+            "route": route,
             "introduction": introduction,
+            "device_name": self.device_name(),
         }
         if self.commands is not None:
             return await self._rpc_contact_submit(params)
@@ -665,6 +696,8 @@ class RelayAgentBridge:
         *,
         decision: str,
         source_agent: str,
+        sender_key: str,
+        device_name: str,
     ) -> dict[str, str]:
         self._require_human_network_context(
             "remote model turns cannot decide contact requests"
@@ -675,6 +708,8 @@ class RelayAgentBridge:
             "domain": domain,
             "request_id": request_id,
             "decision": decision,
+            "sender_key": sender_key,
+            "device_name": device_name,
         }
         if self.commands is not None:
             result = await self._rpc_contact_decide(params)
@@ -715,8 +750,9 @@ class RelayAgentBridge:
         if self.commands is None or set(params) != {
             "agent_id",
             "domain",
-            "recipient_key",
+            "route",
             "introduction",
+            "device_name",
         }:
             raise RelayError("invalid local contact request")
         try:
@@ -731,18 +767,23 @@ class RelayAgentBridge:
             not isinstance(params["domain"], str)
             or not params["domain"]
             or len(params["domain"]) > 253
-            or not isinstance(params["recipient_key"], str)
-            or len(params["recipient_key"]) != 64
+            or not isinstance(params["route"], str)
+            or not re.fullmatch(r"[0-9a-f]{16}", params["route"])
             or not isinstance(params["introduction"], str)
             or introduction_size > 2048
+            or not isinstance(params["device_name"], str)
         ):
             raise RelayError("invalid local contact request")
         self._local_agent(params["agent_id"])
         try:
+            key = await self.commands.resolve_contact_route(
+                params["domain"], params["route"]
+            )
             receipt = await self.commands.submit_contact_request(
                 params["domain"],
-                params["recipient_key"],
+                key,
                 params["introduction"],
+                params["device_name"],
             )
             return {"status": "queued", "receipt_id": receipt}
         except Exception as exc:
@@ -776,6 +817,7 @@ class RelayAgentBridge:
                             "sender_key": item.sender_key,
                             "expires_at": item.expires_at,
                             "introduction": introduction,
+                            "device_name": item.device_name,
                         }
                     )
                 finally:
@@ -798,6 +840,8 @@ class RelayAgentBridge:
             "domain",
             "request_id",
             "decision",
+            "sender_key",
+            "device_name",
         }:
             raise RelayError("invalid local contact decision")
         if (
@@ -808,13 +852,26 @@ class RelayAgentBridge:
             or not re.fullmatch(r"[0-9a-f]{32}", params["request_id"])
             or not isinstance(params["decision"], str)
             or params["decision"] not in {"accept", "reject"}
+            or not isinstance(params["sender_key"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", params["sender_key"])
+            or not isinstance(params["device_name"], str)
         ):
             raise RelayError("invalid local contact decision")
         self._local_agent(params["agent_id"])
         try:
-            result = await self.commands.decide_contact_request(
-                params["domain"], params["request_id"], params["decision"]
+            # Bind before the relay records the decision, like a join accept:
+            # a name collision fails the accept and the knock stays pending.
+            created = params["decision"] == "accept" and self._bind_knock_peer(
+                params["sender_key"], params["device_name"]
             )
+            try:
+                result = await self.commands.decide_contact_request(
+                    params["domain"], params["request_id"], params["decision"]
+                )
+            except Exception:
+                if created:
+                    self.commands.client.revoke(params["sender_key"])
+                raise
             return {"status": result.status, "receipt_id": result.receipt_id}
         except Exception as exc:
             code = getattr(exc, "code", None)

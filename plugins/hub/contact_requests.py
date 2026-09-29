@@ -18,12 +18,14 @@ from nacl.exceptions import CryptoError
 from nacl.public import SealedBox
 from nacl.signing import SigningKey, VerifyKey
 
+from .device_names import NAME_RE, contact_route_hex
 from .dns.discovery import _PublicResolver
 from .relay_state import KEY, RelayError
 
 CONTACT_REQUESTS_PATH = "/relay/v1/contact/requests"
 CONTACT_INBOX_PATH = "/relay/v1/contact/inbox"
 CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
+CONTACT_LOOKUP_PATH = "/relay/v1/contact/lookup"
 CONTACT_SIGNATURE_DOMAIN = b"kollab-relay-contact-http/1\x00"
 CONTACT_MAX_TTL_SECONDS = 24 * 60 * 60
 CONTACT_MAX_INTRODUCTION_BYTES = 2048
@@ -32,6 +34,7 @@ CONTACT_MAX_REQUESTS = 32
 CONTACT_MAX_HTTP_FRAME_BYTES = 512 * 1024
 CONTACT_TIMESTAMP_SKEW_SECONDS = 120
 _HEX_32 = re.compile(r"[0-9a-f]{32}\Z")
+_HEX_16 = re.compile(r"[0-9a-f]{16}\Z")
 _B64URL = re.compile(r"[A-Za-z0-9_-]+\Z")
 _SAFE_ERRORS = {
     "invalid_request",
@@ -46,6 +49,8 @@ _SAFE_ERRORS = {
     "transport",
     "invalid_response",
     "discovery",
+    "unknown_route",
+    "ambiguous_route",
 }
 
 
@@ -95,6 +100,10 @@ class PendingContactRequest:
     sender_key: str
     expires_at: int
     introduction: PrivateMessage = field(repr=False)
+    # The sender's device name, sealed inside the introduction envelope so
+    # the relay never sees it. Falls back to the first 8 hex of the sender's
+    # contact route when missing or invalid -- never the raw key.
+    device_name: str = ""
 
     @property
     def sender_identity(self) -> str:
@@ -104,6 +113,7 @@ class PendingContactRequest:
         return (
             "PendingContactRequest("
             f"receipt_id={self.receipt_id!r}, sender={self.sender_identity!r}, "
+            f"device_name={self.device_name!r}, "
             f"expires_at={self.expires_at}, introduction=<redacted>)"
         )
 
@@ -299,14 +309,21 @@ def _validate_request_frame(
     return frame
 
 
-def _decrypt_introduction(frame: dict[str, Any], signing_key: SigningKey) -> str:
+def _decrypt_envelope(
+    frame: dict[str, Any], signing_key: SigningKey
+) -> tuple[str, str]:
+    """Decrypt the introduction and the sealed device name (may be empty)."""
     try:
         private_key = signing_key.to_curve25519_private_key()
         plaintext = SealedBox(private_key).decrypt(_b64url_decode(frame["envelope"]))
         payload = _strict_json(plaintext)
-        if set(payload) != {"introduction"}:
+        if set(payload) != {"introduction", "device_name"}:
             raise ContactProtocolError("invalid_response")
-        return validate_introduction(payload["introduction"])
+        introduction = validate_introduction(payload["introduction"])
+        device_name = payload["device_name"]
+        if not isinstance(device_name, str):
+            raise ContactProtocolError("invalid_response")
+        return introduction, device_name
     except (CryptoError, ValueError, TypeError) as exc:
         if isinstance(exc, ContactProtocolError):
             raise
@@ -388,9 +405,14 @@ class ContactRequestManager:
         domain: str,
         recipient_key: str,
         introduction: str,
+        device_name: str = "",
     ) -> str:
         recipient_key = validate_contact_key(recipient_key.lower())
         introduction = validate_introduction(introduction)
+        # A missing or malformed name never blocks the knock; the receiving
+        # side falls back to a route-derived placeholder.
+        if not isinstance(device_name, str) or not NAME_RE.fullmatch(device_name):
+            device_name = ""
         origin, ca, cidrs = await self._route(domain)
         sender_key = self.commands.client._store.key
         sender_public_key = sender_key.verify_key.encode().hex()
@@ -398,7 +420,7 @@ class ContactRequestManager:
             bytes.fromhex(recipient_key)
         ).to_curve25519_public_key()
         encrypted = SealedBox(recipient_curve_key).encrypt(
-            _canonical_json({"introduction": introduction})
+            _canonical_json({"introduction": introduction, "device_name": device_name})
         )
         if len(encrypted) > CONTACT_MAX_ENVELOPE_BYTES:
             raise ContactProtocolError("invalid_request")
@@ -457,14 +479,16 @@ class ContactRequestManager:
                 origin=origin,
                 now=now,
             )
+            introduction, device_name = _decrypt_envelope(frame, signing_key)
+            if not device_name or not NAME_RE.fullmatch(device_name):
+                device_name = contact_route_hex(frame["sender_key"])[:8]
             pending.append(
                 PendingContactRequest(
                     receipt_id=frame["request_id"],
                     sender_key=frame["sender_key"],
                     expires_at=frame["expires_at"],
-                    introduction=PrivateMessage(
-                        _decrypt_introduction(frame, signing_key)
-                    ),
+                    introduction=PrivateMessage(introduction),
+                    device_name=device_name,
                 )
             )
         return pending
@@ -502,7 +526,26 @@ class ContactRequestManager:
             raise ContactProtocolError("invalid_response")
         return ContactDecision(request_id, status)
 
-    async def contact_point(self, domain: str) -> dict[str, str]:
-        origin, _ca, _cidrs = await self._route(domain)
-        key = self.commands.client.public_key
-        return {"origin": origin, "identity": "ed25519:" + key, "key": key}
+    async def resolve_route(self, domain: str, route_hex: str) -> str:
+        """Resolve a contact route to its key.
+
+        Never trusts the relay's answer: recomputes the route from the
+        returned key and refuses on any mismatch, so a compromised or
+        misbehaving relay cannot redirect a knock to the wrong recipient.
+        """
+        if not isinstance(route_hex, str) or not _HEX_16.fullmatch(route_hex):
+            raise ContactProtocolError("invalid_request")
+        origin, ca, cidrs = await self._route(domain)
+        result = await self._post(
+            origin,
+            CONTACT_LOOKUP_PATH,
+            {"v": 1, "route": route_hex},
+            ca=ca,
+            cidrs=cidrs,
+        )
+        if set(result) != {"key"} or not isinstance(result["key"], str):
+            raise ContactProtocolError("invalid_response")
+        key = validate_contact_key(result["key"].lower())
+        if contact_route_hex(key) != route_hex:
+            raise ContactProtocolError("invalid_response")
+        return key

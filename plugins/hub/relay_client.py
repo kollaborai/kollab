@@ -246,12 +246,24 @@ class RelayClient:
         self.state.peer_trust = {}
         self._store.save()
 
+    def _adopt_bridge_fields(self) -> None:
+        """Take the fields the agent bridge writes through its own state store.
+
+        This client keeps one long-lived copy and saves all of it, so without
+        this an approve or revoke writes a stale device name, trust and peer
+        bindings back over the bridge's newer ones.
+        """
+        disk = RelayStateStore(self.workspace, self.state_dir).state
+        for name in ("device_name", "trust", "peer_devices", "peer_trust"):
+            setattr(self.state, name, getattr(disk, name))
+
     def approve(self, key: str):
         validate_public_key(key)
         if key == self.public_key:
             raise RelayError("cannot approve your own key")
         newly_approved = key not in self.state.approvals
         if newly_approved:
+            self._adopt_bridge_fields()
             if len(self.state.approvals) >= MAX_APPROVALS:
                 raise RelayError("local peer approval capacity reached")
             self.state.approvals.append(key)
@@ -271,6 +283,7 @@ class RelayClient:
         was_approved = key in self.state.approvals
         previous_session = self._peers.get(key) if was_approved else None
         try:
+            self._adopt_bridge_fields()
             changed = False
             if key in self.state.approvals:
                 self.state.approvals.remove(key)

@@ -7,6 +7,7 @@ anything a human reads.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import socket
 from pathlib import Path
@@ -52,3 +53,36 @@ def validate_trust(level: str) -> str:
     if level not in TRUST_LEVELS:
         raise ValueError("trust: open, agents or manual")
     return level
+
+
+def _require_key(public_key_hex: str) -> bytes:
+    if not isinstance(public_key_hex, str) or not re.fullmatch(r"[0-9a-f]{64}", public_key_hex):
+        raise ValueError("public key must be 64 lowercase hexadecimal characters")
+    return bytes.fromhex(public_key_hex)
+
+
+def device_key_fingerprint(public_key_hex: str) -> str:
+    """Full sha256 device fingerprint of a 64-hex Ed25519 key.
+
+    Shared by join requests (enrollment_client.py) and knock rows
+    (contact_requests.py); humans see it through short_fingerprint().
+    """
+    return hashlib.sha256(
+        b"kollab-relay-enrollment-device-fingerprint-v1\0" + _require_key(public_key_hex)
+    ).hexdigest()
+
+
+def short_fingerprint(fingerprint_hex: str) -> str:
+    """`4d04...9f2e`: first 4 and last 4 hex of a fingerprint, for screens."""
+    return f"{fingerprint_hex[:4]}\u2026{fingerprint_hex[-4:]}"
+
+
+def contact_route_hex(public_key_hex: str) -> str:
+    """The 16-hex fragment of a contact route, `<domain>/c/<hex>`.
+
+    The relay's route index and the client's route check both derive it here,
+    so a relay cannot point a route at a key that does not hash to it.
+    """
+    return hashlib.sha256(
+        b"kollab-contact-route-v1\0" + _require_key(public_key_hex)
+    ).hexdigest()[:16]

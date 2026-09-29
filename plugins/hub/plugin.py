@@ -201,6 +201,22 @@ def format_connect_help(show_all: bool = False) -> str:
     return "\n".join(lines)
 
 
+_KNOCK_ROUTE = re.compile(
+    r"(?:https://)?(?P<domain>[^/\s]+)/c/(?P<route>[0-9a-fA-F]{16})\Z"
+)
+
+
+def _parse_knock_route(value: str) -> tuple[str, str]:
+    """`[https://]<domain>/c/<16 hex>` -> `(domain, lowercased route)`."""
+    match = _KNOCK_ROUTE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError("not a contact route")
+    domain = match.group("domain")
+    if not _looks_like_connect_target(domain):
+        raise ValueError("not a contact route")
+    return domain, match.group("route").lower()
+
+
 def _looks_like_connect_target(value: str) -> bool:
     """A domain, origin URL, host:port or installed network ID, not a typo."""
     if value == "localhost" or any(mark in value for mark in ".:/"):
@@ -8721,19 +8737,17 @@ class HubPlugin(BasePlugin):
                 return "connect: use /connect code [domain]"
             domain = parts[1] if len(parts) == 2 else "kollabor.ai"
             return await self._open_connect_offer_altview(domain)
-        if head in {"knock", "knocks"}:
+        if head == "knock":
+            return await self._run_connect_knock(value.partition(" ")[2].strip())
+        if head == "knocks":
             if len(parts) > 2:
-                return f"connect: use /connect {head} [relay-domain]"
+                return "connect: use /connect knocks [relay-domain]"
             if getattr(getattr(self, "_cli_args", None), "attach", None):
                 return (
                     "connect: attached daemon does not support private contact requests"
                 )
             domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            return (
-                await self._open_contact_request_altview(domain)
-                if head == "knock"
-                else await self._open_contact_review_altview(domain)
-            )
+            return await self._open_contact_review_altview(domain)
         known = {sub.name for sub in CONNECT_SUBCOMMANDS} | {
             sub.name for sub in CONNECT_ADVANCED
         }
@@ -8895,50 +8909,55 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: private offer view is unavailable"
 
-    async def _open_contact_request_altview(self, domain: str) -> str:
-        """Open private entry for an opaque unknown-agent introduction."""
-        if not self.event_bus:
-            return "connect: private contact view is unavailable"
+    async def _run_connect_knock(self, rest: str) -> str:
+        """`/connect knock <route> "text"` -- no private form, no keys.
+
+        A route is public (it is copied, never typed), so unlike a join code
+        it is a plain command argument.
+        """
+        usage = 'connect: use /connect knock <route> "text"'
+        parts = rest.split(None, 1)
+        if len(parts) != 2 or not parts[1].strip():
+            return usage
+        route_token, text = parts[0], parts[1].strip()
+        if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+            text = text[1:-1]
         try:
-            from plugins.altview.contact_altview import (
-                ContactRequestAltView,
-                ContactSubmissionOutcome,
+            domain, route_hex = _parse_knock_route(route_token)
+        except ValueError:
+            return usage
+        from plugins.hub.contact_requests import ContactProtocolError, validate_introduction
+
+        try:
+            introduction = validate_introduction(text)
+        except ContactProtocolError:
+            return usage
+        if getattr(getattr(self, "_cli_args", None), "attach", None):
+            return "connect: attached daemon does not support private contact requests"
+        if self._identity is None or self._rpc_server is None:
+            return "connect: knock is unavailable"
+        try:
+            await self._start_relay_agent()
+            submit = getattr(self._relay_agent, "submit_contact_request", None)
+            if submit is None:
+                return "connect: knock is unavailable"
+            result = await submit(
+                domain, route_hex, introduction, source_agent=self._identity.agent_id
             )
-
-            async def submit(submission):
-                try:
-                    result = await self._run_connect_contact_request(
-                        submission.domain,
-                        submission.recipient_key,
-                        submission.introduction.reveal(),
-                    )
-                except Exception:
-                    return ContactSubmissionOutcome()
-                receipt = result.get("receipt_id") if isinstance(result, dict) else None
-                try:
-                    return ContactSubmissionOutcome(receipt)
-                except (TypeError, ValueError):
-                    return ContactSubmissionOutcome()
-
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
-
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
-            await stack_mgr.push(
-                ContactRequestAltView(domain=domain, on_submit=submit),
-                "contact-request",
-                reuse=False,
-            )
-            return ""
         except Exception:
-            return "connect: private contact view is unavailable"
+            return "connect: knock could not be sent"
+        if isinstance(result, dict) and result.get("status") == "queued":
+            return f"knock sent to {domain}/c/{route_hex}"
+        error = result.get("error") if isinstance(result, dict) else None
+        reason = {
+            "unknown_route": "no one is registered at that route right now",
+            "ambiguous_route": "that route is ambiguous; ask for a fresh one",
+            "capacity": "too many pending knocks right now; try again later",
+            "rate_limited": "too many knocks; wait a moment and try again",
+            "conflict": "that introduction was already sent",
+            "invalid_request": "that route or text is not valid",
+        }.get(error, "could not reach that contact route")
+        return f"connect: {reason}"
 
     async def _open_contact_review_altview(self, domain: str) -> str:
         """Open the local-only review view for requests addressed to this key."""
@@ -8958,13 +8977,20 @@ class HubPlugin(BasePlugin):
                     if (
                         not isinstance(row, dict)
                         or set(row)
-                        != {"receipt_id", "sender_key", "expires_at", "introduction"}
+                        != {
+                            "receipt_id",
+                            "sender_key",
+                            "expires_at",
+                            "introduction",
+                            "device_name",
+                        }
                         or not isinstance(row["receipt_id"], str)
                         or not re.fullmatch(r"[0-9a-f]{32}", row["receipt_id"])
                         or not isinstance(row["sender_key"], str)
                         or not re.fullmatch(r"[0-9a-f]{64}", row["sender_key"])
                         or type(row["expires_at"]) is not int
                         or not isinstance(row["introduction"], str)
+                        or not isinstance(row["device_name"], str)
                     ):
                         raise ValueError("invalid private contact request")
                     requests.append(
@@ -8973,14 +8999,29 @@ class HubPlugin(BasePlugin):
                             row["sender_key"],
                             row["expires_at"],
                             PrivateMessage(row["introduction"]),
+                            row["device_name"],
                         )
                     )
                 return requests
 
-            async def decide(receipt_id: str, decision: str):
-                return await self._run_connect_contact_decision(
-                    domain, receipt_id, decision
+            async def decide(request: PendingContactRequest, decision: str):
+                """None when decided; otherwise the reason it was not."""
+                result = await self._run_connect_contact_decision(
+                    domain,
+                    request.receipt_id,
+                    decision,
+                    sender_key=request.sender_key,
+                    device_name=request.device_name,
                 )
+                if isinstance(result, dict) and "status" in result:
+                    return None
+                error = result.get("error") if isinstance(result, dict) else None
+                return {
+                    "name_taken": "that device name is already on this network",
+                    "capacity": "too many approved devices or pending knocks",
+                    "conflict": "that knock was already decided",
+                    "unavailable": "that knock is no longer available",
+                }.get(error, "try again")
 
             stack_mgr = None
             try:
@@ -9002,25 +9043,6 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: private contact review is unavailable"
 
-    async def _run_connect_contact_request(
-        self, domain: str, recipient_key: str, introduction: str
-    ) -> dict[str, str]:
-        if self._identity is None or self._rpc_server is None:
-            return {"error": "unavailable"}
-        try:
-            await self._start_relay_agent()
-            submit = getattr(self._relay_agent, "submit_contact_request", None)
-            if submit is None:
-                return {"error": "unavailable"}
-            return await submit(
-                domain,
-                recipient_key,
-                introduction,
-                source_agent=self._identity.agent_id,
-            )
-        except Exception:
-            return {"error": "transport"}
-
     async def _run_connect_contact_pending(self, domain: str):
         if self._identity is None or self._rpc_server is None:
             raise ValueError("contact review unavailable")
@@ -9031,7 +9053,13 @@ class HubPlugin(BasePlugin):
         return await pending(domain, source_agent=self._identity.agent_id)
 
     async def _run_connect_contact_decision(
-        self, domain: str, receipt_id: str, decision: str
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        *,
+        sender_key: str,
+        device_name: str,
     ):
         if self._identity is None or self._rpc_server is None:
             raise ValueError("contact review unavailable")
@@ -9044,6 +9072,8 @@ class HubPlugin(BasePlugin):
             receipt_id,
             decision=decision,
             source_agent=self._identity.agent_id,
+            sender_key=sender_key,
+            device_name=device_name,
         )
 
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:

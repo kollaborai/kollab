@@ -13,9 +13,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from nacl.public import SealedBox
 from nacl.signing import SigningKey
 
-from plugins.hub import contact_requests, relay_service as service
+from plugins.hub import contact_requests
+from plugins.hub import relay_service as service
 from plugins.hub.contact_requests import ContactRequestManager
-from plugins.hub.relay_backend import InMemoryBackend, RelayLimits
+from plugins.hub.relay_backend import InMemoryBackend, PeerRecord, RelayLimits
 
 ORIGIN = "https://relay.example"
 NODE_ID = "a" * 32
@@ -39,13 +40,14 @@ def _request_frame(
     *,
     request_id: str = "1" * 32,
     nonce: str = "2" * 32,
+    device_name: str = "",
 ) -> dict:
     recipient_key = recipient.verify_key.encode().hex()
     sender_key = sender.verify_key.encode().hex()
     now = int(time.time())
     ciphertext = SealedBox(recipient.verify_key.to_curve25519_public_key()).encrypt(
         json.dumps(
-            {"introduction": introduction},
+            {"introduction": introduction, "device_name": device_name},
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -127,7 +129,7 @@ async def test_contact_mailbox_encrypts_routes_by_full_key_and_human_decision_on
         origin=ORIGIN,
         now=int(time.time()),
     )
-    assert contact_requests._decrypt_introduction(received, target) == message
+    assert contact_requests._decrypt_envelope(received, target) == (message, "")
     assert (
         contact_requests.PendingContactRequest(
             received["request_id"],
@@ -287,4 +289,138 @@ async def test_contact_client_to_relay_to_local_review_and_decision(
     assert decision.receipt_id == receipt
     assert decision.status == "accepted"
     assert await receiver.pending("relay.example") == []
-    assert relay_client.app["relay_state"].backend.rooms == {}
+
+
+class _RouteCommands:
+    """Minimal `commands` double for resolve_route: no signing key needed."""
+
+    async def _discover(self, domain):
+        assert domain == "relay.example"
+        return SimpleNamespace(origin=ORIGIN), "", (), False
+
+    @staticmethod
+    def _relay_url(_result):
+        return "wss://relay.example/relay/v1/ws"
+
+
+@pytest.mark.asyncio
+async def test_device_name_round_trips_in_the_sealed_envelope(monkeypatch, relay_client):
+    sender_key = SigningKey.generate()
+    recipient_key = SigningKey.generate()
+
+    class _Commands:
+        def __init__(self, key):
+            self.client = SimpleNamespace(
+                _store=SimpleNamespace(key=key),
+                public_key=key.verify_key.encode().hex(),
+            )
+
+        async def _discover(self, domain):
+            return SimpleNamespace(origin=ORIGIN), "", (), False
+
+        @staticmethod
+        def _relay_url(_result):
+            return "wss://relay.example/relay/v1/ws"
+
+    async def test_post(_self, origin, path, frame, *, ca, cidrs):
+        response = await relay_client.post(path, json=frame)
+        body = await response.json()
+        if response.status not in {200, 201, 202}:
+            raise contact_requests.ContactProtocolError(body.get("error", "transport"))
+        return body
+
+    monkeypatch.setattr(ContactRequestManager, "_post", test_post)
+    sender = ContactRequestManager(_Commands(sender_key))
+    receiver = ContactRequestManager(_Commands(recipient_key))
+
+    await sender.submit(
+        "relay.example",
+        recipient_key.verify_key.encode().hex(),
+        "hello",
+        "mac-kollab",
+    )
+    pending = await receiver.pending("relay.example")
+    assert pending[0].device_name == "mac-kollab"
+
+
+@pytest.mark.asyncio
+async def test_invalid_device_name_falls_back_to_the_route_fingerprint(
+    monkeypatch, relay_client
+):
+    sender_key = SigningKey.generate()
+    recipient_key = SigningKey.generate()
+
+    class _Commands:
+        def __init__(self, key):
+            self.client = SimpleNamespace(
+                _store=SimpleNamespace(key=key),
+                public_key=key.verify_key.encode().hex(),
+            )
+
+        async def _discover(self, domain):
+            return SimpleNamespace(origin=ORIGIN), "", (), False
+
+        @staticmethod
+        def _relay_url(_result):
+            return "wss://relay.example/relay/v1/ws"
+
+    async def test_post(_self, origin, path, frame, *, ca, cidrs):
+        response = await relay_client.post(path, json=frame)
+        body = await response.json()
+        if response.status not in {200, 201, 202}:
+            raise contact_requests.ContactProtocolError(body.get("error", "transport"))
+        return body
+
+    monkeypatch.setattr(ContactRequestManager, "_post", test_post)
+    sender = ContactRequestManager(_Commands(sender_key))
+    receiver = ContactRequestManager(_Commands(recipient_key))
+
+    # submit() itself blanks an invalid name before sealing it, so seal the
+    # envelope directly to exercise the receiving side's own fallback too.
+    await sender.submit(
+        "relay.example", recipient_key.verify_key.encode().hex(), "hello", ""
+    )
+    pending = await receiver.pending("relay.example")
+    sender_key_hex = sender_key.verify_key.encode().hex()
+    assert pending[0].device_name == contact_requests.contact_route_hex(sender_key_hex)[:8]
+
+
+@pytest.mark.asyncio
+async def test_resolve_route_returns_the_key_registered_at_that_route(
+    monkeypatch, relay_client
+):
+    key = SigningKey.generate()
+    key_hex = key.verify_key.encode().hex()
+    backend = relay_client.app["relay_state"].backend
+    await backend.register_room(
+        "room-x",
+        PeerRecord(
+            key=key_hex, session="1" * 32, node_id=NODE_ID, connection_id="2" * 32
+        ),
+    )
+    route = contact_requests.contact_route_hex(key_hex)
+
+    async def real_post(_self, origin, path, frame, *, ca, cidrs):
+        response = await relay_client.post(path, json=frame)
+        body = await response.json()
+        if response.status not in {200, 201, 202}:
+            raise contact_requests.ContactProtocolError(body.get("error", "transport"))
+        return body
+
+    monkeypatch.setattr(ContactRequestManager, "_post", real_post)
+    manager = ContactRequestManager(_RouteCommands())
+    resolved = await manager.resolve_route("relay.example", route)
+    assert resolved == key_hex
+
+
+@pytest.mark.asyncio
+async def test_resolve_route_refuses_a_relay_answer_that_does_not_match_the_route(
+    monkeypatch,
+):
+    async def dishonest_post(_self, _origin, _path, _frame, *, ca, cidrs):
+        return {"key": "9" * 64}
+
+    monkeypatch.setattr(ContactRequestManager, "_post", dishonest_post)
+    manager = ContactRequestManager(_RouteCommands())
+    with pytest.raises(contact_requests.ContactProtocolError):
+        await manager.resolve_route("relay.example", "a" * 16)

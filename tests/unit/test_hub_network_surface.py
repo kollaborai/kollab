@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor_events.data_models import ConversationMessage
+from plugins.hub.device_names import contact_route_hex, short_fingerprint
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_commands import RelayCommands
@@ -86,6 +87,35 @@ async def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
     assert commands.client.public_key not in status
     assert "relay:" not in status
     assert "workspace id" not in status
+
+
+@pytest.mark.asyncio
+async def test_status_shows_a_16_hex_contact_route_and_a_short_join_fingerprint(tmp_path):
+    fingerprint = "4d04" + "0" * 56 + "9f2e"
+    row = SimpleNamespace(
+        enrollment_id="a" * 32,
+        device_name="ana-laptop",
+        device_key_fingerprint=fingerprint,
+    )
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        remote_agents=lambda: [],
+        plugin=SimpleNamespace(_presence=None, _identity=None),
+        _enrollment_issuer=None,
+        pending_enrollment_requests=lambda: [row],
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+
+    status = await commands.format_status()
+
+    route = contact_route_hex(commands.client.public_key)
+    assert len(route) == 16
+    assert f"contact route kollabor.ai/c/{route}" in status
+    assert "ana-laptop wants to join   fingerprint 4d04\u20269f2e" in status
+    assert short_fingerprint(fingerprint) == "4d04\u20269f2e"
+    assert fingerprint not in status
+    assert "a" * 32 not in status
 
 
 @pytest.mark.asyncio

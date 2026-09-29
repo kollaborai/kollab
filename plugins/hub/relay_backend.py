@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from .device_names import contact_route_hex
+
 LEASE_SECONDS = 35
 LEASE_RENEW_SECONDS = 10
 ROUTE_TIMEOUT_SECONDS = 3
@@ -103,6 +105,11 @@ class InMemoryBackend:
         self.enrollment_nonces: dict[str, dict[str, float]] = {}
         self.enrollment_nonce_count = 0
         self.contact_requests: dict[str, dict[str, dict[str, Any]]] = {}
+        # route hex -> keys currently registered in any room under it. A
+        # normal key has exactly one entry; more than one is a (practically
+        # impossible) hash collision, reported to callers as "ambiguous"
+        # rather than silently picking one.
+        self.contact_routes: dict[str, set[str]] = {}
         self.state: Any = None
 
     async def start(self, state: Any) -> None:
@@ -149,6 +156,9 @@ class InMemoryBackend:
         if len(room) >= self.limits.max_connections_per_room:
             return "room_capacity", []
         room[member.key] = member
+        self.contact_routes.setdefault(contact_route_hex(member.key), set()).add(
+            member.key
+        )
         return None, list(room.values())
 
     async def list_room(self, room_hash: str) -> tuple[list[PeerRecord], bool]:
@@ -161,10 +171,24 @@ class InMemoryBackend:
         if room is None or room.get(member.key) != member:
             return False, list(room.values()) if room else []
         del room[member.key]
+        self._discard_contact_route(member.key)
         if not room:
             del self.rooms[room_hash]
             return True, []
         return True, list(room.values())
+
+    def _discard_contact_route(self, key: str) -> None:
+        route = contact_route_hex(key)
+        keys = self.contact_routes.get(route)
+        if keys is None:
+            return
+        keys.discard(key)
+        if not keys:
+            del self.contact_routes[route]
+
+    async def lookup_contact_route(self, route_hex: str) -> list[str]:
+        """Keys currently registered under this route (0, 1, or >1 = ambiguous)."""
+        return sorted(self.contact_routes.get(route_hex, ()))
 
     async def renew(
         self,
@@ -1469,6 +1493,7 @@ class RedisRelayBackend:
             status = str(result[0])
             if status != "ok":
                 return status, []
+            await self._touch_contact_route(member.key)
             return None, self._parse_hgetall(result[2:])
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
@@ -1497,11 +1522,41 @@ class RedisRelayBackend:
                 member.key,
                 member.as_json(),
             )
-            return int(result[0]) == 1, self._parse_hgetall(result[1:])
+            removed = int(result[0]) == 1
+            if removed:
+                await self._discard_contact_route(member.key)
+            return removed, self._parse_hgetall(result[1:])
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
                 raise
             raise RelayBackendError("shared peer removal is unavailable") from exc
+
+    async def _touch_contact_route(self, key: str) -> None:
+        # ponytail: a plain SADD+EXPIRE beside the atomic room Lua script,
+        # not inside it -- a knock lookup can be briefly stale (up to
+        # LEASE_SECONDS) after a room change; fold into _JOIN_ROOM/_RENEW_ROOM
+        # if that window ever matters.
+        try:
+            route = contact_route_hex(key)
+            await self._redis.sadd(self._contact_route_key(route), key)
+            await self._redis.expire(self._contact_route_key(route), LEASE_SECONDS)
+        except Exception:
+            pass
+
+    async def _discard_contact_route(self, key: str) -> None:
+        try:
+            route = contact_route_hex(key)
+            await self._redis.srem(self._contact_route_key(route), key)
+        except Exception:
+            pass
+
+    async def lookup_contact_route(self, route_hex: str) -> list[str]:
+        """Keys currently registered under this route (0, 1, or >1 = ambiguous)."""
+        try:
+            members = await self._redis.smembers(self._contact_route_key(route_hex))
+        except Exception as exc:
+            raise RelayBackendError("contact route lookup is unavailable") from exc
+        return sorted(members)
 
     async def renew(
         self,
@@ -1544,7 +1599,10 @@ class RedisRelayBackend:
                 member.as_json(),
                 LEASE_SECONDS * 1000,
             )
-            return int(room_result) == 1
+            renewed = int(room_result) == 1
+            if renewed:
+                await self._touch_contact_route(member.key)
+            return renewed
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
                 raise
@@ -2346,6 +2404,10 @@ class RedisRelayBackend:
     @staticmethod
     def _contact_global_index_key() -> str:
         return "kollab:relay:contact:{mailbox}:active-requests"
+
+    @staticmethod
+    def _contact_route_key(route_hex: str) -> str:
+        return f"kollab:relay:contact:{{mailbox}}:route:{route_hex}"
 
     @staticmethod
     def _node_channel_for(node_id: str) -> str:

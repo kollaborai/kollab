@@ -10,7 +10,14 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from .device_names import DEFAULT_TRUST, format_handle, validate_device_name, validate_trust
+from .device_names import (
+    DEFAULT_TRUST,
+    contact_route_hex,
+    format_handle,
+    short_fingerprint,
+    validate_device_name,
+    validate_trust,
+)
 from .dns.discovery import DiscoveryError, discover, fetch_agent_card, normalize_target
 from .dns.discovery_store import DiscoveryStore
 
@@ -136,7 +143,7 @@ class RelayCommands:
         lines = ["requests"]
         for row in rows:
             name = getattr(row, "device_name", "") or getattr(row, "enrollment_id", "")[:8]
-            fingerprint = getattr(row, "device_key_fingerprint", "")[:12]
+            fingerprint = short_fingerprint(getattr(row, "device_key_fingerprint", ""))
             lines.append(
                 f"  {name} wants to join   fingerprint {fingerprint}   /connect accept {name}"
             )
@@ -245,8 +252,6 @@ class RelayCommands:
         technical block (public key, workspace id, peer counts) for
         operators who explicitly ask with ``/connect status keys``.
         """
-        import hashlib
-
         state = self.client.status()
         origin = state["origin"] or ""
         domain = origin[len("https://") :] if origin.startswith("https://") else origin
@@ -269,10 +274,7 @@ class RelayCommands:
             lines.append(provisioned)
 
         if domain:
-            fingerprint = hashlib.sha256(
-                b"kollab-contact-route-v1\0" + bytes.fromhex(state["key"])
-            ).hexdigest()[:8]
-            lines.append(f"contact route {domain}/c/{fingerprint}")
+            lines.append(f"contact route {domain}/c/{contact_route_hex(state['key'])}")
         else:
             lines.append("contact route none")
 
@@ -390,9 +392,14 @@ class RelayCommands:
         return self._contact_manager
 
     async def submit_contact_request(
-        self, domain: str, recipient_key: str, introduction: str
+        self, domain: str, recipient_key: str, introduction: str, device_name: str = ""
     ) -> str:
-        return await self._contacts().submit(domain, recipient_key, introduction)
+        return await self._contacts().submit(
+            domain, recipient_key, introduction, device_name
+        )
+
+    async def resolve_contact_route(self, domain: str, route_hex: str) -> str:
+        return await self._contacts().resolve_route(domain, route_hex)
 
     async def pending_contact_requests(self, domain: str):
         return await self._contacts().pending(domain)

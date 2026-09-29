@@ -263,11 +263,18 @@ CONTACT_JSON_SCHEMAS = {
             "signature": _HEX128,
         }
     ),
+    # Public route -> key lookup. Unsigned: knowing a route is the whole
+    # point (it is copied, never typed), and the client never trusts the
+    # answer without recomputing the route from the returned key.
+    "lookup": _schema(
+        {"v": {"const": 1}, "route": {"type": "string", "pattern": "^[0-9a-f]{16}$"}}
+    ),
 }
 
 CONTACT_REQUESTS_PATH = "/relay/v1/contact/requests"
 CONTACT_INBOX_PATH = "/relay/v1/contact/inbox"
 CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
+CONTACT_LOOKUP_PATH = "/relay/v1/contact/lookup"
 
 
 def generate_enrollment_code(offer_id: str) -> str:
@@ -900,6 +907,7 @@ def create_app(config: RelayConfig) -> web.Application:
     app.router.add_post(CONTACT_REQUESTS_PATH, contact_request_handler)
     app.router.add_post(CONTACT_INBOX_PATH, contact_inbox_handler)
     app.router.add_post(CONTACT_DECISIONS_PATH, contact_decision_handler)
+    app.router.add_post(CONTACT_LOOKUP_PATH, contact_lookup_handler)
     app.on_startup.append(start_relay)
     app.on_shutdown.append(shutdown_relay)
     app.on_cleanup.append(cleanup_relay)
@@ -1930,6 +1938,25 @@ async def contact_decision_handler(request: web.Request) -> web.Response:
     return web.json_response(
         {"status": status, "receipt": frame["request_id"]}
     )
+
+
+@_enrollment_endpoint
+async def contact_lookup_handler(request: web.Request) -> web.Response:
+    """Resolve a contact route to the key currently registered under it.
+
+    Public and unsigned by design: the whole point of a route is that a
+    stranger who has only ever seen `<domain>/c/<hex>` can look it up. The
+    relay only answers for keys presently connected to a room; it never
+    stores or serves anything else here.
+    """
+    state: RelayState = request.app["relay_state"]
+    frame = await _read_contact_frame(request, "lookup")
+    keys = await state.backend.lookup_contact_route(frame["route"])
+    if not keys:
+        raise _EnrollmentHTTPError(404, "unknown_route")
+    if len(keys) > 1:
+        raise _EnrollmentHTTPError(409, "ambiguous_route")
+    return web.json_response({"key": keys[0]})
 
 
 def _parse_trusted_proxy(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:

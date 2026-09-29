@@ -141,3 +141,31 @@ def test_invalid_trust_level_is_rejected_on_save(store):
     store.state.trust = "wide-open"
     with pytest.raises(RelayError):
         store.save()
+
+
+def test_client_approve_and_revoke_keep_names_written_by_another_store(tmp_path):
+    """The client's long-lived copy must not save stale peer names back."""
+    from plugins.hub.relay_client import RelayClient
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_dir = tmp_path / "state"
+    client = RelayClient(workspace, state_dir=state_dir)
+    other = SigningKey.generate().verify_key.encode().hex()
+
+    bridge_store = RelayStateStore(workspace, state_dir)
+    bridge_store.state.peer_devices = {PEER_KEY: "laptop-kollab"}
+    bridge_store.state.peer_trust = {PEER_KEY: "agents"}
+    bridge_store.state.device_name = "mac-kollab"
+    bridge_store.save()
+
+    client.approve(other)
+    saved = RelayStateStore(workspace, state_dir).state
+    assert saved.peer_devices == {PEER_KEY: "laptop-kollab"}
+    assert saved.peer_trust == {PEER_KEY: "agents"}
+    assert saved.device_name == "mac-kollab"
+
+    client.revoke(PEER_KEY)
+    saved = RelayStateStore(workspace, state_dir).state
+    assert saved.peer_devices == {} and saved.peer_trust == {}
+    assert saved.approvals == [other]

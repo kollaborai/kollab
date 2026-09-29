@@ -28,7 +28,7 @@ from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
 from nacl.signing import SigningKey, VerifyKey
 
-from .device_names import NAME_RE, default_device_name
+from .device_names import NAME_RE, default_device_name, device_key_fingerprint
 from .dns.discovery import DiscoveryError, _PublicResolver, normalize_target
 from .dns.private_directory import (
     PrivateDirectory,
@@ -1804,11 +1804,11 @@ def _require_shape(value: dict[str, Any], fields: set[str]) -> None:
 
 
 def _device_key_fingerprint(public_key_hex: str) -> str:
-    if not isinstance(public_key_hex, str) or not re.fullmatch(r"[0-9a-f]{64}", public_key_hex):
-        raise EnrollmentProtocolError("invalid_response")
-    return hashlib.sha256(
-        b"kollab-relay-enrollment-device-fingerprint-v1\0" + bytes.fromhex(public_key_hex)
-    ).hexdigest()
+    """Delegates to the canonical helper in device_names.py, shared with knocks."""
+    try:
+        return device_key_fingerprint(public_key_hex)
+    except ValueError:
+        raise EnrollmentProtocolError("invalid_response") from None
 
 
 @dataclass(slots=True)

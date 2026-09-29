@@ -1,4 +1,4 @@
-"""Private entry and human review keep contact introductions off chat output."""
+"""Knock review keeps keys and receipts off the screen; introductions are private."""
 
 import re
 import time
@@ -6,12 +6,9 @@ import time
 import pytest
 
 from kollabor_tui.key_parser import KeyPress, KeyType
-from plugins.altview.contact_altview import (
-    ContactRequestAltView,
-    ContactReviewAltView,
-    ContactSubmissionOutcome,
-)
+from plugins.altview.contact_altview import ContactReviewAltView
 from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
+from plugins.hub.device_names import device_key_fingerprint
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -38,98 +35,148 @@ def _key(char: str) -> KeyPress:
     return KeyPress(name=char, code=ord(char), char=char, type=KeyType.PRINTABLE)
 
 
-def _named(name: str) -> KeyPress:
-    return KeyPress(name=name, code=0, char=None, type=KeyType.SPECIAL)
-
-
 @pytest.mark.asyncio
-async def test_contact_entry_clears_private_introduction_and_returns_receipt_only():
-    captured = {}
-    introduction = "Please contact me about a project."
-    recipient_key = "1" * 64
-
-    async def submit(value):
-        captured["submission"] = value
-        captured["repr"] = repr(value)
-        captured["message"] = value.introduction
-        captured["plain"] = value.introduction.reveal()
-        return ContactSubmissionOutcome("a" * 32)
-
-    view = ContactRequestAltView("relay.example", on_submit=submit)
-    renderer = _FakeRenderer()
-    await view.on_enter(renderer)
-
-    view._focus = "key"
-    for char in recipient_key:
-        await view.handle_input(_key(char))
-    view._focus = "intro"
-    for char in introduction:
-        await view.handle_input(_key(char))
-    await view.render_frame(0)
-    assert introduction in renderer.text()
-
-    await view.handle_input(_named("Enter"))
-    await view.render_frame(0)
-
-    assert captured["plain"] == introduction
-    assert introduction not in captured["repr"]
-    assert "<redacted>" in repr(captured["message"])
-    with pytest.raises(RuntimeError, match="cleared"):
-        captured["message"].reveal()
-    assert view._intro_chars == []
-    assert view._receipt_id == "a" * 32
-    assert introduction not in renderer.text()
-    assert "Receipt: " + "a" * 32 in renderer.text()
-
-
-@pytest.mark.asyncio
-async def test_contact_request_cancel_wipes_intro_without_callback():
-    called = False
-    view = ContactRequestAltView(
-        "relay.example", on_submit=lambda _value: _unexpected_callback()
+async def test_knock_review_row_has_name_fingerprint_and_no_key_or_receipt():
+    introduction = "Ana from Webceive."
+    sender_key = "c" * 64
+    request = PendingContactRequest(
+        "b" * 32,
+        sender_key,
+        int(time.time()) + 600,
+        PrivateMessage(introduction),
+        "ana-laptop",
     )
-    await view.on_enter(_FakeRenderer())
-    view._intro_chars.extend(list("private introduction"))
-    view._cursor["intro"] = len(view._intro_chars)
+    renderer = _FakeRenderer()
 
-    assert await view.handle_input(_named("Escape")) is True
-    assert view._intro_chars == []
-    assert view.cancelled
+    async def load():
+        return [request]
 
+    async def decide(_request, _decision):
+        raise AssertionError("not exercised in this test")
 
-async def _unexpected_callback():
-    raise AssertionError("cancelled request must not submit")
+    view = ContactReviewAltView("relay.example", load, decide)
+    await view.on_enter(renderer)
+    await view.render_frame(0)
+
+    text = renderer.text()
+    assert "ana-laptop" in text
+    assert introduction in text
+    full = device_key_fingerprint(sender_key)
+    assert f"fingerprint {full[:4]}\u2026{full[-4:]}" in text
+    assert full[:12] not in text
+    assert "[a]ccept" in text and "[r]eject" in text
+    assert sender_key not in text
+    assert "ed25519:" not in text
+    assert "receipt" not in text.lower()
+    assert request.receipt_id not in text
 
 
 @pytest.mark.asyncio
-async def test_contact_review_accepts_only_the_selected_receipt_without_model_or_grant():
+async def test_knock_review_row_truncates_introduction_to_fit_width():
+    introduction = "x" * 500
+    request = PendingContactRequest(
+        "b" * 32, "c" * 64, int(time.time()) + 600, PrivateMessage(introduction), "wide"
+    )
+    renderer = _FakeRenderer(size=(60, 30))
+
+    async def load():
+        return [request]
+
+    async def decide(_request, _decision):
+        raise AssertionError("not exercised in this test")
+
+    view = ContactReviewAltView("relay.example", load, decide)
+    await view.on_enter(renderer)
+    await view.render_frame(0)
+
+    text = renderer.text()
+    assert "…" in text
+    assert introduction not in text
+
+
+@pytest.mark.asyncio
+async def test_knock_review_accept_passes_full_request_and_reports_by_name():
     introduction = "A human-to-human contact introduction."
     private = PrivateMessage(introduction)
-    request = PendingContactRequest("b" * 32, "c" * 64, int(time.time()) + 600, private)
+    request = PendingContactRequest(
+        "b" * 32, "c" * 64, int(time.time()) + 600, private, "ana-laptop"
+    )
     decisions = []
     renderer = _FakeRenderer()
 
     async def load():
         return [request]
 
-    async def decide(receipt, decision):
-        decisions.append((receipt, decision))
+    async def decide(request_arg, decision):
+        decisions.append((request_arg, decision))
 
     view = ContactReviewAltView("relay.example", load, decide)
     await view.on_enter(renderer)
     await view.render_frame(0)
 
-    assert introduction in renderer.text()
+    await view.handle_input(_key("a"))
+    await view.render_frame(0)
+
+    assert decisions == [(request, "accept")]
+    with pytest.raises(RuntimeError, match="cleared"):
+        private.reveal()
+    text = renderer.text()
+    assert introduction not in text
     assert (
-        "No membership, workspace/tool grant or model run is created."
-        in renderer.text()
+        "accepted ana-laptop. it is a peer with agents trust; nothing is allowed "
+        "until /connect allow ana-laptop <agent>."
+    ) in " ".join(text.split())
+    assert "b" * 32 not in text
+
+
+@pytest.mark.asyncio
+async def test_knock_review_reject_reports_by_name():
+    request = PendingContactRequest(
+        "b" * 32,
+        "c" * 64,
+        int(time.time()) + 600,
+        PrivateMessage("hello"),
+        "ana-laptop",
     )
+    renderer = _FakeRenderer()
+
+    async def load():
+        return [request]
+
+    async def decide(_request, _decision):
+        return None
+
+    view = ContactReviewAltView("relay.example", load, decide)
+    await view.on_enter(renderer)
+    await view.render_frame(0)
+
+    await view.handle_input(_key("r"))
+    await view.render_frame(0)
+
+    assert "rejected ana-laptop." in renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_knock_review_failed_accept_names_the_device_and_keeps_the_knock():
+    request = PendingContactRequest(
+        "b" * 32, "c" * 64, int(time.time()) + 600, PrivateMessage("hello"), "ana-laptop"
+    )
+    renderer = _FakeRenderer()
+
+    async def load():
+        return [request]
+
+    async def decide(_request, _decision):
+        return "that device name is already on this network"
+
+    view = ContactReviewAltView("relay.example", load, decide)
+    await view.on_enter(renderer)
+    await view.render_frame(0)
 
     await view.handle_input(_key("a"))
     await view.render_frame(0)
 
-    assert decisions == [("b" * 32, "accept")]
-    with pytest.raises(RuntimeError, match="cleared"):
-        private.reveal()
-    assert introduction not in renderer.text()
-    assert "accepted" in renderer.text()
+    text = renderer.text()
+    assert "could not accept ana-laptop: that device name is already on this network" in text
+    assert "hello" in text  # still pending, still readable
+    assert "accepted" not in text

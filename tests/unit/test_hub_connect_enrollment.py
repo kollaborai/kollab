@@ -14,7 +14,7 @@ from plugins.altview.connect_altview import (
     ConnectSubmission,
     PrivateCode,
 )
-from plugins.altview.contact_altview import ContactRequestAltView, ContactReviewAltView
+from plugins.altview.contact_altview import ContactReviewAltView
 from plugins.hub.plugin import CODE_IN_COMMAND, HubPlugin
 
 
@@ -178,23 +178,16 @@ async def test_connect_code_opens_private_view_and_uses_typed_attach_rpc(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method", "session_name"),
-    [
-        ("_open_contact_request_altview", "contact-request"),
-        ("_open_contact_review_altview", "contact-review"),
-    ],
-)
-async def test_private_contact_views_always_open_fresh_sessions(method, session_name):
+async def test_private_contact_review_always_opens_a_fresh_session():
     view_stack = SimpleNamespace(push=AsyncMock())
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
 
-    result = await getattr(plugin, method)("example.test")
+    result = await plugin._open_contact_review_altview("example.test")
 
     assert result == ""
     _view, view_name = view_stack.push.await_args.args
-    assert view_name == session_name
+    assert view_name == "contact-review"
     assert view_stack.push.await_args.kwargs == {"reuse": False}
 
 
@@ -242,11 +235,9 @@ async def test_altview_discovery_then_hub_registration_keeps_connect_with_hub():
     ) > 0
     assert registry.get_command("connect") is None
     assert registry.get_command("connect-offer") is None
-    assert registry.get_command("contact-request") is None
     assert registry.get_command("contact-review") is None
     assert "connect" in integrator._plugin_classes
     assert ConnectOfferAltView().metadata.category == "internal"
-    assert ContactRequestAltView("example.test").metadata.category == "internal"
     assert (
         ContactReviewAltView("example.test", lambda: [], lambda *_args: None)
         .metadata.category

@@ -236,6 +236,19 @@ would be ambiguous. `/connect allow`, `/connect deny`, and `/connect revoke`
 take a device name (resolved from the network roster) or, when a device isn't
 resolvable yet, its raw 64-hex peer key.
 
+A stranger outside your network knocks. `/connect status` shows this device's
+contact route, `<domain>/c/<16 hex>`, derived from its key; hand it out
+(copied, never typed). A stranger runs `/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60
+"Ana from Webceive. Can your ops agent review a config?"`, and the sealed
+introduction carries the sender's device name. `/connect knocks` lists what you
+received as `1. ana-laptop  fingerprint 91c0…77ab  "Ana from Webceive. Can your
+ops agent…"  [a]ccept [r]eject`. Accepting makes that device a peer with
+`agents` trust and nothing allowed until `/connect allow ana-laptop <agent>`;
+it is never `open`. A name already on the network fails the accept with
+`could not accept <device>: <reason>` and the knock stays pending. The relay
+still delivers only between devices in the same room, so an accepted stranger
+cannot message an agent yet (constitution section 15).
+
 `/connect status` never shows keys, workspace ids, or `relay:` addresses by
 default — only names. Typing `/connect status keys` appends the previous
 technical block (public key, workspace id, peer counts) for operators who
