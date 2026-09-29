@@ -61,7 +61,7 @@ the private enrollment-code view; discovery for enrollment begins after the
 human submits the code. Public attachment does not enroll the device into a
 private network or grant conversation/tool authority.
 
-`/connect offer [domain]` opens a private offer view for one K1 code. The
+`/connect offer [domain]` opens a private offer view for one short join code. The
 current source binds one device, a five-minute expiry, and the
 `conversation:send` category to a durable local delegation. After verified code
 and device-key proof, the source creates a durable pending request. The issuer

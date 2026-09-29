@@ -1,4 +1,4 @@
-"""Private K1 device-enrollment codes and relay verifiers.
+"""Private device-enrollment codes and relay verifiers.
 
 The code and verifier wrappers redact their value from ordinary string and
 repr formatting. Call ``for_private_display`` only on the issuing private UI,
@@ -21,8 +21,6 @@ _CROCKFORD_LOWER = _CROCKFORD_ALPHABET.lower()
 _OFFER_ID_LENGTH = 32
 _SECRET_LENGTH = 8  # short join code: 8 chars from a 32-symbol alphabet = 40 bits.
 _SECRET_BYTES = 5
-_LEGACY_SECRET_LENGTH = 20  # K1 codes issued before short codes; parsing only.
-_LEGACY_SECRET_BYTES = 13  # 104 random bits; the top 100 bits are used below.
 _KDF_DOMAIN = b"kollab-relay-enrollment-code-v1\0"
 _VERIFIER_DOMAIN = b"kollab-relay-enrollment-verifier-v1\0"
 _ENVELOPE_SALT_DOMAIN = b"kollab-relay-enrollment-envelope-salt-v1\0"
@@ -41,10 +39,7 @@ def _validate_offer_id(offer_id: str) -> bytes:
 
 
 def _validate_secret(secret: bytes | bytearray) -> bytearray:
-    if not isinstance(secret, (bytes, bytearray)) or len(secret) not in (
-        _SECRET_LENGTH,
-        _LEGACY_SECRET_LENGTH,
-    ):
+    if not isinstance(secret, (bytes, bytearray)) or len(secret) != _SECRET_LENGTH:
         raise ValueError("invalid enrollment code secret")
     try:
         text = bytes(secret).decode("ascii")
@@ -75,12 +70,7 @@ class EnrollmentCode:
     def for_private_display(self) -> str:
         """Return the canonical code for a private, human-only display surface."""
         secret = self._secret_text()
-        if len(secret) == _SECRET_LENGTH:
-            return f"{secret[:4]}-{secret[4:]}"
-        groups = "-".join(
-            secret[offset : offset + 4] for offset in range(0, _LEGACY_SECRET_LENGTH, 4)
-        )
-        return f"K1-{self.offer_id}-{groups}"
+        return f"{secret[:4]}-{secret[4:]}"
 
     def for_lookup_tag(self, origin: str) -> str:
         """Return this short code's lookup tag for a signed enrollment request."""
@@ -93,7 +83,7 @@ class EnrollmentCode:
         self._secret.clear()
 
     def _secret_bytes(self) -> bytes:
-        if len(self._secret) not in (_SECRET_LENGTH, _LEGACY_SECRET_LENGTH):
+        if len(self._secret) != _SECRET_LENGTH:
             raise ValueError("enrollment code has been cleared")
         return bytes(self._secret)
 
@@ -194,18 +184,18 @@ _SHORT_CODE_IN_TEXT = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}")
 
 
 def looks_like_join_code(part: str) -> bool:
-    """True for a K1 code or an upper-case ``XXXX-XXXX`` join code typed as one word.
+    """True for an upper-case ``XXXX-XXXX`` join code typed as one word.
 
     Device names are lower-case by rule, so an upper-case short code cannot be a
     device name; lower-case short codes are left to the private form.
     """
     if not isinstance(part, str):
         return False
-    return part.upper().startswith("K1-") or _SHORT_CODE_IN_TEXT.fullmatch(part) is not None
+    return _SHORT_CODE_IN_TEXT.fullmatch(part) is not None
 
 
 def is_short_enrollment_code(value: str) -> bool:
-    """True when ``value`` looks like an ``XXXX-XXXX`` short code, not a K1 code."""
+    """True when ``value`` looks like an ``XXXX-XXXX`` short join code."""
     try:
         parse_short_enrollment_code(value)
         return True
@@ -237,41 +227,6 @@ def parse_short_enrollment_code(value: str) -> bytearray:
     return bytearray("".join(normalized).encode("ascii"))
 
 
-def parse_enrollment_code(value: str) -> EnrollmentCode:
-    """Parse the exact K1 format, accepting lowercase secret letters only."""
-    if not isinstance(value, str) or len(value) != 60:
-        raise ValueError("invalid enrollment code")
-    parts = value.split("-")
-    if (
-        len(parts) != 7
-        or parts[0] != "K1"
-        or len(parts[1]) != _OFFER_ID_LENGTH
-        or len(parts[2]) != 4
-        or len(parts[3]) != 4
-        or len(parts[4]) != 4
-        or len(parts[5]) != 4
-        or len(parts[6]) != 4
-    ):
-        raise ValueError("invalid enrollment code")
-    try:
-        _validate_offer_id(parts[1])
-    except ValueError:
-        raise ValueError("invalid enrollment code") from None
-
-    normalized: list[str] = []
-    for group in parts[2:]:
-        for char in group:
-            if not char.isascii():
-                raise ValueError("invalid enrollment code")
-            if char in _CROCKFORD_ALPHABET:
-                normalized.append(char)
-            elif char in _CROCKFORD_LOWER:
-                normalized.append(char.upper())
-            else:
-                raise ValueError("invalid enrollment code")
-    return EnrollmentCode(parts[1], bytearray("".join(normalized).encode("ascii")))
-
-
 def derive_enrollment_code_verifier(code: EnrollmentCode) -> EnrollmentCodeVerifier:
     """Derive the specified scrypt verifier from a parsed/generated code."""
     if not isinstance(code, EnrollmentCode):
@@ -300,11 +255,7 @@ def derive_enrollment_envelope_key(code: EnrollmentCode) -> EnrollmentEnvelopeKe
 
 
 def derive_enrollment_lookup_tag(secret: bytes | bytearray, origin: str) -> str:
-    """Return the base64url lookup tag a joiner sends to find its short-code offer.
-
-    Only meaningful for a short code's secret; a K1 code carries its offer id
-    directly and never needs a lookup.
-    """
+    """Return the base64url lookup tag a joiner sends to find its short-code offer."""
     if not isinstance(secret, (bytes, bytearray)) or len(secret) != _SECRET_LENGTH:
         raise ValueError("invalid enrollment code secret")
     if not isinstance(origin, str) or not origin:
@@ -367,6 +318,5 @@ __all__ = [
     "enrollment_verifier_hash",
     "generate_enrollment_code",
     "is_short_enrollment_code",
-    "parse_enrollment_code",
     "parse_short_enrollment_code",
 ]

@@ -175,16 +175,16 @@ async def test_bracketed_crlf_paste_waits_for_deliberate_enter():
     view = ConnectAltView(on_submit=submit)
     await view.on_enter(_FakeRenderer())
     view._focus = "code"
-    parsed_names = await _paste(view, "K1-AAAA\r\nBBBB")
+    parsed_names = await _paste(view, "ABCD-EFGH\r\nBBBB")
 
     assert "BracketedPasteStart" in parsed_names
     assert "BracketedPasteEnd" in parsed_names
     assert captured_codes == []
-    assert "K1-AAAA" in "".join(view._code_chars)
+    assert "ABCD-EFGH" in "".join(view._code_chars)
 
     await view.handle_input(_named("Enter"))
 
-    assert captured_codes == ["K1-AAAABBBB"]
+    assert captured_codes == ["ABCD-EFGHBBBB"]
     assert view.outcome == ConnectOutcome.pending("paste-request-1")
 
 
@@ -201,7 +201,7 @@ async def test_bracketed_paste_tab_does_not_change_focus_or_expose_code():
     await view.on_enter(renderer)
     view._focus = "code"
 
-    parsed_names = await _paste(view, "K1-AAAA\tSYNTHETIC-SECRET")
+    parsed_names = await _paste(view, "ABCD-EFGH\tSYNTHETIC-SECRET")
 
     assert "BracketedPasteStart" in parsed_names
     assert "Tab" in parsed_names
@@ -216,7 +216,7 @@ async def test_bracketed_paste_tab_does_not_change_focus_or_expose_code():
 
     await view.handle_input(_named("Enter"))
 
-    assert captured_codes == ["K1-AAAASYNTHETIC-SECRET"]
+    assert captured_codes == ["ABCD-EFGHSYNTHETIC-SECRET"]
     assert view.domain == "kollabor.ai"
 
 
@@ -233,17 +233,17 @@ async def test_code_pasted_into_domain_field_moves_to_private_field():
     await view.on_enter(renderer)
     assert view._focus == "domain"
 
-    await _paste(view, "K1-AAAA-SYNTHETIC-SECRET")
+    await _paste(view, "ABCD-EFGH-SYNTHETIC-SECRET")
     await view.render_frame(0.0)
 
     assert view.domain == "kollabor.ai"
     assert view._focus == "code"
     assert "SYNTHETIC-SECRET" not in renderer.text()
-    assert "K1-" not in renderer.text()
+    assert "ABCD-EFGH" not in renderer.text()
 
     await view.handle_input(_named("Enter"))
 
-    assert captured_codes == ["K1-AAAA-SYNTHETIC-SECRET"]
+    assert captured_codes == ["ABCD-EFGH-SYNTHETIC-SECRET"]
 
 
 @pytest.mark.asyncio
@@ -381,7 +381,7 @@ async def test_offer_code_is_shown_only_in_private_view_and_wiped_on_destroy(
 ):
     monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     called = []
 
     async def create(domain):
@@ -463,7 +463,7 @@ async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
 async def test_offer_code_is_cleared_on_real_session_exit(monkeypatch):
     monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     view = ConnectOfferAltView(
         on_create=lambda _domain: {
             "status": "offered",
@@ -491,37 +491,9 @@ async def test_offer_code_is_cleared_on_real_session_exit(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_offer_code_wraps_to_narrow_terminal_without_losing_characters(
-    monkeypatch,
-):
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
-    view = ConnectOfferAltView(
-        on_create=lambda _domain: {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1300",
-            "code": code,
-        }
-    )
-    renderer = _FakeRenderer(size=(24, 18))
-    await view.on_enter(renderer)
-    await view.handle_input(_named("Enter"))
-    await view.render_frame(0.0)
-
-    code_rows = [
-        line
-        for x, _, line in renderer.lines
-        if x == 2 and re.fullmatch(r"[A-Za-z0-9-]+", line)
-    ]
-    assert "".join(code_rows) == code
-
-
-@pytest.mark.asyncio
 async def test_offer_code_is_cleared_from_view_after_expiry(monkeypatch):
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 900)
     view = ConnectOfferAltView(
         on_create=lambda _domain: {
@@ -547,7 +519,7 @@ async def test_offer_code_is_cleared_from_view_after_expiry(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_offer_callback_failure_never_renders_exception_text(caplog):
-    secret = "K1-private-error-detail"
+    secret = "private-error-detail-token"
 
     def fail(_domain):
         raise RuntimeError(secret)

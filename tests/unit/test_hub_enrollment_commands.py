@@ -412,7 +412,7 @@ async def test_relay_session_change_reports_restart_instead_of_unauthorized(tmp_
 @pytest.mark.asyncio
 async def test_code_text_is_rejected_before_owner_command_dispatch(tmp_path):
     hub, bridge = _local_hub(tmp_path)
-    code_text = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code_text = "ABCD-EFGH"
 
     result = await hub._handle_connect_command(f"accept {code_text}")
 
@@ -439,7 +439,7 @@ async def test_attach_mode_forwards_only_receipt_commands_to_the_owner_daemon():
     assert results == ["status", "accept " + "4" * 32, "reject " + "5" * 32]
     assert [call.args[0] for call in state.hub_connect.await_args_list] == results
 
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     rejected_code = await hub._handle_connect_command(f"accept {code}")
 
     assert rejected_code == CODE_IN_COMMAND
@@ -493,7 +493,7 @@ async def test_codes_and_typos_in_connect_commands_never_reach_the_daemon():
     hub = HubPlugin.__new__(HubPlugin)
     hub._cli_args = SimpleNamespace(attach=True)
     hub.event_bus = SimpleNamespace(get_service=lambda _name: state)
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
 
     assert await hub._handle_connect_command(f"approve {code}") == CODE_IN_COMMAND
     assert await hub._handle_connect_command("pair") == (
@@ -514,13 +514,13 @@ def test_log_lines_never_carry_enrollment_codes():
 
     from kollabor.logging.setup import CompactFormatter
 
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     message = "Executing highlighted menu command: %s"
     record = logging.LogRecord("t", logging.INFO, __file__, 1, message, (f"/connect approve {code}",), None)
     line = CompactFormatter("%(message)s").format(record)
 
     assert code not in line
-    assert line == "Executing highlighted menu command: /connect approve K1-[redacted]"
+    assert line == "Executing highlighted menu command: /connect approve [join code redacted]"
 
 
 @pytest.mark.asyncio

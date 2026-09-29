@@ -50,9 +50,6 @@ logger = logging.getLogger(__name__)
 MAX_DIRECTORY = 64
 MAX_REMOTE_PEERS = 8
 TASK_TIMEOUT = 600
-_ENROLLMENT_CODE_SHAPE = re.compile(
-    r"K1-([0-9a-f]{32})-([0-9A-HJKMNP-TV-Z]{4}-){4}[0-9A-HJKMNP-TV-Z]{4}\Z"
-)
 _SHORT_CODE_SHAPE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
@@ -105,7 +102,6 @@ def _safe_enrollment_offer_result(value) -> dict[str, str]:
     }:
         raise RelayError("invalid local enrollment offer result")
     code = value["code"]
-    match = _ENROLLMENT_CODE_SHAPE.fullmatch(code) if isinstance(code, str) else None
     short = _SHORT_CODE_SHAPE.fullmatch(code) is not None if isinstance(code, str) else False
     if (
         value["status"] != "offered"
@@ -113,8 +109,7 @@ def _safe_enrollment_offer_result(value) -> dict[str, str]:
         or not re.fullmatch(r"[0-9a-f]{32}", value["offer_id"])
         or not isinstance(value["expires_at"], str)
         or not value["expires_at"].isdigit()
-        or (match is None and not short)
-        or (match is not None and match.group(1) != value["offer_id"])
+        or not short
     ):
         raise RelayError("invalid local enrollment offer result")
     return {
@@ -876,12 +871,14 @@ class RelayAgentBridge:
         self._require_human_network_context("remote model turns cannot enroll devices")
         if self.commands is None or set(params) != {"agent_id", "domain", "code"}:
             raise RelayError("invalid local enrollment request")
+        from .enrollment_codes import is_short_enrollment_code
+
         if (
             not isinstance(params["domain"], str)
             or not params["domain"]
             or len(params["domain"]) > 253
             or not isinstance(params["code"], str)
-            or len(params["code"]) != 60
+            or not is_short_enrollment_code(params["code"])
         ):
             raise RelayError("invalid local enrollment request")
         self._local_agent(params["agent_id"])

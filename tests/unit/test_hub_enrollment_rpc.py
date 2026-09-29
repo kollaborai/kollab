@@ -13,7 +13,7 @@ from kollabor_rpc.models import RpcRequest
 
 @pytest.mark.asyncio
 async def test_hub_enrollment_uses_typed_rpc_and_returns_only_receipt():
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     state = SimpleNamespace(
         hub_enroll=AsyncMock(
             return_value={"status": "pending", "receipt_id": "0123456789abcdef"}
@@ -37,7 +37,7 @@ async def test_hub_enrollment_uses_typed_rpc_and_returns_only_receipt():
 
 @pytest.mark.asyncio
 async def test_hub_enrollment_swallows_code_bearing_handler_exceptions(caplog):
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
 
     async def fail(domain: str, submitted_code: str):
         raise RuntimeError(f"transport rejected {submitted_code}")
@@ -61,7 +61,7 @@ async def test_hub_enrollment_swallows_code_bearing_handler_exceptions(caplog):
 
 @pytest.mark.asyncio
 async def test_hub_enrollment_rejects_unknown_fields_before_state_call():
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     state = SimpleNamespace(hub_enroll=AsyncMock())
     server = RpcServer()
     register_state_handlers(server, state)
@@ -81,7 +81,7 @@ async def test_hub_enrollment_rejects_unknown_fields_before_state_call():
 
 @pytest.mark.asyncio
 async def test_remote_state_service_sends_domain_and_code_only_to_typed_method():
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     rpc = SimpleNamespace(
         call=AsyncMock(
             return_value={"status": "pending", "receipt_id": "0123456789abcdef"}
@@ -102,7 +102,7 @@ async def test_remote_state_service_sends_domain_and_code_only_to_typed_method()
 @pytest.mark.asyncio
 async def test_hub_enrollment_offer_returns_code_only_on_typed_private_method():
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     state = SimpleNamespace(
         hub_enrollment_offer=AsyncMock(
             return_value={
@@ -136,8 +136,7 @@ async def test_hub_enrollment_offer_returns_code_only_on_typed_private_method():
 
 @pytest.mark.asyncio
 async def test_hub_enrollment_offer_never_returns_exception_text_or_logs_code(caplog):
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
 
     async def fail(_domain: str):
         raise RuntimeError(f"failed offer {code}")
@@ -162,7 +161,7 @@ async def test_hub_enrollment_offer_never_returns_exception_text_or_logs_code(ca
 @pytest.mark.asyncio
 async def test_hub_enrollment_offer_rejects_extra_fields_and_malformed_code():
     valid_offer_id = "0123456789abcdef0123456789abcdef"
-    valid_code = f"K1-{valid_offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    valid_code = "ABCD-EFGH"
     state = SimpleNamespace(
         hub_enrollment_offer=AsyncMock(
             return_value={
@@ -200,7 +199,7 @@ async def test_hub_enrollment_offer_rejects_extra_fields_and_malformed_code():
 @pytest.mark.asyncio
 async def test_remote_state_service_uses_offer_rpc_and_rejects_bad_response():
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     rpc = SimpleNamespace(
         call=AsyncMock(
             return_value={

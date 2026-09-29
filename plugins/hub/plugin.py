@@ -9075,11 +9075,7 @@ class HubPlugin(BasePlugin):
             and isinstance(expires_at, str)
             and expires_at.isdigit()
             and isinstance(code, str)
-            and re.fullmatch(
-                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}"
-                r"|[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}",
-                code,
-            )
+            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
         ):
             return {
                 "status": "offered",
