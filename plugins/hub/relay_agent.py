@@ -43,7 +43,7 @@ from .relay_conversations import (
     validate_message,
 )
 from .relay_owner import WorkspaceRelayOwner, local_relay_rpc
-from .relay_state import ID, RelayError, RelayStateStore, validate_key
+from .relay_state import ID, RelayError, RelayStateStore, validate_key, validate_public_key
 from .secure_conversation import SecureConversationTransport
 
 logger = logging.getLogger(__name__)
@@ -220,6 +220,10 @@ class RelayAgentBridge:
         except ValueError as exc:
             raise RelayError(str(exc)) from exc
         store = self._state()
+        if name in store.state.peer_devices.values():
+            raise RelayError(
+                f"device name '{name}' is already on this network; choose a different name"
+            )
         store.state.device_name = name
         store.save()
         return store.state.device_name
@@ -239,6 +243,54 @@ class RelayAgentBridge:
         store.state.trust = level
         store.save()
         return store.state.trust
+
+    def effective_trust(self, peer_key: str) -> str:
+        """This network's trust for one peer; manual always wins (docs §4)."""
+        state = self._state().state
+        if state.trust == "manual":
+            return "manual"
+        return state.peer_trust.get(peer_key, state.trust)
+
+    def set_peer_trust(self, peer_key: str, level: str) -> str:
+        try:
+            level = validate_trust(level)
+        except ValueError as exc:
+            raise RelayError(str(exc)) from exc
+        if level == "manual":
+            raise RelayError(
+                "a peer's trust can only be open or agents; manual applies to the whole network"
+            )
+        store = self._state()
+        validate_public_key(peer_key)
+        store.state.peer_trust[peer_key] = level
+        store.save()
+        return level
+
+    def clear_peer_trust(self, peer_key: str) -> None:
+        store = self._state()
+        if store.state.peer_trust.pop(peer_key, None) is not None:
+            store.save()
+
+    def bind_peer_device(self, key: str, name: str) -> None:
+        """Bind a human device name to a peer's key at accept time.
+
+        Idempotent when the same (key, name) pair repeats. Fails with a
+        RelayError, and writes nothing, when the name is this device's own
+        name or is already bound to a different key
+        (docs/specs/agent-network-simple-flow.md §4).
+        """
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+            name = key[:8]
+        store = self._state()
+        if store.state.peer_devices.get(key) == name:
+            return
+        if name == self.device_name() or name in store.state.peer_devices.values():
+            raise RelayError(
+                f"device name '{name}' is already on this network; "
+                "that device must run /connect name <other-name> and request a new code"
+            )
+        store.state.peer_devices[key] = name
+        store.save()
 
     async def remote_agents(self) -> list[dict]:
         """Remote agents from the cached directory, keyed by agent@device.
@@ -803,6 +855,10 @@ class RelayAgentBridge:
             return await self._ensure_enrollment_issuer().decide(
                 enrollment_id, decision=decision
             )
+        except RelayError:
+            # Already a safe, operator-visible message (e.g. a device-name
+            # collision from bind_peer_device); pass it through unchanged.
+            raise
         except Exception as exc:
             # Do not include tokens, paths, or raw protocol errors in the command result.
             code = getattr(exc, "code", None)
@@ -1325,8 +1381,9 @@ class RelayAgentBridge:
                     message,
                     agent_name=target.name,
                     # Open trust admits any approved peer to any local agent;
-                    # agents/manual trust still require a receiving grant.
-                    require_grant=self.trust_level() != "open",
+                    # agents/manual trust still require a receiving grant. This
+                    # peer's own trust can differ from the network default.
+                    require_grant=self.effective_trust(peer) != "open",
                 )
                 try:
                     if receipt["state"] == "queued":
@@ -1937,6 +1994,7 @@ class RelayAgentBridge:
             }
         client = self.commands.client
         status = client.status()
+        peer_devices = self._state().state.peer_devices
         if requested:
             validate_key(requested)
         # Relay-approved peers are always reachable; the peer mesh only adds
@@ -2008,7 +2066,8 @@ class RelayAgentBridge:
                             not isinstance(device, str) or not NAME_RE.fullmatch(device)
                         ):
                             raise RelayError("invalid remote agent descriptor")
-                        device = device or peer_key[:8]
+                        # The recorded binding wins over the peer's self-report.
+                        device = peer_devices.get(peer_key) or device or peer_key[:8]
                         address = str(
                             RelayAddress(
                                 peer_key, row["workspace_id"], row["agent_id"]
@@ -2266,7 +2325,7 @@ class RelayAgentBridge:
         if not queued:
             return
         record = self.store.task(queued[0]["id"])
-        if self.trust_level() != "manual":
+        if self.effective_trust(record["peer"]) != "manual":
             # Open and agents trust: an ordinary hub turn, no task envelope,
             # no active-task bookkeeping (docs/specs/agent-network-simple-flow.md §6).
             await self._deliver_open_message(record)
@@ -2309,11 +2368,14 @@ class RelayAgentBridge:
         hub_msg, exactly like a local agent. Nothing here waits for that
         reply or captures it.
         """
-        level = self.trust_level()
+        level = self.effective_trust(record["peer"])
         payload = record["payload"]
-        from_device = payload.get("from_device") or RelayAddress.parse(
-            payload["from"]
-        ).key[:8]
+        # The recorded binding wins over the sender's self-reported name.
+        from_device = (
+            self._state().state.peer_devices.get(record["peer"])
+            or payload.get("from_device")
+            or RelayAddress.parse(payload["from"]).key[:8]
+        )
         message = HubMessage(
             id=payload["id"],
             action="message",

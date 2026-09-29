@@ -240,6 +240,10 @@ class RelayClient:
         self.state.room = secrets.token_hex(32)
         self.state.approvals = []
         self.state.inviter = ""
+        # Every prior peer key is meaningless in the new room; keeping their
+        # device-name bindings would only block those names from reuse.
+        self.state.peer_devices = {}
+        self.state.peer_trust = {}
         self._store.save()
 
     def approve(self, key: str):
@@ -267,8 +271,15 @@ class RelayClient:
         was_approved = key in self.state.approvals
         previous_session = self._peers.get(key) if was_approved else None
         try:
+            changed = False
             if key in self.state.approvals:
                 self.state.approvals.remove(key)
+                changed = True
+            if self.state.peer_devices.pop(key, None) is not None:
+                changed = True
+            if self.state.peer_trust.pop(key, None) is not None:
+                changed = True
+            if changed:
                 self._store.save()
         finally:
             # A persistence error must not leave already-running callbacks

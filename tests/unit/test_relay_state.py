@@ -8,8 +8,11 @@ must keep loading state files written before those fields existed.
 import json
 
 import pytest
+from nacl.signing import SigningKey
 
 from plugins.hub.relay_state import ID, RelayError, RelayStateStore
+
+PEER_KEY = SigningKey.generate().verify_key.encode().hex()
 
 
 @pytest.fixture
@@ -22,6 +25,64 @@ def store(tmp_path):
 def test_fresh_state_defaults_to_open_trust_and_no_device_name(store):
     assert store.state.device_name == ""
     assert store.state.trust == "open"
+    assert store.state.peer_devices == {}
+    assert store.state.peer_trust == {}
+
+
+def test_peer_devices_and_peer_trust_round_trip_through_save_and_reload(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_dir = tmp_path / "state"
+    first = RelayStateStore(workspace, state_dir)
+    first.state.peer_devices = {PEER_KEY: "laptop-kollab"}
+    first.state.peer_trust = {PEER_KEY: "agents"}
+    first.save()
+
+    reloaded = RelayStateStore(workspace, state_dir)
+    assert reloaded.state.peer_devices == {PEER_KEY: "laptop-kollab"}
+    assert reloaded.state.peer_trust == {PEER_KEY: "agents"}
+
+
+def test_older_state_file_missing_peer_devices_and_peer_trust_still_loads(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_dir = tmp_path / "state"
+    first = RelayStateStore(workspace, state_dir)
+    old_payload = {
+        k: v
+        for k, v in json.loads(first.state_path.read_text()).items()
+        if k not in ("peer_devices", "peer_trust")
+    }
+    assert "peer_devices" not in old_payload and "peer_trust" not in old_payload
+    first.state_path.write_text(json.dumps(old_payload))
+
+    reloaded = RelayStateStore(workspace, state_dir)
+    assert reloaded.state.peer_devices == {}
+    assert reloaded.state.peer_trust == {}
+
+
+def test_invalid_peer_device_key_is_rejected_on_save(store):
+    store.state.peer_devices = {"not-a-key": "laptop-kollab"}
+    with pytest.raises(RelayError):
+        store.save()
+
+
+def test_invalid_peer_device_name_is_rejected_on_save(store):
+    store.state.peer_devices = {PEER_KEY: "Not Valid!"}
+    with pytest.raises(RelayError):
+        store.save()
+
+
+def test_invalid_peer_trust_value_is_rejected_on_save(store):
+    store.state.peer_trust = {PEER_KEY: "manual"}
+    with pytest.raises(RelayError):
+        store.save()
+
+
+def test_invalid_peer_trust_key_is_rejected_on_save(store):
+    store.state.peer_trust = {"not-a-key": "agents"}
+    with pytest.raises(RelayError):
+        store.save()
 
 
 def test_device_name_and_trust_round_trip_through_save_and_reload(tmp_path):
