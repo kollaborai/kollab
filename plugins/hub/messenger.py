@@ -76,6 +76,15 @@ def _coerce_line_count(value: Any, default: int) -> int:
     return max(1, count)
 
 
+def _coerce_wait_seconds(value: Any, default: int) -> int:
+    """Normalize an optional wait duration; 0 is valid (``--no-wait``)."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        count = default
+    return max(0, count)
+
+
 def _remote_auth_bytes(kind: str, *values: str) -> bytes:
     """Return canonical, domain-separated bytes for remote endpoint auth."""
     payload = json.dumps(
@@ -326,6 +335,8 @@ class AgentSocketServer:
         on_get_output: Optional[Callable] = None,
         on_shutdown: Optional[Callable] = None,
         on_input_inject: Optional[Callable] = None,
+        on_network_status: Optional[Callable] = None,
+        on_network_send: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -336,6 +347,10 @@ class AgentSocketServer:
         self._on_get_output = on_get_output
         self._on_shutdown = on_shutdown
         self._on_input_inject = on_input_inject
+        # Agent network CLI (docs/specs/agent-network-simple-flow.md): local
+        # operator only, same gate as get_output/get_status below.
+        self._on_network_status = on_network_status
+        self._on_network_send = on_network_send
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1397,6 +1412,68 @@ class AgentSocketServer:
                         except Exception as exc:
                             logger.debug(f"shutdown callback error: {exc}")
 
+                elif action == "network_status":
+                    # docs/specs/agent-network-simple-flow.md, CLI bullet:
+                    # `kollab --hub status` asks one online local agent for
+                    # the network section. Local operator only (see the
+                    # local_admin/remote_admin gate above) -- never exposed
+                    # to a remote peer.
+                    payload: Dict[str, Any] = {}
+                    if self._on_network_status:
+                        try:
+                            result = self._on_network_status()
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            if isinstance(result, dict):
+                                payload = result
+                        except Exception as exc:
+                            logger.debug(f"network_status callback error: {exc}")
+                    resp = (
+                        json.dumps(
+                            {
+                                "type": "network_status",
+                                "device": payload.get("device", ""),
+                                "trust": payload.get("trust", ""),
+                                "agents": payload.get("agents", []),
+                            },
+                            default=str,
+                        )
+                        + "\n"
+                    )
+                    writer.write(resp.encode())
+                    await writer.drain()
+
+                elif action == "network_send":
+                    # docs/specs/agent-network-simple-flow.md, CLI bullet:
+                    # `kollab --hub msg agent@device text` delivers through
+                    # this local agent's daemon and optionally waits for the
+                    # first reply. Local operator only, same as above.
+                    to = str(msg_data.get("to", "") or "")
+                    content = str(msg_data.get("content", "") or "")
+                    wait_seconds = _coerce_wait_seconds(
+                        msg_data.get("wait_seconds"), 600
+                    )
+                    if self._on_network_send:
+                        try:
+                            result = self._on_network_send(to, content, wait_seconds)
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            if not isinstance(result, dict):
+                                result = {
+                                    "type": "error",
+                                    "msg": "network send handler returned no result",
+                                }
+                        except Exception as exc:
+                            logger.debug(f"network_send callback error: {exc}")
+                            result = {"type": "error", "msg": "network send failed"}
+                    else:
+                        result = {
+                            "type": "error",
+                            "msg": "network messaging is not available on this build",
+                        }
+                    writer.write((json.dumps(result, default=str) + "\n").encode())
+                    await writer.drain()
+
                 elif action == "rpc_request":
                     # Handshake-phase RPC: no concurrent writer, safe to write
                     # directly without a lock. Attached-phase RPC is handled
@@ -2213,6 +2290,110 @@ class AgentMessenger:
             return {}
         except Exception:
             return {}
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_network_status(
+        socket_path: str,
+        timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> Optional[dict]:
+        """Ask a local agent's daemon for the network section.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: `kollab --hub
+        status` merges this into the local rows. Returns None on any
+        transport failure or malformed response -- callers print
+        "network: not connected" in that case.
+        """
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            req = json.dumps({"action": "network_status"}) + "\n"
+            writer.write(req.encode())
+            await writer.drain()
+
+            resp_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+
+            if resp_line:
+                resp = json.loads(resp_line.decode().strip())
+                if isinstance(resp, dict) and resp.get("type") == "network_status":
+                    return resp
+            return None
+        except Exception as exc:
+            logger.debug("network_status request failed for %s: %s", socket_path, exc)
+            return None
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_network_send(
+        socket_path: str,
+        handle: str,
+        content: str,
+        wait_seconds: int = 600,
+        *,
+        connect_timeout: float = 5.0,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> dict:
+        """Ask a local agent's daemon to deliver to agent@device and wait.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: `kollab --hub
+        msg agent@device text`. The daemon holds the connection open while
+        it waits for the reply, so the read timeout covers the full wait.
+        Returns the daemon's frame as-is (`network_reply`, `network_timeout`,
+        `network_sent`, or `error`); a transport failure is normalized to
+        `{"type": "error", "msg": ...}` so callers have one shape to check.
+        """
+        wait_seconds = _coerce_wait_seconds(wait_seconds, 600)
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=connect_timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            req = (
+                json.dumps(
+                    {
+                        "action": "network_send",
+                        "to": handle,
+                        "content": content,
+                        "wait_seconds": wait_seconds,
+                    }
+                )
+                + "\n"
+            )
+            writer.write(req.encode())
+            await writer.drain()
+
+            resp_line = await asyncio.wait_for(
+                reader.readline(), timeout=wait_seconds + connect_timeout + 5.0
+            )
+            if not resp_line:
+                return {"type": "error", "msg": "empty response"}
+            resp = json.loads(resp_line.decode().strip())
+            if not isinstance(resp, dict):
+                return {"type": "error", "msg": "invalid response envelope"}
+            return resp
+        except asyncio.TimeoutError:
+            return {"type": "error", "msg": "timed out waiting for the daemon"}
+        except Exception as exc:
+            logger.debug("network_send request failed for %s: %s", socket_path, exc)
+            return {"type": "error", "msg": str(exc) or type(exc).__name__}
         finally:
             if writer:
                 writer.close()

@@ -40,13 +40,22 @@ attach to a running agent:
   --system-prompt, --context, --save all work on the daemon state.
 
 manage agents from CLI (no TUI needed):
-  kollab --hub                           prints hub help (new in 4.5)
-  kollab --hub status                    list online agents
-  kollab --hub msg ruby "hello"          send message
+  kollab --hub                                    prints hub help (new in 4.5)
+  kollab --hub status                             list online agents, plus the network
+                                                   section (agent@device, one per line)
+  kollab --hub msg ruby "hello"                   send message to a local agent
+  kollab --hub msg infra@alzan-prod-home "hi"     send to a remote agent, wait up to
+                                                   600s for its first reply
+  kollab --hub msg infra@alzan-prod-home "hi" --no-wait   send and return immediately
   kollab --hub capture ruby 50           read last 50 output lines
   kollab --hub stop ruby                 send shutdown signal
   kollab --hub stop all                  stop all agents
   kollab --hub broadcast "stand down"    message all agents
+
+  a remote target (agent@device) is delivered through one online local
+  agent's daemon (coordinator preferred) and answers with the remote
+  agent's first reply or "no reply from <handle> within N s" on timeout.
+  see docs/specs/agent-network-simple-flow.md.
 
 launch an organization:
   kollab --detached --org startup        start agent + spawn org team
