@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from kollabor_config.config_utils import encode_project_path
+from plugins.hub.device_names import default_device_name
 from plugins.hub.local_directory import LocalAgentDirectory, LocalDirectoryError
 
 
@@ -109,12 +110,20 @@ def test_export_filters_explicit_workspace_and_strips_private_fields(directory):
         "name": "sapphire",
         "is_coordinator": True,
         "state": "ready",
+        "device": default_device_name(workspace),
     }
     assert str(workspace) not in json.dumps(rows)
     with pytest.raises(LocalDirectoryError):
         view.publishable_agents(None, "b" * 32)
     with pytest.raises(LocalDirectoryError):
         view.publishable_agents(workspace, "")
+
+
+def test_export_uses_explicit_device_name_over_the_derived_default(directory):
+    view, publish = directory
+    _, _, workspace = publish("one")
+    rows = view.publishable_agents(workspace, "b" * 32, "mac-kollab")
+    assert rows[0]["device"] == "mac-kollab"
 
 
 def test_existing_relay_workspace_identity_used_without_key_read(directory):

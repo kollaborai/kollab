@@ -16,6 +16,7 @@ from pathlib import Path
 from nacl.exceptions import CryptoError
 from nacl.signing import SigningKey, VerifyKey
 
+from .device_names import validate_device_name, validate_trust
 from .dns.discovery import normalize_target
 
 KEY = re.compile(r"[0-9a-f]{64}\Z")
@@ -123,6 +124,8 @@ class RelayState:
     workspace_id: str = field(default_factory=lambda: secrets.token_hex(16))
     approvals: list[str] = field(default_factory=list)
     inviter: str = ""
+    device_name: str = ""
+    trust: str = "open"
 
 
 class RelayStateStore:
@@ -152,7 +155,11 @@ class RelayStateStore:
         self.state_path = self.path / "state.json"
         if self.state_path.exists() or self.state_path.is_symlink():
             payload = strict_json(self._read_private(self.state_path, 65536))
-            if set(payload) != set(RelayState.__dataclass_fields__):
+            # A subset check, not equality: an older state file predating
+            # device_name/trust is missing those keys, and the dataclass
+            # defaults fill them in. Any key outside the dataclass is still
+            # rejected.
+            if set(payload) - set(RelayState.__dataclass_fields__):
                 raise RelayError("unsupported relay state fields")
             self.state = RelayState(**payload)
             self._validate()
@@ -196,6 +203,15 @@ class RelayStateStore:
             validate_public_key(key)
         if value.inviter:
             validate_public_key(value.inviter)
+        try:
+            if value.device_name:
+                validate_device_name(value.device_name)
+            validate_trust(value.trust)
+        except ValueError as exc:
+            # device_names raises plain ValueError; every failure out of this
+            # store must be the operator-visible RelayError, like every other
+            # field checked above.
+            raise RelayError(str(exc)) from exc
 
     def save(self):
         self._validate()

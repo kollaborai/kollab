@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from .device_names import NAME_RE
 from .relay_state import ID, RelayError, validate_key
 
 AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -34,7 +35,11 @@ MAX_GRANTS = 1024
 MAX_EXPECTATIONS = 1024
 MAX_OUTBOUND_GRANTS = 1024
 MAX_CONVERSATION_TTL = 3600
-TERMINAL = frozenset({"completed", "cancelled", "rejected", "interrupted", "failed"})
+# "delivered" is a task's terminal outcome under open/agents trust: an
+# ordinary hub message with no task envelope and no captured reply.
+TERMINAL = frozenset(
+    {"completed", "cancelled", "rejected", "interrupted", "failed", "delivered"}
+)
 MESSAGE_KINDS = frozenset({"message"})
 EVENT_KINDS = frozenset({"progress", "question", "answer", "result", "error"})
 CORRELATED_KINDS = MESSAGE_KINDS | EVENT_KINDS
@@ -107,8 +112,21 @@ def validate_message(
         "kind",
         "expires_at",
     }
-    if not isinstance(payload, dict) or set(payload) != fields:
+    # from_device is optional on the wire: a sender on this version always
+    # includes it (docs/specs/agent-network-simple-flow.md §4); a receiver on
+    # an older build has none, and the caller falls back to peer_key[:8].
+    optional_fields = {"from_device"}
+    if (
+        not isinstance(payload, dict)
+        or not fields <= set(payload)
+        or set(payload) - fields - optional_fields
+    ):
         raise RelayError("invalid agent message fields")
+    if "from_device" in payload and (
+        not isinstance(payload["from_device"], str)
+        or not NAME_RE.fullmatch(payload["from_device"])
+    ):
+        raise RelayError("invalid sender device")
     for name in ("id", "thread_id"):
         if not isinstance(payload[name], str) or not ID.fullmatch(payload[name]):
             raise RelayError("invalid conversation identifier")
@@ -271,6 +289,16 @@ class ConversationStore:
             if "presented_at" not in event_columns:
                 db.execute(
                     "ALTER TABLE conversation_events ADD COLUMN presented_at INTEGER NOT NULL DEFAULT 0"
+                )
+            outbound_columns = {
+                r[1] for r in db.execute("PRAGMA table_info(outbound_queue)")
+            }
+            if "open" not in outbound_columns:
+                # A message queued with no human communication grant (open or
+                # agents trust). 0 for every row from before this column and
+                # for every grant-bound message prepare_outbound still queues.
+                db.execute(
+                    "ALTER TABLE outbound_queue ADD COLUMN open INTEGER NOT NULL DEFAULT 0"
                 )
             scopes = [r[0] for r in db.execute("SELECT workspace FROM scope")]
             if scopes and scopes != [workspace_id]:
@@ -688,6 +716,74 @@ class ConversationStore:
                     ),
                 )
             return bound
+
+    def queue_open_message(self, room: str, payload: dict) -> dict:
+        """Queue an ordinary hub message with no human communication grant.
+
+        Used only when the network's trust level is `open` or `agents`
+        (docs/specs/agent-network-simple-flow.md §4/§6): the message is
+        delivered like any local hub message, with no grant to bind and no
+        reply expectation recorded against it.
+        """
+        source, target = RelayAddress.parse(payload["from"]), RelayAddress.parse(
+            payload["to"]
+        )
+        validate_message(payload, peer_key=source.key, workspace_id=target.workspace_id)
+        if source.workspace_id != self.workspace_id or (
+            self.local_key and source.key != self.local_key
+        ):
+            raise RelayError("outbound message belongs to another workspace")
+        if payload["kind"] != "message":
+            raise RelayError("open delivery is for ordinary messages only")
+        self._scope(room, target.key)
+        now = int(time.time())
+        fingerprint = self._fingerprint(payload)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT * FROM outbound_queue WHERE id=?", (payload["id"],)
+            ).fetchone()
+            if existing:
+                if (
+                    existing["room"] != room
+                    or existing["peer"] != target.key
+                    or existing["fingerprint"] != fingerprint
+                ):
+                    raise RelayError("outbound message identifier conflict")
+                return {
+                    "id": payload["id"],
+                    "state": existing["state"],
+                    "duplicate": True,
+                }
+            if payload["expires_at"] <= now:
+                raise RelayError("conversation deadline exceeded")
+            db.execute(
+                "DELETE FROM outbound_queue WHERE created<? AND state!='queued'",
+                (now - 86400,),
+            )
+            if (
+                db.execute("SELECT count(*) FROM outbound_queue").fetchone()[0]
+                >= MAX_OUTBOX
+            ):
+                raise RelayError("conversation delivery capacity reached")
+            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            db.execute(
+                "INSERT INTO outbound_queue "
+                "(id,room,peer,thread,kind,fingerprint,payload,created,expires,open) "
+                "VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (
+                    payload["id"],
+                    room,
+                    target.key,
+                    payload["thread_id"],
+                    payload["kind"],
+                    fingerprint,
+                    encoded,
+                    now,
+                    payload["expires_at"],
+                ),
+            )
+            return {"id": payload["id"], "state": "queued", "duplicate": False}
 
     def withdraw_contact(self, room: str, grant_id: str):
         validate_key(room)
@@ -1124,7 +1220,7 @@ class ConversationStore:
     def outbound(self, event_id: str) -> dict | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT state,payload,room,peer,kind FROM outbound_queue WHERE id=?",
+                "SELECT state,payload,room,peer,kind,open FROM outbound_queue WHERE id=?",
                 (event_id,),
             ).fetchone()
         if row is None:
@@ -1145,6 +1241,10 @@ class ConversationStore:
             return False
         payload = item["payload"]
         if payload["kind"] == "message":
+            if item.get("open"):
+                # Queued by queue_open_message: room/peer/expiry are already
+                # checked above; there is no grant or expectation to bind.
+                return True
             with self._connect() as db:
                 grant = db.execute(
                     "SELECT state,expires FROM outbound_grants WHERE id=? AND room=?",
@@ -1369,7 +1469,15 @@ class ConversationStore:
                 ).rowcount
             )
 
-    def admit(self, room: str, peer: str, payload: dict, *, agent_name: str) -> dict:
+    def admit(
+        self,
+        room: str,
+        peer: str,
+        payload: dict,
+        *,
+        agent_name: str,
+        require_grant: bool = True,
+    ) -> dict:
         self._scope(room, peer)
         payload = validate_message(
             payload,
@@ -1400,7 +1508,10 @@ class ConversationStore:
                 return {"id": old["id"], "state": old["state"], "duplicate": True}
             if payload["expires_at"] <= now:
                 raise ConversationRejection("expired")
-            permitted = bool(
+            # Under open trust every accepted device may message every agent
+            # (docs/specs/agent-network-simple-flow.md §4): the receiving
+            # grant this row would otherwise require is not asked for.
+            permitted = not require_grant or bool(
                 db.execute(
                     "SELECT 1 FROM grants WHERE room=? AND peer=? AND agent=?",
                     (room, peer, agent_name),
@@ -1412,7 +1523,8 @@ class ConversationStore:
             if payload["kind"] == "result" and not expected:
                 raise RelayError("unsolicited conversation result")
             db.execute(
-                "DELETE FROM tasks WHERE state IN ('completed','cancelled','rejected','interrupted','failed') "
+                "DELETE FROM tasks WHERE state IN "
+                "('completed','cancelled','rejected','interrupted','failed','delivered') "
                 "AND updated<?",
                 (now - 86400,),
             )

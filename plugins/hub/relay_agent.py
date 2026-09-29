@@ -22,6 +22,14 @@ from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import CancellationOrigin
 from kollabor_ai.message_content import content_to_text
 
+from .device_names import (
+    NAME_RE,
+    default_device_name,
+    format_handle,
+    parse_handle,
+    validate_device_name,
+    validate_trust,
+)
 from .local_directory import LocalAgentDirectory
 from .models import HubMessage, MessageScope
 from .relay_commands import RelayCommands
@@ -199,6 +207,86 @@ class RelayAgentBridge:
             raise RelayError(
                 "correlated relay events cannot issue human network commands"
             )
+
+    def device_name(self) -> str:
+        return self._state().state.device_name or default_device_name(self.workspace)
+
+    def set_device_name(self, name: str) -> str:
+        self._require_human_network_context("remote model turns cannot rename this device")
+        try:
+            name = validate_device_name(name)
+        except ValueError as exc:
+            raise RelayError(str(exc)) from exc
+        store = self._state()
+        store.state.device_name = name
+        store.save()
+        return store.state.device_name
+
+    def trust_level(self) -> str:
+        return self._state().state.trust
+
+    def set_trust_level(self, level: str) -> str:
+        self._require_human_network_context(
+            "remote model turns cannot change network trust"
+        )
+        try:
+            level = validate_trust(level)
+        except ValueError as exc:
+            raise RelayError(str(exc)) from exc
+        store = self._state()
+        store.state.trust = level
+        store.save()
+        return store.state.trust
+
+    async def remote_agents(self) -> list[dict]:
+        """Remote agents from the cached directory, keyed by agent@device.
+
+        Never raises: an unavailable relay is an empty roster, not an error.
+        """
+        try:
+            result = await self._owner_call(
+                "relay.directory", {"peer": "", "cached": True}
+            )
+        except Exception:
+            return []
+        rows = []
+        for row in result.get("agents", []):
+            try:
+                rows.append(
+                    {
+                        "name": row["name"],
+                        "device": row["device"],
+                        "handle": format_handle(row["name"], row["device"]),
+                        "state": row["state"],
+                        "address": row["address"],
+                        "online": True,
+                        "is_coordinator": row["is_coordinator"],
+                        "workspace_id": row["workspace_id"],
+                    }
+                )
+            except (KeyError, TypeError):
+                continue
+        return rows
+
+    async def resolve_handle(self, handle: str) -> str:
+        """The relay: address for an approved agent@device, or a clear RelayError."""
+        parsed = parse_handle(handle)
+        matches = (
+            [
+                row
+                for row in await self.remote_agents()
+                if row["name"] == parsed[0] and row["device"] == parsed[1]
+            ]
+            if parsed
+            else []
+        )
+        if not matches:
+            raise RelayError(
+                "unknown agent@device: run /connect status to see who is online"
+            )
+        if len(matches) > 1:
+            raise RelayError("ambiguous agent@device")
+        return matches[0]["address"]
 
     async def start(self):
         rpc = self.plugin._rpc_server
@@ -837,30 +925,38 @@ class RelayAgentBridge:
         state = self._state().state
         if state.room != client.state.room or destination.key not in state.approvals:
             raise RelayError("peer is not approved in the current room")
+        # Open and agents trust need no human communication grant to send a
+        # message: it is an ordinary hub message, not a task
+        # (docs/specs/agent-network-simple-flow.md §4/§6).
+        open_trust = self.trust_level() in ("open", "agents")
         expires_at = int(time.time()) + TASK_TIMEOUT
+        candidates = None
         if kind == "message":
-            # Reject missing or mismatched human authorization before the
-            # directory lookup causes any network request to the peer.
-            contacts = self.store.contacts(state.room, sender)
-            candidates = [
-                item
-                for item in contacts
-                if item["recipient"] == str(destination)
-                and item["expires"] > int(time.time())
-                and item["state"] in {"ready", "sent"}
-            ]
-            exact = [item for item in candidates if item["id"] == params["grant_id"]]
-            ready = [item for item in candidates if item["state"] == "ready"]
-            candidates = exact if params["grant_id"] else ready
-            if len(candidates) != 1:
-                raise RelayError(
-                    "a human communication grant is required; use /connect authorize or /connect send"
-                )
-            if params["content"].strip() != candidates[0]["purpose"]:
-                raise RelayError(
-                    "initial message must match the human-authorized request exactly"
-                )
-            remote = await self._remote_participant(destination)
+            if open_trust:
+                remote = await self._remote_participant(destination)
+            else:
+                # Reject missing or mismatched human authorization before the
+                # directory lookup causes any network request to the peer.
+                contacts = self.store.contacts(state.room, sender)
+                candidates = [
+                    item
+                    for item in contacts
+                    if item["recipient"] == str(destination)
+                    and item["expires"] > int(time.time())
+                    and item["state"] in {"ready", "sent"}
+                ]
+                exact = [item for item in candidates if item["id"] == params["grant_id"]]
+                ready = [item for item in candidates if item["state"] == "ready"]
+                candidates = exact if params["grant_id"] else ready
+                if len(candidates) != 1:
+                    raise RelayError(
+                        "a human communication grant is required; use /connect authorize or /connect send"
+                    )
+                if params["content"].strip() != candidates[0]["purpose"]:
+                    raise RelayError(
+                        "initial message must match the human-authorized request exactly"
+                    )
+                remote = await self._remote_participant(destination)
         elif kind == "answer":
             question = self.store.event(params["reply_to"])
             if (
@@ -921,11 +1017,13 @@ class RelayAgentBridge:
             }
             destination = RelayAddress.parse(original["from"])
             expires_at = original["expires_at"]
+        if kind == "message":
+            thread_id = params["thread_id"] if open_trust else candidates[0]["id"]
+        else:
+            thread_id = params["thread_id"]
         payload = {
             "id": params["id"],
-            "thread_id": (
-                candidates[0]["id"] if kind == "message" else params["thread_id"]
-            ),
+            "thread_id": thread_id,
             "reply_to": params["reply_to"],
             "from": sender,
             "to": str(destination),
@@ -936,6 +1034,7 @@ class RelayAgentBridge:
             "content": params["content"],
             "kind": kind,
             "expires_at": expires_at,
+            "from_device": self.device_name(),
         }
         if kind in EVENT_KINDS and kind != "answer":
             payload["reply_to"] = payload["thread_id"]
@@ -948,7 +1047,11 @@ class RelayAgentBridge:
         if state.room != client.state.room or destination.key not in state.approvals:
             raise RelayError("peer is not approved in the current room")
         if payload["kind"] == "message":
-            payload = self.store.prepare_outbound(state.room, payload)
+            payload = (
+                self.store.queue_open_message(state.room, payload)
+                if open_trust
+                else self.store.prepare_outbound(state.room, payload)
+            )
         else:
             self.store.queue_outbound(state.room, payload)
         if kind == "progress":
@@ -1178,7 +1281,7 @@ class RelayAgentBridge:
             if payload != {}:
                 raise RelayError("invalid directory request")
             agents = self.directory.publishable_agents(
-                self.workspace, client.state.workspace_id
+                self.workspace, client.state.workspace_id, self.device_name()
             )
             return {
                 "agents": agents[:MAX_DIRECTORY],
@@ -1209,7 +1312,13 @@ class RelayAgentBridge:
                 ):
                     raise ConversationRejection("recipient_unavailable")
                 receipt = self.store.admit(
-                    client.state.room, peer, message, agent_name=target.name
+                    client.state.room,
+                    peer,
+                    message,
+                    agent_name=target.name,
+                    # Open trust admits any approved peer to any local agent;
+                    # agents/manual trust still require a receiving grant.
+                    require_grant=self.trust_level() != "open",
                 )
                 try:
                     if receipt["state"] == "queued":
@@ -1864,7 +1973,15 @@ class RelayAgentBridge:
                             "is_coordinator",
                             "state",
                         }
-                        if not isinstance(row, dict) or set(row) != fields:
+                        # A peer on this version always sends "device" too; an
+                        # older peer has none, and its agents fall back to a
+                        # stable per-peer stand-in below.
+                        optional_fields = {"device"}
+                        if (
+                            not isinstance(row, dict)
+                            or not fields <= set(row)
+                            or set(row) - fields - optional_fields
+                        ):
                             raise RelayError("invalid remote agent descriptor")
                         if (
                             not isinstance(row["machine_id"], str)
@@ -1878,12 +1995,25 @@ class RelayAgentBridge:
                             or len(row["state"]) > 20
                         ):
                             raise RelayError("invalid remote agent descriptor")
+                        device = row.get("device")
+                        if device is not None and (
+                            not isinstance(device, str) or not NAME_RE.fullmatch(device)
+                        ):
+                            raise RelayError("invalid remote agent descriptor")
+                        device = device or peer_key[:8]
                         address = str(
                             RelayAddress(
                                 peer_key, row["workspace_id"], row["agent_id"]
                             )
                         )
-                        safe.append({**row, "address": address})
+                        safe.append(
+                            {
+                                **row,
+                                "address": address,
+                                "device": device,
+                                "handle": format_handle(row["name"], device),
+                            }
+                        )
                     cached = (time.monotonic(), safe)
                     self._cache[cache_key] = cached
                 rows.extend(cached[1])
@@ -2128,6 +2258,11 @@ class RelayAgentBridge:
         if not queued:
             return
         record = self.store.task(queued[0]["id"])
+        if self.trust_level() != "manual":
+            # Open and agents trust: an ordinary hub turn, no task envelope,
+            # no active-task bookkeeping (docs/specs/agent-network-simple-flow.md §6).
+            await self._deliver_open_message(record)
+            return
         self.active = ActiveRelayTask(record, time.monotonic())
         token = self._turn.set(record["id"])
         try:
@@ -2157,6 +2292,46 @@ class RelayAgentBridge:
         finally:
             self._injecting_message = None
             self._turn.reset(token)
+
+    async def _deliver_open_message(self, record):
+        """Deliver a queued message as a plain hub turn (open/agents trust).
+
+        No ActiveRelayTask, no self._turn: the receiving agent runs its own
+        tools under its own permissions and answers later with its own
+        hub_msg, exactly like a local agent. Nothing here waits for that
+        reply or captures it.
+        """
+        level = self.trust_level()
+        payload = record["payload"]
+        from_device = payload.get("from_device") or RelayAddress.parse(
+            payload["from"]
+        ).key[:8]
+        message = HubMessage(
+            id=payload["id"],
+            action="message",
+            from_agent=payload["from"],
+            from_identity=format_handle(payload["from_identity"], from_device),
+            to=self.identity.identity,
+            content=payload["content"],
+            scope=MessageScope.DIRECT.value,
+            thread_id=payload["thread_id"],
+            reply_to=payload["reply_to"],
+            metadata={
+                "network": {
+                    "from": payload["from"],
+                    "from_device": from_device,
+                    "thread_id": payload["thread_id"],
+                    "trust": level,
+                }
+            },
+        )
+        try:
+            await self.plugin._on_message_received(message)
+            self.store.transition(record["id"], "delivered")
+        except Exception:
+            self.store.transition(
+                record["id"], "failed", detail="could not enter the model pipeline"
+            )
 
     def _release_remote_cancellation_if_idle(self, llm):
         pending = self._pending_remote_cancellation
@@ -2386,20 +2561,29 @@ class RelayAgentBridge:
             await self._stop_active("failed", "final response could not be delivered")
 
     async def harness_context(self):
-        lines = [
-            "Network conversations require human direction. Do not contact agents because they appear online.",
-            "Discovery and peer approval do not grant tool access. Receiving workspace permissions always apply.",
-            "Send a relay answer only after the human supplies it, using kind='answer' "
-            "with the exact pending question's peer, thread_id, and event ID as reply_to.",
-            "After a relay send, results and questions arrive in this conversation on their "
-            "own and progress is shown to the human; do not poll with hub_status, hub_capture or cron jobs.",
-        ]
+        manual = self.trust_level() == "manual"
+        if manual:
+            lines = [
+                "Network conversations require human direction. Do not contact agents because they appear online.",
+                "Discovery and peer approval do not grant tool access. Receiving workspace permissions always apply.",
+                "Send a relay answer only after the human supplies it, using kind='answer' "
+                "with the exact pending question's peer, thread_id, and event ID as reply_to.",
+                "After a relay send, results and questions arrive in this conversation on their "
+                "own and progress is shown to the human; do not poll with hub_status, hub_capture or cron jobs.",
+            ]
+        else:
+            # Open and agents trust: no grant lines, no one-question line, no
+            # human-answer line, no do-not-poll line (docs/specs/agent-network-simple-flow.md §7).
+            lines = [
+                "Discovery and peer approval do not grant tool access. Receiving workspace permissions always apply.",
+            ]
         if self._correlated_event_context.get() is not None:
             lines.append(
                 "This turn reports a relay event to the human: reply in text. No tools are available."
             )
         if (
-            self.active
+            manual
+            and self.active
             and not self.active.finished
             and self.active.record["id"] == self._turn.get()
         ):
@@ -2427,6 +2611,8 @@ class RelayAgentBridge:
                     separators=(",", ":"),
                 ),
             ]
+        if not manual:
+            return lines
         try:
             state = self._state().state
             sender = str(

@@ -67,7 +67,7 @@ class Directory:
     def agents(self, workspace=None):
         return self.rows
 
-    def publishable_agents(self, workspace, workspace_id):
+    def publishable_agents(self, workspace, workspace_id, device_name=None):
         return [
             {
                 "machine_id": row.machine_id,
@@ -76,6 +76,7 @@ class Directory:
                 "name": row.name,
                 "is_coordinator": row.is_coordinator,
                 "state": row.state,
+                "device": device_name or "test-device",
             }
             for row in self.rows
         ]
@@ -231,6 +232,11 @@ async def bridges(tmp_path):
         origin.commands.client._store.save()
     for bridge, *_ in members:
         client = bridge.commands.client
+        # This whole file exercises the Codex/manual model: human grants, the
+        # active-task envelope, correlated replies. Open trust (the network's
+        # new default) skips all of that, so pin these fixtures to manual.
+        client._store.state.trust = "manual"
+        client._store.save()
         bridge.secure_transport = SecureConversationTransport(
             client, client._store.key.encode()
         )
