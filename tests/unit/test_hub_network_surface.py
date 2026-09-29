@@ -443,7 +443,8 @@ async def test_route_message_resolves_a_handle_and_sends_with_no_grant():
     assert rejections == []
     assert sent["address"] == "relay:resolved:infra@alzan-prod-home"
     assert sent["content"] == "check the tunnel"
-    assert sent["kwargs"] == {"kind": "message"}
+    # The message's own thread rides along so an answer can name it.
+    assert sent["kwargs"] == {"kind": "message", "thread_id": msg.thread_id, "reply_to": ""}
     assert msg.metadata["network"] == {"to": "relay:resolved:infra@alzan-prod-home"}
 
 
@@ -663,7 +664,7 @@ async def test_route_message_awaits_resolve_handle():
         assert handle == "infra@alzan-prod-home"
         return REMOTE_ROWS[0]["address"]
 
-    async def send(address, content, kind="message"):
+    async def send(address, content, kind="message", thread_id="", reply_to=""):
         sent.append((address, content, kind))
 
     hub._relay_agent = SimpleNamespace(resolve_handle=resolve_handle, send=send, trust_level=lambda: "open")

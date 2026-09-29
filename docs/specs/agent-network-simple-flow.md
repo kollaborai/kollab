@@ -435,6 +435,18 @@ the named agent, with its own tools under its own workspace permissions. It
 answers with `hub_msg` like a local agent. Peer content is untrusted task
 data; secrets and permission overrides are refused as they are locally.
 
+What the sender is told. The `hub_msg` result for an `agent@device` reports what
+the network did, never local presence: `sent to <agent@device>` when the network
+took it; `unknown agent@device: run /connect status to see who is online` when
+the roster does not list it; the receiving device's own reason when it refuses;
+`not sent again: ...` for an identical resend within two minutes. It never says
+a rostered peer is offline, so the model has no reason to resend. The message's
+thread id travels in the relay payload and the answering agent's `hub_msg` to
+that handle carries it back (oldest unanswered request first, each answered
+once). `kollab --hub msg` resolves only on the message on its own request's
+thread, so an older or duplicate answer from the same agent is never printed as
+the answer to a newer request.
+
 ## 8. The join code
 
 Today: `K1-<32 hex offer id>-XXXX-XXXX-XXXX-XXXX-XXXX`, 60 characters, and the

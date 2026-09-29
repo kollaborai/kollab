@@ -1609,7 +1609,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         if parse_handle(target) is not None:
             # Agent network (docs/specs/agent-network-simple-flow.md, CLI
             # bullet): deliver through one online local agent's daemon and
-            # wait for the first reply. A plain local target below is
+            # wait for the reply to it. A plain local target below is
             # unchanged.
             wait_seconds = 0 if "--no-wait" in msg_rest else 600
             content = " ".join(tok for tok in msg_rest if tok != "--no-wait")

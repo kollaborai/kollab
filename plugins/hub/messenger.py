@@ -1447,7 +1447,7 @@ class AgentSocketServer:
                     # docs/specs/agent-network-simple-flow.md, CLI bullet:
                     # `kollab --hub msg agent@device text` delivers through
                     # this local agent's daemon and optionally waits for the
-                    # first reply. Local operator only, same as above.
+                    # reply to it. Local operator only, same as above.
                     to = str(msg_data.get("to", "") or "")
                     content = str(msg_data.get("content", "") or "")
                     wait_seconds = _coerce_wait_seconds(

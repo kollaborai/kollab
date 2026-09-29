@@ -77,10 +77,12 @@ class ContactReviewAltView(AltView):
 
     def __init__(
         self,
-        domain: str,
-        on_load: ContactLoadCallback,
-        on_decide: ContactDecisionCallback,
+        domain: str = "kollabor.ai",
+        on_load: ContactLoadCallback | None = None,
+        on_decide: ContactDecisionCallback | None = None,
     ) -> None:
+        # Defaults let the AltView command integrator build a bare instance to
+        # read its metadata; without callbacks the view is an empty inbox.
         super().__init__(_metadata("contact-review", "Review knocks locally"))
         self.domain = _filter(domain, _MAX_DOMAIN)
         self._on_load = on_load
@@ -102,7 +104,7 @@ class ContactReviewAltView(AltView):
         self._selected = 0
         self._armed = True
         try:
-            result = self._on_load()
+            result = self._on_load() if self._on_load is not None else []
             if inspect.isawaitable(result):
                 result = await result
             if not isinstance(result, list) or any(
@@ -217,6 +219,10 @@ class ContactReviewAltView(AltView):
         request = self._requests[self._selected]
         verb = "accept" if decision == "accept" else "reject"
         who = display_name(request.device_name)
+        if self._on_decide is None:
+            self._message = f"could not {verb} {who}: knock review is not connected"
+            self.request_render()
+            return
         try:
             reason = self._on_decide(request, decision)
             if inspect.isawaitable(reason):

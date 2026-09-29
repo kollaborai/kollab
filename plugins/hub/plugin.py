@@ -254,6 +254,27 @@ _HUB_MSG_EMBEDDED_ATTRS_RE = re.compile(
 )
 
 
+_REMOTE_REFUSED_STATES = frozenset(
+    {"rejected", "failed", "cancelled", "interrupted", "revoked", "unavailable"}
+)
+
+
+def _receipt_refusal(receipt: Any) -> str:
+    """Why the network refused a send, from its receipt; "" when it accepted.
+
+    The receiver's fixed rejection reasons are safe to show. Anything else that
+    is not an acceptance gets a plain sentence, never the receipt's raw fields.
+    """
+    state = receipt.get("state") if isinstance(receipt, dict) else ""
+    if state not in _REMOTE_REFUSED_STATES:
+        return ""
+    from .relay_conversations import CONVERSATION_REJECTION_DETAILS
+
+    return CONVERSATION_REJECTION_DETAILS.get(
+        receipt.get("reason"), f"the network did not deliver it ({state})"
+    )
+
+
 @dataclass
 class HubWakeDecision:
     """Decision for whether an incoming hub message should wake the LLM."""
@@ -398,12 +419,14 @@ class HubPlugin(BasePlugin):
         self._relay_agent = None
         self._relay_startup_task = None
         # CLI `kollab --hub msg agent@device` waiters (docs/specs/
-        # agent-network-simple-flow.md, CLI bullet). Keyed by the local
-        # outbound HubMessage's thread_id, with a fallback keyed by handle
-        # since the relay send path does not thread thread_id across a hop
-        # today. _on_message_received resolves whichever matches first.
+        # agent-network-simple-flow.md, CLI bullet), keyed by the outbound
+        # HubMessage's thread_id. The thread id crosses the wire in the relay
+        # payload and the answering agent echoes it (see _network_requests),
+        # so a waiter resolves only on the reply to its own request.
         self._cli_waiters: Dict[str, "asyncio.Future"] = {}
-        self._cli_waiters_by_handle: Dict[str, "asyncio.Future"] = {}
+        # Inbound network requests still owed an answer, per sender handle:
+        # [(received_at, thread_id, message_id)] oldest first.
+        self._network_requests: Dict[str, list] = {}
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
@@ -2583,6 +2606,31 @@ class HubPlugin(BasePlugin):
                 output=f"crystal_delete error: {e}",
             )
 
+    def _note_network_request(self, message: HubMessage) -> None:
+        """Record a remote request so this agent's answer can carry its thread."""
+        # __dict__: some tests build HubPlugin via __new__ without __init__.
+        owed = self.__dict__.setdefault("_network_requests", {})
+        queue = owed.setdefault(message.from_identity, [])
+        queue.append((time.time(), message.thread_id, message.id))
+        del queue[:-32]
+
+    def _take_network_request(self, handle: str) -> Tuple[str, str]:
+        """(thread_id, message_id) of the oldest request from ``handle`` still
+        owed an answer, or ("", "") when this message answers nothing.
+
+        Agents answer in the order they were asked, so the oldest request is the
+        one being answered; each request is answered once, and one older than
+        the CLI wait ceiling (600 s) is dropped rather than matched.
+        """
+        queue = self.__dict__.setdefault("_network_requests", {}).get(handle) or []
+        cutoff = time.time() - 600
+        while queue and queue[0][0] < cutoff:
+            queue.pop(0)
+        if not queue:
+            return "", ""
+        _, thread_id, message_id = queue.pop(0)
+        return thread_id, message_id
+
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -2750,21 +2798,35 @@ class HubPlugin(BasePlugin):
         }
         # Network admission owns durable deduplication. Caching content here
         # before authorization would turn a failed send into silent success on
-        # retry, including after the human grants the requested contact.
+        # retry, including after the human grants the requested contact. An
+        # agent@device send is cached only once the network accepted it.
         if not target.startswith("relay:") and msg_hash in self._recent_hub_msgs:
             logger.debug(f"hub_msg dedup: skipping duplicate to {target}")
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_msg",
                 success=True,
-                output="",  # silent -- prevents continuation loops
+                # A remote send says why nothing went out; a local one stays
+                # silent to prevent continuation loops.
+                output=(
+                    f"not sent again: this exact message to {target} was already sent"
+                    if handle
+                    else ""
+                ),
             )
-        if not target.startswith("relay:"):
+        if not target.startswith("relay:") and not handle:
             self._recent_hub_msgs[msg_hash] = now
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
-        if is_reply and self._active_thread_id:
+        if handle:
+            # A remote agent answers on the thread of the request it received,
+            # so the asker (a CLI waiter, another agent) can tell whose answer
+            # this is. The model never sees thread ids, so the runtime supplies
+            # them.
+            if not thread_id and not reply_to:
+                thread_id, reply_to = self._take_network_request(target)
+        elif is_reply and self._active_thread_id:
             # <hub_reply> — inherit active thread from last received message
             thread_id = thread_id or self._active_thread_id
             reply_to = reply_to or self._active_thread_msg_id
@@ -2847,17 +2909,26 @@ class HubPlugin(BasePlugin):
         my_name = self._identity.identity if self._identity else "?"
         await self._bridge_forward(f"[{my_name} -> {target}] {content}")
 
+        # The relay address the router recorded is routing state. The tool
+        # result is published to attached clients, so it must not carry it.
+        metadata = {k: v for k, v in metadata.items() if k != "network"}
+
         # Build output — check rejections first
         queued_for = list((msg.metadata or {}).get("_queued_for", []))
         if rejections:
             parts = []
             for ident, reason in rejections:
                 parts.append(f"{ident}: {reason}")
-            output = f"[hub_msg] rejected: {'; '.join(parts)}. " + (
-                "Network grants and receiver permissions must authorize delivery."
-                if target.startswith("relay:")
-                or (self._relay_agent and self._relay_agent._turn.get())
-                else 'send with force="true" to break through.'
+            output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
+                # The reason already says what to do; force means nothing here.
+                ""
+                if handle
+                else (
+                    " Network grants and receiver permissions must authorize delivery."
+                    if target.startswith("relay:")
+                    or (self._relay_agent and self._relay_agent._turn.get())
+                    else ' send with force="true" to break through.'
+                )
             )
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2870,6 +2941,12 @@ class HubPlugin(BasePlugin):
         elif msg.metadata.get("relay_receipt"):
             receipt = msg.metadata["relay_receipt"]
             output = f"remote task {receipt['id']}: {receipt['state']}; acceptance is not completion"
+        elif handle:
+            # The network accepted it (a rejection returned above). Local
+            # presence knows nothing of agent@device, so it cannot say the peer
+            # is offline; the roster answers that.
+            self._recent_hub_msgs[msg_hash] = now
+            output = f"sent to {target}"
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
         elif self._presence:
@@ -6635,21 +6712,27 @@ class HubPlugin(BasePlugin):
             while len(self._seen_messages) > 1000:
                 self._seen_messages.popitem(last=False)
 
+        # A request from a remote agent@device is owed an answer on its own
+        # thread; remember it so the reply carries that thread back.
+        if (
+            message.action == "message"
+            and not message.reply_to
+            and (message.metadata or {}).get("network")
+            and parse_handle(message.from_identity or "") is not None
+        ):
+            self._note_network_request(message)
+
         # `kollab --hub msg agent@device` waiter: fulfil a pending CLI wait
-        # the moment this handle's first reply arrives. Matched by thread_id
-        # when the remote echoed it, else by handle (see _cli_waiters in
-        # __init__). This never blocks or consumes the message -- it still
-        # goes through the normal display and model path below. getattr:
-        # some tests construct HubPlugin via __new__ without running
-        # __init__, the same reason _relay_agent above is read with getattr.
+        # when the reply to that exact request arrives (same thread_id, echoed
+        # by the answering agent). Any other message from that agent -- an
+        # older answer, a late duplicate, unrelated chatter -- is not the
+        # answer. This never blocks or consumes the message: it still goes
+        # through the normal display and model path below. getattr: some tests
+        # construct HubPlugin via __new__ without running __init__, the same
+        # reason _relay_agent above is read with getattr.
         cli_waiters = getattr(self, "_cli_waiters", None)
-        cli_waiters_by_handle = getattr(self, "_cli_waiters_by_handle", None)
-        if cli_waiters or cli_waiters_by_handle:
+        if cli_waiters:
             waiter = cli_waiters.pop(message.thread_id, None)
-            if waiter is None:
-                waiter = cli_waiters_by_handle.pop(message.from_identity, None)
-            else:
-                cli_waiters_by_handle.pop(message.from_identity, None)
             if waiter is not None and not waiter.done():
                 waiter.set_result((message.from_identity, message.content))
 
@@ -8062,26 +8145,52 @@ class HubPlugin(BasePlugin):
             Empty list means all recipients accepted.
         """
         relay = getattr(self, "_relay_agent", None)
-        handle = parse_handle(message.to or "") if relay is not None else None
+        handle = parse_handle(message.to or "")
         if handle is not None:
             # An agent@device handle: the network is the hub across machines
             # (docs/specs/agent-network-simple-flow.md section 4). Under open
             # and agents trust this needs no human grant -- resolve the
             # handle and deliver it like any other hub message.
-            from .relay_state import RelayError
+            from .relay_state import ID, RelayError
 
             handle_str = format_handle(*handle)
             resolve = getattr(relay, "resolve_handle", None)
             send = getattr(relay, "send", None)
+            if relay is None:
+                # No bridge yet: never fall through to local presence, which
+                # cannot hold a remote agent and would report it as absent.
+                return [
+                    (
+                        message.to,
+                        "the network is not connected on this device: run /connect status",
+                    )
+                ]
             if resolve is None or send is None:
                 return [(message.to, "network messaging is not available on this build")]
             try:
                 address = resolve(handle_str)
                 if inspect.isawaitable(address):
                     address = await address
-                await send(address, message.content, kind="message")
+                # The thread and reply ids travel in the relay payload so the
+                # receiver's answer can name the request it answers.
+                receipt = await send(
+                    address,
+                    message.content,
+                    kind="message",
+                    thread_id=(
+                        message.thread_id
+                        if ID.fullmatch(message.thread_id or "")
+                        else ""
+                    ),
+                    reply_to=(
+                        message.reply_to if ID.fullmatch(message.reply_to or "") else ""
+                    ),
+                )
             except RelayError as exc:
                 return [(message.to, str(exc))]
+            refusal = _receipt_refusal(receipt)
+            if refusal:
+                return [(message.to, refusal)]
             message.metadata["network"] = {"to": address}
             self._trace_delivery(message, "remote_accepted", detail="network")
             return []
@@ -10004,6 +10113,9 @@ class HubPlugin(BasePlugin):
         target = rest.strip()
         if not target:
             return "usage: /hub wake <identity>"
+        refusal = self._remote_target_refusal(target)
+        if refusal:
+            return refusal
 
         if not self._presence:
             return "hub not active"
@@ -11326,7 +11438,8 @@ class HubPlugin(BasePlugin):
             self._identity.identity if self._identity else COORDINATOR_IDENTITY
         )
 
-        if live_target is not None:
+        # A remote agent@device is never in local presence; the network owns it.
+        if live_target is not None or parse_handle(target) is not None:
             message = HubMessage(
                 action="message",
                 from_agent="human",
@@ -11380,6 +11493,9 @@ class HubPlugin(BasePlugin):
         rejections = await self._route_message(msg)
         if rejections:
             parts = [f"{ident}: {reason}" for ident, reason in rejections]
+            if parse_handle(target) is not None:
+                # A remote reason is complete; force does not apply to it.
+                return f"rejected: {'; '.join(parts)}"
             return (
                 f"rejected: {'; '.join(parts)}. " f'use force="true" to break through.'
             )
@@ -11427,8 +11543,9 @@ class HubPlugin(BasePlugin):
                         address = resolve(handle)
                         if inspect.isawaitable(address):
                             address = await address
-                        await send(address, content, kind="message")
-                        reached += 1
+                        receipt = await send(address, content, kind="message")
+                        if not _receipt_refusal(receipt):
+                            reached += 1
                     except RelayError:
                         continue
             base += f"; {reached} network agent(s)"
@@ -11949,7 +12066,6 @@ class HubPlugin(BasePlugin):
         )
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._cli_waiters[msg.thread_id] = future
-        self._cli_waiters_by_handle[handle_str] = future
         try:
             rejections = await self._route_message(msg)
             self._display_outgoing_message(handle_str, content)
@@ -11970,8 +12086,6 @@ class HubPlugin(BasePlugin):
                 return {"type": "network_timeout"}
         finally:
             self._cli_waiters.pop(msg.thread_id, None)
-            if self._cli_waiters_by_handle.get(handle_str) is future:
-                self._cli_waiters_by_handle.pop(handle_str, None)
 
     async def _on_remote_shutdown(self, reason: str = "") -> None:
         """Handle shutdown signal received via hub socket.
