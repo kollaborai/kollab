@@ -34,7 +34,6 @@ from plugins.hub.enrollment_codes import (
     derive_enrollment_envelope_key,
     enrollment_verifier_hash,
     generate_enrollment_code,
-    parse_enrollment_code,
 )
 from plugins.hub.enrollment_delegations import EnrollmentDelegationStore
 from plugins.hub.enrollment_recovery import (
@@ -429,11 +428,11 @@ async def _run_enrollment(
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
-    # A fixed legacy K1 code: this helper exercises the deep pairing protocol
-    # (challenge/proof/decision/ack), not code-format parsing, and a K1 code
-    # skips the lookup round trip a short code's FakeTransport doesn't model.
-    code_text = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
-    code = parse_enrollment_code(code_text)
+    # This helper exercises the deep pairing protocol (challenge/proof/
+    # decision/ack); FakeTransport.post below resolves the short code's
+    # lookup round trip so enroll_device can find this fixed offer id.
+    code = generate_enrollment_code(offer_id)
+    code_text = code.for_private_display()
     verifier = derive_enrollment_code_verifier(code)
     envelope_key = derive_enrollment_envelope_key(code)
     owner_signing_key = SigningKey.generate()
@@ -523,6 +522,10 @@ async def _run_enrollment(
 
         async def __aexit__(self, *_args):
             return None
+
+        async def post(self, path, _frame, **_kwargs):
+            assert path == enrollment_client.ENROLLMENT_LOOKUP_PATH
+            return {"offer_id": offer_id}
 
         async def post_signed_retry(self, *args, **kwargs):
             return await self.post_signed(*args, **kwargs)

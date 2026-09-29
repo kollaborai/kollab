@@ -46,7 +46,6 @@ from .enrollment_codes import (
     enrollment_verifier_hash,
     generate_enrollment_code,
     is_short_enrollment_code,
-    parse_enrollment_code,
     parse_short_enrollment_code,
 )
 from .enrollment_delegations import (
@@ -1689,20 +1688,18 @@ async def enroll_device(commands, domain: str, private_code: str) -> dict[str, s
     client = commands.client
     discovery = None
     try:
-        if is_short_enrollment_code(private_code):
-            secret = parse_short_enrollment_code(private_code)
-            discovery, _lookup_ca, _lookup_cidrs = await _discover_destination(commands, domain)
-            offer_id = await _lookup_enrollment_offer(
-                client, discovery, _lookup_ca, _lookup_cidrs, secret
-            )
-            if offer_id is None:
-                raise EnrollmentProtocolError("unavailable")
-            code = EnrollmentCode(offer_id, secret)
-            for index in range(len(secret)):
-                secret[index] = 0
-        else:
-            code = parse_enrollment_code(private_code)
-            offer_id = code.offer_id
+        if not is_short_enrollment_code(private_code):
+            raise EnrollmentProtocolError("invalid_request")
+        secret = parse_short_enrollment_code(private_code)
+        discovery, _lookup_ca, _lookup_cidrs = await _discover_destination(commands, domain)
+        offer_id = await _lookup_enrollment_offer(
+            client, discovery, _lookup_ca, _lookup_cidrs, secret
+        )
+        if offer_id is None:
+            raise EnrollmentProtocolError("unavailable")
+        code = EnrollmentCode(offer_id, secret)
+        for index in range(len(secret)):
+            secret[index] = 0
         if not _claim_destination_recovery(client, offer_id):
             raise EnrollmentProtocolError("unavailable")
         claimed = True

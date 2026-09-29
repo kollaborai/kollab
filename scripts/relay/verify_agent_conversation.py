@@ -69,8 +69,8 @@ _SHORT_JOIN_CODE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
 
 
 def _looks_like_join_code(part: str) -> bool:
-    """A K1 code or an upper-case XXXX-XXXX join code; never allowed in a command."""
-    return isinstance(part, str) and (part.upper().startswith("K1-") or _SHORT_JOIN_CODE.fullmatch(part) is not None)
+    """An upper-case XXXX-XXXX join code; never allowed in a command."""
+    return isinstance(part, str) and _SHORT_JOIN_CODE.fullmatch(part) is not None
 
 
 CHECKS = (
@@ -1551,7 +1551,7 @@ def address(value):
 def valid_command(parts):
     if not isinstance(parts,list) or not parts or any(not isinstance(v,str) or not v for v in parts): return False
     short=re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
-    def bad(v): return any(ord(c)<32 or ord(c)==127 for c in v) or v.upper().startswith("K1-") or short.fullmatch(v)
+    def bad(v): return any(ord(c)<32 or ord(c)==127 for c in v) or short.fullmatch(v)
     if any(bad(v) for v in parts): return False
     if len(" ".join(parts).encode("utf-8"))>4096: return False
     head=parts[0]

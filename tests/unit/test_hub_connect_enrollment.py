@@ -72,7 +72,7 @@ async def test_connect_enroll_is_removed_use_bare_connect():
 
 @pytest.mark.asyncio
 async def test_connect_bare_opens_private_form_and_uses_typed_attach_rpc():
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(
         hub_enroll=AsyncMock(
@@ -145,7 +145,7 @@ async def test_connect_code_opens_private_view_and_uses_typed_attach_rpc(
     monkeypatch,
 ):
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     result = {
         "status": "offered",
         "offer_id": offer_id,
@@ -210,13 +210,13 @@ async def test_connect_code_is_rejected_from_command_text_and_code_domain_is_bou
     plugin._cli_args = SimpleNamespace(attach=True)
 
     pasted = await plugin._handle_connect_command(
-        "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+        "ABCD-EFGH"
     )
     pasted_to_enroll = await plugin._handle_connect_command(
-        "enroll K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+        "enroll ABCD-EFGH"
     )
     pasted_to_code = await plugin._handle_connect_command(
-        "code K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+        "code ABCD-EFGH"
     )
     malformed_code = await plugin._handle_connect_command("code example.test extra")
 

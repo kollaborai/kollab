@@ -1,6 +1,6 @@
 {
   "name": "connect-code-guard",
-  "description": "Typos, codes in commands, and the private form's guidance for /connect (issues #104, #121). A typo reports 'unknown subcommand', bare /connect says where a code comes from, a K1 code or a short XXXX-XXXX code typed into a command is refused, and neither code reaches the log.",
+  "description": "Typos, codes in commands, and the private form's guidance for /connect (issues #104, #121). A typo reports 'unknown subcommand', bare /connect says where a code comes from, a short XXXX-XXXX code typed into a command is refused, and the code never reaches the log.",
   "config": {
     "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-codes\"; mkdir -p \"$H\"; mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":true}}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "app_init_sleep": 10,
@@ -60,35 +60,7 @@
     },
     {
       "action": "section",
-      "title": "a code typed into a command is refused"
-    },
-    {
-      "action": "type",
-      "text": "/connect approve K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX",
-      "delay": 0.04
-    },
-    {
-      "action": "enter"
-    },
-    {
-      "action": "wait_for",
-      "pattern": "codes never go in a command",
-      "timeout": 8
-    },
-    {
-      "action": "sleep",
-      "seconds": 1.0
-    },
-    {
-      "action": "shell",
-      "command": "grep -rh 'K1-0123456789abcdef' \"${TMPDIR:-/tmp}/kollab-spec-connect-codes/.kollab\" 2>/dev/null | head -1; echo LOGS-CHECKED",
-      "description": "the typed code is not in any log",
-      "assert_contains": "LOGS-CHECKED",
-      "assert_not_contains": "K1-0123456789abcdef"
-    },
-    {
-      "action": "section",
-      "title": "a short join code typed into a command is refused too"
+      "title": "a short join code typed into a command is refused"
     },
     {
       "action": "type",

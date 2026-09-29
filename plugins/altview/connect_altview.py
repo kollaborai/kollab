@@ -24,6 +24,9 @@ from kollabor_tui.key_parser import KeyPress
 _MAX_DOMAIN_LENGTH = 253
 _MAX_CODE_LENGTH = 4096
 _RECEIPT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
+_SHORT_CODE_PASTE_RE = re.compile(
+    r"[0-9A-HJKMNP-TV-Z]{4}-?[0-9A-HJKMNP-TV-Z]{4}", re.IGNORECASE
+)
 _REDACTED = "<redacted>"
 
 
@@ -371,7 +374,8 @@ class ConnectAltView(AltView):
 
         if self._focus == "domain":
             text = "".join(field)
-            marker = text.find("K1-")
+            found = _SHORT_CODE_PASTE_RE.search(text)
+            marker = found.start() if found else -1
             if marker >= 0:
                 # A code typed or pasted into the domain field moves to the
                 # private field so it is never rendered in clear text.
@@ -606,13 +610,7 @@ class ConnectOfferAltView(AltView):
                 or not expires_at.isdigit()
                 or int(expires_at) <= int(time.time())
                 or not isinstance(code, str)
-                or not (
-                    re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
-                    or re.fullmatch(
-                        rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
-                        code,
-                    )
-                )
+                or not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
             ):
                 raise ValueError("invalid enrollment offer")
             self._private_code = PrivateCode(code)

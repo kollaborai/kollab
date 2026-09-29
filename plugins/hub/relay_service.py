@@ -65,10 +65,6 @@ _HEX_32 = re.compile(r"[0-9a-f]{32}\Z")
 _HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
 _HEX_128 = re.compile(r"[0-9a-f]{128}\Z")
 _B64URL = re.compile(r"[A-Za-z0-9_-]+\Z")
-_ENROLLMENT_CODE = re.compile(
-    r"K1-([0-9a-f]{32})-((?:[0-9A-HJKMNP-TV-Z]{4}-){4}[0-9A-HJKMNP-TV-Z]{4})\Z",
-    re.IGNORECASE,
-)
 _SHORT_ENROLLMENT_CODE = re.compile(
     r"([0-9A-HJKMNP-TV-Z]{4})-?([0-9A-HJKMNP-TV-Z]{4})\Z",
     re.IGNORECASE,
@@ -287,32 +283,29 @@ def generate_enrollment_code(offer_id: str) -> str:
     return f"{secret[:4]}-{secret[4:]}"
 
 
-def _normalize_enrollment_code(code: str) -> tuple[str | None, str]:
-    """Return (offer_id, normalized secret) for a K1 or short code.
+def _normalize_enrollment_code(code: str) -> str:
+    """Return the normalized secret for a short join code.
 
-    A K1 code carries its own offer id; a short code does not, and the
-    caller must resolve one first through the lookup route.
+    A short code carries no offer id; the caller must resolve one first
+    through the lookup route.
     """
     if not isinstance(code, str):
         raise ValueError("invalid enrollment code")
     stripped = code.strip()
-    match = _ENROLLMENT_CODE.fullmatch(stripped)
-    if match is not None:
-        return match.group(1).lower(), match.group(2).replace("-", "").upper()
     match = _SHORT_ENROLLMENT_CODE.fullmatch(stripped)
     if match is not None:
-        return None, (match.group(1) + match.group(2)).upper()
+        return (match.group(1) + match.group(2)).upper()
     raise ValueError("invalid enrollment code")
 
 
 def derive_enrollment_code_verifier(code: str, offer_id: str | None = None) -> tuple[str, str]:
     """Derive `(offer_id, verifier)` locally; never call this with an HTTP body.
 
-    A K1 code's own offer id always wins. A short code has none embedded, so
-    the resolved id from the lookup route must be passed in.
+    A short code has no offer id embedded, so the resolved id from the
+    lookup route must be passed in.
     """
-    parsed_offer_id, secret = _normalize_enrollment_code(code)
-    resolved_offer_id = parsed_offer_id if parsed_offer_id is not None else offer_id
+    secret = _normalize_enrollment_code(code)
+    resolved_offer_id = offer_id
     if not isinstance(resolved_offer_id, str) or not _HEX_32.fullmatch(resolved_offer_id):
         raise ValueError("invalid enrollment offer id")
     salt = hashlib.sha256(
@@ -330,12 +323,8 @@ def derive_enrollment_code_verifier(code: str, offer_id: str | None = None) -> t
 
 
 def derive_enrollment_lookup_tag(code: str, origin: str) -> str:
-    """Derive the base64url lookup tag a joiner sends to find its offer.
-
-    Meaningless for a K1 code (its offer id is already in hand), but the
-    derivation works for either format since it only uses the secret.
-    """
-    _, secret = _normalize_enrollment_code(code)
+    """Derive the base64url lookup tag a joiner sends to find its offer."""
+    secret = _normalize_enrollment_code(code)
     if not isinstance(origin, str) or not origin:
         raise ValueError("invalid origin")
     key = ENROLLMENT_LOOKUP_DOMAIN + origin.encode("ascii")

@@ -5,7 +5,7 @@
 > contract only; a command or flow that appears here and not there is not part of the design.
 
 Status: unreleased source contains the private `/connect` code-entry view,
-`/connect offer`, K1 code/device-key proof handling, durable pending-request
+`/connect offer`, short-code/device-key proof handling, durable pending-request
 metadata, and an issuer API that requires a separate accept/reject after proof.
 Acceptance consumes the delegated device allowance and issues only a
 `conversation:send` credential plus a room invitation. When a supported active
@@ -120,9 +120,9 @@ or proofs from any source, returning the same generic error a missing or
 expired offer would. The verifier stays `scrypt(code secret, salt =
 sha256(domain || offer id))`, resolved offer id substituted in for a short
 code. The previous `K1-<offer id>-XXXX-XXXX-XXXX-XXXX-XXXX` (100-bit) format
-is accepted for one release so devices on an older client version can still
-join; a relay serving both formats is required during that overlap. Hashing a
-six-digit PIN and using it directly as an encryption key is not acceptable.
+is not accepted; nobody but Marco ran a version that issued it, so there is no
+upgrade window to protect. Hashing a six-digit PIN and using it directly as an
+encryption key is not acceptable.
 The service stores bounded, expiring encrypted enrollment records, with atomic
 redemption across workers/hosts, connection/source limits and admission
 quotas. Codes are never reusable membership credentials.

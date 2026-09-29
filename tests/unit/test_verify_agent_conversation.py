@@ -592,7 +592,7 @@ def test_relay_owner_command_rejects_unscoped_or_secret_bearing_commands():
     for parts in (
         ["rotate"],
         ["deny", REMOTE_KEY],
-        ["join", "K1-" + "a" * 32],
+        ["join", "ABCD-EFGH"],
     ):
         with pytest.raises(harness.AcceptanceError):
             harness._relay_command_value(parts)
@@ -1985,7 +1985,7 @@ def test_interactive_connect_rejects_enrollment_code_before_starting_tui(tmp_pat
         runner._interactive_connect(
             endpoint,
             ["--simple", "--project", str(tmp_path), "--attach", "lapis"],
-            ["join", "K1-" + "a" * 32],
+            ["join", "ABCD-EFGH"],
             timeout=1,
         )
     assert raised.value.code == "interactive_command_rejected"

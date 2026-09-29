@@ -979,41 +979,6 @@ async def test_lookup_route_resolves_offer_and_is_origin_bound(relay_client):
 
 
 @pytest.mark.asyncio
-async def test_lookup_route_keeps_the_k1_path_working_without_it(relay_client):
-    """0.10.7 clients never call /lookup; their offer id is in the code."""
-    issuer = SigningKey.generate()
-    device = SigningKey.generate()
-    await register_issuer(relay_client, issuer, ROOM_CAPABILITY, SESSION)
-
-    offer_id = "2" * 32
-    legacy_code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
-    _, verifier = service.derive_enrollment_code_verifier(legacy_code)
-    verifier_hash = service.enrollment_verifier_hash(offer_id, verifier)
-    create = _issuer_fields(
-        issuer,
-        offer_id,
-        service.ENROLLMENT_OFFERS_PATH,
-        expires_at=int(time.time()) + 300,
-        code_verifier_hash=verifier_hash,
-    )
-    status, result = await post_json(relay_client, service.ENROLLMENT_OFFERS_PATH, create)
-    assert status == 201
-
-    request_path = f"/relay/v1/enrollment/offers/{offer_id}/request"
-    request = _destination_fields(
-        device,
-        offer_id,
-        request_path,
-        round_id="3" * 32,
-        code_verifier=verifier,
-        envelope=b64url(b"legacy request"),
-    )
-    status, accepted = await post_json(relay_client, request_path, request)
-    assert status == 202
-    assert accepted == {"status": "pending", "receipt": "3" * 32}
-
-
-@pytest.mark.asyncio
 async def test_submit_request_carries_validates_and_defaults_device_name(relay_client):
     issuer = SigningKey.generate()
     device_a = SigningKey.generate()
