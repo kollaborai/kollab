@@ -316,18 +316,6 @@ class RelayCommands:
         domain = ProvisionedStateFile().get_network_preferences().get(value)
         return f"https://{domain}" if domain is not None else value
 
-    @staticmethod
-    def _format_networks() -> str:
-        from kollabor_config.provisioned_state import ProvisionedStateFile
-
-        networks = ProvisionedStateFile().get_network_preferences()
-        if not networks:
-            return "connect: no provisioned networks"
-        return "provisioned networks:\n" + "\n".join(
-            f"  {network_id}: {domain}"
-            for network_id, domain in sorted(networks.items())
-        )
-
     async def _discover(self, value: str):
         value = self._resolve_network_target(value)
         requested = normalize_target(value, document=False)
@@ -363,12 +351,10 @@ class RelayCommands:
             raise ValueError("Unsupported advertised relay control URL")
         return "wss://" + result.origin[len("https://") :] + "/relay/v1/ws"
 
-    async def format_status(self, *, show_keys: bool = False) -> str:
+    async def format_status(self) -> str:
         """`/connect status`, redesigned per the constitution (sections 5-6).
 
-        Names, not keys, appear here. ``show_keys`` appends the old
-        technical block (public key, workspace id, peer counts) for
-        operators who explicitly ask with ``/connect status keys``.
+        Names, not keys, appear here.
         """
         state = self.client.status()
         origin = state["origin"] or ""
@@ -384,12 +370,6 @@ class RelayCommands:
         device_name = self._device_name()
         if device_name:
             lines.append(f"this device {device_name}")
-        try:
-            provisioned = self._format_networks()
-        except Exception:
-            provisioned = ""
-        if provisioned.startswith("provisioned networks:"):
-            lines.append(provisioned)
 
         if domain:
             lines.append(f"contact route {domain}/c/{contact_route_hex(state['key'])}")
@@ -398,7 +378,6 @@ class RelayCommands:
 
         lines.append("online")
         remote_rows = await self._remote_rows()
-        own_identity = getattr(getattr(self.agent_bridge, "plugin", None), "_identity", None)
         for name in self._local_agent_names():
             lines.append(f"  {name} (this device)")
         network_trust = self._trust_level()
@@ -457,19 +436,6 @@ class RelayCommands:
                     detail += f"; retry in {recovery['retry_in_seconds']}s"
                 lines.append(detail)
 
-        if show_keys:
-            agent_id = getattr(own_identity, "agent_id", "unavailable")
-            lines.append("")
-            lines.append(f"your public key: {state['key']}")
-            lines.append(f"workspace id: {state['workspace_id']}")
-            lines.append(f"workspace path: {self.client.workspace}")
-            lines.append(f"agent id: {agent_id}")
-            lines.append(
-                f"online peers: {state['peers']}; approved keys: {state['approved_peers']}"
-            )
-            lines.append(
-                "Private room; conversation grants and receiving workspace permissions are separate."
-            )
         return "\n".join(lines)
 
     async def _attach(self, result, ca: str, cidrs: tuple[str, ...]) -> str:
@@ -687,7 +653,7 @@ class RelayCommands:
                 head, rest, source_agent=source_agent
             )
         if head == "status":
-            return await self.format_status(show_keys=rest.strip() == "keys")
+            return await self.format_status()
         if head == "revoke":
             if not rest:
                 return "usage: /connect revoke <device>"

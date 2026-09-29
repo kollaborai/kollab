@@ -311,8 +311,6 @@ def test_provisioned_network_target_is_resolved_without_reusing_private_origin_s
     assert RelayCommands._resolve_network_target("https://custom.example.org") == (
         "https://custom.example.org"
     )
-    assert network_id in RelayCommands._format_networks()
-    assert "relay.example.org" in RelayCommands._format_networks()
 
 
 def test_store_checks_actual_config_profile_collision_without_rewriting_it(

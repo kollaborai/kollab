@@ -285,10 +285,8 @@ it is never `open`. A name already on the network fails the accept with
 still delivers only between devices in the same room, so an accepted stranger
 cannot message an agent yet (constitution section 15).
 
-`/connect status` never shows keys, workspace ids, or `relay:` addresses by
-default — only names. Typing `/connect status keys` appends the previous
-technical block (public key, workspace id, peer counts) for operators who
-need it.
+`/connect status` never shows keys, workspace ids, or `relay:` addresses —
+only names.
 
 Join codes are 8 characters from `0-9A-Z` (without `I L O U`), shown as
 `XXXX-XXXX`, one device, five minutes, single use. `/connect code` prints one

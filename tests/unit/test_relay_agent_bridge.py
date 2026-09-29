@@ -695,17 +695,8 @@ async def test_relay_status_reports_the_attached_workspace_and_agent_identity(br
     status = await bridge.commands.format_status()
     assert f"{bridge.identity.identity} (this device)" in status
     assert bridge.commands.client.public_key not in status
-
-    keyed = await bridge.commands.format_status(show_keys=True)
-    client_status = bridge.commands.client.status()
-
-    assert f"workspace id: {client_status['workspace_id']}" in keyed
-    assert f"workspace path: {bridge.commands.client.workspace}" in keyed
-    assert f"agent id: {bridge.identity.agent_id}" in keyed
-    assert (
-        "Private room; conversation grants and receiving workspace permissions are separate."
-        in keyed
-    )
+    assert bridge.commands.client.status()["workspace_id"] not in status
+    assert bridge.identity.agent_id not in status
 
 
 @pytest.mark.asyncio
@@ -1977,11 +1968,12 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
             await second._owner_call("relay.event", {"id": "a" * 32})
         with pytest.raises(RelayError, match="method or parameters"):
             await second._owner_call("relay.arbitrary", {"id": "a" * 32})
-        # /connect status hides keys by default (docs/specs/agent-network-
-        # simple-flow.md section 6); "status keys" still proves the RPC
-        # reached the real owner's state.
-        forwarded = await second.command("status keys")
-        assert original_key in forwarded
+        # /connect status shows names, never keys (docs/specs/agent-network-
+        # simple-flow.md section 6); the owner's own agent in the list proves
+        # the RPC reached the real owner's state.
+        forwarded = await second.command("status")
+        assert "one (this device)" in forwarded
+        assert original_key not in forwarded
         assert second.commands is None
         # allow only means something under agents trust (open ignores grants).
         await second.command("trust agents")
@@ -1993,7 +1985,7 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
         await second._ensure_owner()
         assert second.commands is not None
         assert second.commands.client.public_key == original_key
-        assert original_key in await second.command("status keys")
+        assert "two (this device)" in await second.command("status")
     finally:
         for bridge, server in instances:
             await bridge.close()

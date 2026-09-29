@@ -11884,7 +11884,12 @@ class HubPlugin(BasePlugin):
             if asyncio.iscoroutine(result):
                 result = await result
             if isinstance(result, list):
-                agents = result
+                # Rows carry the relay: address; the CLI never gets it.
+                agents = [
+                    {k: v for k, v in row.items() if k not in ("address", "workspace_id")}
+                    for row in result
+                    if isinstance(row, dict)
+                ]
         except Exception as e:
             logger.debug("network_status: remote_agents failed: %s", e)
 

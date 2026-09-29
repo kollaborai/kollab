@@ -236,24 +236,6 @@ async def test_connect_snapshot_with_the_relay_down_still_returns_and_skips_knoc
 
 
 @pytest.mark.asyncio
-async def test_test_status_keys_appends_the_technical_block(tmp_path):
-    bridge = SimpleNamespace(
-        trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
-        remote_agents=lambda: [],
-        plugin=SimpleNamespace(_presence=None, _identity=None),
-        _enrollment_issuer=None,
-    )
-    commands = _relay_commands(tmp_path, agent_bridge=bridge)
-
-    status = await commands.format_status(show_keys=True)
-
-    assert commands.client.public_key in status
-    assert "workspace id:" in status
-    assert "Private room" in status
-
-
-@pytest.mark.asyncio
 async def test_status_lists_offline_devices_for_approved_keys_with_no_online_agents(tmp_path):
     offline_key = "b" * 64
     bridge = SimpleNamespace(
@@ -311,24 +293,6 @@ async def test_status_shows_trust_suffix_when_peer_override_differs_from_network
     status = await commands.format_status()
 
     assert "infra@alzan-prod-home - idle  trust agents" in status
-
-
-@pytest.mark.asyncio
-async def test_connect_status_keys_reaches_format_status_with_show_keys(tmp_path):
-    bridge = SimpleNamespace(
-        trust_level=lambda: "open",
-        device_name=lambda: "",
-        remote_agents=lambda: [],
-        plugin=SimpleNamespace(_presence=None, _identity=None),
-        _enrollment_issuer=None,
-    )
-    commands = _relay_commands(tmp_path, agent_bridge=bridge)
-
-    plain = await commands._run("status", source_agent=None)
-    keyed = await commands._run("status keys", source_agent=None)
-
-    assert commands.client.public_key not in plain
-    assert commands.client.public_key in keyed
 
 
 # --------------------------------------------------------------------- #
