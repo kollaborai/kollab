@@ -36,6 +36,7 @@ from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
+from .device_names import DEFAULT_TRUST, format_handle, parse_handle
 from .messaging_bridge import (
     BRIDGE_CONFLICT_BACKOFF,
     BridgeConflictError,
@@ -102,39 +103,74 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
-# One list feeds the command palette and the /connect router, so a documented
-# subcommand can't be listed without being routable (or the reverse).
+# Three lists per the agent network constitution (docs/specs/agent-network-
+# simple-flow.md, section 6): the shown palette, the advanced (help all,
+# trust manual) commands, and the removed names with their one-release
+# redirect message. A documented subcommand can't be listed without being
+# routable (or the reverse).
 CONNECT_SUBCOMMANDS = [
-    SubcommandInfo("enroll", "[domain]", "Enter an enrollment code in the private form"),
-    SubcommandInfo("offer", "[domain]", "Create a one-device, five-minute enrollment code"),
-    SubcommandInfo("requests", "", "List pending enrollment requests"),
-    SubcommandInfo("accept", "<receipt-id>", "Accept a verified enrollment request"),
-    SubcommandInfo("reject", "<receipt-id>", "Reject a verified enrollment request"),
-    SubcommandInfo("networks", "", "List provisioned networks and their domains"),
-    SubcommandInfo("status", "", "Show transport state and this workspace's key"),
-    SubcommandInfo("peers", "", "List online peers and their approval state"),
-    SubcommandInfo("invite", "", "Save a private invitation file"),
-    SubcommandInfo("join", "<file>", "Join from a private invitation file"),
-    SubcommandInfo("contact-point", "[domain]", "Show the contact route to share"),
-    SubcommandInfo("contact", "[domain]", "Send a sealed introduction"),
-    SubcommandInfo("contacts", "[domain]", "Review introductions sent to this key"),
-    SubcommandInfo("approve", "<peer-key>", "Permit encrypted ping and presence"),
-    SubcommandInfo("revoke", "<peer-key>", "Remove a peer's approval and grants"),
-    SubcommandInfo("ping", "<peer-key>", "Request an encrypted presence response"),
-    SubcommandInfo("rotate", "", "Replace the room capability, clear approvals"),
-    SubcommandInfo("disconnect", "", "Close the connection, stop reconnecting"),
-    SubcommandInfo("agents", "[local|peer-key]", "List remote or local agents"),
-    SubcommandInfo("allow", "<peer-key> <agent>", "Let a peer talk to a local agent"),
-    SubcommandInfo("deny", "<peer-key> [agent]", "Revoke a peer's access, cancel work"),
-    SubcommandInfo("grants", "", "List receiving and sending grants"),
-    SubcommandInfo("authorize", "<address> <request>", "Authorize one exact request"),
-    SubcommandInfo("send", "<address> <request>", "Authorize and send one request"),
-    SubcommandInfo("withdraw", "<grant-id>", "Withdraw a sending grant"),
-    SubcommandInfo("task", "<address> <id>", "Inspect a remote task"),
-    SubcommandInfo("cancel", "<address> <id>", "Cancel a remote task"),
-    SubcommandInfo("answer", "<event-id> <text>", "Answer a pending question"),
-    SubcommandInfo("help", "", "Show usage for every subcommand"),
+    SubcommandInfo("code", "", "Print a join code without the screen"),
+    SubcommandInfo("accept", "<device>", "Accept a join or knock request by name"),
+    SubcommandInfo("reject", "<device>", "Reject a join or knock request by name"),
+    SubcommandInfo(
+        "status", "", "Show network, this device, contact route, online agents"
+    ),
+    SubcommandInfo("name", "<name>", "Name this device"),
+    SubcommandInfo("trust", "open|agents|manual", "Trust level for this network"),
+    SubcommandInfo(
+        "knock", '<route> "text"', "Introduce yourself to a stranger's contact route"
+    ),
+    SubcommandInfo("knocks", "", "Review introductions you received"),
+    SubcommandInfo(
+        "allow", "<device> <agent>", "Let a device's agent message a local agent"
+    ),
+    SubcommandInfo("deny", "<device> [agent]", "Revoke a device's access"),
+    SubcommandInfo("revoke", "<device>", "Remove a device or peer"),
+    SubcommandInfo("leave", "[domain]", "Disconnect and stop reconnecting"),
+    SubcommandInfo(
+        "help", "[all]", "This list; all adds the manual-trust and reset commands"
+    ),
 ]
+
+# Only under /connect help all: trust-manual conversation commands and resets.
+CONNECT_ADVANCED = [
+    SubcommandInfo(
+        "authorize",
+        "<agent@device> <request>",
+        "Authorize one exact request (trust manual)",
+    ),
+    SubcommandInfo(
+        "send",
+        "<agent@device> <request>",
+        "Authorize and send one request (trust manual)",
+    ),
+    SubcommandInfo("withdraw", "<grant-id>", "Withdraw a sending grant (trust manual)"),
+    SubcommandInfo(
+        "answer", "<event-id> <text>", "Answer a pending question (trust manual)"
+    ),
+    SubcommandInfo("task", "<agent@device> <id>", "Inspect a remote task (trust manual)"),
+    SubcommandInfo("cancel", "<agent@device> <id>", "Cancel a remote task (trust manual)"),
+    SubcommandInfo("rotate", "", "Replace the network secret after a lost device"),
+]
+
+# Removed subcommand -> the redirect message the router prints for one release.
+CONNECT_REMOVED = {
+    "enroll": "use /connect",
+    "offer": "use /connect code",
+    "requests": "use /connect or /connect status",
+    "peers": "use /connect or /connect status",
+    "agents": "use /connect or /connect status",
+    "networks": "use /connect or /connect status",
+    "approve": "accepting a device approves it; presence is on /connect",
+    "ping": "accepting a device approves it; presence is on /connect",
+    "contact-point": "your contact route is in /connect status",
+    "contact": "use /connect knock, /connect knocks",
+    "contacts": "use /connect knock, /connect knocks",
+    "invite": "file pairing is gone; use a join code",
+    "join": "file pairing is gone; use a join code",
+    "disconnect": "use /connect leave",
+    "grants": "use /connect status",
+}
 
 CODE_IN_COMMAND = (
     "connect: codes never go in a command. Run /connect with nothing after it "
@@ -142,8 +178,8 @@ CODE_IN_COMMAND = (
 )
 
 
-def format_connect_help() -> str:
-    """Aligned /connect usage built from the same list as the command menu."""
+def format_connect_help(show_all: bool = False) -> str:
+    """Aligned /connect usage built from the same lists as the command menu."""
     rows = [
         ("/connect", "Join with a code from a connected device (private form)"),
         ("/connect <domain>", "Connect this agent to a network, e.g. kollabor.ai"),
@@ -152,8 +188,16 @@ def format_connect_help() -> str:
         (f"/connect {sub.name} {sub.args}".rstrip(), sub.description)
         for sub in CONNECT_SUBCOMMANDS
     ]
-    width = max(len(left) for left, _ in rows)
-    return "\n".join(f"{left:<{width}}  {text}" for left, text in rows)
+    advanced_rows = [
+        (f"/connect {sub.name} {sub.args}".rstrip(), sub.description)
+        for sub in CONNECT_ADVANCED
+    ]
+    width = max(len(left) for left, _ in rows + advanced_rows)
+    lines = [f"{left:<{width}}  {text}" for left, text in rows]
+    if show_all:
+        lines.append("advanced (trust manual, resets):")
+        lines.extend(f"{left:<{width}}  {text}" for left, text in advanced_rows)
+    return "\n".join(lines)
 
 
 def _looks_like_connect_target(value: str) -> bool:
@@ -169,7 +213,10 @@ def _looks_like_connect_target(value: str) -> bool:
 
 
 def _unknown_connect_subcommand(head: str) -> str:
-    matches = [sub.name for sub in CONNECT_SUBCOMMANDS if sub.name.startswith(head)]
+    names = [sub.name for sub in CONNECT_SUBCOMMANDS] + [
+        sub.name for sub in CONNECT_ADVANCED
+    ]
+    matches = [name for name in names if name.startswith(head)]
     hint = f" Did you mean /connect {matches[0]}?" if len(matches) == 1 else ""
     return f"connect: unknown subcommand '{head}'.{hint} Run /connect help for the list."
 
@@ -2662,6 +2709,14 @@ class HubPlugin(BasePlugin):
                 error=f"invalid target '{target}'. use a real agent identity name.",
             )
 
+        # A remote target is addressed agent@device (docs/specs/
+        # agent-network-simple-flow.md section 4). Normalize case so dedup
+        # and routing see one canonical form regardless of how the model
+        # capitalized it.
+        handle = parse_handle(target)
+        if handle:
+            target = format_handle(*handle)
+
         # Dedup
         dedup_window = 120
         msg_hash = hashlib.md5(f"{target}:{content}".encode()).hexdigest()
@@ -2833,8 +2888,9 @@ class HubPlugin(BasePlugin):
             )
 
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
+        scope = str(tool_data.get("scope", "") or "").strip().lower()
         result_text = await self._handle_broadcast_command(
-            content, force=force_attr in ("true", "yes", "1")
+            content, force=force_attr in ("true", "yes", "1"), scope=scope
         )
         rejected = "rejected:" in result_text.lower()
         return ToolExecutionResult(
@@ -7189,9 +7245,22 @@ class HubPlugin(BasePlugin):
         lines.append(f'you are "{self._identity.identity}" on the kollabor hub.')
         if self._identity.is_coordinator:
             lines.append("you are the coordinator.")
+
+        network_domain = self._relay_network_domain()
+        if network_domain:
+            trust = self._relay_trust_level()
+            lines.append(
+                f"network: {self._relay_network_name(network_domain)} "
+                f"via {network_domain} (trust: {trust})"
+            )
+            device_name = self._relay_device_name()
+            if device_name:
+                lines.append(f"this device: {device_name}")
+
         lines.append("")
 
-        if self._roster:
+        remote_rows = self._remote_agent_rows()
+        if self._roster or remote_rows:
             lines.append("active agents:")
             for agent in self._roster:
                 if not isinstance(agent, dict):
@@ -7205,6 +7274,25 @@ class HubPlugin(BasePlugin):
                     lines.append(f"  {ident}{coord} - {status}: {task}")
                 else:
                     lines.append(f"  {ident}{coord} - {status}")
+            for row in remote_rows:
+                handle = row.get("handle") or format_handle(
+                    row.get("name", "?"), row.get("device", "?")
+                )
+                status = row.get("state", "unknown")
+                task = row.get("task", "") or row.get("current_task", "")
+                if task:
+                    lines.append(f"  {handle} - {status}: {task}")
+                else:
+                    lines.append(f"  {handle} - {status}")
+            offline_devices = sorted(
+                {
+                    row.get("device")
+                    for row in remote_rows
+                    if not row.get("online") and row.get("device")
+                }
+            )
+            if offline_devices:
+                lines.append(f"offline devices: {', '.join(offline_devices)}")
         else:
             lines.append("no other agents online.")
 
@@ -7223,6 +7311,12 @@ class HubPlugin(BasePlugin):
 
         lines.append("to message an agent, ALWAYS use this exact format:")
         lines.append('<hub_msg to="identity">your message</hub_msg>')
+        lines.append("remote agents use the same tag with their full name:")
+        lines.append('<hub_msg to="infra@alzan-prod-home">your message</hub_msg>')
+        lines.append(
+            "a remote agent runs your message with its own tools on its own machine "
+            "and answers with the same tag."
+        )
         lines.append("")
         lines.append(
             "IMPORTANT: when asked to delegate, coordinate, or assign tasks "
@@ -7918,6 +8012,27 @@ class HubPlugin(BasePlugin):
             Empty list means all recipients accepted.
         """
         relay = getattr(self, "_relay_agent", None)
+        handle = parse_handle(message.to or "") if relay is not None else None
+        if handle is not None:
+            # An agent@device handle: the network is the hub across machines
+            # (docs/specs/agent-network-simple-flow.md section 4). Under open
+            # and agents trust this needs no human grant -- resolve the
+            # handle and deliver it like any other hub message.
+            from .relay_state import RelayError
+
+            handle_str = format_handle(*handle)
+            resolve = getattr(relay, "resolve_handle", None)
+            send = getattr(relay, "send", None)
+            if resolve is None or send is None:
+                return [(message.to, "network messaging is not available on this build")]
+            try:
+                address = resolve(handle_str)
+                await send(address, message.content, kind="message")
+            except RelayError as exc:
+                return [(message.to, str(exc))]
+            message.metadata["network"] = {"to": address}
+            self._trace_delivery(message, "remote_accepted", detail="network")
+            return []
         if (message.to or "").startswith("relay:"):
             from .relay_state import ID, RelayError
 
@@ -8283,6 +8398,68 @@ class HubPlugin(BasePlugin):
             return MessageScope.PROJECT.value
         return MessageScope.DIRECT.value
 
+    def _remote_agent_rows(self) -> list:
+        """Rows from the relay bridge's remote_agents(), degrading to none.
+
+        Slice A (relay_agent.py) owns the real implementation; this only
+        needs to survive its absence on older or partial builds.
+        """
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "remote_agents", None)
+        if not callable(getter):
+            return []
+        try:
+            rows = getter()
+        except Exception:
+            return []
+        if not isinstance(rows, (list, tuple)):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def _relay_network_domain(self) -> str:
+        """This device's network domain for display, without the scheme."""
+        commands = getattr(self, "_relay_commands", None)
+        client = getattr(commands, "client", None)
+        origin = getattr(getattr(client, "state", None), "origin", "") if client else ""
+        if isinstance(origin, str) and origin:
+            return origin[len("https://") :] if origin.startswith("https://") else origin
+        return ""
+
+    def _relay_network_name(self, domain: str) -> str:
+        """The network's human name when available, else its domain."""
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "network_name", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return value
+            except Exception:
+                pass
+        return domain
+
+    def _relay_trust_level(self) -> str:
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "trust_level", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return value
+            except Exception:
+                pass
+        return DEFAULT_TRUST
+
+    def _relay_device_name(self) -> str:
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "device_name", None)
+        if callable(getter):
+            try:
+                return getter() or ""
+            except Exception:
+                pass
+        return ""
+
     async def _maybe_route_to_coordinator(self, response: str) -> None:
         """Auto-route untagged responses to coordinator if enabled.
 
@@ -8476,19 +8653,18 @@ class HubPlugin(BasePlugin):
         if any(part.upper().startswith("K1-") for part in parts):
             return CODE_IN_COMMAND
         if head == "help":
-            return format_connect_help()
-        enrollment_commands = {"", "enroll"}
-        if head in enrollment_commands:
+            show_all = len(parts) >= 2 and parts[1].lower() == "all"
+            return format_connect_help(show_all)
+        if head in CONNECT_REMOVED:
+            return f"connect: {CONNECT_REMOVED[head]}"
+        if head == "":
+            return await self._open_connect_altview("kollabor.ai")
+        if head == "code":
             if len(parts) > 2:
-                return CODE_IN_COMMAND
-            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            return await self._open_connect_altview(domain)
-        if head == "offer":
-            if len(parts) > 2:
-                return "connect: use /connect offer [domain]"
+                return "connect: use /connect code [domain]"
             domain = parts[1] if len(parts) == 2 else "kollabor.ai"
             return await self._open_connect_offer_altview(domain)
-        if head in {"contact", "contacts"}:
+        if head in {"knock", "knocks"}:
             if len(parts) > 2:
                 return f"connect: use /connect {head} [relay-domain]"
             if getattr(getattr(self, "_cli_args", None), "attach", None):
@@ -8498,16 +8674,19 @@ class HubPlugin(BasePlugin):
             domain = parts[1] if len(parts) == 2 else "kollabor.ai"
             return (
                 await self._open_contact_request_altview(domain)
-                if head == "contact"
+                if head == "knock"
                 else await self._open_contact_review_altview(domain)
             )
-        if head not in {sub.name for sub in CONNECT_SUBCOMMANDS}:
+        known = {sub.name for sub in CONNECT_SUBCOMMANDS} | {
+            sub.name for sub in CONNECT_ADVANCED
+        }
+        if head not in known:
             if not _looks_like_connect_target(parts[0]):
                 return _unknown_connect_subcommand(head)
             if len(parts) != 1:
                 return CODE_IN_COMMAND
             # A domain argument joins the public discovery/relay network. Device
-            # enrollment remains an explicit private flow via /connect enroll.
+            # enrollment remains an explicit private flow via bare /connect.
         if getattr(getattr(self, "_cli_args", None), "attach", None):
             state = (
                 self.event_bus.get_service("state_service") if self.event_bus else None
@@ -10805,6 +10984,13 @@ class HubPlugin(BasePlugin):
             proj = f" [{a.project}]" if a.project else ""
             lines.append(f"  {a.identity}{role}{me}: {state_str}{proj}{task}")
 
+        for row in self._remote_agent_rows():
+            handle = row.get("handle") or format_handle(
+                row.get("name", "?"), row.get("device", "?")
+            )
+            online_str = "online" if row.get("online") else "offline"
+            lines.append(f"  {handle} - {row.get('state', 'unknown')} (device {online_str})")
+
         pending = self._work_queue.get_pending() if self._work_queue else []
         if pending:
             lines.append(f"\nwork queue: {len(pending)} pending")
@@ -10991,7 +11177,9 @@ class HubPlugin(BasePlugin):
             )
         return f"sent to {target}"
 
-    async def _handle_broadcast_command(self, content: str, force: bool = False) -> str:
+    async def _handle_broadcast_command(
+        self, content: str, force: bool = False, scope: str = ""
+    ) -> str:
         if not content:
             return "usage: /hub broadcast <message>"
         msg = HubMessage(
@@ -11008,6 +11196,33 @@ class HubPlugin(BasePlugin):
             return "broadcast sent (hub not fully initialized)"
         agents = self._presence.get_cached_agents()
         base = f"broadcast to {len(agents)} agent(s)"
+
+        # scope="network": under open trust, also reach every online remote
+        # agent (docs/specs/agent-network-simple-flow.md section 7). Any
+        # other trust level stays local-only -- messaging a stranger's
+        # device needs an explicit allow, not a broadcast.
+        if scope == "network" and self._relay_trust_level() == "open":
+            relay = getattr(self, "_relay_agent", None)
+            resolve = getattr(relay, "resolve_handle", None)
+            send = getattr(relay, "send", None)
+            reached = 0
+            if callable(resolve) and callable(send):
+                from .relay_state import RelayError
+
+                for row in self._remote_agent_rows():
+                    if not row.get("online"):
+                        continue
+                    handle = row.get("handle") or format_handle(
+                        row.get("name", "?"), row.get("device", "?")
+                    )
+                    try:
+                        address = resolve(handle)
+                        await send(address, content, kind="message")
+                        reached += 1
+                    except RelayError:
+                        continue
+            base += f"; {reached} network agent(s)"
+
         if rejections:
             parts = [f"{ident}: {reason}" for ident, reason in rejections]
             base += f" (rejected: {'; '.join(parts)})"
