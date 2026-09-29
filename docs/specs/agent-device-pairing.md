@@ -100,13 +100,28 @@ Required sequence:
    preserves other local approvals. Membership still does not grant permission
    for unsolicited conversations or remote workspace tools.
 
-Code design must resist guessing and malicious bootstrap substitution. Use a
-high-entropy generated code (at least 100 random bits, presented in copyable
-groups), or a reviewed password-authenticated key exchange if short human PINs
-are selected. Hashing a six-digit PIN and using it directly as an encryption key
-is not acceptable. The service stores bounded, expiring encrypted enrollment
-records, with atomic redemption across workers/hosts, connection/source limits
-and admission quotas. Codes are never reusable membership credentials.
+Code design must resist guessing and malicious bootstrap substitution. As of
+`docs/specs/agent-network-simple-flow.md` section 8 (the constitution; it wins
+where this document disagrees), the code is 8 characters from a 32-symbol
+alphabet (`0-9 A-Z` without `I L O U`), shown as `XXXX-XXXX`, typed in either
+case with the dash optional -- 40 bits, one device, five minutes, single use.
+Because the offer id is no longer inside the code, the joining device also
+derives a lookup tag, `HMAC-SHA256(key = lookup-domain || canonical relay
+origin, msg = the code's secret)`, and sends it to the relay's
+`/relay/v1/enrollment/lookup` route to resolve the offer id; the issuer
+registers a hash of the same tag at offer-creation time. The relay stores
+hashes of both the lookup tag and the verifier, never the code or the tag
+itself, and burns the offer -- deleting it outright -- after 5 failed lookups
+or proofs from any source, returning the same generic error a missing or
+expired offer would. The verifier stays `scrypt(code secret, salt =
+sha256(domain || offer id))`, resolved offer id substituted in for a short
+code. The previous `K1-<offer id>-XXXX-XXXX-XXXX-XXXX-XXXX` (100-bit) format
+is accepted for one release so devices on an older client version can still
+join; a relay serving both formats is required during that overlap. Hashing a
+six-digit PIN and using it directly as an encryption key is not acceptable.
+The service stores bounded, expiring encrypted enrollment records, with atomic
+redemption across workers/hosts, connection/source limits and admission
+quotas. Codes are never reusable membership credentials.
 
 ### Provisioned configuration and tokens
 

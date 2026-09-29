@@ -29,6 +29,7 @@ from aiohttp import WSCloseCode, WSMsgType, web
 from nacl.exceptions import BadSignatureError, CryptoError
 from nacl.signing import VerifyKey
 
+from .device_names import NAME_RE
 from .relay_backend import (
     CONTACT_REQUEST_TTL_MS,
     ENROLLMENT_MAX_NONCES,
@@ -68,8 +69,13 @@ _ENROLLMENT_CODE = re.compile(
     r"K1-([0-9a-f]{32})-((?:[0-9A-HJKMNP-TV-Z]{4}-){4}[0-9A-HJKMNP-TV-Z]{4})\Z",
     re.IGNORECASE,
 )
+_SHORT_ENROLLMENT_CODE = re.compile(
+    r"([0-9A-HJKMNP-TV-Z]{4})-?([0-9A-HJKMNP-TV-Z]{4})\Z",
+    re.IGNORECASE,
+)
 
 ENROLLMENT_OFFERS_PATH = "/relay/v1/enrollment/offers"
+ENROLLMENT_LOOKUP_PATH = "/relay/v1/enrollment/lookup"
 ENROLLMENT_REQUEST_PATH = "/relay/v1/enrollment/offers/{offer_id}/request"
 ENROLLMENT_ISSUER_POLL_PATH = "/relay/v1/enrollment/offers/{offer_id}/poll"
 ENROLLMENT_CHALLENGE_PATH = "/relay/v1/enrollment/offers/{offer_id}/challenge"
@@ -81,6 +87,7 @@ ENROLLMENT_ACK_POLL_PATH = "/relay/v1/enrollment/offers/{offer_id}/ack/poll"
 ENROLLMENT_SIGNATURE_DOMAIN = b"kollab-relay-enrollment-http/1\x00"
 ENROLLMENT_CODE_KDF_DOMAIN = b"kollab-relay-enrollment-code-v1\x00"
 ENROLLMENT_VERIFIER_DOMAIN = b"kollab-relay-enrollment-verifier-v1\x00"
+ENROLLMENT_LOOKUP_DOMAIN = b"kollab-relay-enrollment-lookup-v1\x00"
 ENROLLMENT_CODE_SCRYPT_N = 1 << 14
 ENROLLMENT_CODE_SCRYPT_R = 8
 ENROLLMENT_CODE_SCRYPT_P = 1
@@ -106,6 +113,7 @@ _HEX64 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
 _HEX128 = {"type": "string", "pattern": "^[0-9a-f]{128}$"}
 _INTEGER = {"type": "integer", "minimum": 0}
 _BASE64URL_32 = {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}
+_DEVICE_NAME = {"type": "string", "pattern": f"^{NAME_RE.pattern}$", "maxLength": 63}
 _ENVELOPE_SCHEMA = {
     "type": "string",
     "pattern": "^[A-Za-z0-9_-]+$",
@@ -113,12 +121,15 @@ _ENVELOPE_SCHEMA = {
 }
 
 
-def _schema(properties: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _schema(
+    properties: dict[str, dict[str, Any]], *, optional: tuple[str, ...] = ()
+) -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": False,
-        "required": list(properties),
+        "required": [key for key in properties if key not in optional],
+        "optional": list(optional),
         "properties": properties,
     }
 
@@ -142,13 +153,24 @@ _DESTINATION_PROPERTIES = {
     "signature": _HEX128,
 }
 
+_LOOKUP_PROPERTIES = {
+    "v": {"const": 1},
+    "destination_key": _HEX64,
+    "lookup": _BASE64URL_32,
+    "issued_at": _INTEGER,
+    "nonce": _HEX32,
+    "signature": _HEX128,
+}
+
 ENROLLMENT_JSON_SCHEMAS = {
     "create_offer": _schema(
         {
             **_ISSUER_PROPERTIES,
             "expires_at": _INTEGER,
             "code_verifier_hash": _HEX64,
-        }
+            "lookup_hash": _HEX64,
+        },
+        optional=("lookup_hash",),
     ),
     "submit_request": _schema(
         {
@@ -156,8 +178,11 @@ ENROLLMENT_JSON_SCHEMAS = {
             "round_id": _HEX32,
             "code_verifier": _BASE64URL_32,
             "envelope": _ENVELOPE_SCHEMA,
-        }
+            "device_name": _DEVICE_NAME,
+        },
+        optional=("device_name",),
     ),
+    "lookup_offer": _schema(_LOOKUP_PROPERTIES),
     "issuer_poll": _schema({**_ISSUER_PROPERTIES, "claim_id": _HEX32}),
     "publish_challenge": _schema(
         {
@@ -250,34 +275,78 @@ CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
 
 
 def generate_enrollment_code(offer_id: str) -> str:
-    """Generate the local-only 100-bit code for one already-chosen offer ID."""
+    """Generate the local-only 40-bit short join code; the offer id is looked up.
+
+    Kept validating ``offer_id`` even though it is no longer embedded, since
+    every call site already has it in hand and a bad id here is a caller bug.
+    """
     if not isinstance(offer_id, str) or not _HEX_32.fullmatch(offer_id):
         raise ValueError("invalid enrollment offer id")
     alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-    secret = "".join(secrets.choice(alphabet) for _ in range(20))
-    groups = "-".join(secret[index : index + 4] for index in range(0, 20, 4))
-    return f"K1-{offer_id}-{groups}"
+    secret = "".join(secrets.choice(alphabet) for _ in range(8))
+    return f"{secret[:4]}-{secret[4:]}"
 
 
-def derive_enrollment_code_verifier(code: str) -> tuple[str, str]:
-    """Derive `(offer_id, verifier)` locally; never call this with an HTTP body."""
+def _normalize_enrollment_code(code: str) -> tuple[str | None, str]:
+    """Return (offer_id, normalized secret) for a K1 or short code.
+
+    A K1 code carries its own offer id; a short code does not, and the
+    caller must resolve one first through the lookup route.
+    """
     if not isinstance(code, str):
         raise ValueError("invalid enrollment code")
-    match = _ENROLLMENT_CODE.fullmatch(code.strip())
-    if match is None:
-        raise ValueError("invalid enrollment code")
-    offer_id = match.group(1).lower()
-    secret = match.group(2).replace("-", "").upper().encode("ascii")
-    salt = hashlib.sha256(ENROLLMENT_CODE_KDF_DOMAIN + bytes.fromhex(offer_id)).digest()
+    stripped = code.strip()
+    match = _ENROLLMENT_CODE.fullmatch(stripped)
+    if match is not None:
+        return match.group(1).lower(), match.group(2).replace("-", "").upper()
+    match = _SHORT_ENROLLMENT_CODE.fullmatch(stripped)
+    if match is not None:
+        return None, (match.group(1) + match.group(2)).upper()
+    raise ValueError("invalid enrollment code")
+
+
+def derive_enrollment_code_verifier(code: str, offer_id: str | None = None) -> tuple[str, str]:
+    """Derive `(offer_id, verifier)` locally; never call this with an HTTP body.
+
+    A K1 code's own offer id always wins. A short code has none embedded, so
+    the resolved id from the lookup route must be passed in.
+    """
+    parsed_offer_id, secret = _normalize_enrollment_code(code)
+    resolved_offer_id = parsed_offer_id if parsed_offer_id is not None else offer_id
+    if not isinstance(resolved_offer_id, str) or not _HEX_32.fullmatch(resolved_offer_id):
+        raise ValueError("invalid enrollment offer id")
+    salt = hashlib.sha256(
+        ENROLLMENT_CODE_KDF_DOMAIN + bytes.fromhex(resolved_offer_id)
+    ).digest()
     verifier = hashlib.scrypt(
-        secret,
+        secret.encode("ascii"),
         salt=salt,
         n=ENROLLMENT_CODE_SCRYPT_N,
         r=ENROLLMENT_CODE_SCRYPT_R,
         p=ENROLLMENT_CODE_SCRYPT_P,
         dklen=32,
     )
-    return offer_id, _base64url_encode(verifier)
+    return resolved_offer_id, _base64url_encode(verifier)
+
+
+def derive_enrollment_lookup_tag(code: str, origin: str) -> str:
+    """Derive the base64url lookup tag a joiner sends to find its offer.
+
+    Meaningless for a K1 code (its offer id is already in hand), but the
+    derivation works for either format since it only uses the secret.
+    """
+    _, secret = _normalize_enrollment_code(code)
+    if not isinstance(origin, str) or not origin:
+        raise ValueError("invalid origin")
+    key = ENROLLMENT_LOOKUP_DOMAIN + origin.encode("ascii")
+    tag = hmac.new(key, secret.encode("ascii"), hashlib.sha256).digest()
+    return _base64url_encode(tag)
+
+
+def enrollment_lookup_hash(lookup: str) -> str:
+    """Return the relay-storable hash of a lookup tag; the tag is bearer-equivalent."""
+    tag_bytes = _base64url_decode(lookup, expected_bytes=32)
+    return hashlib.sha256(tag_bytes).hexdigest()
 
 
 def enrollment_verifier_hash(offer_id: str, verifier: str) -> str:
@@ -434,9 +503,13 @@ def _validate_contact_schema(name: str, frame: dict[str, Any]) -> None:
 
 def _validate_json_schema(schema: dict[str, Any], frame: dict[str, Any]) -> None:
     properties = schema["properties"]
-    if set(frame) != set(schema["required"]):
+    required = set(schema["required"])
+    allowed = required | set(schema.get("optional", ()))
+    if not required <= set(frame) <= allowed:
         raise ValueError("unexpected request shape")
     for field_name, rules in properties.items():
+        if field_name not in frame:
+            continue
         value = frame[field_name]
         expected_type = rules.get("type")
         if expected_type == "string":
@@ -826,6 +899,7 @@ def create_app(config: RelayConfig) -> web.Application:
     app.router.add_get("/relay/v1/metrics", metrics_handler)
     app.router.add_get(WEBSOCKET_PATH, websocket_handler)
     app.router.add_post(ENROLLMENT_OFFERS_PATH, enrollment_offer_handler)
+    app.router.add_post(ENROLLMENT_LOOKUP_PATH, enrollment_lookup_handler)
     app.router.add_post(ENROLLMENT_REQUEST_PATH, enrollment_request_handler)
     app.router.add_post(ENROLLMENT_ISSUER_POLL_PATH, enrollment_issuer_poll_handler)
     app.router.add_post(ENROLLMENT_CHALLENGE_PATH, enrollment_challenge_handler)
@@ -1506,19 +1580,22 @@ async def enrollment_offer_handler(request: web.Request) -> web.Response:
     ttl_seconds = expires_at - now
     if not ENROLLMENT_MIN_TTL_SECONDS <= ttl_seconds <= ENROLLMENT_MAX_TTL_SECONDS:
         raise _EnrollmentHTTPError(400, "invalid_request")
+    lookup_hash = frame.get("lookup_hash")
+    digest_fields = {
+        "offer_id": frame["offer_id"],
+        "issuer_key": frame["issuer_key"],
+        "expires_at": expires_at,
+        "code_verifier_hash": frame["code_verifier_hash"],
+    }
     fields = {
         "issuer_key": frame["issuer_key"],
         "expires_at": str(expires_at),
         "code_verifier_hash": frame["code_verifier_hash"],
-        "create_digest": _content_digest(
-            {
-                "offer_id": frame["offer_id"],
-                "issuer_key": frame["issuer_key"],
-                "expires_at": expires_at,
-                "code_verifier_hash": frame["code_verifier_hash"],
-            }
-        ),
     }
+    if lookup_hash is not None:
+        digest_fields["lookup_hash"] = lookup_hash
+        fields["lookup_hash"] = lookup_hash
+    fields["create_digest"] = _content_digest(digest_fields)
     result = await state.backend.create_enrollment_offer(
         frame["offer_id"],
         fields,
@@ -1537,12 +1614,31 @@ async def enrollment_offer_handler(request: web.Request) -> web.Response:
 
 
 @_enrollment_endpoint
+async def enrollment_lookup_handler(request: web.Request) -> web.Response:
+    """Resolve a short code's lookup tag to its offer id.
+
+    The same generic error covers a wrong guess, an expired offer, an
+    already-used offer, and a burned one -- a caller cannot tell them apart.
+    """
+    state: RelayState = request.app["relay_state"]
+    frame = await _read_enrollment_frame(request, "lookup_offer")
+    _verify_enrollment_request(state, request, frame, "destination_key")
+    await _consume_enrollment_nonce(state, frame, "destination_key")
+    lookup_hash = enrollment_lookup_hash(frame["lookup"])
+    offer_id = await state.backend.find_enrollment_offer_by_lookup(lookup_hash)
+    if offer_id is None:
+        raise _EnrollmentHTTPError(404, "unavailable")
+    return web.json_response({"offer_id": offer_id})
+
+
+@_enrollment_endpoint
 async def enrollment_request_handler(request: web.Request) -> web.Response:
     state: RelayState = request.app["relay_state"]
     frame = await _read_enrollment_frame(request, "submit_request")
     _verify_enrollment_request(state, request, frame, "destination_key")
     await _consume_enrollment_nonce(state, frame, "destination_key")
     candidate_hash = enrollment_verifier_hash(frame["offer_id"], frame["code_verifier"])
+    device_name = frame.get("device_name", "")
     digest = _content_digest(
         {
             "offer_id": frame["offer_id"],
@@ -1550,6 +1646,7 @@ async def enrollment_request_handler(request: web.Request) -> web.Response:
             "destination_key": frame["destination_key"],
             "candidate_hash": candidate_hash,
             "envelope": frame["envelope"],
+            "device_name": device_name,
         }
     )
     result = await state.backend.submit_enrollment_request(
@@ -1559,6 +1656,7 @@ async def enrollment_request_handler(request: web.Request) -> web.Response:
         candidate_hash=candidate_hash,
         envelope=frame["envelope"],
         content_digest=digest,
+        device_name=device_name,
     )
     if result == "invalid_code":
         raise _EnrollmentHTTPError(401, "invalid_contact")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import shutil
 import socket
 import tempfile
@@ -59,6 +60,17 @@ def _destination_fields(signer: SigningKey, offer_id: str, path: str, **extra):
     body = {
         "v": 1,
         "offer_id": offer_id,
+        "destination_key": bytes(signer.verify_key).hex(),
+        "issued_at": int(time.time()),
+        "nonce": service.secrets.token_hex(16),
+        **extra,
+    }
+    return service.sign_enrollment_request(signer, ORIGIN, "POST", path, body)
+
+
+def _lookup_fields(signer: SigningKey, path: str, **extra):
+    body = {
+        "v": 1,
         "destination_key": bytes(signer.verify_key).hex(),
         "issued_at": int(time.time()),
         "nonce": service.secrets.token_hex(16),
@@ -188,9 +200,8 @@ async def test_in_memory_enrollment_admission_has_global_source_and_nonce_caps(
 async def test_enrollment_code_and_signature_contract():
     offer_id = "1" * 32
     code = service.generate_enrollment_code(offer_id)
-    assert code.startswith(f"K1-{offer_id}-")
-    assert len(code.rsplit("-", 1)[-1]) == 4
-    derived_id, verifier = service.derive_enrollment_code_verifier(code.lower())
+    assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
+    derived_id, verifier = service.derive_enrollment_code_verifier(code.lower(), offer_id)
     assert derived_id == offer_id
     assert len(base64.urlsafe_b64decode(verifier + "=")) == 32
     assert service.enrollment_verifier_hash(
@@ -236,7 +247,7 @@ async def test_full_pairing_mailbox_is_key_pinned_idempotent_and_non_authorizing
 
     offer_id = "1" * 32
     code = service.generate_enrollment_code(offer_id)
-    parsed_offer_id, verifier = service.derive_enrollment_code_verifier(code)
+    parsed_offer_id, verifier = service.derive_enrollment_code_verifier(code, offer_id)
     assert parsed_offer_id == offer_id
     verifier_hash = service.enrollment_verifier_hash(offer_id, verifier)
     create = _issuer_fields(
@@ -350,6 +361,7 @@ async def test_full_pairing_mailbox_is_key_pinned_idempotent_and_non_authorizing
         "round_id": "2" * 32,
         "destination_key": bytes(device.verify_key).hex(),
         "envelope": request_envelope,
+        "device_name": "",
     }
     status, retry_claim = await post_json(
         client,
@@ -420,6 +432,7 @@ async def test_full_pairing_mailbox_is_key_pinned_idempotent_and_non_authorizing
         "round_id": "7" * 32,
         "destination_key": bytes(device.verify_key).hex(),
         "envelope": proof_envelope,
+        "device_name": "",
     }
 
     decision_path = service.ENROLLMENT_DECISION_PATH.format(offer_id=offer_id)
@@ -572,7 +585,7 @@ async def test_issuer_key_alone_and_plaintext_code_are_not_accepted(relay_client
     issuer = SigningKey.generate()
     offer_id = "d" * 32
     code = service.generate_enrollment_code(offer_id)
-    _, verifier = service.derive_enrollment_code_verifier(code)
+    _, verifier = service.derive_enrollment_code_verifier(code, offer_id)
     path = service.ENROLLMENT_OFFERS_PATH
     body = _issuer_fields(
         issuer,
@@ -606,7 +619,7 @@ async def test_memory_backend_bounds_capacity_failed_codes_and_expiry():
     backend = InMemoryBackend(NODE_ID, RelayLimits())
     offer_id = "f" * 32
     code = service.generate_enrollment_code(offer_id)
-    _, verifier = service.derive_enrollment_code_verifier(code)
+    _, verifier = service.derive_enrollment_code_verifier(code, offer_id)
     correct_hash = service.enrollment_verifier_hash(offer_id, verifier)
     fields = {
         "issuer_key": "1" * 64,
@@ -633,8 +646,10 @@ async def test_memory_backend_bounds_capacity_failed_codes_and_expiry():
             envelope=b64url(b"opaque"),
             content_digest=f"{attempt + 1:064x}",
         )
+        # At the cap the offer is burned outright, not merely rate limited, so
+        # a guesser sees the same generic error a missing offer would give.
         assert result == (
-            "rate_limited"
+            "unavailable"
             if attempt + 1 == ENROLLMENT_MAX_FAILED_CODES
             else "invalid_code"
         )
@@ -647,9 +662,9 @@ async def test_memory_backend_bounds_capacity_failed_codes_and_expiry():
             envelope=b64url(b"opaque"),
             content_digest="4" * 64,
         )
-        == "rate_limited"
+        == "unavailable"
     )
-    await asyncio.sleep(1.05)
+    # Burning deletes the offer, freeing capacity immediately -- no TTL wait.
     assert (
         await backend.create_enrollment_offer(
             "0" * 32, fields, ttl_ms=10_000, capacity=1
@@ -749,7 +764,7 @@ async def test_redis_backend_lua_mailbox_transitions_are_atomic(monkeypatch):
             assert "{mailbox}" in backend._enrollment_nonce_index_key()
             offer_id = "9" * 32
             code = service.generate_enrollment_code(offer_id)
-            _, verifier = service.derive_enrollment_code_verifier(code)
+            _, verifier = service.derive_enrollment_code_verifier(code, offer_id)
             verifier_hash = service.enrollment_verifier_hash(offer_id, verifier)
             fields = {
                 "issuer_key": "1" * 64,
@@ -917,3 +932,225 @@ async def test_redis_backend_lua_mailbox_transitions_are_atomic(monkeypatch):
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
+
+
+@pytest.mark.asyncio
+async def test_lookup_route_resolves_offer_and_is_origin_bound(relay_client):
+    issuer = SigningKey.generate()
+    device = SigningKey.generate()
+    await register_issuer(relay_client, issuer, ROOM_CAPABILITY, SESSION)
+
+    offer_id = "1" * 32
+    code = service.generate_enrollment_code(offer_id)
+    _, verifier = service.derive_enrollment_code_verifier(code, offer_id)
+    lookup_tag = service.derive_enrollment_lookup_tag(code, ORIGIN)
+    lookup_hash = service.enrollment_lookup_hash(lookup_tag)
+    create = _issuer_fields(
+        issuer,
+        offer_id,
+        service.ENROLLMENT_OFFERS_PATH,
+        expires_at=int(time.time()) + 300,
+        code_verifier_hash=service.enrollment_verifier_hash(offer_id, verifier),
+        lookup_hash=lookup_hash,
+    )
+    status, result = await post_json(relay_client, service.ENROLLMENT_OFFERS_PATH, create)
+    assert status == 201
+
+    lookup_body = _lookup_fields(device, service.ENROLLMENT_LOOKUP_PATH, lookup=lookup_tag)
+    status, found = await post_json(relay_client, service.ENROLLMENT_LOOKUP_PATH, lookup_body)
+    assert status == 200
+    assert found == {"offer_id": offer_id}
+
+    # A different relay origin derives a different tag; it does not resolve.
+    other_origin_tag = service.derive_enrollment_lookup_tag(code, "https://other.example")
+    other_body = _lookup_fields(device, service.ENROLLMENT_LOOKUP_PATH, lookup=other_origin_tag)
+    status, miss = await post_json(relay_client, service.ENROLLMENT_LOOKUP_PATH, other_body)
+    assert status == 404
+    assert miss == {"error": "unavailable"}
+
+    # A wrong guess gets the exact same generic error as a miss.
+    wrong_tag = service.derive_enrollment_lookup_tag(
+        service.generate_enrollment_code(offer_id), ORIGIN
+    )
+    wrong_body = _lookup_fields(device, service.ENROLLMENT_LOOKUP_PATH, lookup=wrong_tag)
+    status, wrong = await post_json(relay_client, service.ENROLLMENT_LOOKUP_PATH, wrong_body)
+    assert status == 404
+    assert wrong == miss == {"error": "unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_lookup_route_keeps_the_k1_path_working_without_it(relay_client):
+    """0.10.7 clients never call /lookup; their offer id is in the code."""
+    issuer = SigningKey.generate()
+    device = SigningKey.generate()
+    await register_issuer(relay_client, issuer, ROOM_CAPABILITY, SESSION)
+
+    offer_id = "2" * 32
+    legacy_code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    _, verifier = service.derive_enrollment_code_verifier(legacy_code)
+    verifier_hash = service.enrollment_verifier_hash(offer_id, verifier)
+    create = _issuer_fields(
+        issuer,
+        offer_id,
+        service.ENROLLMENT_OFFERS_PATH,
+        expires_at=int(time.time()) + 300,
+        code_verifier_hash=verifier_hash,
+    )
+    status, result = await post_json(relay_client, service.ENROLLMENT_OFFERS_PATH, create)
+    assert status == 201
+
+    request_path = f"/relay/v1/enrollment/offers/{offer_id}/request"
+    request = _destination_fields(
+        device,
+        offer_id,
+        request_path,
+        round_id="3" * 32,
+        code_verifier=verifier,
+        envelope=b64url(b"legacy request"),
+    )
+    status, accepted = await post_json(relay_client, request_path, request)
+    assert status == 202
+    assert accepted == {"status": "pending", "receipt": "3" * 32}
+
+
+@pytest.mark.asyncio
+async def test_submit_request_carries_validates_and_defaults_device_name(relay_client):
+    issuer = SigningKey.generate()
+    device_a = SigningKey.generate()
+    device_b = SigningKey.generate()
+    await register_issuer(relay_client, issuer, ROOM_CAPABILITY, SESSION)
+
+    async def offer(offer_id: str) -> str:
+        code = service.generate_enrollment_code(offer_id)
+        _, verifier = service.derive_enrollment_code_verifier(code, offer_id)
+        create = _issuer_fields(
+            issuer,
+            offer_id,
+            service.ENROLLMENT_OFFERS_PATH,
+            expires_at=int(time.time()) + 300,
+            code_verifier_hash=service.enrollment_verifier_hash(offer_id, verifier),
+        )
+        status, _ = await post_json(relay_client, service.ENROLLMENT_OFFERS_PATH, create)
+        assert status == 201
+        return verifier
+
+    # A named device: the relay validates and stores it, the issuer sees it.
+    offer_id = "4" * 32
+    verifier = await offer(offer_id)
+    request_path = f"/relay/v1/enrollment/offers/{offer_id}/request"
+    request = _destination_fields(
+        device_a,
+        offer_id,
+        request_path,
+        round_id="5" * 32,
+        code_verifier=verifier,
+        envelope=b64url(b"req"),
+        device_name="mac-kollab",
+    )
+    status, _ = await post_json(relay_client, request_path, request)
+    assert status == 202
+    poll_path = service.ENROLLMENT_ISSUER_POLL_PATH.format(offer_id=offer_id)
+    status, claimed = await post_json(
+        relay_client, poll_path, _issuer_fields(issuer, offer_id, poll_path, claim_id="6" * 32)
+    )
+    assert status == 200
+    assert claimed["device_name"] == "mac-kollab"
+
+    # An invalid name is rejected outright.
+    offer_id = "7" * 32
+    verifier = await offer(offer_id)
+    request_path = f"/relay/v1/enrollment/offers/{offer_id}/request"
+    bad_request = _destination_fields(
+        device_b,
+        offer_id,
+        request_path,
+        round_id="8" * 32,
+        code_verifier=verifier,
+        envelope=b64url(b"req"),
+        device_name="Not Valid!",
+    )
+    status, result = await post_json(relay_client, request_path, bad_request)
+    assert status == 400
+    assert result == {"error": "invalid_request"}
+
+    # An older joiner that never sends the field still works; it defaults "".
+    offer_id = "9" * 32
+    verifier = await offer(offer_id)
+    request_path = f"/relay/v1/enrollment/offers/{offer_id}/request"
+    absent_request = _destination_fields(
+        device_b,
+        offer_id,
+        request_path,
+        round_id="a" * 32,
+        code_verifier=verifier,
+        envelope=b64url(b"req"),
+    )
+    status, _ = await post_json(relay_client, request_path, absent_request)
+    assert status == 202
+    poll_path = service.ENROLLMENT_ISSUER_POLL_PATH.format(offer_id=offer_id)
+    status, claimed = await post_json(
+        relay_client, poll_path, _issuer_fields(issuer, offer_id, poll_path, claim_id="b" * 32)
+    )
+    assert claimed["device_name"] == ""
+
+
+@pytest.mark.asyncio
+async def test_offer_is_burned_after_five_failures_and_lookup_stops_working(relay_client):
+    issuer = SigningKey.generate()
+    device = SigningKey.generate()
+    await register_issuer(relay_client, issuer, ROOM_CAPABILITY, SESSION)
+
+    offer_id = "c" * 32
+    code = service.generate_enrollment_code(offer_id)
+    _, verifier = service.derive_enrollment_code_verifier(code, offer_id)
+    lookup_tag = service.derive_enrollment_lookup_tag(code, ORIGIN)
+    lookup_hash = service.enrollment_lookup_hash(lookup_tag)
+    create = _issuer_fields(
+        issuer,
+        offer_id,
+        service.ENROLLMENT_OFFERS_PATH,
+        expires_at=int(time.time()) + 300,
+        code_verifier_hash=service.enrollment_verifier_hash(offer_id, verifier),
+        lookup_hash=lookup_hash,
+    )
+    status, _ = await post_json(relay_client, service.ENROLLMENT_OFFERS_PATH, create)
+    assert status == 201
+
+    wrong_verifier = b64url(b"z" * 32)
+    request_path = f"/relay/v1/enrollment/offers/{offer_id}/request"
+    for attempt in range(backend_module.ENROLLMENT_MAX_FAILED_CODES):
+        request = _destination_fields(
+            device,
+            offer_id,
+            request_path,
+            round_id=f"{attempt + 1:032x}",
+            code_verifier=wrong_verifier,
+            envelope=b64url(b"req"),
+        )
+        status, result = await post_json(relay_client, request_path, request)
+        if attempt + 1 == backend_module.ENROLLMENT_MAX_FAILED_CODES:
+            assert status == 404
+            assert result == {"error": "unavailable"}
+        else:
+            assert status == 401
+            assert result == {"error": "invalid_contact"}
+
+    # Burned outright: the lookup it was registered under no longer resolves.
+    lookup_body = _lookup_fields(device, service.ENROLLMENT_LOOKUP_PATH, lookup=lookup_tag)
+    status, missing = await post_json(relay_client, service.ENROLLMENT_LOOKUP_PATH, lookup_body)
+    assert status == 404
+    assert missing == {"error": "unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_lookup_rate_limit_is_the_existing_per_source_bucket(relay_client, monkeypatch):
+    monkeypatch.setattr(service, "ENROLLMENT_RATE_LIMIT", 1)
+    device = SigningKey.generate()
+    first = _lookup_fields(device, service.ENROLLMENT_LOOKUP_PATH, lookup=b64url(b"x" * 32))
+    status, _ = await post_json(relay_client, service.ENROLLMENT_LOOKUP_PATH, first)
+    assert status in (401, 404)  # not a real offer; rate limiting is what's tested
+
+    second = _lookup_fields(device, service.ENROLLMENT_LOOKUP_PATH, lookup=b64url(b"y" * 32))
+    status, limited = await post_json(relay_client, service.ENROLLMENT_LOOKUP_PATH, second)
+    assert status == 429
+    assert limited == {"error": "rate_limited"}
