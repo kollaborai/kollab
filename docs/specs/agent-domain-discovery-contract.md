@@ -8,7 +8,7 @@ Status: the 0.9.0 release baseline includes signed discovery and encrypted prese
 
 Related: [network design](agent-network-simple-flow.md), [scenario walkthroughs](agent-network-simple-flow.md), [existing remote endpoint](hub-remote-endpoint.md).
 
-Protocol reuse: [Grok Bot, Buzz and A2A comparison](agent-network-protocol-landscape.md). The recommendation is A2A for tasks/cards, with Kollab-specific discovery, membership and communication policy. A narrow A2A 1.0 workspace adapter and Card-signing profile are now implemented; deployment and evidence boundaries are tracked in the [implementation ledger](agent-network-simple-flow.md).
+Protocol reuse: [Grok Bot, Buzz and A2A comparison](agent-network-protocol-landscape.md). The recommendation is A2A for tasks/cards, with Kollab-specific discovery, membership and communication policy. A narrow A2A 1.0 workspace adapter and Card-signing profile are now implemented; deployment and evidence boundaries are tracked in the [agent network contract](agent-network-simple-flow.md).
 
 ## 2. Open-source constraints, invariant, and result states
 
@@ -146,5 +146,5 @@ The implemented proof is a Kollab application profile using compact JOSE JWS. It
 
 Only the local operator path holds the owner signing key. An optional HTTP pairing endpoint accepts possession proof into a pending inbox; it cannot approve admission. The receiver's private directory returns one explicitly configured workspace after the scoped request is authorized. No private key, absolute workspace path, broad member roster or raw credential is published by discovery. The operator must install signed membership/revocation updates at every receiver; automatic revocation federation is not implemented.
 
-The receiver rechecks membership/grant validity before local tool execution. Local workspace permission decisions remain in force. This private flow and the A2A service have independent validation from public identity publication; see the [implementation ledger](agent-network-simple-flow.md).
+The receiver rechecks membership/grant validity before local tool execution. Local workspace permission decisions remain in force. This private flow and the A2A service have independent validation from public identity publication; see the [agent network contract](agent-network-simple-flow.md).
 

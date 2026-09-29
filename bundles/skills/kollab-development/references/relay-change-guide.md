@@ -106,7 +106,7 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
   `relay_owner.py`, and `local_directory.py` to reach the existing Hub/model/tool
   pipeline. Direct approved same-room TLS sessions are not a Hub mesh route;
   `peer_router.py` and `peer_records.py` remain unintegrated. Inspect the
-  implementation ledger before claiming release or live proof. Keep peer/room
+  agent network contract's proof bar before claiming release or live proof. Keep peer/room
   approval separate from sender communication grants and receiver tool policy.
 - Native relay sends require a durable human instruction bound to the sender
   session, room, exact recipient, exact initial request and deadline. Preserve

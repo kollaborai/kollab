@@ -28,7 +28,7 @@ recorded, a later runtime can finish peer approval only when the owner key,
 issuer workspace, relay key, origin, and room still match and the delegation
 is not revoked. This recovery records the prior human decision; it cannot
 create one. The full contract below is not complete or released. See the
-[implementation ledger](agent-network-simple-flow.md).
+[agent network contract](agent-network-simple-flow.md).
 
 This contract provides one account-free path for an owner to enroll a new device, keep a private member roster, grant one device a narrow conversation permission, and revoke it later. Discovery only locates a peer. It does not enroll a key, authorize a message, or authorize tool execution.
 
