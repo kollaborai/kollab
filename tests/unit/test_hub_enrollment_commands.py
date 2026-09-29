@@ -185,7 +185,15 @@ async def test_local_hub_command_lists_redacted_requests_and_accepts_or_rejects(
     store, accepted_live, fingerprint = _add_pending(bridge, issuer, round_id=accepted_id, now=now)
     _add_pending(bridge, issuer, round_id=rejected_id, now=now)
 
-    listed = await hub._handle_connect_command("requests")
+    # "requests" is retired per the agent network constitution section 6
+    # ("use /connect or /connect status"); the redacted listing itself
+    # (RelayCommands._format_enrollment_requests) stays available for reuse
+    # and is checked directly here.
+    assert await hub._handle_connect_command("requests") == (
+        "connect: use /connect or /connect status"
+    )
+    pending = bridge.pending_enrollment_requests(source_agent=AGENT_ID)
+    listed = RelayCommands._format_enrollment_requests(pending)
 
     assert accepted_id in listed
     assert rejected_id in listed
@@ -200,7 +208,8 @@ async def test_local_hub_command_lists_redacted_requests_and_accepts_or_rejects(
     assert "network revocation does not revoke them at the provider" in listed
     assert "default (openai/gpt-4.1) to kollab-new-device" in listed
 
-    accepted = await hub._handle_connect_command(f"accept {accepted_id}")
+    # accept/reject now also take a receipt prefix of 8+ hex characters.
+    accepted = await hub._handle_connect_command(f"accept {accepted_id[:8]}")
     assert accepted == f"enrollment accepted; receipt: {accepted_id}"
     assert await hub._handle_connect_command(f"accept {accepted_id}") == f"enrollment accepted; receipt: {accepted_id}"
     assert accepted_live.decision == "approved"
@@ -226,6 +235,36 @@ async def test_local_hub_command_lists_redacted_requests_and_accepts_or_rejects(
         ).status
         == "rejected"
     )
+
+
+@pytest.mark.asyncio
+async def test_accept_reject_take_a_device_name_from_pending_rows(tmp_path):
+    """Once a row carries device_name, accept/reject match it by name."""
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "5" * 32
+    store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+
+    row = SimpleNamespace(enrollment_id=round_id, device_name="laptop-kollab")
+    bridge.pending_enrollment_requests = lambda source_agent: (row,)
+
+    accepted = await hub._handle_connect_command("accept laptop-kollab")
+
+    assert accepted == f"enrollment accepted; receipt: {round_id}"
+    assert live.decision == "approved"
+
+
+@pytest.mark.asyncio
+async def test_accept_rejects_an_unknown_device_name(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    bridge._enrollment_issuer = EnrollmentIssuer(bridge)
+    bridge.pending_enrollment_requests = lambda source_agent: ()
+
+    result = await hub._handle_connect_command("accept nonexistent-device")
+
+    assert result == "connect: no pending request matches 'nonexistent-device'"
 
 
 @pytest.mark.asyncio
@@ -295,13 +334,13 @@ async def test_attach_mode_forwards_only_receipt_commands_to_the_owner_daemon():
 
     results = []
     for command in (
-        "requests",
+        "status",
         "accept " + "4" * 32,
         "reject " + "5" * 32,
     ):
         results.append(await hub._handle_connect_command(command))
 
-    assert results == ["requests", "accept " + "4" * 32, "reject " + "5" * 32]
+    assert results == ["status", "accept " + "4" * 32, "reject " + "5" * 32]
     assert [call.args[0] for call in state.hub_connect.await_args_list] == results
 
     code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
@@ -321,12 +360,26 @@ async def test_connect_palette_lists_subcommands_and_each_reaches_the_owner_daem
     hub._register_commands()
     connect = next(cmd for cmd in registered if cmd.name == "connect")
     names = [sub.name for sub in connect.subcommands]
-    assert {"offer", "requests", "send", "answer", "networks", "help"} <= set(names)
+    assert set(names) == {
+        "code",
+        "accept",
+        "reject",
+        "status",
+        "name",
+        "trust",
+        "knock",
+        "knocks",
+        "allow",
+        "deny",
+        "revoke",
+        "leave",
+        "help",
+    }
 
     state = SimpleNamespace(hub_connect=AsyncMock(side_effect=lambda value: value))
     hub._cli_args = SimpleNamespace(attach=True)
     hub.event_bus = SimpleNamespace(get_service=lambda _name: state)
-    local = {"enroll", "offer", "contact", "contacts", "help"}
+    local = {"code", "knock", "knocks", "help"}
     for name in names:
         if name in local:
             continue

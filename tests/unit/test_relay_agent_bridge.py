@@ -676,16 +676,22 @@ async def test_relay_payload_contains_only_pinned_tls_records_for_conversations(
 async def test_relay_status_reports_the_attached_workspace_and_agent_identity(bridges):
     members, _ = bridges
     bridge = members[0][0]
+    # Default /connect status shows names, not keys or workspace ids
+    # (docs/specs/agent-network-simple-flow.md section 6); the agent's own
+    # identity is always visible in the online list.
     status = bridge.commands.format_status()
+    assert f"{bridge.identity.identity} (this device)" in status
+    assert bridge.commands.client.public_key not in status
+
+    keyed = bridge.commands.format_status(show_keys=True)
     client_status = bridge.commands.client.status()
 
-    assert f"workspace id: {client_status['workspace_id']}" in status
-    assert f"workspace path: {bridge.commands.client.workspace}" in status
-    assert f"agent identity: {bridge.identity.identity}" in status
-    assert f"agent id: {bridge.identity.agent_id}" in status
+    assert f"workspace id: {client_status['workspace_id']}" in keyed
+    assert f"workspace path: {bridge.commands.client.workspace}" in keyed
+    assert f"agent id: {bridge.identity.agent_id}" in keyed
     assert (
         "Private room; conversation grants and receiving workspace permissions are separate."
-        in status
+        in keyed
     )
 
 
@@ -1958,7 +1964,10 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
             await second._owner_call("relay.event", {"id": "a" * 32})
         with pytest.raises(RelayError, match="method or parameters"):
             await second._owner_call("relay.arbitrary", {"id": "a" * 32})
-        forwarded = await second.command("status")
+        # /connect status hides keys by default (docs/specs/agent-network-
+        # simple-flow.md section 6); "status keys" still proves the RPC
+        # reached the real owner's state.
+        forwarded = await second.command("status keys")
         assert original_key in forwarded
         assert second.commands is None
         assert "approve the peer" in await second.command(
@@ -1969,7 +1978,7 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
         await second._ensure_owner()
         assert second.commands is not None
         assert second.commands.client.public_key == original_key
-        assert original_key in await second.command("status")
+        assert original_key in await second.command("status keys")
     finally:
         for bridge, server in instances:
             await bridge.close()

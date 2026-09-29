@@ -13,6 +13,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from .device_names import DEFAULT_TRUST, format_handle, validate_device_name, validate_trust
 from .dns.discovery import DiscoveryError, discover, fetch_agent_card, normalize_target
 from .dns.discovery_store import DiscoveryStore
 
@@ -48,6 +49,65 @@ class RelayCommands:
 
     def _setting(self, name: str, default: Any) -> Any:
         return self.config.get(name, default) if self.config else default
+
+    def _network_name(self, domain: str) -> str:
+        """The network's human name when available, else its domain."""
+        getter = getattr(self.agent_bridge, "network_name", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return value
+            except Exception:
+                pass
+        return domain
+
+    def _trust_level(self) -> str:
+        getter = getattr(self.agent_bridge, "trust_level", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return value
+            except Exception:
+                pass
+        return DEFAULT_TRUST
+
+    def _device_name(self) -> str:
+        getter = getattr(self.agent_bridge, "device_name", None)
+        if callable(getter):
+            try:
+                return getter() or ""
+            except Exception:
+                pass
+        return ""
+
+    def _remote_rows(self) -> list:
+        """Rows from the relay bridge's remote_agents(), degrading to none."""
+        getter = getattr(self.agent_bridge, "remote_agents", None)
+        if not callable(getter):
+            return []
+        try:
+            rows = getter()
+        except Exception:
+            return []
+        if not isinstance(rows, (list, tuple)):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def _resolve_peer_key(self, token: str) -> str:
+        """A 64-hex peer key is returned unchanged; a device name resolves to it."""
+        if re.fullmatch(r"[0-9a-f]{64}", token):
+            return token
+        for row in self._remote_rows():
+            if row.get("device") == token and row.get("address"):
+                try:
+                    from .relay_conversations import RelayAddress
+
+                    return RelayAddress.parse(row["address"]).key
+                except Exception:
+                    continue
+        raise ValueError(f"no known device matches '{token}'; use its 64-hex peer key")
 
     @staticmethod
     def _resolve_network_target(value: str) -> str:
@@ -104,24 +164,84 @@ class RelayCommands:
             raise ValueError("Unsupported advertised relay control URL")
         return "wss://" + result.origin[len("https://") :] + "/relay/v1/ws"
 
-    def format_status(self) -> str:
+    def format_status(self, *, show_keys: bool = False) -> str:
+        """`/connect status`, redesigned per the constitution (sections 5-6).
+
+        Names, not keys, appear here. ``show_keys`` appends the old
+        technical block (public key, workspace id, peer counts) for
+        operators who explicitly ask with ``/connect status keys``.
+        """
+        import hashlib
+
         state = self.client.status()
-        identity = getattr(self.agent_bridge, "identity", None)
-        agent_identity = getattr(identity, "identity", "unavailable")
-        agent_id = getattr(identity, "agent_id", "unavailable")
-        lines = [
-            f"beacon: {state['state']}",
-            f"address: {state['origin'] or 'not configured'}",
-            f"your public key: {state['key']}",
-            f"workspace id: {state['workspace_id']}",
-            f"workspace path: {self.client.workspace}",
-            f"agent identity: {agent_identity}",
-            f"agent id: {agent_id}",
-            f"online peers: {state['peers']}; approved keys: {state['approved_peers']}",
-            f"reconnect on launch: {'enabled' if state['enabled'] else 'disabled'}",
-        ]
+        origin = state["origin"] or ""
+        domain = origin[len("https://") :] if origin.startswith("https://") else origin
+
+        lines = []
+        if domain:
+            trust = self._trust_level()
+            lines.append(f"network {self._network_name(domain)} via {domain}  trust: {trust}")
+        else:
+            lines.append("network: none")
+
+        device_name = self._device_name()
+        if device_name:
+            lines.append(f"this device {device_name}")
+
+        if domain:
+            fingerprint = hashlib.sha256(
+                b"kollab-contact-route-v1\0" + bytes.fromhex(state["key"])
+            ).hexdigest()[:8]
+            lines.append(f"contact route {domain}/c/{fingerprint}")
+        else:
+            lines.append("contact route none")
+
+        lines.append("online")
+        remote_rows = self._remote_rows()
+        for row in remote_rows:
+            if not row.get("online"):
+                continue
+            handle = row.get("handle") or format_handle(
+                row.get("name", "?"), row.get("device", "?")
+            )
+            lines.append(f"  {handle} - {row.get('state', 'unknown')}")
+
+        plugin = getattr(self.agent_bridge, "plugin", None)
+        presence = getattr(plugin, "_presence", None)
+        local_agents = []
+        if presence is not None:
+            try:
+                local_agents = list(presence.get_cached_agents())
+            except Exception:
+                local_agents = []
+        own_identity = getattr(plugin, "_identity", None)
+        if own_identity is not None and not any(
+            getattr(a, "agent_id", None) == getattr(own_identity, "agent_id", None)
+            for a in local_agents
+        ):
+            local_agents = [own_identity] + local_agents
+        for agent in local_agents:
+            name = getattr(agent, "identity", None)
+            if name:
+                lines.append(f"  {name} (this device)")
+
+        offline_devices = sorted(
+            {
+                row.get("device")
+                for row in remote_rows
+                if not row.get("online") and row.get("device")
+            }
+        )
+        if offline_devices:
+            lines.append(f"offline devices: {', '.join(offline_devices)}")
+
+        lines.append("join code: run /connect code")
+
         if state.get("error"):
             lines.append("connection issue: " + state["error"])
+        if domain and not state["enabled"]:
+            lines.append("reconnect on launch: disabled")
+
         issuer = getattr(self.agent_bridge, "_enrollment_issuer", None)
         if issuer is not None:
             recovery = issuer.destination_recovery_status()
@@ -143,9 +263,20 @@ class RelayCommands:
                 if recovery["retry_in_seconds"]:
                     detail += f"; retry in {recovery['retry_in_seconds']}s"
                 lines.append(detail)
-        lines.append(
-            "Private room; conversation grants and receiving workspace permissions are separate."
-        )
+
+        if show_keys:
+            agent_id = getattr(own_identity, "agent_id", "unavailable")
+            lines.append("")
+            lines.append(f"your public key: {state['key']}")
+            lines.append(f"workspace id: {state['workspace_id']}")
+            lines.append(f"workspace path: {self.client.workspace}")
+            lines.append(f"agent id: {agent_id}")
+            lines.append(
+                f"online peers: {state['peers']}; approved keys: {state['approved_peers']}"
+            )
+            lines.append(
+                "Private room; conversation grants and receiving workspace permissions are separate."
+            )
         return "\n".join(lines)
 
     async def _attach(self, result, ca: str, cidrs: tuple[str, ...]) -> str:
@@ -296,31 +427,78 @@ class RelayCommands:
             return self._format_enrollment_requests(requests)
         if head in {"accept", "reject"}:
             fields = rest.split()
-            if len(fields) != 1 or not re.fullmatch(r"[0-9a-f]{32}", fields[0]):
-                return f"usage: /connect {head} <32-hex receipt-id>"
+            if len(fields) != 1:
+                return f"usage: /connect {head} <device-name-or-receipt>"
             if self.agent_bridge is None:
                 return "connect: local enrollment issuer is unavailable"
+            token = fields[0]
+            receipt_id = token if re.fullmatch(r"[0-9a-f]{32}", token) else None
+            if receipt_id is None:
+                is_hex_prefix = len(token) >= 8 and re.fullmatch(r"[0-9a-f]+", token)
+                candidates = self.agent_bridge.pending_enrollment_requests(
+                    source_agent=source_agent
+                )
+                matches = [
+                    row
+                    for row in candidates
+                    if (is_hex_prefix and row.enrollment_id.startswith(token))
+                    or getattr(row, "device_name", "") == token
+                ]
+                if len(matches) > 1:
+                    return f"connect: '{token}' matches more than one pending request; use the full receipt"
+                if not matches:
+                    return f"connect: no pending request matches '{token}'"
+                receipt_id = matches[0].enrollment_id
             decision = "accept" if head == "accept" else "reject"
             result = await self.agent_bridge.decide_enrollment_request(
-                fields[0], decision=decision, source_agent=source_agent
+                receipt_id, decision=decision, source_agent=source_agent
             )
             return f"enrollment {result['status']}; receipt: {result['receipt_id']}"
-        if head == "contact-point":
-            fields = rest.split()
-            if len(fields) > 1:
-                return "usage: /connect contact-point <relay-domain>"
-            domain = fields[0] if fields else self.client.state.origin or "kollabor.ai"
+        if head == "name":
+            if not rest:
+                return "usage: /connect name <name>"
             try:
-                point = await self._contacts().contact_point(domain)
-            except Exception:
-                return "connect: contact point is unavailable"
-            return (
-                f"contact route: {point['origin']} {point['identity']} "
-                "(share this route out of band)"
+                name = validate_device_name(rest.strip())
+            except ValueError as exc:
+                return f"connect: {exc}"
+            setter = getattr(self.agent_bridge, "set_device_name", None)
+            if setter is None:
+                return "connect: device naming is not available on this build"
+            applied = setter(name)
+            return f"this device is now {applied or name}"
+        if head == "trust":
+            try:
+                level = validate_trust(rest.strip())
+            except ValueError as exc:
+                return f"connect: {exc}"
+            setter = getattr(self.agent_bridge, "set_trust_level", None)
+            if setter is None:
+                return "connect: trust levels are not available on this build"
+            applied = setter(level) or level
+            domain = self.client.state.origin or "this network"
+            if domain.startswith("https://"):
+                domain = domain[len("https://") :]
+            lines = [f"trust for {domain} is now {applied}"]
+            if applied == "manual":
+                lines.append("messages now need /connect authorize or /connect send")
+            return "\n".join(lines)
+        if head in {"allow", "deny"}:
+            if self.agent_bridge is None:
+                return (
+                    "connect: agent conversations require a running Kollab Hub session"
+                )
+            fields = rest.split(maxsplit=1)
+            if not fields:
+                return f"usage: /connect {head} <device-or-peer-key> [agent]"
+            try:
+                key = self._resolve_peer_key(fields[0])
+            except ValueError as exc:
+                return f"connect: {exc}"
+            new_rest = key if len(fields) == 1 else f"{key} {fields[1]}"
+            return await self.agent_bridge.application_command(
+                head, new_rest, source_agent=source_agent
             )
         if head in {
-            "allow",
-            "deny",
             "grants",
             "agents",
             "authorize",
@@ -338,7 +516,7 @@ class RelayCommands:
                 head, rest, source_agent=source_agent
             )
         if head == "status":
-            return self.format_status()
+            return self.format_status(show_keys=rest.strip() == "keys")
         if head == "networks":
             if rest:
                 return "usage: /connect networks"
@@ -368,13 +546,17 @@ class RelayCommands:
             )
         if head in {"approve", "revoke"}:
             if not rest:
-                return f"usage: /connect {head} <full 64-hex peer public key>"
-            getattr(self.client, head)(rest)
+                return f"usage: /connect {head} <device-name-or-peer-key>"
+            try:
+                key = self._resolve_peer_key(rest)
+            except ValueError as exc:
+                return f"connect: {exc}"
+            getattr(self.client, head)(key)
             if head == "revoke" and self.agent_bridge is not None:
                 self.agent_bridge._state()
-                self.agent_bridge.store.revoke(self.client.state.room, rest)
+                self.agent_bridge.store.revoke(self.client.state.room, key)
             return (
-                f"peer presence {'approved' if head == 'approve' else 'revoked'}: {rest}\n"
+                f"peer presence {'approved' if head == 'approve' else 'revoked'}: {key}\n"
                 "Workspace tool permissions are separate."
             )
         if head == "ping":
@@ -382,11 +564,9 @@ class RelayCommands:
                 return "usage: /connect ping <full 64-hex peer public key>"
             reply = await self.client.ping(rest)
             return "encrypted peer response: " + json.dumps(reply, sort_keys=True)
-        if head == "disconnect":
+        if head == "leave":
             await self.client.close(disable=True)
-            return (
-                "beacon disconnected; automatic reconnect disabled for this workspace"
-            )
+            return "left the network; automatic reconnect disabled for this workspace"
         if head == "rotate":
             origin = self.client.state.origin
             if not origin:
@@ -438,7 +618,7 @@ class RelayCommands:
         if head == "help":
             from .plugin import format_connect_help
 
-            return format_connect_help()
+            return format_connect_help(show_all=rest.strip().lower() == "all")
         value = value or self.client.state.origin or "https://kollabor.ai"
         result, ca, cidrs, is_card = await self._discover(value)
         if is_card:

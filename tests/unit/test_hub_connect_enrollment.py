@@ -57,7 +57,21 @@ async def test_connect_domain_runs_public_discovery_in_owner_session():
 
 
 @pytest.mark.asyncio
-async def test_connect_enroll_domain_opens_private_form_and_uses_typed_attach_rpc():
+async def test_connect_enroll_is_removed_use_bare_connect():
+    """`enroll` is a remnant of the first build (constitution section 6);
+    bare /connect now opens the same private form, always against
+    kollabor.ai -- there is no longer a way to point the entry form at
+    another domain from the command surface."""
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=True)
+
+    assert await plugin._handle_connect_command("enroll example.test") == (
+        "connect: use /connect"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_bare_opens_private_form_and_uses_typed_attach_rpc():
     code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(
@@ -73,14 +87,14 @@ async def test_connect_enroll_domain_opens_private_form_and_uses_typed_attach_rp
     )
     plugin._cli_args = SimpleNamespace(attach=True)
 
-    result = await plugin._handle_connect_command("enroll example.test")
+    result = await plugin._handle_connect_command("")
 
     assert result == ""
     view, view_name = view_stack.push.await_args.args
     assert view_stack.push.await_args.kwargs == {"reuse": False}
     assert view_name == "connect"
-    assert view.domain == "example.test"
-    submission = ConnectSubmission("example.test", PrivateCode(code))
+    assert view.domain == "kollabor.ai"
+    submission = ConnectSubmission("kollabor.ai", PrivateCode(code))
     try:
         outcome = await view._on_submit(submission)
     finally:
@@ -88,7 +102,7 @@ async def test_connect_enroll_domain_opens_private_form_and_uses_typed_attach_rp
 
     assert outcome.status is ConnectStatus.PENDING
     assert outcome.receipt_id == "0123456789abcdef"
-    state.hub_enroll.assert_awaited_once_with("example.test", code)
+    state.hub_enroll.assert_awaited_once_with("kollabor.ai", code)
     state.hub_connect.assert_not_awaited()
 
 
@@ -117,7 +131,17 @@ async def test_connect_subcommand_remains_on_existing_rpc_and_code_is_not_comman
 
 
 @pytest.mark.asyncio
-async def test_connect_offer_opens_private_view_and_uses_typed_attach_rpc(
+async def test_connect_offer_is_removed_use_connect_code():
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=True)
+
+    assert await plugin._handle_connect_command("offer example.test") == (
+        "connect: use /connect code"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_code_opens_private_view_and_uses_typed_attach_rpc(
     monkeypatch,
 ):
     offer_id = "0123456789abcdef0123456789abcdef"
@@ -139,7 +163,7 @@ async def test_connect_offer_opens_private_view_and_uses_typed_attach_rpc(
     )
     plugin._cli_args = SimpleNamespace(attach=True)
 
-    opened = await plugin._handle_connect_command("offer example.test")
+    opened = await plugin._handle_connect_command("code example.test")
 
     assert opened == ""
     view, view_name = view_stack.push.await_args.args
@@ -175,7 +199,7 @@ async def test_private_contact_views_always_open_fresh_sessions(method, session_
 
 
 @pytest.mark.asyncio
-async def test_connect_code_is_rejected_from_command_text_and_offer_domain_is_bounded():
+async def test_connect_code_is_rejected_from_command_text_and_code_domain_is_bounded():
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(hub_enrollment_offer=AsyncMock(), hub_connect=AsyncMock())
     plugin = HubPlugin.__new__(HubPlugin)
@@ -191,15 +215,15 @@ async def test_connect_code_is_rejected_from_command_text_and_offer_domain_is_bo
     pasted_to_enroll = await plugin._handle_connect_command(
         "enroll K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
     )
-    pasted_to_offer = await plugin._handle_connect_command(
-        "offer K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    pasted_to_code = await plugin._handle_connect_command(
+        "code K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
     )
-    malformed_offer = await plugin._handle_connect_command("offer example.test extra")
+    malformed_code = await plugin._handle_connect_command("code example.test extra")
 
     assert pasted == CODE_IN_COMMAND
     assert pasted_to_enroll == CODE_IN_COMMAND
-    assert pasted_to_offer == CODE_IN_COMMAND
-    assert malformed_offer == "connect: use /connect offer [domain]"
+    assert pasted_to_code == CODE_IN_COMMAND
+    assert malformed_code == "connect: use /connect code [domain]"
     state.hub_enrollment_offer.assert_not_awaited()
     assert view_stack.push.await_count == 0
 

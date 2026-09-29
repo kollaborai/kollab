@@ -149,135 +149,111 @@ New to `/connect`? Start with the [connect guide](../guides/connect.md).
 
 `/hub dns connect [domain]` is an alias for `/connect [domain]`. An explicit
 domain performs signed public discovery and attaches the current workspace to
-the advertised relay. Bare `/connect` and `/connect enroll [domain]` open the
-private device-enrollment form. Public relay attachment does not enroll a device
-in a private group; a fresh attachment starts in an empty workspace room and
-does not expose a public roster. Join a shared invitation room to see its peers.
+the advertised relay. Bare `/connect` opens the private device-enrollment form
+(`kollabor.ai` by default; `enroll` was removed, see below). Public relay
+attachment does not enroll a device in a private group; a fresh attachment
+starts in an empty workspace room and does not expose a public roster. Once a
+network exists, its remote agents appear in the roster as `agent@device` and
+are messaged with the same `hub_msg` tag as a local agent — see
+[the agent network constitution](../specs/agent-network-simple-flow.md).
 See [Agent DNS](../architecture/reference/agent-dns-reference.md).
 
 ## Public beacon commands
 
-The current source supports public discovery/relay attachment and the private
-enrollment commands below. The enrollment commands ship in Kollab 0.10.0.
-Deployment and verification status are tracked in the
-[implementation ledger](../specs/agent-network-implementation-status.md).
+`/connect` is the agent network surface: one machine, one workspace, joined
+into a private network with a short code, so its agents can message agents on
+other devices exactly like local hub peers. The full model, the trust levels,
+and the reasoning behind this surface are the
+[agent network constitution](../specs/agent-network-simple-flow.md) — it wins
+over this page when they disagree. Deployment and verification status are
+tracked in the [implementation ledger](../specs/agent-network-implementation-status.md).
+
+Shown in the palette and in `/connect help`:
 
 ```text
-/connect <domain>                  verify public discovery and attach to its relay
-/connect networks                  list provisioned network IDs and their domains
-/connect                           open private code-entry form (default: kollabor.ai)
-/connect enroll [domain]           open the same private code-entry form
-/connect offer [domain]            create/display one private, one-device K1 code
-/connect requests                  list redacted pending enrollment requests
-/connect accept <receipt-id>       explicitly accept a proof-verified enrollment
-/connect reject <receipt-id>       explicitly reject a proof-verified enrollment
-/connect status                    show actual transport state and workspace public key
-/connect invite                    save a private invitation file; display its path only
-/connect join <local-file-path>     verify the invitation's origin, pin inviter, and join
-/connect peers                     list online keys and local approval state
-/connect contact-point [domain]     show this workspace's contact route to share out of band
-/connect contact [domain]          open the private form to send a sealed introduction
-/connect contacts [domain]         review pending introductions addressed to this key
-/connect approve <64-hex-key>       permit encrypted ping/presence with this peer
-/connect revoke <64-hex-key>        remove that presence approval and every grant to that peer
-/connect ping <64-hex-key>          request an encrypted presence response
-/connect rotate                    replace the room capability and clear local approvals
-/connect disconnect                close the connection and disable reconnect on launch
-/connect agents [local|peer-key]    list authorized remote agents or quiet local presence
-/connect allow <peer-key> <name>    permit incoming conversations for a local agent
-/connect deny <peer-key> [name]     revoke incoming authority and cancel affected work
-/connect grants                    list receiving and human sending grants
-/connect authorize <address> <request>  authorize one exact initial request for hub_msg
-/connect send <address> <request>   authorize and send that exact human request
-/connect withdraw <grant-id>       withdraw local sending and correlated-return authority
-/connect task <address> <id>        inspect the receiving task state
-/connect cancel <address> <id>      cancel the remote task
-/connect answer <event-id> <text>   answer a pending question from an authorized peer
+/connect                           the screen: network, this device, join code, requests, online agents
+/connect <domain>                  join another directory, e.g. kollabor.ai
+/connect code                      print a join code without the screen (scripts, small terminals)
+/connect accept <device>           accept a join or knock request by name
+/connect reject <device>           reject a join or knock request by name
+/connect status [keys]             network, this device, contact route, online agents; add keys for the technical block
+/connect name <name>               name this device
+/connect trust open|agents|manual  trust level for this network
+/connect knock <route> "text"      introduce yourself to a stranger's contact route
+/connect knocks                    review introductions you received
+/connect allow <device> <agent>    let a device's agent message a local agent
+/connect deny <device> [agent]     revoke a device's access, cancel affected work
+/connect revoke <device>           remove a device or peer
+/connect leave [domain]            disconnect and stop reconnecting
+/connect help [all]                this list; all adds the manual-trust and reset commands
 ```
 
-Any agent connected to the relay can create an offer for its own private
-network; the new device verifies the issuer's key through the code exchange. An
-offer authorizes one new device for five minutes. Its membership credential
-is scoped to `conversation:send`. Enter the displayed K1 code only in the private
-enrollment form. Never place the code in slash-command text, chat, shell input,
-logs, or model context. Code and device-key proof create a durable pending
-request; they do not approve membership. On the local issuer session that
-created the offer, `/connect requests` shows bounded metadata, the destination
-workspace and a shortened device-key fingerprint, without codes, proofs, tokens,
-or membership secrets. When an active supported provider profile is available,
-the request also names its source and destination profiles, provider/model and
-the exact credential category proposed for copying. Use the exact 32-hex receipt
-ID with `/connect accept` or `/connect reject`. Acceptance revalidates the
-active issuer session and requested scope, consumes one device allowance, and
-issues the scoped conversation credential and room invitation. It also sends
-the allowlisted profile settings and one displayed provider credential in a
-device-sealed bundle; the destination installs it atomically and returns a
-device-signed receipt before the issuer approves the peer. Network revocation
-does not revoke a copied credential at its provider. Rejection consumes no
-allowance. The relay keeps no durable state: if it restarts, or the issuer
-reconnects under a new relay session, while a code is in flight, that request
-can no longer be decided and `/connect accept` says so; an accepted enrollment
-cut off by a restart retries until its code expires. Create a new code.
-Enrollment grants no workspace or tool permission. The
-pending-request API is not exposed as a remote-agent tool; these are local
-operator commands. If the issuer worker or its in-memory code key is gone, the
-request cannot be decided in that process. See the
-[pairing spec](../specs/agent-device-pairing.md) and
-[implementation ledger](../specs/agent-network-implementation-status.md).
+`/connect help all` only (advanced, `trust manual`, and resets):
 
-`/connect contact-point [domain]` shows `<origin> ed25519:<64-hex-key>`; share
-that string with the other party out of band (it is how a stranger addresses
-you — there is no public directory to browse). To reach them, run
-`/connect contact [domain]`; the private form asks for the domain and the
-64-hex key only (drop the `ed25519:` prefix) plus a short introduction, then
-sends it sealed to that key over `POST /relay/v1/contact/requests`. On the
-receiving side, `/connect contacts [domain]` opens a private review list
-(`POST /relay/v1/contact/inbox`) with explicit accept/reject per request
-(`POST /relay/v1/contact/decisions`). `/connect contact` and `/connect
-contacts` both default to the `kollabor.ai` domain and are unavailable from an
-attached viewer session (`--attach`); run them on the daemon that owns the
-identity. Accepting a contact request only resolves that receipt — it does not
-open a room, grant a conversation, or expose your roster. To actually talk,
-pair separately through `/connect invite`/`/connect join` or code enrollment,
-then follow the conversation commands below.
+```text
+/connect authorize <agent@device> <request>  authorize one exact request (trust manual)
+/connect send <agent@device> <request>       authorize and send one request (trust manual)
+/connect withdraw <grant-id>                 withdraw a sending grant (trust manual)
+/connect answer <event-id> <text>            answer a pending question (trust manual)
+/connect task <agent@device> <id>            inspect a remote task (trust manual)
+/connect cancel <agent@device> <id>          cancel a remote task (trust manual)
+/connect rotate                              replace the network secret after a lost device
+```
 
-Privately transfer the invitation file to the joining computer. Do not paste its
-contents into chat or a command. Joining pins the inviter; the inviter approves
-the joining key before replying to its pings. Room membership permits peer-key
-visibility and ciphertext routing. Workspace tools require separate receiver
-membership, grants, and local permissions. Peer traffic never starts an LLM turn.
+Removed. Each prints its redirect for one release instead of running:
 
-The conversation commands above ship in Kollab 0.10.0. A remote address is the complete
-`relay:<key>:<workspace-id>:<agent-id>` from the directory. Receiving permission
-is independent of presence approval and normal tool permissions. Sending grants
-are bound to the exact human request, recipient and sending session, with a
-ten-minute deadline. `/connect send` authorizes and sends one exact request.
-`/connect authorize` returns a grant ID for an exact request. The response
-parser accepts XML `thread` and `thread_id` attributes on `hub_msg` and maps
-either to the internal thread ID; use the same authorized request as the tag
-body. The structured `hub-msg` schema also exposes optional `thread_id`. The
-relay harness supplies the exact pending human grant ID, full destination and
-unchanged request. A supplied unknown ID fails instead of selecting another
-ready grant; this identifier selects an existing grant and cannot create
-authority. A receipt is admission, not completion.
-See the [network implementation ledger](../specs/agent-network-implementation-status.md)
-for remaining conversation and live acceptance requirements.
+```text
+/connect enroll                    use /connect
+/connect offer                     use /connect code
+/connect requests, peers, agents, networks   use /connect or /connect status
+/connect approve, ping             accepting a device approves it; presence is on /connect
+/connect contact-point             your contact route is in /connect status
+/connect contact, contacts         use /connect knock, /connect knocks
+/connect invite, join              file pairing is gone; use a join code
+/connect disconnect                use /connect leave
+/connect grants                    use /connect status
+```
 
-`/connect invite` already writes its source file with mode `0600`. Check the
-receiving copy after transfer and use `chmod 600 <invitation-file>` in that
-computer's terminal if needed. The joining user must own the file; symlinks are
-rejected. `/connect join` accepts a quoted path containing spaces. Join from the
-other computer: sessions in the same local workspace share a relay identity and
-cannot join their own invitation. Self-invitation rejection preserves the current
-connection. Join errors distinguish local file access, permissions, self-invitation
-and publisher verification without displaying invitation contents.
+Trust is one setting per network, defaulting to `open`: every accepted device's
+agents may message every other, under hub rules (no grants, no task envelope,
+no question cap). `agents` trust narrows that to an explicit allowlist per
+device (`/connect allow` / `/connect deny`). `manual` is the original,
+human-gated model — every first message needs `/connect authorize` or
+`/connect send`, replies go through the task envelope, and a remote question
+waits for `/connect answer`; that is what the `help all` commands are for.
 
-In attach mode, code entry and offer creation use typed `state.hub_enroll` and
-`state.hub_enrollment_offer` calls on the owning daemon. Existing `/connect`
-status, invitation, peer, conversation, and enrollment review subcommands use
-`state.hub_connect`; accept/reject RPC arguments contain only a receipt ID. The
-viewer does not create another relay identity or connection. The enrollment
-outcome shown to the viewer is limited to status and a receipt ID.
+`/connect accept` and `/connect reject` take a device name, a receipt-id
+prefix of 8 or more hex characters, or the full 32-hex receipt when a name
+would be ambiguous. `/connect allow`, `/connect deny`, and `/connect revoke`
+take a device name (resolved from the network roster) or, when a device isn't
+resolvable yet, its raw 64-hex peer key.
+
+`/connect status` never shows keys, workspace ids, or `relay:` addresses by
+default — only names. Typing `/connect status keys` appends the previous
+technical block (public key, workspace id, peer counts) for operators who
+need it.
+
+Join codes are 8 characters from `0-9A-Z` (without `I L O U`), shown as
+`XXXX-XXXX`, one device, five minutes, single use. `/connect code` prints one
+to the screen only — never paste a code into a command, into chat, or into a
+log. See [the agent network constitution](../specs/agent-network-simple-flow.md)
+section 8 for how it stays secure at that length.
+
+Once a device is on your network, its agents appear in your roster as
+`agent@device` and in the hub context injected into every turn. Message one
+exactly like a local agent:
+
+```
+<hub_msg to="infra@alzan-prod-home">check the wireguard tunnel</hub_msg>
+```
+
+The receiving device runs it with its own tools under its own permissions and
+answers with the same tag; the rest of the network observes both messages,
+dimmed, same as any other hub message. `hub_status` and `hub_agents` list
+remote agents the same way (`agent@device - state (device online|offline)`).
+`hub_broadcast scope="network"` also reaches every online remote agent under
+`open` trust; without that scope, or under any other trust level, a broadcast
+stays local.
 
 Run the service from the same application:
 

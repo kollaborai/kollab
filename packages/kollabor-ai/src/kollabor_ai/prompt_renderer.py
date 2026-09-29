@@ -542,7 +542,21 @@ class PromptRenderer:
             logger.debug("Failed to get cached agents for hub_roster")
             return ""
 
-        if not agents:
+        # Remote agents across the network (docs/specs/agent-network-simple-
+        # flow.md section 4) are merged into the same roster as agent@device.
+        # Slice A (plugins/hub/relay_agent.py) owns remote_agents(); degrade
+        # to no rows when it is missing or errors.
+        remote_rows = []
+        remote_getter = getattr(getattr(hub, "_relay_agent", None), "remote_agents", None)
+        if callable(remote_getter):
+            try:
+                rows = remote_getter()
+                if isinstance(rows, (list, tuple)):
+                    remote_rows = [row for row in rows if isinstance(row, dict)]
+            except Exception:
+                remote_rows = []
+
+        if not agents and not remote_rows:
             lines = [
                 "--- hub roster ---",
                 "no peers online.",
@@ -581,6 +595,13 @@ class PromptRenderer:
             lines.append(
                 f"  {identity_name}{role_tag} - {state_str}{caps_str}{profile_str}"
             )
+
+        for row in remote_rows:
+            handle = row.get("handle") or f"{row.get('name', '?')}@{row.get('device', '?')}"
+            state = row.get("state", "unknown")
+            task = row.get("task", "") or row.get("current_task", "")
+            state_str = f"{state}: {task}" if task else state
+            lines.append(f"  {handle} - {state_str}")
 
         lines.append('  to message a peer: <hub_msg to="name">your message</hub_msg>')
         lines.append("--- end hub roster ---")
