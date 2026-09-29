@@ -437,7 +437,10 @@ data; secrets and permission overrides are refused as they are locally.
 
 What the sender is told. The `hub_msg` result for an `agent@device` reports what
 the network did, never local presence: `sent to <agent@device>` when the network
-took it; `unknown agent@device: run /connect status to see who is online` when
+took it, plus, for a new request, that the reply arrives by itself as a hub message
+and the agent should end its turn unless it has other local work (no status check,
+no capture, no second message); an answer on a request the agent received stays
+plain `sent to <agent@device>`; `unknown agent@device: run /connect status to see who is online` when
 the roster does not list it; the receiving device's own reason when it refuses;
 `not sent again: ...` for an identical resend within two minutes. It never says
 a rostered peer is offline, so the model has no reason to resend. The message's

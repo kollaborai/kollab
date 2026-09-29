@@ -77,7 +77,7 @@ async def test_a_remote_agent_on_the_roster_gets_sent_and_no_warning():
     result = await plugin._handle_hub_msg_tool(_call(PEER))
 
     assert result.success
-    assert result.output == f"sent to {PEER}"
+    assert result.output.startswith(f"sent to {PEER}")
     assert "not online" not in result.output and "warning" not in result.output
     assert len(sent) == 1 and sent[0]["address"] == f"relay:{PEER}"
     # Local presence has nothing to say about a remote agent.
@@ -90,7 +90,7 @@ async def test_the_handle_is_matched_whatever_its_case():
 
     result = await plugin._handle_hub_msg_tool(_call(PEER.upper()))
 
-    assert result.success and result.output == f"sent to {PEER}"
+    assert result.success and result.output.startswith(f"sent to {PEER}")
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_a_failed_remote_send_can_be_retried_once_the_agent_is_on_the_rost
     )
     retried = await plugin._handle_hub_msg_tool(_call(PEER))
 
-    assert retried.success and retried.output == f"sent to {PEER}"
+    assert retried.success and retried.output.startswith(f"sent to {PEER}")
     assert len(sent) == 1
 
 
@@ -143,6 +143,73 @@ async def test_a_repeated_remote_send_is_not_resent_and_says_so():
     assert again.success
     assert "not sent again" in again.output
     assert len(sent) == 1
+
+
+NEW_REQUEST_RESULT = (
+    f"sent to {PEER}; its reply arrives by itself as a hub message. end your turn "
+    "unless you have other local work, and do not check status, capture, or send again."
+)
+
+
+@pytest.mark.asyncio
+async def test_a_new_request_result_tells_the_asker_the_reply_comes_by_itself():
+    """The live run polled hub_status, tried hub_capture, then asked a second
+    time, so the far side ran the task twice. The result is what the model
+    reads before it decides; it must say to stop and wait."""
+    plugin, sent = _plugin(on_roster=[PEER])
+
+    result = await plugin._handle_hub_msg_tool(_call(PEER))
+
+    assert result.success and result.output == NEW_REQUEST_RESULT
+    assert len(sent) == 1
+    assert LEAK.search(result.output) is None
+
+
+@pytest.mark.asyncio
+async def test_an_answer_on_a_received_request_thread_stays_plain_sent_to():
+    from plugins.hub.models import HubMessage
+
+    plugin, sent = _plugin(on_roster=[PEER])
+    request = HubMessage(
+        action="message",
+        from_identity=PEER,
+        to="koordinator",
+        content="run uname",
+        metadata={"network": {"kind": "relay"}},
+    )
+    plugin._note_network_request(request)
+
+    result = await plugin._handle_hub_msg_tool(_call(PEER, "alzan-prod"))
+
+    assert result.success and result.output == f"sent to {PEER}"
+    assert sent[0]["thread_id"] == request.thread_id
+    assert sent[0]["reply_to"] == request.id
+
+
+@pytest.mark.asyncio
+async def test_the_answer_is_owed_once_so_the_next_message_is_a_new_request():
+    from plugins.hub.models import HubMessage
+
+    plugin, _ = _plugin(on_roster=[PEER])
+    plugin._note_network_request(
+        HubMessage(action="message", from_identity=PEER, to="koordinator", content="q")
+    )
+    answer = await plugin._handle_hub_msg_tool(_call(PEER, "the answer"))
+    followup = await plugin._handle_hub_msg_tool(_call(PEER, "one more thing"))
+
+    assert answer.output == f"sent to {PEER}"
+    assert followup.output.startswith(f"sent to {PEER}; its reply arrives by itself")
+
+
+@pytest.mark.asyncio
+async def test_the_wait_note_is_for_remote_requests_only():
+    lapis = AgentRuntime(name="coder", identity="lapis", agent_id="lapis-id")
+    plugin, _ = _plugin(local=[lapis])
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    result = await plugin._handle_hub_msg_tool(_call("lapis"))
+
+    assert result.output == "delivered to lapis"
 
 
 @pytest.mark.asyncio

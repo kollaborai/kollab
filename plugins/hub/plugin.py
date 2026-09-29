@@ -2955,6 +2955,17 @@ class HubPlugin(BasePlugin):
             # is offline; the roster answers that.
             self._recent_hub_msgs[msg_hash] = now
             output = f"sent to {target}"
+            if not (thread_id or reply_to):
+                # A new request, not an answer on a received thread. The model
+                # reads this result to pick its next move, and left alone it
+                # polls hub_status, tries hub_capture, then asks again, which
+                # runs the task twice on the far side. Say where the reply
+                # comes from here rather than in the prompt alone.
+                output += (
+                    "; its reply arrives by itself as a hub message. end your "
+                    "turn unless you have other local work, and do not check "
+                    "status, capture, or send again."
+                )
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
         elif self._presence:

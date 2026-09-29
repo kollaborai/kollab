@@ -670,7 +670,13 @@ class ResponseParser:
             pattern: compiled regex with capture groups
             tool_type: type string for tool_executor routing
             extract_fn: converts regex match -> tool_data dict
+
+        One name, one definition: registering a name again replaces the earlier
+        entry. The LLM core bridges every registry tool in before any plugin
+        starts, so a plugin's own tag would otherwise stack on the generic one
+        and a single tag in a response would parse into two tools.
         """
+        self._plugin_tags = [t for t in self._plugin_tags if t["name"] != tag_name]
         self._plugin_tags.append(
             {
                 "name": tag_name,
