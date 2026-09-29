@@ -30,7 +30,7 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "Accept a join or knock request by name",
+      "pattern": "Accept a join request by name",
       "description": "accept is listed"
     },
     {

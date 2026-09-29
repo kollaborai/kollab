@@ -70,8 +70,8 @@ async def test_private_code_is_masked_and_length_is_not_rendered():
     await view.render_frame(0.0)
     rendered = renderer.text()
 
-    assert "Domain: kollabor.ai" in rendered
-    assert "Private code: ********" in rendered
+    assert re.search(r"domain\s+kollabor\.ai", rendered)
+    assert re.search(r"join code\s+\*{8}(?!\*)", rendered)
     assert "s3cr3t-value" not in rendered
     assert "************" not in rendered
 
@@ -107,9 +107,11 @@ async def test_submit_passes_private_wrapper_then_pending_request_shows_no_recei
 
     await view.render_frame(0.0)
     rendered = renderer.text()
-    assert "Request sent; waiting for approval on another device." in rendered
+    assert (
+        "request sent to kollabor.ai; waiting for approval on another device"
+        in rendered
+    )
     assert "enroll-7f2a" not in rendered
-    assert "kollabor.ai" not in rendered
     assert "s3cr3t-value" not in rendered
     assert "member" not in rendered.lower()
     assert "credential" not in rendered.lower()
@@ -196,7 +198,7 @@ async def test_bracketed_paste_tab_does_not_change_focus_or_expose_code():
 
     await view.render_frame(0.0)
     assert "SYNTHETIC-SECRET" not in renderer.text()
-    assert "Private code: ********" in renderer.text()
+    assert re.search(r"join code\s+\*{8}(?!\*)", renderer.text())
 
     await view.handle_input(_named("Enter"))
 
@@ -215,7 +217,7 @@ async def test_code_pasted_into_domain_field_moves_to_private_field():
     view = ConnectAltView(on_submit=submit)
     renderer = _FakeRenderer()
     await view.on_enter(renderer)
-    assert view._focus == "domain"
+    view._focus = "domain"
 
     await _paste(view, "ABCD-EFGH-SYNTHETIC-SECRET")
     await view.render_frame(0.0)
@@ -239,11 +241,12 @@ async def test_deliberate_tab_changes_focus_outside_bracketed_paste():
 
     assert tab is not None
     assert tab.name == "Tab"
-    assert view._focus == "domain"
+    # The domain is prefilled, so the first thing typed is the code.
+    assert view._focus == "code"
 
     await view.handle_input(tab)
 
-    assert view._focus == "code"
+    assert view._focus == "domain"
 
 
 @pytest.mark.asyncio
@@ -285,7 +288,7 @@ async def test_callback_exception_is_generic_and_never_logged(caplog):
     await view.render_frame(0.0)
 
     assert view.outcome == ConnectOutcome.error()
-    assert "Could not submit the connect request." in view._renderer.text()
+    assert "could not submit the join request" in view._renderer.text()
     assert secret not in view._renderer.text()
     assert secret not in caplog.text
 
@@ -305,9 +308,9 @@ async def test_invalid_callback_result_maps_to_generic_error():
 @pytest.mark.parametrize(
     ("result", "message"),
     [
-        (ConnectOutcome.approved(), "Connection approved."),
-        (ConnectOutcome.rejected(), "Connection request rejected."),
-        (ConnectOutcome.error(), "Could not submit the connect request."),
+        (ConnectOutcome.approved(), "joined kollabor.ai"),
+        (ConnectOutcome.rejected(), "join request rejected"),
+        (ConnectOutcome.error(), "could not submit the join request"),
     ],
 )
 async def test_non_pending_statuses_are_typed_and_render_generic_copy(result, message):
@@ -356,7 +359,7 @@ async def test_domain_filters_terminal_controls_and_submit_requires_both_fields(
     await view.handle_input(_named("Enter"))
     await view.render_frame(0.0)
     assert view.outcome is None
-    assert "Enter a domain and private code." in renderer.text()
+    assert "enter a domain and join code" in renderer.text()
 
 
 @pytest.mark.asyncio
@@ -375,7 +378,7 @@ async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
         await _type_code(view, typed)
         await view.render_frame(0.0)
 
-        assert "Private code: ********" in renderer.text()
+        assert re.search(r"join code\s+\*{8}(?!\*)", renderer.text())
         assert typed not in renderer.text()
 
         await view.handle_input(_named("Enter"))
@@ -392,5 +395,112 @@ async def test_join_form_is_titled_connect_with_network_none_above_the_code_fiel
     rows = [line for _, _, line in renderer.lines]
     assert any(line.strip() == "Connect" for line in rows)
     network = next(i for i, line in enumerate(rows) if line.strip() == "network      none")
-    code_field = next(i for i, line in enumerate(rows) if "Private code:" in line)
+    code_field = next(i for i, line in enumerate(rows) if "join code" in line)
     assert network < code_field
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "domain",
+    ["team-share.example.com", "test-server.example.org", "backpack.dev", "mesh-data.example.net"],
+)
+async def test_a_domain_that_looks_like_a_code_stays_in_the_domain_field(domain):
+    """Typing or pasting a hyphenated or 8-letter domain must not be taken for a code."""
+    typed = ConnectAltView("")
+    await typed.on_enter(_FakeRenderer())
+    assert typed._focus == "domain"
+    for character in domain:
+        await typed.handle_input(_key(character))
+    assert typed.domain == domain
+    assert typed._code_chars == []
+
+    pasted = ConnectAltView("")
+    await pasted.on_enter(_FakeRenderer())
+    await _paste(pasted, domain)
+    assert pasted.domain == domain
+    assert pasted._code_chars == []
+    assert pasted._focus == "domain"
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_code_leaves_the_prefilled_domain_alone():
+    view = ConnectAltView()
+    await view.on_enter(_FakeRenderer())
+    view._focus = "domain"
+
+    await _paste(view, "7QK4-M2XP")
+
+    assert view.domain == "kollabor.ai"
+    assert "".join(view._code_chars) == "7QK4-M2XP"
+    assert view._focus == "code"
+
+
+@pytest.mark.asyncio
+async def test_empty_code_starts_a_network_on_the_domain_when_attach_is_offered():
+    attached = []
+
+    async def attach(domain: str) -> bool:
+        attached.append(domain)
+        return True
+
+    view = ConnectAltView(on_attach=attach)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    assert attached == ["kollabor.ai"]
+    assert view.outcome == ConnectOutcome.connected()
+    assert "connected to kollabor.ai" in renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_empty_code_without_attach_is_a_validation_error_and_a_failed_attach_is_generic():
+    view = ConnectAltView()
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    assert view.outcome is None
+
+    async def refuse(_domain: str) -> bool:
+        return False
+
+    failing = ConnectAltView(on_attach=refuse)
+    await failing.on_enter(_FakeRenderer())
+    await failing.handle_input(_named("Enter"))
+    assert failing.outcome == ConnectOutcome.error()
+
+
+@pytest.mark.asyncio
+async def test_an_approved_join_shows_the_joined_line_the_caller_supplies():
+    line = "joined marco-home as alzan-prod-home. trust: open"
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.approved(line))
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await _type_code(view, "7QK4-M2XP")
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    assert line in renderer.text()
+    with pytest.raises(ValueError):
+        ConnectOutcome.approved("two\nlines")
+    with pytest.raises(ValueError):
+        ConnectOutcome(ConnectStatus.REJECTED, detail="not allowed here")
+
+
+@pytest.mark.asyncio
+async def test_the_form_hints_wrap_instead_of_being_cut_off_on_a_narrow_terminal():
+    async def attach(_domain: str) -> bool:
+        return True
+
+    view = ConnectAltView(on_attach=attach)
+    renderer = _FakeRenderer(size=(40, 30))
+    await view.on_enter(renderer)
+    await view.render_frame(0.0)
+
+    rows = [line for _, _, line in renderer.lines]
+    assert all(len(line) <= 40 for line in rows if not line.startswith("\u2584"))
+    flat = " ".join(" ".join(rows).split())
+    assert "an empty code plus enter starts a network on kollabor.ai" in flat
+    assert "run /connect code on a device already on the network" in flat

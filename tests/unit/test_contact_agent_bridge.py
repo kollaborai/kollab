@@ -220,6 +220,57 @@ async def test_a_failed_approval_rolls_back_the_binding_and_raises(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_failed_relay_decision_keeps_an_approval_that_existed_before(tmp_path):
+    """Only what this accept added is undone: a key approved earlier keeps its approval."""
+    _plugin, bridge = _bridge(tmp_path)
+    bridge.commands.client.approve(_SENDER)
+    bridge.commands.decision_error = RelayError("relay is down")
+
+    decided = await bridge._rpc_contact_decide(_decision("accept"))
+
+    assert decided == {"error": "transport"}
+    disk = _disk(tmp_path)
+    assert disk.approvals == [_SENDER]
+    assert disk.peer_devices == {} and disk.peer_trust == {}
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_trust_is_set_before_the_approval_so_a_failure_never_leaves_an_open_peer(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+
+    def refuse(_key, _level):
+        raise RelayError("state is read-only")
+
+    bridge.set_peer_trust = refuse
+
+    with pytest.raises(RelayError, match="read-only"):
+        bridge._bind_knock_peer(_SENDER, "ana-laptop")
+
+    disk = _disk(tmp_path)
+    assert disk.approvals == []  # never approved on the network default (open)
+    assert disk.peer_devices == {}
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_approval_rolls_back_even_a_non_relay_error(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+
+    def disk_full(_key):
+        raise OSError("disk full")
+
+    bridge.commands.client.approve = disk_full
+
+    with pytest.raises(OSError, match="disk full"):
+        bridge._bind_knock_peer(_SENDER, "ana-laptop")
+
+    disk = _disk(tmp_path)
+    assert disk.peer_devices == {} and disk.peer_trust == {} and disk.approvals == []
+    await bridge.close()
+
+
+@pytest.mark.asyncio
 async def test_remote_model_turn_cannot_submit_review_or_decide_contact(tmp_path):
     plugin = SimpleNamespace(
         _identity=SimpleNamespace(agent_id="local-agent", identity="operator")

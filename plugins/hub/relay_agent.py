@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import contextvars
 import json
 import logging
@@ -26,6 +27,7 @@ from .device_names import (
     NAME_RE,
     default_device_name,
     format_handle,
+    key_label,
     parse_handle,
     validate_device_name,
     validate_trust,
@@ -172,25 +174,43 @@ class RelayAgentBridge:
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
 
-    def _bind_knock_peer(self, sender_key: str, device_name: str) -> bool:
-        """Turn an accepted knock into a peer: name it, approve it, trust `agents`.
+    def _bind_knock_peer(self, sender_key: str, device_name: str):
+        """Turn an accepted knock into a peer: name it, trust `agents`, approve it.
 
         The name is bound first so a duplicate fails before anything else is
-        written; nothing is allowed until `/connect allow`. Returns whether
-        this call created the name binding. Failures are never swallowed; a
-        failed approval undoes the binding this call created.
+        written; trust is set before the approval so a failure between the two
+        never leaves an approved key on the network default (`open`); nothing
+        is allowed until `/connect allow`. Returns an ``undo`` function that
+        removes only what this call added, so a key that was already approved
+        keeps its approval. Failures are never swallowed; a failed step undoes
+        the earlier ones.
         """
+        client = self.commands.client
+        was_approved = sender_key in client.state.approvals
+        previous_trust = self._state().state.peer_trust.get(sender_key)
         created = self.bind_peer_device(sender_key, device_name)
-        try:
-            self.commands.client.approve(sender_key)
-            self.set_peer_trust(sender_key, "agents")
-        except RelayError:
+
+        def undo() -> None:
+            if not was_approved:
+                client.revoke(sender_key)  # also drops the name and the trust
+                return
+            store = self._state()
             if created:
-                store = self._state()
                 store.state.peer_devices.pop(sender_key, None)
-                store.save()
+            if previous_trust is None:
+                store.state.peer_trust.pop(sender_key, None)
+            else:
+                store.state.peer_trust[sender_key] = previous_trust
+            store.save()
+
+        try:
+            self.set_peer_trust(sender_key, "agents")
+            client.approve(sender_key)
+        except Exception:
+            with contextlib.suppress(Exception):
+                undo()
             raise
-        return created
+        return undo
 
     @property
     def identity(self):
@@ -302,7 +322,7 @@ class RelayAgentBridge:
         """
         self._require_human_network_context("remote model turns cannot bind peer devices")
         if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-            name = key[:8]
+            name = key_label(key)
         store = self._state()
         if store.state.peer_devices.get(key) == name:
             return False
@@ -861,7 +881,7 @@ class RelayAgentBridge:
         try:
             # Bind before the relay records the decision, like a join accept:
             # a name collision fails the accept and the knock stays pending.
-            created = params["decision"] == "accept" and self._bind_knock_peer(
+            undo = params["decision"] == "accept" and self._bind_knock_peer(
                 params["sender_key"], params["device_name"]
             )
             try:
@@ -869,8 +889,8 @@ class RelayAgentBridge:
                     params["domain"], params["request_id"], params["decision"]
                 )
             except Exception:
-                if created:
-                    self.commands.client.revoke(params["sender_key"])
+                if undo:
+                    undo()
                 raise
             return {"status": result.status, "receipt_id": result.receipt_id}
         except Exception as exc:
@@ -2077,7 +2097,12 @@ class RelayAgentBridge:
             cache_key = (status["session"], peer_key, peer_session)
             cached = self._cache.get(cache_key)
             try:
-                if not cached or time.monotonic() - cached[0] > 15:
+                # A cached read never drops a known peer for being a few
+                # seconds past its TTL: the refresher runs on the same 15 s
+                # beat, and skipping the entry would flash the device offline.
+                if not cached or (
+                    not params.get("cached") and time.monotonic() - cached[0] > 15
+                ):
                     if params.get("cached"):
                         continue
                     if self.secure_transport is None:
@@ -2126,7 +2151,7 @@ class RelayAgentBridge:
                         ):
                             raise RelayError("invalid remote agent descriptor")
                         # The recorded binding wins over the peer's self-report.
-                        device = peer_devices.get(peer_key) or device or peer_key[:8]
+                        device = peer_devices.get(peer_key) or device or key_label(peer_key)
                         address = str(
                             RelayAddress(
                                 peer_key, row["workspace_id"], row["agent_id"]
@@ -2162,6 +2187,10 @@ class RelayAgentBridge:
             or len(peer_sessions) > MAX_REMOTE_PEERS,
         }
 
+    def _peer_name(self, peer_key: str) -> str:
+        """The human name for a peer key: its bound device name, never the key."""
+        return self._state().state.peer_devices.get(peer_key) or key_label(peer_key)
+
     async def application_command(self, head, rest, source_agent=None):
         self._require_human_network_context(
             "remote model turns cannot issue human network commands"
@@ -2171,7 +2200,7 @@ class RelayAgentBridge:
         parts = rest.split()
         if head == "allow":
             if len(parts) != 2:
-                return "usage: /connect allow <peer public key> <local agent name>"
+                return "usage: /connect allow <device> <agent>"
             peer, name = parts
             if peer not in client.state.approvals:
                 raise RelayError(
@@ -2182,10 +2211,13 @@ class RelayAgentBridge:
                     "grant requires an online agent name in this workspace"
                 )
             self.store.grant(client.state.room, peer, name)
-            return f"conversation allowed: {peer} -> {name}; local tool permissions still apply"
+            return (
+                f"conversation allowed: {self._peer_name(peer)} -> {name}; "
+                "local tool permissions still apply"
+            )
         if head == "deny":
             if len(parts) not in (1, 2):
-                return "usage: /connect deny <peer public key> [local agent name]"
+                return "usage: /connect deny <device> [agent]"
             self.store.revoke(
                 client.state.room, parts[0], parts[1] if len(parts) == 2 else None
             )
@@ -2433,7 +2465,7 @@ class RelayAgentBridge:
         from_device = (
             self._state().state.peer_devices.get(record["peer"])
             or payload.get("from_device")
-            or RelayAddress.parse(payload["from"]).key[:8]
+            or key_label(RelayAddress.parse(payload["from"]).key)
         )
         message = HubMessage(
             id=payload["id"],

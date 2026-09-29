@@ -10,9 +10,11 @@ from unittest.mock import AsyncMock
 import pytest
 from nacl.signing import SigningKey
 
+from plugins.hub.device_names import key_label
 from plugins.hub.enrollment_client import (
     EnrollmentIssuer,
     EnrollmentProtocolError,
+    EnrollmentRecoveryJournal,
     _ActiveEnrollmentOffer,
     _device_key_fingerprint,
     _LiveEnrollmentRequest,
@@ -188,32 +190,29 @@ async def test_local_hub_command_lists_redacted_requests_and_accepts_or_rejects(
     _add_pending(bridge, issuer, round_id=rejected_id, now=now)
 
     # "requests" is retired per the agent network constitution section 6
-    # ("use /connect or /connect status"); the redacted listing itself
-    # (RelayCommands._format_enrollment_requests) stays available for reuse
-    # and is checked directly here.
+    # ("use /connect or /connect status"); a pending join is listed on the
+    # status screen by name and short fingerprint, never by receipt.
     assert await hub._handle_connect_command("requests") == (
         "connect: use /connect or /connect status"
     )
-    pending = bridge.pending_enrollment_requests(source_agent=AGENT_ID)
-    listed = RelayCommands._format_enrollment_requests(pending)
+    listed = await bridge.commands.format_status()
 
-    assert accepted_id in listed
-    assert rejected_id in listed
-    assert "sha256:" + fingerprint[:16] in listed
+    assert "wants to join   fingerprint" in listed
+    assert accepted_id not in listed
+    assert rejected_id not in listed
     assert fingerprint not in listed
     assert "challenge-secret" not in listed
     assert "proof-secret" not in listed
     assert "token" not in listed.lower()
-    assert "decision: available" in listed
-    assert f"destination workspace: {WORKSPACE_ID}" in listed
-    assert "provider credentials will be copied to this device" in listed
-    assert "network revocation does not revoke them at the provider" in listed
-    assert "default (openai/gpt-4.1) to kollab-new-device" in listed
 
-    # accept/reject now also take a receipt prefix of 8+ hex characters.
+    # Scripts may still pass a receipt prefix of 8+ hex characters; the reply
+    # names the device and never echoes the receipt.
     accepted = await hub._handle_connect_command(f"accept {accepted_id[:8]}")
-    assert accepted == f"enrollment accepted; receipt: {accepted_id}"
-    assert await hub._handle_connect_command(f"accept {accepted_id}") == f"enrollment accepted; receipt: {accepted_id}"
+    assert accepted == "accepted that device. it is now a trusted device on kollabor.ai."
+    # Decided requests are no longer pending, so a repeat finds nothing.
+    assert await hub._handle_connect_command(f"accept {accepted_id}") == (
+        f"connect: no pending request matches '{accepted_id}'"
+    )
     assert accepted_live.decision == "approved"
     assert accepted_live.decision_event.is_set()
     assert store.get("human-action-01").consumed_new_devices == 1
@@ -227,7 +226,7 @@ async def test_local_hub_command_lists_redacted_requests_and_accepts_or_rejects(
     )
 
     rejected = await hub._handle_connect_command(f"reject {rejected_id}")
-    assert rejected == f"enrollment rejected; receipt: {rejected_id}"
+    assert rejected == "rejected that device."
     assert store.get("human-action-01").consumed_new_devices == 1
     assert (
         store.get_enrollment_request(
@@ -254,7 +253,7 @@ async def test_accept_reject_take_a_device_name_from_pending_rows(tmp_path):
 
     accepted = await hub._handle_connect_command("accept laptop-kollab")
 
-    assert accepted == f"enrollment accepted; receipt: {round_id}"
+    assert accepted == "accepted laptop-kollab. it is now a trusted device on kollabor.ai."
     assert live.decision == "approved"
 
 
@@ -281,7 +280,7 @@ async def test_accept_binds_the_joiners_device_name(tmp_path):
 
     accepted = await hub._handle_connect_command(f"accept {round_id}")
 
-    assert accepted == f"enrollment accepted; receipt: {round_id}"
+    assert accepted == "accepted laptop-kollab. it is now a trusted device on kollabor.ai."
     assert bridge._state().state.peer_devices[live.destination_key] == "laptop-kollab"
 
 
@@ -297,10 +296,10 @@ async def test_accept_without_a_device_name_falls_back_to_the_key_prefix(tmp_pat
 
     accepted = await hub._handle_connect_command(f"accept {round_id}")
 
-    assert accepted == f"enrollment accepted; receipt: {round_id}"
+    assert accepted == "accepted that device. it is now a trusted device on kollabor.ai."
     assert (
         bridge._state().state.peer_devices[live.destination_key]
-        == live.destination_key[:8]
+        == key_label(live.destination_key)
     )
 
 
@@ -378,6 +377,33 @@ async def test_accept_rolls_back_the_binding_when_consume_fails(tmp_path, monkey
         await issuer.decide(round_id, decision="accept")
 
     assert live.destination_key not in bridge._state().state.peer_devices
+
+
+@pytest.mark.asyncio
+async def test_accept_rolls_back_the_binding_when_the_recovery_journal_write_fails(
+    tmp_path, monkeypatch
+):
+    """A failed journal write also orphans the binding: an unapproved key would
+    squat the name until the room rotates."""
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "a" * 32
+    _store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    live.device_name = "laptop-kollab"
+
+    def disk_full(self, *_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(EnrollmentRecoveryJournal, "put", disk_full)
+
+    with pytest.raises(EnrollmentProtocolError, match="unavailable"):
+        await issuer.decide(round_id, decision="accept")
+
+    assert live.destination_key not in bridge._state().state.peer_devices
+    other = SigningKey.generate().verify_key.encode().hex()
+    bridge.bind_peer_device(other, "laptop-kollab")  # the name is free again
 
 
 @pytest.mark.asyncio

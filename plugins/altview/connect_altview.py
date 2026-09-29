@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+import textwrap
 import time
 import unicodedata
 from dataclasses import dataclass, replace
@@ -20,12 +21,12 @@ from typing import Any, Awaitable, Callable
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
-from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow
+from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow, network_label
 
 _MAX_DOMAIN_LENGTH = 253
 _MAX_CODE_LENGTH = 4096
 _RECEIPT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
-_SHORT_CODE_PASTE_RE = re.compile(
+_SHORT_CODE_START_RE = re.compile(
     r"[0-9A-HJKMNP-TV-Z]{4}-?[0-9A-HJKMNP-TV-Z]{4}", re.IGNORECASE
 )
 _REDACTED = "<redacted>"
@@ -40,6 +41,7 @@ class ConnectStatus(Enum):
 
     PENDING = "pending"
     APPROVED = "approved"
+    CONNECTED = "connected"
     REJECTED = "rejected"
     ERROR = "error"
 
@@ -122,6 +124,9 @@ class ConnectOutcome:
 
     status: ConnectStatus
     receipt_id: str | None = None
+    # One line of non-secret text shown in place of the generic one, e.g.
+    # `joined marco-home as alzan-prod-home. trust: open`.
+    detail: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, ConnectStatus):
@@ -133,14 +138,25 @@ class ConnectOutcome:
                 raise ValueError("pending outcome requires a safe receipt ID")
         elif self.receipt_id is not None:
             raise ValueError("only pending outcomes may include a receipt ID")
+        if self.detail and (
+            self.status not in (ConnectStatus.APPROVED, ConnectStatus.CONNECTED)
+            or not isinstance(self.detail, str)
+            or len(self.detail) > 200
+            or ConnectAltView._filter_text(self.detail, 200) != self.detail
+        ):
+            raise ValueError("outcome detail must be one short printable line")
 
     @classmethod
     def pending(cls, receipt_id: str) -> ConnectOutcome:
         return cls(ConnectStatus.PENDING, receipt_id)
 
     @classmethod
-    def approved(cls) -> ConnectOutcome:
-        return cls(ConnectStatus.APPROVED)
+    def approved(cls, detail: str = "") -> ConnectOutcome:
+        return cls(ConnectStatus.APPROVED, detail=detail)
+
+    @classmethod
+    def connected(cls, detail: str = "") -> ConnectOutcome:
+        return cls(ConnectStatus.CONNECTED, detail=detail)
 
     @classmethod
     def rejected(cls) -> ConnectOutcome:
@@ -155,6 +171,8 @@ ConnectSubmitCallback = Callable[
     [ConnectSubmission], ConnectOutcome | Awaitable[ConnectOutcome]
 ]
 EnrollmentOfferCallback = Callable[[str], dict[str, str] | Awaitable[dict[str, str]]]
+# Starts a network on a directory when the code is left empty; true on success.
+ConnectAttachCallback = Callable[[str], bool | Awaitable[bool]]
 
 
 class ConnectAltView(AltView):
@@ -171,6 +189,7 @@ class ConnectAltView(AltView):
         self,
         domain: str = "kollabor.ai",
         on_submit: ConnectSubmitCallback | None = None,
+        on_attach: ConnectAttachCallback | None = None,
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect",
@@ -186,16 +205,19 @@ class ConnectAltView(AltView):
         super().__init__(metadata)
         self._domain = self._filter_text(domain, _MAX_DOMAIN_LENGTH)
         self._on_submit = on_submit
+        self._on_attach = on_attach
         self._renderer: Any = None
         self._code_chars: list[str] = []
         self._domain_cursor = len(self.domain)
         self._code_cursor = 0
-        self._focus = "domain"
+        # The domain is prefilled, so the first thing a person types is the code.
+        self._focus = "code" if self.domain else "domain"
         self._stage = "entry"
         self._validation_error = ""
         self._outcome: ConnectOutcome | None = None
         self.cancelled = False
         self._paste_active = False
+        self._paste_from = 0
 
     @property
     def outcome(self) -> ConnectOutcome | None:
@@ -217,7 +239,7 @@ class ConnectAltView(AltView):
         self._outcome = None
         self.cancelled = False
         self._validation_error = ""
-        self._focus = "domain"
+        self._focus = "code" if self.domain else "domain"
         self._stage = "entry"
         self._paste_active = False
 
@@ -248,7 +270,7 @@ class ConnectAltView(AltView):
         if self._stage == "entry":
             self._render_entry(top + 3, width)
         elif self._stage == "submitting":
-            self._write_line(2, top + 4, "Submitting connect request…", width)
+            self._write_line(2, top + 4, "submitting…", width)
         else:
             self._render_outcome(top + 4, width)
         return True
@@ -256,9 +278,11 @@ class ConnectAltView(AltView):
     async def handle_input(self, key_press: KeyPress) -> bool:
         if key_press.name == "BracketedPasteStart":
             self._paste_active = True
+            self._paste_from = self._domain_cursor
             return False
         if key_press.name == "BracketedPasteEnd":
             self._paste_active = False
+            self._move_pasted_code()
             self.request_render()
             return False
 
@@ -305,37 +329,48 @@ class ConnectAltView(AltView):
         await super().on_complete()
 
     def _render_entry(self, y: int, width: int) -> None:
-        domain_marker = ">" if self._focus == "domain" else " "
-        code_marker = ">" if self._focus == "code" else " "
         self._write_line(1, y, "network".ljust(_LABEL_WIDTH) + "none", width)
-        self._write_line(
-            2, y + 2, f"{domain_marker} Domain: {self._visible_domain()}", width
-        )
+        self._write_line(1, y + 2, self._field("domain", self._visible_domain()), width)
         code_display = "********" if self._code_chars else "(enter privately)"
-        self._write_line(2, y + 3, f"{code_marker} Private code: {code_display}", width)
+        self._write_line(1, y + 3, self._field("join code", code_display), width)
         if self._validation_error:
             self._write_line(2, y + 5, self._validation_error, width)
-        self._write_line(2, y + 7, "Tab: switch   Enter: submit   Esc: cancel", width)
-        self._write_line(
-            2, y + 9, "No code? Run /connect code on a device that is already connected.", width
-        )
+        self._write_line(2, y + 7, "tab switch  enter submit  esc cancel", width)
+        hints = ["no code? run /connect code on a device already on the network"]
+        if self._on_attach is not None:
+            hints.append(
+                f"first device? an empty code plus enter starts a network on {self.domain}"
+            )
+        row = y + 9
+        for hint in hints:
+            for line in textwrap.wrap(hint, max(10, width - 3)):
+                self._write_line(2, row, line, width)
+                row += 1
+
+    def _field(self, label: str, value: str) -> str:
+        focused = self._focus == ("domain" if label == "domain" else "code")
+        return f"{'>' if focused else ' '} {label}".ljust(_LABEL_WIDTH) + value
 
     def _render_outcome(self, y: int, width: int) -> None:
         outcome = self._outcome
         if outcome is None:
-            message = "Connect request cancelled."
+            message = "cancelled"
         elif outcome.status is ConnectStatus.PENDING:
-            message = "Request sent; waiting for approval on another device."
+            message = (
+                f"request sent to {self.domain}; "
+                "waiting for approval on another device"
+            )
         elif outcome.status is ConnectStatus.APPROVED:
-            message = "Connection approved."
+            message = outcome.detail or f"joined {self.domain}"
+        elif outcome.status is ConnectStatus.CONNECTED:
+            message = outcome.detail or f"connected to {self.domain}"
         elif outcome.status is ConnectStatus.REJECTED:
-            message = "Connection request rejected."
+            message = "join request rejected"
         else:
-            message = "Could not submit the connect request."
+            message = "could not submit the join request"
 
-        if message:
-            self._write_line(2, y, message, width)
-        self._write_line(2, y + 3, "Enter or Esc: close", width)
+        self._write_line(2, y, message, width)
+        self._write_line(2, y + 3, "enter/esc close", width)
 
     def _edit_focused_field(self, key_press: KeyPress) -> None:
         field = self._domain_chars() if self._focus == "domain" else self._code_chars
@@ -377,28 +412,62 @@ class ConnectAltView(AltView):
             cursor += 1
 
         if self._focus == "domain":
-            text = "".join(field)
-            found = _SHORT_CODE_PASTE_RE.search(text)
-            marker = found.start() if found else -1
-            if marker >= 0:
-                # A code typed or pasted into the domain field moves to the
-                # private field so it is never rendered in clear text.
-                self._clear_code_input()
-                self._code_chars.extend(list(text[marker:])[:_MAX_CODE_LENGTH])
-                self._code_cursor = len(self._code_chars)
-                for index in range(marker, len(field)):
-                    field[index] = "\0"
-                text = text[:marker]
-                cursor = min(cursor, len(text))
-                self._focus = "code"
-            self.domain = text
+            self.domain = "".join(field)
         setattr(self, cursor_attr, cursor)
         self._validation_error = ""
         self.request_render()
 
+    def _move_pasted_code(self) -> None:
+        """A code pasted into the domain field moves to the private field.
+
+        Only what was just pasted moves, and only when it starts with a code
+        and has no dot, so it is never left in clear text and a pasted
+        domain such as `team-share.example.com` is never taken for a code.
+        """
+        if self._focus != "domain":
+            return
+        text, start, end = self.domain, self._paste_from, self._domain_cursor
+        chunk = text[start:end]
+        if "." in chunk or _SHORT_CODE_START_RE.match(chunk) is None:
+            return
+        self._clear_code_input()
+        self._code_chars.extend(list(chunk)[:_MAX_CODE_LENGTH])
+        self._code_cursor = len(self._code_chars)
+        self.domain = text[:start] + text[end:]
+        self._domain_cursor = start
+        self._focus = "code"
+
+    async def _attach(self) -> None:
+        """Empty code: start a network on the domain, the first-device path."""
+        self._stage = "submitting"
+        self._validation_error = ""
+        self.request_render()
+        try:
+            result = self._on_attach(self.domain) if self._on_attach else False
+            if inspect.isawaitable(result):
+                result = await result
+            self._outcome = (
+                ConnectOutcome.connected() if result is True else ConnectOutcome.error()
+            )
+        except asyncio.CancelledError:
+            self._outcome = ConnectOutcome.error()
+            self._stage = "outcome"
+            raise
+        except Exception:
+            self._outcome = ConnectOutcome.error()
+        self._stage = "outcome"
+        self.request_render()
+
     async def _submit(self) -> None:
-        if not self.domain.strip() or not self._code_chars:
-            self._validation_error = "Enter a domain and private code."
+        if not self.domain.strip():
+            self._validation_error = "enter a domain"
+            self.request_render()
+            return
+        if not self._code_chars:
+            if self._on_attach is not None:
+                await self._attach()
+                return
+            self._validation_error = "enter a domain and join code"
             self.request_render()
             return
 
@@ -555,11 +624,7 @@ def connect_screen_lines(
         lines += _block("network", ["loading…"], width)
         lines += _block("join code", [_code_value(state)], width)
     else:
-        network = (
-            snapshot.domain
-            if snapshot.network == snapshot.domain
-            else f"{snapshot.network}  via {snapshot.domain}"
-        )
+        network = network_label(snapshot.network, snapshot.domain)
         lines += _block("network", [f"{network}   trust: {snapshot.trust}"], width)
         lines += _block("this device", [snapshot.device or "unnamed"], width)
         lines += _block("join code", [_code_value(state)], width)
@@ -581,9 +646,11 @@ def connect_screen_lines(
 
 
 def _sent_summary(categories: tuple[str, ...]) -> str:
-    """What accepting copies to the new device, from the request's own scope."""
-    if any(category.endswith(":oauth_tokens") for category in categories):
-        return "profile settings and one sign-in"
+    """What accepting queues for the new device, from the request's own scope.
+
+    An oauth login never travels (constitution section 9), so a provider
+    category always means an api key.
+    """
     if any(category.startswith("provider:") for category in categories):
         return "profile settings and one api key"
     return ""
@@ -635,6 +702,9 @@ class ConnectScreenAltView(AltView):
         self._selected = 0
         self._notice: tuple[str, ...] = ()
         self._deciding = False
+        # Cleared by a decision, set again once the redraw shows the next
+        # request, so a held or double-tapped key cannot decide one unseen.
+        self._armed = True
 
     @property
     def domain(self) -> str:
@@ -642,6 +712,7 @@ class ConnectScreenAltView(AltView):
 
     async def on_enter(self, renderer: Any) -> None:
         self._renderer = renderer
+        self._armed = True
         self._clear_code()
         self._code_status = "creating"
         self._snapshot = None
@@ -668,6 +739,7 @@ class ConnectScreenAltView(AltView):
         )
         for offset, line in enumerate(lines[1:]):
             self._renderer.write_at(0, 3 + offset, line, "")
+        self._armed = True
         return True
 
     async def handle_input(self, key_press: KeyPress) -> bool:
@@ -784,6 +856,7 @@ class ConnectScreenAltView(AltView):
             or not snapshot.requests
             or self._on_decide is None
             or self._deciding
+            or not self._armed
         ):
             return
         row = snapshot.requests[self._selected]
@@ -808,13 +881,14 @@ class ConnectScreenAltView(AltView):
             ]
             sent = _sent_summary(row.categories)
             if sent:
-                notice.append(f"sent to {who}: {sent}")
+                notice.append(f"sealed config queued for {who}: {sent}")
             self._notice = tuple(notice)
         else:
             self._notice = (f"rejected {who}.",)
         remaining = tuple(item for item in snapshot.requests if item is not row)
         self._snapshot = replace(snapshot, requests=remaining)
         self._selected = max(0, min(self._selected, len(remaining) - 1))
+        self._armed = False
 
     def _screen_state(self) -> ConnectScreenState:
         remaining = 0

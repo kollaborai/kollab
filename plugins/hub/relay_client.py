@@ -232,11 +232,13 @@ class RelayClient:
     def join_invite(self, token: str) -> str:
         if self._task is not None and not self._task.done():
             raise RelayError("disconnect before joining another invitation")
+        self._adopt_bridge_fields()
         return self._store.join(token)
 
     def rotate_room(self):
         if self._task is not None and not self._task.done():
             raise RelayError("disconnect before rotating the invitation room")
+        self._adopt_bridge_fields()
         self.state.room = secrets.token_hex(32)
         self.state.approvals = []
         self.state.inviter = ""
@@ -246,12 +248,22 @@ class RelayClient:
         self.state.peer_trust = {}
         self._store.save()
 
+    async def leave(self) -> None:
+        """Disconnect for good: forget the directory, the room and every peer.
+
+        A device that left can then join any network by code, which needs an
+        empty origin, no inviter and no approvals.
+        """
+        await self.close(disable=True)
+        self.state.origin = ""
+        self.rotate_room()
+
     def _adopt_bridge_fields(self) -> None:
         """Take the fields the agent bridge writes through its own state store.
 
-        This client keeps one long-lived copy and saves all of it, so without
-        this an approve or revoke writes a stale device name, trust and peer
-        bindings back over the bridge's newer ones.
+        This client keeps one long-lived copy and saves all of it, so every
+        method that saves must call this first, or it writes a stale device
+        name, trust and peer bindings back over the bridge's newer ones.
         """
         disk = RelayStateStore(self.workspace, self.state_dir).state
         for name in ("device_name", "trust", "peer_devices", "peer_trust"):
@@ -339,14 +351,13 @@ class RelayClient:
                 "verified relay endpoint must be canonical same-origin /relay/v1/ws"
             )
         if self.state.origin and self.state.origin != origin:
-            raise RelayError(
-                "disconnect and join an invitation to change the relay origin"
-            )
+            raise RelayError("run /connect leave before joining another directory")
         await self.close()
         self._ws_url, self._ca, self._private_cidrs = ws_url, ca, tuple(private_cidrs)
         # Validate operator configuration before starting any background work.
         _PublicResolver(dns.asyncresolver.Resolver(), self._private_cidrs)
         ssl.create_default_context(cafile=ca or None)
+        self._adopt_bridge_fields()
         self.state.origin, self.state.enabled = origin, True
         self._store.save()
         self._closed, self._error = False, ""
@@ -359,6 +370,7 @@ class RelayClient:
     async def close(self, disable: bool = False):
         self._closed = True
         if disable:
+            self._adopt_bridge_fields()
             self.state.enabled = False
             self._store.save()
         task, self._task = self._task, None

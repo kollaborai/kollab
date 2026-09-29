@@ -193,7 +193,7 @@ Shown in the palette and in `/connect help`:
 /connect allow <device> <agent>    let a device's agent message a local agent
 /connect deny <device> [agent]     revoke a device's access, cancel affected work
 /connect revoke <device>           remove a device or peer
-/connect leave [domain]            disconnect and stop reconnecting
+/connect leave [domain]            disconnect, forget the network and stop reconnecting
 /connect help [all]                this list; all adds the manual-trust and reset commands
 ```
 
@@ -241,16 +241,22 @@ Removed. Each prints its redirect for one release instead of running:
   one. If the relay is unreachable the line says so and the rest still renders.
 - Requests and the roster refresh about every two seconds. With more than one
   request, Up and Down select a row; `a` accepts and `r` rejects it. Accepting
-  prints what it sent: the request's profile settings and one login (an api
-  key, or a ChatGPT sign-in) when the active profile has one, nothing else.
-  A duplicate device name or any other refusal is printed on the screen.
+  prints what it queued for the device: the request's profile settings and one
+  api key when the active profile has one, nothing else (an OAuth login never
+  travels; each device runs `/login`). After each decision the next request
+  needs a fresh keypress. A duplicate device name or any other refusal is
+  printed on the screen.
 - Rows that do not fit the terminal split or end in `…`; nothing wraps.
 - `Esc` closes it. The code exists only in this private view, never in chat,
   history or logs.
 - `/connect code` opens the same view with just the code (small terminals).
-  With no network, bare `/connect` opens the code form under `network      none`.
-- An attached window (`kollab --attach`) prints the daemon's `/connect status`
-  text instead of the screen.
+  With no network, bare `/connect` opens the code form under `network      none`;
+  leave the code empty and press Enter on the first device to start a network
+  on the domain.
+- An attached window (`kollab --attach`), or a second window in the same
+  workspace, prints the owner's `/connect status` text instead of the screen.
+  `/connect knocks` opens the review for the joined directory: up/down select a
+  knock and `a`/`r` act on the marked row.
 
 Trust is one setting per network, defaulting to `open`: every accepted device's
 agents may message every other, under hub rules (no grants, no task envelope,
@@ -260,11 +266,11 @@ human-gated model — every first message needs `/connect authorize` or
 `/connect send`, replies go through the task envelope, and a remote question
 waits for `/connect answer`; that is what the `help all` commands are for.
 
-`/connect accept` and `/connect reject` take a device name, a receipt-id
-prefix of 8 or more hex characters, or the full 32-hex receipt when a name
-would be ambiguous. `/connect allow`, `/connect deny`, and `/connect revoke`
-take a device name (resolved from the network roster) or, when a device isn't
-resolvable yet, its raw 64-hex peer key.
+`/connect accept` and `/connect reject` take a device name; when two pending
+requests share a name, add the start of the fingerprint the Connect screen
+shows (`/connect accept ana-laptop 4d04`). `/connect allow`, `/connect deny`,
+and `/connect revoke` take a device name (see `/connect status`). Under `open`
+trust `allow` and `deny` have no effect and say so.
 
 A stranger outside your network knocks. `/connect status` shows this device's
 contact route, `<domain>/c/<16 hex>`, derived from its key; hand it out

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import inspect
 import re
 import secrets
@@ -16,6 +15,7 @@ from .device_names import (
     DEFAULT_TRUST,
     contact_route_hex,
     format_handle,
+    key_label,
     short_fingerprint,
     validate_device_name,
     validate_trust,
@@ -23,8 +23,6 @@ from .device_names import (
 from .dns.discovery import DiscoveryError, discover, fetch_agent_card, normalize_target
 from .dns.discovery_store import DiscoveryStore
 
-MAX_VISIBLE_ENROLLMENT_REQUESTS = 24
-MAX_VISIBLE_ENROLLMENT_SCOPE_ITEMS = 4
 KNOCK_COUNT_TTL_SECONDS = 15.0
 KNOCK_COUNT_TIMEOUT_SECONDS = 5.0
 
@@ -62,15 +60,30 @@ class ConnectSnapshot:
 MANUAL_TRUST_COMMANDS = frozenset({"authorize", "send", "withdraw", "answer", "task", "cancel"})
 
 
-def offline_device_names(agent_bridge, remote_rows: list, approvals) -> list[str]:
-    """Devices with an approved peer key but no online row right now.
+# The first line of `/connect status` on a device with no network. The plugin
+# reads it back in attach mode and in follower windows, so both share this.
+NO_NETWORK = "network none"
+
+
+def network_label(network: str, domain: str) -> str:
+    """`marco-home  via kollabor.ai`, or just the domain when it is the name."""
+    return domain if network == domain else f"{network}  via {domain}"
+
+
+def offline_device_names(agent_bridge, remote_rows: list, client) -> list[str]:
+    """Approved devices in this room that have no online row right now.
 
     ``remote_agents()`` rows are always ``online: True`` (the directory only
     lists agents currently reachable), so "offline" comes from comparing the
-    approved peer keys against who has an online row, not from a per-row
-    flag. Named from the recorded ``peer_devices`` binding, falling back to
-    ``key[:8]`` for an approved peer never bound to a name.
+    approved peer keys against the relay's live roster and the online rows,
+    not from a per-row flag. Nobody is offline while the relay itself is
+    unreachable (presence is unknowable then), and an accepted stranger is
+    left out: it lives in its own room, so it never shows up online here
+    (docs/specs/agent-network-simple-flow.md section 15). Named from the
+    recorded ``peer_devices`` binding, falling back to ``key_label``.
     """
+    if client.status().get("state") != "online":
+        return []
     offline = {
         row.get("device")
         for row in remote_rows
@@ -79,15 +92,16 @@ def offline_device_names(agent_bridge, remote_rows: list, approvals) -> list[str
     try:
         from .relay_conversations import RelayAddress
 
-        peer_devices = agent_bridge._state().state.peer_devices
-        online_keys = {
+        state = agent_bridge._state().state
+        online_keys = {peer["key"] for peer in client.peers()} | {
             RelayAddress.parse(row["address"]).key
             for row in remote_rows
             if row.get("online") and row.get("address")
         }
-        for key in approvals:
-            if key not in online_keys:
-                offline.add(peer_devices.get(key, key[:8]))
+        strangers = getattr(state, "peer_trust", {})
+        for key in client.state.approvals:
+            if key not in online_keys and key not in strangers:
+                offline.add(state.peer_devices.get(key) or key_label(key))
     except Exception:
         pass
     return sorted(offline)
@@ -135,17 +149,6 @@ class RelayCommands:
                 pass
         return domain
 
-    def _trust_level(self) -> str:
-        getter = getattr(self.agent_bridge, "trust_level", None)
-        if callable(getter):
-            try:
-                value = getter()
-                if value:
-                    return value
-            except Exception:
-                pass
-        return DEFAULT_TRUST
-
     def _device_name(self) -> str:
         getter = getattr(self.agent_bridge, "device_name", None)
         if callable(getter):
@@ -183,10 +186,11 @@ class RelayCommands:
             return ["requests none"]
         lines = ["requests"]
         for row in rows:
-            name = getattr(row, "device_name", "") or getattr(row, "enrollment_id", "")[:8]
-            fingerprint = short_fingerprint(getattr(row, "device_key_fingerprint", ""))
+            full = getattr(row, "device_key_fingerprint", "")
+            name = getattr(row, "device_name", "")
             lines.append(
-                f"  {name} wants to join   fingerprint {fingerprint}   /connect accept {name}"
+                f"  {name or 'unknown device'} wants to join   "
+                f"fingerprint {short_fingerprint(full)}   /connect accept {name or full[:4]}"
             )
         return lines
 
@@ -258,9 +262,7 @@ class RelayCommands:
                 if row.get("online")
             ),
             offline_devices=tuple(
-                offline_device_names(
-                    self.agent_bridge, remote_rows, self.client.state.approvals
-                )
+                offline_device_names(self.agent_bridge, remote_rows, self.client)
             ),
         )
 
@@ -280,7 +282,7 @@ class RelayCommands:
         return [row for row in rows if isinstance(row, dict)]
 
     async def _resolve_peer_key(self, token: str) -> str:
-        """A 64-hex peer key is returned unchanged; a device name resolves to it.
+        """A device name resolves to its peer key (a pasted 64-hex key passes).
 
         The recorded binding (``peer_devices``) is checked first so an
         offline device's name still resolves, not only an online one.
@@ -303,7 +305,7 @@ class RelayCommands:
                     return RelayAddress.parse(row["address"]).key
                 except Exception:
                     continue
-        raise ValueError(f"no known device matches '{token}'; use its 64-hex peer key")
+        raise ValueError(f"no known device matches '{token}'; /connect status lists them")
 
     @staticmethod
     def _resolve_network_target(value: str) -> str:
@@ -373,10 +375,10 @@ class RelayCommands:
 
         lines = []
         if domain:
-            trust = self._trust_level()
-            lines.append(f"network {self._network_name(domain)} via {domain}  trust: {trust}")
+            label = network_label(self._network_name(domain), domain)
+            lines.append(f"network {label}  trust: {self._trust_level()}")
         else:
-            lines.append("network: none")
+            lines.append(NO_NETWORK)
 
         device_name = self._device_name()
         if device_name:
@@ -417,20 +419,20 @@ class RelayCommands:
                 except Exception:
                     pass
             lines.append(line)
+        lines.extend(
+            f"  {device} (offline)"
+            for device in offline_device_names(
+                self.agent_bridge, remote_rows, self.client
+            )
+        )
         lines.extend(self._pending_request_lines())
 
-        offline_devices = offline_device_names(
-            self.agent_bridge, remote_rows, self.client.state.approvals
-        )
-        if offline_devices:
-            lines.append(f"offline devices: {', '.join(offline_devices)}")
-
-        lines.append("join code: run /connect code")
+        lines.append("join code run /connect code")
 
         if state.get("error"):
-            lines.append("connection issue: " + state["error"])
+            lines.append("connection issue " + state["error"])
         if domain and not state["enabled"]:
-            lines.append("reconnect on launch: disabled")
+            lines.append("reconnect on launch disabled")
 
         issuer = getattr(self.agent_bridge, "_enrollment_issuer", None)
         if issuer is not None:
@@ -551,60 +553,7 @@ class RelayCommands:
             try:
                 return await self._run(value, source_agent=source_agent)
             except (DiscoveryError, OSError, ValueError, TimeoutError) as exc:
-                # Client errors must never include invite/private state material.
-                if value.partition(" ")[0] == "join":
-                    return self._join_error(exc)
                 return f"connect: {exc}"
-
-    @staticmethod
-    def _join_error(exc: Exception) -> str:
-        """Use fixed diagnostics; never echo a token, path, or raw exception."""
-        if isinstance(exc, DiscoveryError):
-            hint = {
-                "expired": "the relay discovery document has expired; the publisher must renew it",
-                "key_changed": "the publisher key changed; verify it with the operator before re-pairing",
-                "rollback": "the publisher revision is older than the trusted revision",
-                "revision_conflict": "the publisher reused a revision with different content",
-                "key_conflict": "DNS and the discovery document disagree about the publisher key",
-                "cache_unavailable": "the verified publisher identity could not be saved locally",
-                "address_denied": "the relay address is outside the configured discovery scope",
-                "dns_unavailable": "the relay domain could not be resolved",
-                "timeout": "the relay discovery request timed out; retry when reachable",
-                "unavailable": "relay discovery is unavailable; check network and TLS configuration",
-            }.get(
-                exc.code,
-                "relay discovery failed verification; check the publisher and local discovery configuration",
-            )
-            return "connect: " + hint
-        if isinstance(exc, TimeoutError):
-            return "connect: relay connection timed out; use /connect status to inspect reconnect state"
-        if isinstance(exc, FileNotFoundError):
-            return "connect: a required local file was not found; use the invitation's path on this computer"
-        if isinstance(exc, PermissionError):
-            return "connect: local file access was denied; check invitation and relay-state ownership and permissions"
-        if isinstance(exc, OSError):
-            if exc.errno == errno.ELOOP:
-                return "connect: invitation must be a regular file, not a symbolic link"
-            return "connect: could not read the invitation or save local relay state"
-        hint = {
-            "cannot join your own invitation": (
-                "this invitation belongs to this workspace; join it from the other computer's Kollab session"
-            ),
-            "invitation must be an owned private regular file": (
-                "invitation must be a regular file owned by this user with private permissions; "
-                "run chmod 600 on the receiving file"
-            ),
-            "invitation file is too large": "invitation exceeds the 4096-byte limit; transfer the original file again",
-            "invalid invitation path quoting": (
-                "provide one invitation file path; use matching quotes around a path containing spaces"
-            ),
-            "Unsupported advertised relay control URL": "the publisher advertises an unsupported relay endpoint",
-        }.get(
-            str(exc),
-            "invalid invitation or relay configuration; "
-            "transfer the original invitation file and check /connect status",
-        )
-        return "connect: " + hint
 
     async def _run(self, value: str, *, source_agent=None) -> str:
 
@@ -620,33 +569,57 @@ class RelayCommands:
                 )
         if head in {"accept", "reject"}:
             fields = rest.split()
-            if len(fields) != 1:
-                return f"usage: /connect {head} <device-name-or-receipt>"
+            if not 1 <= len(fields) <= 2:
+                return f"usage: /connect {head} <device> [fingerprint]"
             if self.agent_bridge is None:
                 return "connect: local enrollment issuer is unavailable"
             token = fields[0]
-            receipt_id = token if re.fullmatch(r"[0-9a-f]{32}", token) else None
-            if receipt_id is None:
-                is_hex_prefix = len(token) >= 8 and re.fullmatch(r"[0-9a-f]+", token)
-                candidates = self.agent_bridge.pending_enrollment_requests(
-                    source_agent=source_agent
+            candidates = list(
+                self.agent_bridge.pending_enrollment_requests(source_agent=source_agent)
+            )
+            matches = [
+                row for row in candidates if getattr(row, "device_name", "") == token
+            ] or [
+                row
+                for row in candidates
+                if re.fullmatch(r"[0-9a-f]{4,}", token)
+                and (
+                    getattr(row, "device_key_fingerprint", "").startswith(token)
+                    # scripts may still pass the receipt; no screen shows it
+                    or (
+                        len(token) >= 8
+                        and getattr(row, "enrollment_id", "").startswith(token)
+                    )
                 )
+            ]
+            if len(fields) == 2:
                 matches = [
                     row
-                    for row in candidates
-                    if (is_hex_prefix and row.enrollment_id.startswith(token))
-                    or getattr(row, "device_name", "") == token
+                    for row in matches
+                    if getattr(row, "device_key_fingerprint", "").startswith(
+                        fields[1].lower()
+                    )
                 ]
-                if len(matches) > 1:
-                    return f"connect: '{token}' matches more than one pending request; use the full receipt"
-                if not matches:
-                    return f"connect: no pending request matches '{token}'"
-                receipt_id = matches[0].enrollment_id
+            if len(matches) > 1:
+                return (
+                    f"connect: more than one pending request is named '{token}'; "
+                    f"add the start of its fingerprint: /connect {head} {token} 4d04"
+                )
+            if not matches:
+                return f"connect: no pending request matches '{token}'"
+            row = matches[0]
             decision = "accept" if head == "accept" else "reject"
-            result = await self.agent_bridge.decide_enrollment_request(
-                receipt_id, decision=decision, source_agent=source_agent
+            await self.agent_bridge.decide_enrollment_request(
+                row.enrollment_id, decision=decision, source_agent=source_agent
             )
-            return f"enrollment {result['status']}; receipt: {result['receipt_id']}"
+            who = getattr(row, "device_name", "") or "that device"
+            if decision == "reject":
+                return f"rejected {who}."
+            domain = self.client.state.origin.removeprefix("https://")
+            return (
+                f"accepted {who}. it is now a trusted device on "
+                f"{self._network_name(domain) or 'this network'}."
+            )
         if head == "name":
             if not rest:
                 return "usage: /connect name <name>"
@@ -680,16 +653,26 @@ class RelayCommands:
                 return (
                     "connect: agent conversations require a running Kollab Hub session"
                 )
-            fields = rest.split(maxsplit=1)
-            if not fields:
-                return f"usage: /connect {head} <device-or-peer-key> [agent]"
+            fields = rest.split()
+            counts, usage = (
+                ((2,), "usage: /connect allow <device> <agent>")
+                if head == "allow"
+                else ((1, 2), "usage: /connect deny <device> [agent]")
+            )
+            if len(fields) not in counts:
+                return usage
             try:
                 key = await self._resolve_peer_key(fields[0])
             except ValueError as exc:
                 return f"connect: {exc}"
-            new_rest = key if len(fields) == 1 else f"{key} {fields[1]}"
+            effective_trust = getattr(self.agent_bridge, "effective_trust", None)
+            if callable(effective_trust) and effective_trust(key) == "open":
+                return (
+                    f"connect: trust is open, so {head} has no effect; "
+                    "use /connect trust agents, or /connect revoke <device>"
+                )
             return await self.agent_bridge.application_command(
-                head, new_rest, source_agent=source_agent
+                head, " ".join([key, *fields[1:]]), source_agent=source_agent
             )
         if head in MANUAL_TRUST_COMMANDS:
             if self.agent_bridge is None:
@@ -717,14 +700,15 @@ class RelayCommands:
                 "Its grants are gone. Provider credentials it copied are not revoked at the provider."
             )
         if head == "leave":
-            await self.client.close(disable=True)
-            if self.agent_bridge is not None:
-                store = self.agent_bridge._state()
-                if store.state.peer_devices or store.state.peer_trust:
-                    store.state.peer_devices = {}
-                    store.state.peer_trust = {}
-                    store.save()
-            return "left the network; automatic reconnect disabled for this workspace"
+            origin = self.client.state.origin
+            if not origin:
+                return "connect: this device is not on a network"
+            if rest and rest.lower().removeprefix("https://").rstrip("/") != (
+                origin.removeprefix("https://")
+            ):
+                return f"connect: this device is not on {rest}"
+            await self.client.leave()
+            return "left the network; this device can join another with a code"
         if head == "rotate":
             origin = self.client.state.origin
             if not origin:
@@ -749,56 +733,3 @@ class RelayCommands:
                 else "\nAgent Card: not advertised by this publisher"
             )
         return await self._attach(result, ca, cidrs)
-
-    @staticmethod
-    def _format_enrollment_requests(requests) -> str:
-        if not requests:
-            return "connect: no pending enrollment requests"
-        visible = requests[:MAX_VISIBLE_ENROLLMENT_REQUESTS]
-        lines = [f"pending enrollment requests ({len(requests)}):"]
-        for request in visible:
-            networks = request.network_ids[:MAX_VISIBLE_ENROLLMENT_SCOPE_ITEMS]
-            categories = request.credential_categories[
-                :MAX_VISIBLE_ENROLLMENT_SCOPE_ITEMS
-            ]
-            network_text = ", ".join(networks) or "none"
-            if len(request.network_ids) > len(networks):
-                network_text += f", +{len(request.network_ids) - len(networks)} more"
-            category_text = ", ".join(categories) or "none"
-            if len(request.credential_categories) > len(categories):
-                category_text += (
-                    f", +{len(request.credential_categories) - len(categories)} more"
-                )
-            profile = request.profile_summary or request.configuration_profile or "none"
-            availability = (
-                "available"
-                if request.decision_available
-                else "unavailable in this process"
-            )
-            lines.extend(
-                (
-                    f"  receipt: {request.enrollment_id}",
-                    "  device fingerprint: sha256:"
-                    + request.device_key_fingerprint[:16]
-                    + "…",
-                    f"  destination workspace: {request.workspace_id or 'unbound'}",
-                    f"  issuer: {request.issuer}",
-                    f"  networks: {network_text}",
-                    f"  profile: {profile}; categories: {category_text}",
-                    f"  allowance remaining: {request.remaining_new_devices}; "
-                    f"expires: {request.expires_at}; decision: {availability}",
-                )
-            )
-            if any(category.startswith("provider:") for category in categories):
-                lines.append(
-                    "  provider credentials will be copied to this device; "
-                    "network revocation does not revoke them at the provider"
-                )
-        if len(requests) > len(visible):
-            lines.append(
-                f"  {len(requests) - len(visible)} additional request(s) omitted"
-            )
-        lines.append(
-            "Accept or reject by receipt ID; code, proof and membership details are hidden."
-        )
-        return "\n".join(lines)

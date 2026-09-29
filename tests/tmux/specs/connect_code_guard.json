@@ -48,7 +48,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "No code\\? Run /connect code",
+      "pattern": "no code\\? run /connect code",
       "timeout": 8
     },
     {

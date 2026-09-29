@@ -11,7 +11,6 @@ import base64
 import hashlib
 import hmac
 import json
-import math
 import re
 import secrets
 import ssl
@@ -496,7 +495,6 @@ def _provisioning_scope_from_payload(value: Any, *, enrollment_id: str, workspac
             "provider:openrouter:api_key",
             "provider:openai_responses:api_key",
             "provider:gemini:api_key",
-            "provider:openai:oauth_tokens",
         }
     )
     if (
@@ -666,8 +664,8 @@ def _decode_recovery_value(value: Any, *, maximum: int) -> bytes:
 def _profile_credential_category(profile) -> str | None:
     provider = profile.get_provider()
     auth_type = getattr(profile, "auth_type", "") or "api_key"
-    if auth_type == "oauth" and provider == "openai_responses":
-        return "provider:openai:oauth_tokens"
+    # An OAuth login never travels: two devices sharing one refresh token sign
+    # each other out, so each runs its own /login (constitution, sections 3, 9).
     if auth_type != "api_key" or provider not in {
         "openai",
         "anthropic",
@@ -691,44 +689,12 @@ def _valid_credential_text(value: Any) -> bool:
 
 
 async def _profile_credential(profile, *, category: str, destination_profile_name: str):
-    from .provisioning import (
-        OpenAIOAuthCredential,
-        ProvisioningCredential,
-    )
+    from .provisioning import ProvisioningCredential
 
     if category.endswith(":api_key"):
         secret = profile.get_api_key()
         if not _valid_credential_text(secret):
             raise EnrollmentProtocolError("unavailable")
-        return ProvisioningCredential(category, destination_profile_name, secret)
-    if category == "provider:openai:oauth_tokens":
-        from kollabor_ai.oauth.token_storage import OAuthTokenStorage
-
-        tokens = await OAuthTokenStorage().load_tokens(
-            "openai",
-            auto_refresh=False,
-            profile_name=(profile.name if getattr(profile, "is_provisioned", False) else None),
-        )
-        if (
-            tokens is None
-            or not _valid_credential_text(tokens.access_token)
-            or not _valid_credential_text(tokens.refresh_token)
-            or len(tokens.access_token.encode("utf-8")) + len(tokens.refresh_token.encode("utf-8"))
-            > _MAX_PROVIDER_CREDENTIAL_BYTES
-            or isinstance(tokens.expires_at, bool)
-            or not isinstance(tokens.expires_at, (int, float))
-            or not math.isfinite(tokens.expires_at)
-            or tokens.expires_at <= 0
-            or (tokens.account_id is not None and not _valid_credential_text(tokens.account_id))
-            or (tokens.account_id is not None and len(tokens.account_id) > 256)
-        ):
-            raise EnrollmentProtocolError("unavailable")
-        secret = OpenAIOAuthCredential(
-            access_token=tokens.access_token,
-            refresh_token=tokens.refresh_token,
-            expires_at=tokens.expires_at,
-            account_id=tokens.account_id,
-        )
         return ProvisioningCredential(category, destination_profile_name, secret)
     raise EnrollmentProtocolError("unavailable")
 
@@ -2807,13 +2773,28 @@ class EnrollmentIssuer:
             bound_new_device = False
             if callable(binder):
                 bound_new_device = bool(binder(live.destination_key, live.device_name))
-            journal = self._recovery_journal(client)
-            recovery_record = self._recovery_record(live, client)
+
+            def unbind() -> None:
+                # A failed accept orphans the binding: an unapproved key would
+                # squat the device name. Undo only the binding this call
+                # created; an earlier accept of the same key keeps its name.
+                state_getter = getattr(bridge, "_state", None)
+                if bound_new_device and callable(state_getter):
+                    try:
+                        relay_state = state_getter()
+                        relay_state.state.peer_devices.pop(live.destination_key, None)
+                        relay_state.save()
+                    except Exception:
+                        pass
+
             try:
+                journal = self._recovery_journal(client)
+                recovery_record = self._recovery_record(live, client)
                 # Write intent first. Recovery still requires the separately
                 # durable approved status in EnrollmentDelegationStore.
                 journal.put(live.offer.offer_id, recovery_record)
             except Exception as exc:
+                unbind()
                 raise EnrollmentProtocolError("unavailable") from exc
             try:
                 store.consume(
@@ -2833,19 +2814,7 @@ class EnrollmentIssuer:
                     journal.delete(live.offer.offer_id)
                 except Exception:
                     pass
-                if bound_new_device:
-                    # consume() failed after the name was bound: the binding
-                    # is orphaned (an unapproved key squatting a device
-                    # name). Undo only the binding this call created; an
-                    # earlier accept of the same key keeps its name.
-                    state_getter = getattr(bridge, "_state", None)
-                    if callable(state_getter):
-                        try:
-                            relay_state = state_getter()
-                            relay_state.state.peer_devices.pop(live.destination_key, None)
-                            relay_state.save()
-                        except Exception:
-                            pass
+                unbind()
                 raise EnrollmentProtocolError("unauthorized") from exc
             self._approved_offer_ids.add(live.offer.offer_id)
             recovery_record["status"] = "approved"

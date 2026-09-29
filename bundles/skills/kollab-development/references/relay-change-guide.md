@@ -21,7 +21,7 @@ the wire formats and configuration. Recheck them before editing or deploying.
   and `/connect` flow.
 - `plugins/hub/enrollment_client.py`, `enrollment_codes.py`,
   `enrollment_delegations.py`, and `plugins/altview/connect_altview.py`: private
-  code entry/offer UI, K1 proof and issuer behavior, and local non-secret
+  code entry/join code UI, short-code proof and issuer behavior, and local non-secret
   delegation state. The code is not a CLI argument or approval by itself.
   Verified proof creates a pending request; the local issuer can inspect
   redacted metadata and explicitly accept/reject it. Acceptance grants
@@ -71,9 +71,9 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
   separate checks. Discovery and an online roster must not start unsolicited model
   turns or grant file/shell access. Keep human-directed communication explicit.
 - The `/connect <domain>` command is public signed discovery/relay attachment;
-  bare `/connect` and `/connect enroll [domain]` are private code entry.
-  Current unreleased enrollment source has `/connect offer`, redacted request
-  listing, and explicit local accept/reject. It permits one device per
+  bare `/connect` opens the Connect screen (private code entry when there is no
+  network). Current unreleased enrollment source has `/connect code` and
+  explicit local accept/reject by device name. It permits one device per
   five-minute offer and a durable, scope-bound delegation. Verified
   code/device-key proof creates a pending request and is not approval.
   Acceptance may send the supported active profile and one explicitly listed

@@ -398,22 +398,31 @@ async def test_a_accepts_the_selected_request_and_says_what_was_sent(monkeypatch
 
     assert calls["decide"] == [("alzan-prod-home", "accept")]
     assert "accepted alzan-prod-home. it is now a trusted device on marco-home." in text
-    assert "sent to alzan-prod-home: profile settings and one api key" in text
-    assert "sealed config" not in text
+    assert (
+        "sealed config queued for alzan-prod-home: profile settings and one api key"
+        in text
+    )
     assert "alzan-prod-home wants to join" not in text
     assert "ana-laptop wants to join" in text
     await view.on_complete()
 
 
 @pytest.mark.asyncio
-async def test_accept_names_a_sign_in_when_the_login_is_oauth(monkeypatch):
+async def test_a_held_key_cannot_decide_the_next_request_unseen(monkeypatch):
+    """A second keypress handled before the redraw must not accept the next stranger."""
     monkeypatch.setattr(_TIME, lambda: 1_000)
-    oauth = _row(categories=("conversation:send", "provider:openai:oauth_tokens"))
-    view, renderer, _ = await _open(_snapshot(requests=(oauth,)))
+    requests = (_row("ana-laptop"), _row("alzan-prod-home"))
+    view, renderer, calls = await _open(_snapshot(requests=requests))
 
     await view.handle_input(_key("a"))
+    await view.handle_input(_key("a"))  # buffered before any redraw
 
-    assert "profile settings and one sign-in" in await _text(view, renderer)
+    assert calls["decide"] == [("ana-laptop", "accept")]
+
+    await _text(view, renderer)  # the redraw shows the next request
+    await view.handle_input(_key("a"))
+
+    assert calls["decide"] == [("ana-laptop", "accept"), ("alzan-prod-home", "accept")]
     await view.on_complete()
 
 
@@ -427,7 +436,7 @@ async def test_accept_without_a_profile_only_grants_network_access(monkeypatch):
     text = await _text(view, renderer)
 
     assert "accepted alzan-prod-home." in text
-    assert "sent to" not in text
+    assert "queued for" not in text
     await view.on_complete()
 
 

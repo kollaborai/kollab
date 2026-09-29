@@ -346,9 +346,9 @@ Shown in the palette and in `/connect help`:
 | `/connect trust open\|agents\|manual` | Trust level for this network | new |
 | `/connect knock <route> "text"` | Introduce yourself to a stranger's contact route | renamed from `contact` |
 | `/connect knocks` | Review introductions you received | renamed from `contacts` |
-| `/connect allow <device> <agent>`, `deny <device> [agent]` | Under `agents` trust or for accepted strangers | kept; argument was a 64-hex key |
+| `/connect allow <device> <agent>`, `deny <device> [agent]` | Under `agents` trust or for accepted strangers; under `open` they say they have no effect | kept; argument was a 64-hex key |
 | `/connect revoke <device>` | Remove a device or peer | kept; argument was a 64-hex key |
-| `/connect leave [domain]` | Disconnect and stop reconnecting | renamed from `disconnect` |
+| `/connect leave [domain]` | Disconnect, forget the network and stop reconnecting; the device can then join another by code | renamed from `disconnect` |
 | `/connect help [all]` | This list; `all` adds the manual-trust and reset commands | kept |
 
 `/connect help all` only:
@@ -558,6 +558,12 @@ document before it merges.
   knock enrolls the stranger's device into the accepting device's room with
   `agents` trust (client work, reuses enrollment). Marco decides which, or
   neither for milestone 1.
+
+- Story 1's no-network screen. Joining Marco's network by code needs a code
+  field on a device with no network, so bare `/connect` there opens the code
+  form (domain prefilled `kollabor.ai`, code first). To make "`/connect` joins
+  kollabor.ai on its own" true for a first device, an empty code plus Enter
+  starts a network on that domain. Marco confirms, or wants it automatic.
 
 - The exact name of the default network for a person's first join (proposed:
   `<first device name>-net`, editable).

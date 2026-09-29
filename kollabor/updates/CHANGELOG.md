@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bare `/connect` on a device that is on a network opens the Connect screen: network, this device, a join code that counts down (`c` makes a new one), join requests you accept or reject with `a` and `r`, waiting knocks and the online agents, refreshed every two seconds. `/connect code` shows just the code. With no network, `/connect` still opens the private code form, now titled Connect with `network      none` above the code field, and a pending request no longer prints a receipt id.
 - Join codes are looked up by a keyed tag (`POST /relay/v1/enrollment/lookup`) and an offer burns after five failed proofs. The joining device sends its name with the request, and the accept line shows the name and key fingerprint.
 
+### Fixed
+- Trust, the device name and peer names no longer revert when the client saves stale state on `/connect leave`, `/connect rotate` or a reconnect.
+- `/connect leave` forgets the network, so the device can join another by code; `/connect leave <domain>` refuses a domain it is not on. Bare `/connect` in a second window of the same workspace shows the owner's status instead of `network none`, and `/connect knocks` reads the joined directory.
+- `/connect accept` and `/connect reject` name the device (`accepted ana-laptop. it is now a trusted device on marco-home.`) and never print a receipt; two requests with one name are told apart by the start of the fingerprint. `/connect allow` and `deny` print device names, and say they have no effect under `open` trust.
+- The knock review has a selection (up/down) and `a`/`r` act on the marked row; a held key cannot decide the next knock or request unseen. One malformed knock no longer hides the others.
+- The code form starts a network on the directory when the code is left empty (first device), prints `joined <network> as <device>. trust: <level>` after an approved join, and keeps a pasted hyphenated or eight-letter domain out of the masked code field. Accepting a join no longer offers an OAuth login; each device runs its own `/login`.
+- Offline devices are not listed while the relay is unreachable, for accepted strangers, or for peers the relay shows online. `hub_capture`, `hub_spawn` and `hub_stop` refuse an `agent@device` target with a hint to message it.
+
 ## [0.10.7] - 2026-09-28
 
 ### Fixed

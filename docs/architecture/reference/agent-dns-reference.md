@@ -7,7 +7,7 @@ status: reference
 ---
 # Agent DNS: Discovery, Identity & Trust
 
-Update, 2026-09-27: public discovery follows the [domain discovery contract](../../specs/agent-domain-discovery-contract.md): signed descriptors go into a separate cache and grant no workspace access. Automatic coordinator publication/import has been removed. Current unreleased source uses `/connect <domain>` for signed public discovery and connects to a compatible advertised relay; bare `/connect` and `/connect enroll [domain]` open private device-code entry. The published 0.9.0 baseline also performs direct discovery/relay attachment. The [public beacon](../../specs/agent-public-beacon.md) adds outbound WSS connections and encrypted peer presence; the [agent network contract](../../specs/agent-network-simple-flow.md) records verification and deployment status. The local registry and historical direct TCP/TLS endpoint described below remain separate from both the beacon and standard A2A workspace receiver.
+Update, 2026-09-27: public discovery follows the [domain discovery contract](../../specs/agent-domain-discovery-contract.md): signed descriptors go into a separate cache and grant no workspace access. Automatic coordinator publication/import has been removed. Current unreleased source uses `/connect <domain>` for signed public discovery and connects to a compatible advertised relay; bare `/connect` opens the Connect screen (private device-code entry when there is no network). The published 0.9.0 baseline also performs direct discovery/relay attachment. The [public beacon](../../specs/agent-public-beacon.md) adds outbound WSS connections and encrypted peer presence; the [agent network contract](../../specs/agent-network-simple-flow.md) records verification and deployment status. The local registry and historical direct TCP/TLS endpoint described below remain separate from both the beacon and standard A2A workspace receiver.
 
 ## Overview
 
@@ -43,8 +43,8 @@ No peer is approved, dialed, enrolled or allowed to message by discovery.
 Identity-only publication advertises no directory, relay or A2A service. A
 healthy relay may advertise its same-origin control URL and protocol. The
 current `/connect <domain>` path performs signed discovery and opens an outbound
-WSS connection. Bare `/connect` and `/connect enroll [domain]` open private code
-entry. Public availability must be checked
+WSS connection. Bare `/connect` opens the Connect screen, or private code entry
+when there is no network. Public availability must be checked
 against the current signed descriptor and the agent network contract. A separate
 running A2A receiver can publish an optional canonical `agent_card` locator;
 its standard Agent Card describes its actual interfaces and skills.
@@ -56,21 +56,21 @@ See the [discovery contract](../../specs/agent-domain-discovery-contract.md),
 
 `/connect <domain>` and `/hub dns connect <domain>` use signed discovery and
 attach this workspace to the advertised relay. The domain must publish a
-compatible relay endpoint. Bare `/connect` and `/connect enroll [domain]` open
-the private enrollment-code view; discovery for enrollment begins after the
-human submits the code. Public attachment does not enroll the device into a
+compatible relay endpoint. Bare `/connect` opens the Connect screen, or the
+private code view when there is no network; discovery for enrollment begins
+after the human submits the code. Public attachment does not enroll the device into a
 private network or grant conversation/tool authority.
 
-`/connect offer [domain]` opens a private offer view for one short join code. The
+`/connect code [domain]` opens a private view of one short join code. The
 current source binds one device, a five-minute expiry, and the
 `conversation:send` category to a durable local delegation. After verified code
 and device-key proof, the source creates a durable pending request. The issuer
-must explicitly accept or reject it through local `/connect` commands.
+must explicitly accept or reject it by device name (`/connect accept <device>`).
 Configuration provisioning remains unimplemented. These source changes are
 unreleased.
 
-`/connect invite` and `/connect join <local-file-path>` remain the invitation-file
-path in the published 0.9.0 baseline. In attach mode, private code entry and
+File pairing (`/connect invite`, `/connect join`) exists only in the published
+0.9.0 baseline; current source pairs by join code. In attach mode, private code entry and
 offer creation use the typed `state.hub_enroll` and
 `state.hub_enrollment_offer` RPCs; existing connection subcommands use
 `state.hub_connect`. The viewer reuses the owning daemon's identity.

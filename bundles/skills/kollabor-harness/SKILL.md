@@ -188,14 +188,14 @@ auto-discovered from `plugins/` — no manual registration.
 
 ## agent conversations across computers
 
-Use normal `hub_msg` with the complete address shown by `/connect agents`:
-`relay:<peer-public-key>:<workspace-id>:<agent-id>`. Agent names may repeat across
-machines. `/connect agents local` lists other local workspaces quietly.
+Use normal `hub_msg` with the `agent@device` name shown by `/connect status`,
+e.g. `infra@alzan-prod-home`. Agent names may repeat across machines; the
+device name tells them apart.
 
 Only contact an agent when the human has directed that communication. Seeing a
 peer online, joining its room, or approving its key does not grant permission to
-send it work. The receiving human separately authorizes conversations with
-`/connect allow <sender-public-key> <local-agent-name>`; local tool permissions
+send it work. Under `agents` trust the receiving human separately allows a
+device's agent with `/connect allow <device> <agent>`; local tool permissions
 continue to apply. Never use `force` to override network authorization.
 
 The runtime records a human instruction before the model runs. Use its exact

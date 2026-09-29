@@ -86,3 +86,12 @@ def contact_route_hex(public_key_hex: str) -> str:
     return hashlib.sha256(
         b"kollab-contact-route-v1\0" + _require_key(public_key_hex)
     ).hexdigest()[:16]
+
+
+def key_label(public_key_hex: str) -> str:
+    """A stand-in device name for a peer with no bound name: 8 hash-derived hex.
+
+    Never the raw key (constitution section 13); the contact route already
+    exposes exactly this much.
+    """
+    return contact_route_hex(public_key_hex)[:8]

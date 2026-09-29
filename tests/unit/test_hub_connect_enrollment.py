@@ -78,7 +78,7 @@ async def test_connect_bare_opens_private_form_and_uses_typed_attach_rpc():
         hub_enroll=AsyncMock(
             return_value={"status": "pending", "receipt_id": "0123456789abcdef"}
         ),
-        hub_connect=AsyncMock(return_value="network: none"),
+        hub_connect=AsyncMock(return_value="network none"),
     )
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = _EventBus(
@@ -269,7 +269,7 @@ async def test_altview_discovery_then_hub_registration_keeps_connect_with_hub():
     state.hub_connect.assert_awaited_once_with("status")
     assert view_stack.push.await_count == 0
 
-    state.hub_connect.return_value = "network: none"
+    state.hub_connect.return_value = "network none"
     assert await command.handler("") == ""
     assert view_stack.push.await_count == 1
     _view, view_name = view_stack.push.await_args.args
@@ -371,3 +371,56 @@ async def test_screen_decisions_go_to_the_issuer_and_report_why_they_failed():
     )
     decide.side_effect = RuntimeError("private detail")
     assert await view._on_decide(row, "reject") == "try again"
+
+
+async def _form_view(plugin):
+    """Open the code form the way bare /connect does and hand back the view."""
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
+    await plugin._open_connect_altview("kollabor.ai")
+    view, _name = view_stack.push.await_args.args
+    return view
+
+
+@pytest.mark.asyncio
+async def test_the_form_starts_a_network_when_no_code_is_entered():
+    """First device: nobody has a code yet, so an empty code starts the network."""
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=False)
+    plugin._run_connect_command = AsyncMock(
+        return_value="network kollabor.ai  trust: open\nthis device mac-kollab"
+    )
+    view = await _form_view(plugin)
+
+    assert await view._on_attach("kollabor.ai") is True
+    plugin._run_connect_command.assert_awaited_once_with("kollabor.ai")
+
+    plugin._run_connect_command.return_value = "connect: relay discovery is unavailable"
+    assert await view._on_attach("kollabor.ai") is False
+    plugin._run_connect_command.return_value = "network none\ncontact route none"
+    assert await view._on_attach("kollabor.ai") is False
+    assert await view._on_attach("not a domain") is False
+
+
+@pytest.mark.asyncio
+async def test_an_approved_join_reports_the_network_device_and_trust():
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=False)
+    plugin._run_connect_enrollment = AsyncMock(return_value={"status": "approved"})
+    plugin._relay_agent = SimpleNamespace(
+        network_name=lambda: "marco-home",
+        device_name=lambda: "alzan-prod-home",
+        trust_level=lambda: "open",
+    )
+    plugin._relay_commands = SimpleNamespace(
+        client=SimpleNamespace(state=SimpleNamespace(origin="https://kollabor.ai"))
+    )
+    view = await _form_view(plugin)
+    submission = ConnectSubmission("kollabor.ai", PrivateCode("ABCD-EFGH"))
+    try:
+        outcome = await view._on_submit(submission)
+    finally:
+        submission.code.clear()
+
+    assert outcome.status.value == "approved"  # the altview module may be reloaded
+    assert outcome.detail == "joined marco-home as alzan-prod-home. trust: open"

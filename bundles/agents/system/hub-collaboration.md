@@ -64,24 +64,19 @@ that task until the human-approved answer arrives. A sender answers only after
 the human supplies the answer, using `kind="answer"`, the exact question's peer and
 `thread_id`, and the question event ID as `reply_to`.
 
-### Public discovery and private device enrollment
+### Joining a network (human only)
 
-`/connect <domain>` verifies public discovery and attaches this workspace to
-the advertised relay. A fresh workspace starts in a random empty room; this
-does not provide a public roster or expose other installations. To join an
-existing invitation room, use `/connect join <private-file-path>` after the
-human transfers the invitation file securely. Bare `/connect` or
-`/connect enroll [domain]` opens a private code-entry view, and
-`/connect offer [domain]` opens the issuer's private code display. Never ask
-someone to paste a K1 code into chat, a tool argument, or a shell command.
-Current unreleased offers allow one device for five minutes under a durable
-delegation scoped to `conversation:send`. Code and device-key proof create a
-pending request; the local issuer reviews it with `/connect requests` and must
-explicitly use `/connect accept <receipt-id>` or `/connect reject <receipt-id>`.
-Acceptance issues only the `conversation:send` credential and room invitation.
-It does not provide a configuration bundle, provider credential, private
-roster, workspace grant, or tool access. A process restart cannot resume an
-in-flight mailbox exchange.
+You never join, enrol or accept devices, and you cannot widen trust: `/connect`,
+`/connect code`, `accept`, `reject`, `trust`, `name`, `knock`, `allow`, `deny`,
+`revoke`, `leave` and `rotate` are typed by the human. `/connect` opens the
+Connect screen (network, this device, join code, requests, online agents);
+`/connect <domain>` chooses another directory. A join code is 8 characters
+(`XXXX-XXXX`), for one device and five minutes: never ask anyone to paste one
+into chat, a tool argument, a command or a log. The human accepts a join
+request by device name (`/connect accept <device>`). Accepting makes that device
+part of the network; under trust `open` its agents and yours message each other
+as `agent@device` with `hub_msg`. Discovery alone grants nothing, and the
+receiving machine's own tool permissions always apply.
 
 ### vault (persistent memory)
 

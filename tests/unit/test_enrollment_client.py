@@ -176,25 +176,15 @@ def test_provisioning_scope_accepts_one_allowlisted_provider_credential():
 
 
 @pytest.mark.asyncio
-async def test_openai_oauth_profile_plan_keeps_reusable_tokens_out_of_offer_metadata(
-    monkeypatch,
-):
-    tokens = SimpleNamespace(
-        access_token="private-access-token",
-        refresh_token="private-refresh-token",
-        expires_at=4_102_444_800.0,
-        account_id="private-account-id",
-    )
-
+async def test_an_oauth_login_is_never_offered_to_a_joining_device(monkeypatch):
+    """Two devices sharing one refresh token sign each other out, so an OAuth
+    profile enrols network-only and each device runs its own /login."""
     token_reads = []
 
     class FakeOAuthTokenStorage:
-        async def load_tokens(self, provider, auto_refresh, *, profile_name=None):
-            assert provider == "openai"
-            assert auto_refresh is False
-            assert profile_name is None
-            token_reads.append(provider)
-            return tokens
+        async def load_tokens(self, *_args, **_kwargs):
+            token_reads.append(True)
+            raise AssertionError("an oauth login must never be read for enrollment")
 
     from kollabor_ai.oauth import token_storage
 
@@ -215,25 +205,8 @@ async def test_openai_oauth_profile_plan_keeps_reusable_tokens_out_of_offer_meta
     )
     issuer = EnrollmentIssuer(SimpleNamespace(plugin=plugin))
 
-    plan = await issuer._make_provisioning_plan("a" * 32)
-    assert plan is not None
-    assert plan.credential_category == "provider:openai:oauth_tokens"
+    assert await issuer._make_provisioning_plan("a" * 32) is None
     assert token_reads == []
-    assert "private-access-token" not in repr(plan)
-    assert "private-refresh-token" not in repr(plan)
-    assert "private-account-id" not in repr(plan)
-
-    _profile, credentials = await issuer._accepted_profile_payload(SimpleNamespace(provisioning_plan=plan))
-    assert credentials[0].secret.access_token == "private-access-token"
-    assert credentials[0].secret.refresh_token == "private-refresh-token"
-    assert credentials[0].secret.account_id == "private-account-id"
-    assert token_reads == ["openai"]
-
-    tokens.access_token = "a" * 5000
-    tokens.refresh_token = "b" * 5000
-    with pytest.raises(EnrollmentProtocolError, match="unavailable"):
-        await issuer._accepted_profile_payload(SimpleNamespace(provisioning_plan=plan))
-    assert token_reads == ["openai", "openai"]
 
 
 def test_embedded_maximum_provisioning_bundle_exceeds_decision_envelope_limit():

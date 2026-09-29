@@ -180,3 +180,84 @@ async def test_knock_review_failed_accept_names_the_device_and_keeps_the_knock()
     assert "could not accept ana-laptop: that device name is already on this network" in text
     assert "hello" in text  # still pending, still readable
     assert "accepted" not in text
+
+
+def _named(name: str) -> KeyPress:
+    return KeyPress(name=name, code=0, char=None, type=KeyType.SPECIAL)
+
+
+def _knock(name: str, receipt: str, key: str) -> PendingContactRequest:
+    return PendingContactRequest(
+        receipt * 32, key * 64, int(time.time()) + 600, PrivateMessage(f"hi from {name}"), name
+    )
+
+
+async def _open_two():
+    eve, ana = _knock("eve-box", "1", "a"), _knock("ana-laptop", "2", "b")
+    decisions = []
+    renderer = _FakeRenderer()
+
+    async def load():
+        return [eve, ana]
+
+    async def decide(request, decision):
+        decisions.append((request.device_name, decision))
+
+    view = ContactReviewAltView("relay.example", load, decide)
+    await view.on_enter(renderer)
+    await view.render_frame(0)
+    return view, renderer, decisions
+
+
+@pytest.mark.asyncio
+async def test_knock_review_hint_is_only_on_the_selected_row_and_a_acts_on_it():
+    view, renderer, decisions = await _open_two()
+    rows = [line for _, _, line in renderer.lines if "fingerprint" in line]
+    assert [("[a]ccept" in row) for row in rows] == [True, False]
+    assert rows[0].lstrip().startswith("> 1. eve-box")
+
+    await view.handle_input(_named("ArrowDown"))
+    await view.render_frame(0)
+    rows = [line for _, _, line in renderer.lines if "fingerprint" in line]
+    assert [("[a]ccept" in row) for row in rows] == [False, True]
+    assert rows[1].lstrip().startswith("> 2. ana-laptop")
+
+    await view.handle_input(_key("a"))
+
+    assert decisions == [("ana-laptop", "accept")]  # the row the hint was on
+
+
+@pytest.mark.asyncio
+async def test_knock_review_a_held_key_cannot_decide_the_next_knock_unseen():
+    view, renderer, decisions = await _open_two()
+
+    await view.handle_input(_key("r"))
+    await view.handle_input(_key("r"))  # buffered before the redraw shows Ana
+
+    assert decisions == [("eve-box", "reject")]
+
+    await view.render_frame(0)
+    await view.handle_input(_key("r"))
+
+    assert decisions == [("eve-box", "reject"), ("ana-laptop", "reject")]
+
+
+@pytest.mark.asyncio
+async def test_knock_review_row_flattens_tabs_so_it_stays_one_row():
+    request = PendingContactRequest(
+        "b" * 32, "c" * 64, int(time.time()) + 600, PrivateMessage("\t" * 300), "tabby"
+    )
+    renderer = _FakeRenderer(size=(80, 30))
+
+    async def load():
+        return [request]
+
+    async def decide(_request, _decision):
+        return None
+
+    view = ContactReviewAltView("relay.example", load, decide)
+    await view.on_enter(renderer)
+    await view.render_frame(0)
+
+    assert "\t" not in renderer.text()
+    assert "[a]ccept" in renderer.text()

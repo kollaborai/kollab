@@ -18,7 +18,7 @@ from nacl.exceptions import CryptoError
 from nacl.public import SealedBox
 from nacl.signing import SigningKey, VerifyKey
 
-from .device_names import NAME_RE, contact_route_hex
+from .device_names import NAME_RE, contact_route_hex, key_label
 from .dns.discovery import _PublicResolver
 from .relay_state import KEY, RelayError
 
@@ -473,21 +473,27 @@ class ContactRequestManager:
         now = int(time.time())
         pending: list[PendingContactRequest] = []
         for raw in requests:
-            frame = _validate_request_frame(
-                raw,
-                recipient_key=recipient_key,
-                origin=origin,
-                now=now,
-            )
-            introduction, device_name = _decrypt_envelope(frame, signing_key)
+            # The sealed envelope is sender-controlled and the relay cannot
+            # read it, so one malformed knock must not hide the good ones.
+            try:
+                frame = _validate_request_frame(
+                    raw,
+                    recipient_key=recipient_key,
+                    origin=origin,
+                    now=now,
+                )
+                introduction, device_name = _decrypt_envelope(frame, signing_key)
+                private = PrivateMessage(introduction)
+            except ValueError:  # ContactProtocolError is one
+                continue
             if not device_name or not NAME_RE.fullmatch(device_name):
-                device_name = contact_route_hex(frame["sender_key"])[:8]
+                device_name = key_label(frame["sender_key"])
             pending.append(
                 PendingContactRequest(
                     receipt_id=frame["request_id"],
                     sender_key=frame["sender_key"],
                     expires_at=frame["expires_at"],
-                    introduction=PrivateMessage(introduction),
+                    introduction=private,
                     device_name=device_name,
                 )
             )

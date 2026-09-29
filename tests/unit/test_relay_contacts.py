@@ -41,13 +41,16 @@ def _request_frame(
     request_id: str = "1" * 32,
     nonce: str = "2" * 32,
     device_name: str = "",
+    envelope: dict | None = None,
 ) -> dict:
     recipient_key = recipient.verify_key.encode().hex()
     sender_key = sender.verify_key.encode().hex()
     now = int(time.time())
     ciphertext = SealedBox(recipient.verify_key.to_curve25519_public_key()).encrypt(
         json.dumps(
-            {"introduction": introduction, "device_name": device_name},
+            envelope
+            if envelope is not None
+            else {"introduction": introduction, "device_name": device_name},
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -424,3 +427,56 @@ async def test_resolve_route_refuses_a_relay_answer_that_does_not_match_the_rout
     manager = ContactRequestManager(_RouteCommands())
     with pytest.raises(contact_requests.ContactProtocolError):
         await manager.resolve_route("relay.example", "a" * 16)
+
+
+@pytest.mark.asyncio
+async def test_one_malformed_knock_does_not_hide_the_good_ones(monkeypatch, relay_client):
+    """The sealed envelope is sender-controlled: a knock with no device_name (or
+    any extra key) must be skipped, not blank the whole inbox."""
+    recipient_key = SigningKey.generate()
+    good_sender, bad_sender = SigningKey.generate(), SigningKey.generate()
+
+    class _Commands:
+        def __init__(self, key):
+            self.client = SimpleNamespace(
+                _store=SimpleNamespace(key=key),
+                public_key=key.verify_key.encode().hex(),
+            )
+
+        async def _discover(self, domain):
+            return SimpleNamespace(origin=ORIGIN), "", (), False
+
+        @staticmethod
+        def _relay_url(_result):
+            return "wss://relay.example/relay/v1/ws"
+
+    async def test_post(_self, origin, path, frame, *, ca, cidrs):
+        response = await relay_client.post(path, json=frame)
+        body = await response.json()
+        if response.status not in {200, 201, 202}:
+            raise contact_requests.ContactProtocolError(body.get("error", "transport"))
+        return body
+
+    monkeypatch.setattr(ContactRequestManager, "_post", test_post)
+    for sender, request_id, nonce, envelope in (
+        (bad_sender, "3" * 32, "4" * 32, {"introduction": "hi"}),
+        (bad_sender, "5" * 32, "6" * 32, {"introduction": "hi", "device_name": "x", "extra": 1}),
+        (good_sender, "1" * 32, "2" * 32, None),
+    ):
+        frame = _request_frame(
+            sender,
+            recipient_key,
+            "hello from ana",
+            request_id=request_id,
+            nonce=nonce,
+            device_name="ana-laptop",
+            envelope=envelope,
+        )
+        status, _ = await _post(relay_client, service.CONTACT_REQUESTS_PATH, frame)
+        assert status == 202
+
+    pending = await ContactRequestManager(_Commands(recipient_key)).pending("relay.example")
+
+    assert [(row.device_name, row.introduction.reveal()) for row in pending] == [
+        ("ana-laptop", "hello from ana")
+    ]

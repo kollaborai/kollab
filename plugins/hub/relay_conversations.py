@@ -89,7 +89,7 @@ class RelayAddress:
         fields = value.split(":")
         if len(fields) != 4 or fields[0] != "relay":
             raise RelayError(
-                "use the complete relay agent address from /connect agents"
+                "use agent@device from /connect status"
             )
         return cls(*fields[1:])
 
@@ -114,7 +114,7 @@ def validate_message(
     }
     # from_device is optional on the wire: a sender on this version always
     # includes it (docs/specs/agent-network-simple-flow.md §4); a receiver on
-    # an older build has none, and the caller falls back to peer_key[:8].
+    # an older build has none, and the caller falls back to key_label(peer_key).
     optional_fields = {"from_device"}
     if (
         not isinstance(payload, dict)

@@ -5,22 +5,21 @@
 > contract only; a command or flow that appears here and not there is not part of the design.
 
 Status: unreleased source contains the private `/connect` code-entry view,
-`/connect offer`, short-code/device-key proof handling, durable pending-request
+`/connect code`, short-code/device-key proof handling, durable pending-request
 metadata, and an issuer API that requires a separate accept/reject after proof.
 Acceptance consumes the delegated device allowance and issues only a
 `conversation:send` credential plus a room invitation. When a supported active
 profile and credential are available, an accepted request also receives its
 allowlisted profile settings and one provider credential inside a device-sealed,
-workspace-scoped provisioning bundle. `/connect requests` shows the source and
-destination profile names, provider/model and exact credential category before
-the human accepts; the credential is read again only after acceptance. The
+workspace-scoped provisioning bundle. The Connect screen shows the joining
+device's name and fingerprint before the human accepts; the credential is read again only after acceptance. The
 destination installs the bundle atomically and sends a device-signed receipt;
 the issuer approves the peer only after verifying that receipt. Network
 revocation does not revoke a copied credential at its provider. Enrollment
 grants no workspace or tool access. The pending-request/decision API is not yet
 wired into a proactive trusted-agent notification, natural-language approval,
-or agent-side decision tool; the local human issuer uses explicit
-`/connect requests`, `/connect accept`, and `/connect reject` commands. A
+or agent-side decision tool; the local human issuer uses the Connect screen or
+the explicit `/connect accept <device>` and `/connect reject <device>` commands. A
 process restart cannot resume the in-memory mailbox worker or code-derived
 envelope key. If the owner has already accepted and the destination's
 owner-context-bound intent and device-signed install receipt were durably

@@ -8,7 +8,7 @@ open/agents instead.
 
 import pytest
 
-from plugins.hub.device_names import default_device_name, format_handle
+from plugins.hub.device_names import default_device_name, format_handle, key_label
 from plugins.hub.relay_state import RelayError
 from tests.unit.test_relay_agent_bridge import Directory, address, allow, bridges  # noqa: F401
 
@@ -310,7 +310,7 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
     }
 
     # An older peer sends no "device" field at all; the caller falls back to
-    # a stable per-peer stand-in (peer_key[:8]) rather than failing closed.
+    # a stable per-peer stand-in (key_label) rather than failing closed.
     original = Directory.publishable_agents
 
     def without_device(self, workspace, workspace_id, device_name=None):
@@ -325,4 +325,4 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
 
     rows = await left.remote_agents()
     assert len(rows) == 1
-    assert rows[0]["device"] == right.commands.client.public_key[:8]
+    assert rows[0]["device"] == key_label(right.commands.client.public_key)

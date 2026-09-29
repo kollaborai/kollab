@@ -110,9 +110,9 @@ REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 # redirect message. A documented subcommand can't be listed without being
 # routable (or the reverse).
 CONNECT_SUBCOMMANDS = [
-    SubcommandInfo("code", "", "Print a join code without the screen"),
-    SubcommandInfo("accept", "<device>", "Accept a join or knock request by name"),
-    SubcommandInfo("reject", "<device>", "Reject a join or knock request by name"),
+    SubcommandInfo("code", "[domain]", "Print a join code without the screen"),
+    SubcommandInfo("accept", "<device>", "Accept a join request by name"),
+    SubcommandInfo("reject", "<device>", "Reject a join request by name"),
     SubcommandInfo(
         "status", "", "Show network, this device, contact route, online agents"
     ),
@@ -121,7 +121,7 @@ CONNECT_SUBCOMMANDS = [
     SubcommandInfo(
         "knock", '<route> "text"', "Introduce yourself to a stranger's contact route"
     ),
-    SubcommandInfo("knocks", "", "Review introductions you received"),
+    SubcommandInfo("knocks", "[domain]", "Review introductions you received"),
     SubcommandInfo(
         "allow", "<device> <agent>", "Let a device's agent message a local agent"
     ),
@@ -182,7 +182,7 @@ CODE_IN_COMMAND = (
 def format_connect_help(show_all: bool = False) -> str:
     """Aligned /connect usage built from the same lists as the command menu."""
     rows = [
-        ("/connect", "The screen: code, requests, agents (no network: enter a code)"),
+        ("/connect", "The screen: network, join code, requests, agents (no network: enter a code, or start one)"),
         ("/connect <domain>", "Connect this agent to a network, e.g. kollabor.ai"),
     ]
     rows += [
@@ -7336,10 +7336,11 @@ class HubPlugin(BasePlugin):
             offline_devices = []
             if relay is not None:
                 try:
-                    approvals = relay.commands.client.state.approvals
+                    offline_devices = offline_device_names(
+                        relay, remote_rows, relay.commands.client
+                    )
                 except Exception:
-                    approvals = []
-                offline_devices = offline_device_names(relay, remote_rows, approvals)
+                    offline_devices = []
             if offline_devices:
                 lines.append(f"offline devices: {', '.join(offline_devices)}")
         else:
@@ -8481,6 +8482,13 @@ class HubPlugin(BasePlugin):
         commands = getattr(self, "_relay_commands", None)
         client = getattr(commands, "client", None)
         origin = getattr(getattr(client, "state", None), "origin", "") if client else ""
+        if not origin:
+            # A second window in the workspace does not own the relay, but the
+            # network is the workspace's: read it from the shared state file.
+            try:
+                origin = self._relay_agent._state().state.origin
+            except Exception:
+                origin = ""
         if isinstance(origin, str) and origin:
             return origin[len("https://") :] if origin.startswith("https://") else origin
         return ""
@@ -8693,7 +8701,7 @@ class HubPlugin(BasePlugin):
         self.command_registry.register_command(
             CommandDefinition(
                 name="connect",
-                description="Discover, pair, authorize and message agents across networks",
+                description="Join a network, pair devices and message agents across machines",
                 category=CommandCategory.CUSTOM,
                 plugin_name=self.name,
                 handler=self._handle_connect_command,
@@ -8744,7 +8752,11 @@ class HubPlugin(BasePlugin):
                 return (
                     "connect: attached daemon does not support private contact requests"
                 )
-            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
+            domain = (
+                parts[1]
+                if len(parts) == 2
+                else self._relay_network_domain() or "kollabor.ai"
+            )
             return await self._open_contact_review_altview(domain)
         known = {sub.name for sub in CONNECT_SUBCOMMANDS} | {
             sub.name for sub in CONNECT_ADVANCED
@@ -8776,11 +8788,22 @@ class HubPlugin(BasePlugin):
 
     async def _connect_home(self) -> str:
         """Bare /connect: the Connect screen on a network, the code form off one."""
+        from .relay_commands import NO_NETWORK
+
+        status = None
         if getattr(getattr(self, "_cli_args", None), "attach", None):
-            # The screen runs on this process's relay, which an attached window
-            # does not have: it shows the daemon's status text instead.
-            status = await self._attached_connect("status")
-            if str(status).startswith("network: none"):
+            # The screen runs on the process that owns the relay. An attached
+            # window shows the daemon's status text instead.
+            status = str(await self._attached_connect("status"))
+        elif self._relay_commands is None:
+            # A second window in the workspace does not own the relay either;
+            # asking for status also starts the bridge, which may elect this
+            # window the owner after all.
+            status = str(await self._run_connect_command("status"))
+            if self._relay_commands is not None:
+                status = None
+        if status is not None:
+            if status.splitlines()[:1] == [NO_NETWORK]:
                 return await self._open_connect_altview("kollabor.ai")
             return status
         domain = self._relay_network_domain()
@@ -8821,10 +8844,29 @@ class HubPlugin(BasePlugin):
                     except (TypeError, ValueError):
                         return ConnectOutcome.error()
                 if status == "approved":
-                    return ConnectOutcome.approved()
+                    try:
+                        return ConnectOutcome.approved(self._joined_line(submission.domain))
+                    except (TypeError, ValueError):
+                        return ConnectOutcome.approved()
                 if status == "rejected":
                     return ConnectOutcome.rejected()
                 return ConnectOutcome.error()
+
+            async def attach(domain: str) -> bool:
+                """No code: this is the first device, so start a network."""
+                from .relay_commands import NO_NETWORK
+
+                if not _looks_like_connect_target(domain):
+                    return False
+                try:
+                    if getattr(getattr(self, "_cli_args", None), "attach", None):
+                        text = await self._attached_connect(domain)
+                    else:
+                        text = await self._run_connect_command(domain)
+                except Exception:
+                    return False
+                first = str(text).splitlines()[:1]
+                return bool(first) and first[0].startswith("network ") and first[0] != NO_NETWORK
 
             stack_mgr = None
             try:
@@ -8839,7 +8881,7 @@ class HubPlugin(BasePlugin):
                 self.event_bus.register_service("altview_stack_manager", stack_mgr)
 
             await stack_mgr.push(
-                ConnectAltView(domain=domain, on_submit=submit),
+                ConnectAltView(domain=domain, on_submit=submit, on_attach=attach),
                 "connect",
                 reuse=False,
             )
@@ -8847,6 +8889,14 @@ class HubPlugin(BasePlugin):
         except Exception:
             # UI initialization failures must not include the private code.
             return "connect: private enrollment view is unavailable"
+
+    def _joined_line(self, domain: str) -> str:
+        """`joined <network> as <device>. trust: <level>` once a join is approved."""
+        device = self._relay_device_name()
+        if not device:
+            return f"joined {domain}"
+        network = self._relay_network_name(self._relay_network_domain() or domain)
+        return f"joined {network} as {device}. trust: {self._relay_trust_level()}"
 
     async def _run_connect_enrollment(self, domain: str, code: str) -> dict[str, str]:
         """Run typed enrollment in the daemon that owns the local identity."""
@@ -9590,6 +9640,15 @@ class HubPlugin(BasePlugin):
         header = f"[{peer.identity}]"
         return header + "\n" + "\n".join(output_lines)
 
+    @staticmethod
+    def _remote_target_refusal(target: Any) -> str | None:
+        """capture, spawn and stop stay local; a remote handle is refused with
+        a hint to message that agent instead (constitution section 7)."""
+        target = str(target or "").strip()
+        if parse_handle(target) is None:
+            return None
+        return f"not allowed on a remote device; ask {target} to do it"
+
     async def _handle_spawn_command(self, rest: Any) -> str:
         """Handle /hub spawn <name> <task>.
 
@@ -9603,6 +9662,10 @@ class HubPlugin(BasePlugin):
           3. Explicit identity + type: name is identity, type attr overrides
              → e.g. name="lapis" type="research"
         """
+        first = str(rest.get("name", "") if isinstance(rest, dict) else rest or "").split()
+        refusal = self._remote_target_refusal(first[0] if first else "")
+        if refusal:
+            return refusal
         orch = self._get_orchestrator()
         if not orch:
             return "error: agent orchestrator not available"
@@ -9882,10 +9945,13 @@ class HubPlugin(BasePlugin):
         names, or "all". Hub identities capture directly over peer sockets.
         Orchestrator session names still route through agent_orchestrator.
         """
+        args = rest.split() if rest.strip() else []
+        refusal = self._remote_target_refusal(args[0] if args else "")
+        if refusal:
+            return refusal
         orch = self._get_orchestrator()
         if not orch:
             return "error: agent orchestrator not available"
-        args = rest.split() if rest.strip() else []
         if not args:
             return "usage: /hub capture <identity|name|all> [lines]"
 
@@ -10052,6 +10118,9 @@ class HubPlugin(BasePlugin):
         target = rest.strip()
         if not target:
             return "usage: /hub stop <identity|all>"
+        refusal = self._remote_target_refusal(target)
+        if refusal:
+            return refusal
 
         if not self._presence or not self._identity:
             return "hub not active"

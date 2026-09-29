@@ -26,7 +26,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Private code:",
+      "pattern": "join code",
       "timeout": 10
     },
     {
@@ -44,8 +44,13 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "Private code:",
+      "pattern": "join code",
       "description": "the code field is there"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "first device\\? an empty code",
+      "description": "the first device is told how to start a network"
     },
     {
       "action": "assert_not_contains",

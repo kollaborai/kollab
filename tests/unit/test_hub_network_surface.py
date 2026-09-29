@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor_events.data_models import ConversationMessage
-from plugins.hub.device_names import contact_route_hex, short_fingerprint
+from plugins.hub.device_names import contact_route_hex, key_label, short_fingerprint
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_commands import RelayCommands
@@ -76,13 +76,13 @@ async def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
 
     status = await commands.format_status()
 
-    assert "network kollabor.ai via kollabor.ai  trust: open" in status
+    assert "network kollabor.ai  trust: open" in status
     assert "this device mac-kollab" in status
     assert "infra@alzan-prod-home - idle" in status
     assert "ops@alzan-prod-home" not in status
-    assert "offline devices: alzan-prod-home" in status
+    assert "  alzan-prod-home (offline)" in status
     assert "koordinator (this device)" in status
-    assert "join code: run /connect code" in status
+    assert "join code run /connect code" in status
     # No keys, workspace ids, or relay: addresses by default.
     assert commands.client.public_key not in status
     assert "relay:" not in status
@@ -271,11 +271,11 @@ async def test_status_lists_offline_devices_for_approved_keys_with_no_online_age
 
     status = await commands.format_status()
 
-    assert "offline devices: laptop-kollab" in status
+    assert "  laptop-kollab (offline)" in status
 
 
 @pytest.mark.asyncio
-async def test_status_offline_device_without_a_recorded_name_shows_key_prefix(tmp_path):
+async def test_status_offline_device_without_a_recorded_name_shows_a_hash_label_not_the_key(tmp_path):
     offline_key = "c" * 64
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
@@ -290,7 +290,8 @@ async def test_status_offline_device_without_a_recorded_name_shows_key_prefix(tm
 
     status = await commands.format_status()
 
-    assert f"offline devices: {offline_key[:8]}" in status
+    assert f"  {key_label(offline_key)} (offline)" in status
+    assert offline_key[:8] not in status
 
 
 @pytest.mark.asyncio
@@ -420,7 +421,10 @@ async def test_connect_revoke_rejects_an_unknown_device(tmp_path):
 
     result = await commands._run("revoke some-unknown-device", source_agent=None)
 
-    assert result == "connect: no known device matches 'some-unknown-device'; use its 64-hex peer key"
+    assert result == (
+        "connect: no known device matches 'some-unknown-device'; "
+        "/connect status lists them"
+    )
 
 
 @pytest.mark.asyncio
@@ -623,7 +627,11 @@ async def test_roster_context_includes_network_line_and_remote_rows():
             state=SimpleNamespace(peer_devices={offline_peer_key: "laptop-kollab"})
         ),
         commands=SimpleNamespace(
-            client=SimpleNamespace(state=SimpleNamespace(approvals=[offline_peer_key]))
+            client=SimpleNamespace(
+                state=SimpleNamespace(approvals=[offline_peer_key]),
+                status=lambda: {"state": "online"},
+                peers=lambda: [],
+            )
         ),
     )
     hub._relay_commands = SimpleNamespace(

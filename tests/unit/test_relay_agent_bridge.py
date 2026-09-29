@@ -1976,6 +1976,8 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
         forwarded = await second.command("status keys")
         assert original_key in forwarded
         assert second.commands is None
+        # allow only means something under agents trust (open ignores grants).
+        await second.command("trust agents")
         assert "approve the peer" in await second.command(
             "allow " + "a" * 64 + " absent"
         )

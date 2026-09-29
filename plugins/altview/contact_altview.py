@@ -45,7 +45,7 @@ def _safe_display_text(value: str) -> str:
     return "".join(
         char
         for char in value
-        if char in "\n\t"
+        if char == "\n"
         or (char.isprintable() and not unicodedata.category(char).startswith("C"))
     )
 
@@ -61,13 +61,12 @@ def _filter(value: str, limit: int) -> str:
 
 
 class ContactReviewAltView(AltView):
-    """List received knocks; accept or reject the oldest one at a time.
+    """List received knocks; accept or reject the selected one.
 
     Every row is named and fingerprinted, never keyed: `N. <device-name>
     fingerprint <4 hex>…<4 hex>   "<introduction>"   [a]ccept [r]eject`, per
-    the constitution's Story 5. `[a]`/`[r]` always act on the first (oldest) row;
-    reviewing a specific later row individually is a follow-up, not built
-    here.
+    the constitution's Story 5. Up/down move the selection (like the Connect
+    screen) and `[a]`/`[r]` act on that row only; the hint is printed on it.
     """
 
     def __init__(
@@ -84,12 +83,18 @@ class ContactReviewAltView(AltView):
         self._requests: list[PendingContactRequest] = []
         self._stage = "loading"
         self._message = ""
+        self._selected = 0
+        # Cleared by a decision, set again once the redraw shows the next
+        # row, so a held or double-tapped key cannot decide a knock unseen.
+        self._armed = True
 
     async def on_enter(self, renderer: Any) -> None:
         self._renderer = renderer
         self._requests.clear()
         self._stage = "loading"
         self._message = ""
+        self._selected = 0
+        self._armed = True
         try:
             result = self._on_load()
             if inspect.isawaitable(result):
@@ -100,13 +105,13 @@ class ContactReviewAltView(AltView):
                 raise ValueError("invalid contact inbox")
             self._requests = result[:32]
             self._stage = "review"
-            self._message = "" if self._requests else "No pending knocks."
+            self._message = "" if self._requests else "no pending knocks"
         except asyncio.CancelledError:
             self._clear_requests()
             raise
         except Exception:
             self._stage = "error"
-            self._message = "Knock inbox is unavailable."
+            self._message = "knock inbox is unavailable"
 
     async def on_complete(self) -> None:
         self._clear_requests()
@@ -126,36 +131,49 @@ class ContactReviewAltView(AltView):
         self._renderer.write_at(
             0,
             top + 1,
-            solid(" Knocks ".ljust(width), T().dark[1], T().text, width),
+            solid(" Knocks".ljust(width), T().dark[1], T().text, width),
             "",
         )
         if self._stage == "loading":
-            self._write(2, top + 4, "Loading knocks…", width)
+            self._write(2, top + 4, "loading knocks…", width)
         elif self._stage == "error" or not self._requests:
             self._write_wrapped(top + 4, self._message, width)
-            self._write(2, top + 8, "Enter or Esc: close", width)
+            self._write(2, top + 8, "enter/esc close", width)
         else:
             visible = max(1, height - (top + 10))
-            shown = self._requests[:visible]
+            first = min(max(0, self._selected - visible + 1), max(0, len(self._requests) - visible))
+            shown = self._requests[first : first + visible]
+            many = len(self._requests) > 1
             for offset, request in enumerate(shown):
+                number = first + offset + 1
+                current = first + offset == self._selected
                 self._write(
-                    2, top + 3 + offset, self._row(request, offset + 1, width - 2), width
+                    2,
+                    top + 3 + offset,
+                    self._row(request, number, width - 2, current, many),
+                    width,
                 )
             self._write_wrapped(top + 4 + len(shown), self._message, width)
-            self._write(
-                2,
-                height - 4,
-                "[a] accept the first knock   [r] reject the first knock",
-                width,
-            )
-            self._write(2, height - 3, "Esc: close", width)
+            self._write(2, height - 3, self._footer(many), width)
+        self._armed = True
         return True
 
     @staticmethod
-    def _row(request: PendingContactRequest, number: int, width: int) -> str:
+    def _footer(many: bool) -> str:
+        return ("up/down select  " if many else "") + "a accept  r reject  esc close"
+
+    @staticmethod
+    def _row(
+        request: PendingContactRequest,
+        number: int,
+        width: int,
+        current: bool = True,
+        many: bool = False,
+    ) -> str:
         fingerprint = short_fingerprint(device_key_fingerprint(request.sender_key))
-        prefix = f'{number}. {request.device_name}  fingerprint {fingerprint}   "'
-        suffix = '"   [a]ccept [r]eject'
+        marker = ("> " if current else "  ") if many else ""
+        prefix = f'{marker}{number}. {request.device_name}  fingerprint {fingerprint}   "'
+        suffix = '"   [a]ccept [r]eject' if current else '"'
         budget = max(0, width - len(prefix) - len(suffix))
         introduction = _safe_display_text(request.introduction.reveal()).replace(
             "\n", " "
@@ -169,12 +187,22 @@ class ContactReviewAltView(AltView):
             return True
         if self._stage != "review" or not self._requests:
             return key_press.name == "Enter"
-        if key_press.char and key_press.char.lower() in {"a", "r"}:
+        if key_press.name == "ArrowUp":
+            self._selected = max(0, self._selected - 1)
+            self.request_render()
+        elif key_press.name == "ArrowDown":
+            self._selected = min(len(self._requests) - 1, self._selected + 1)
+            self.request_render()
+        elif (
+            self._armed
+            and key_press.char
+            and key_press.char.lower() in {"a", "r"}
+        ):
             await self._decide("accept" if key_press.char.lower() == "a" else "reject")
         return False
 
     async def _decide(self, decision: str) -> None:
-        request = self._requests[0]
+        request = self._requests[self._selected]
         verb = "accept" if decision == "accept" else "reject"
         try:
             reason = self._on_decide(request, decision)
@@ -189,7 +217,9 @@ class ContactReviewAltView(AltView):
             self.request_render()
             return
         request.introduction.clear()
-        self._requests.pop(0)
+        self._requests.pop(self._selected)
+        self._selected = max(0, min(self._selected, len(self._requests) - 1))
+        self._armed = False
         self._message = (
             f"accepted {request.device_name}. it is a peer with agents trust; "
             f"nothing is allowed until /connect allow {request.device_name} <agent>."
