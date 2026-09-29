@@ -44,6 +44,7 @@ status: active
 
 ## Agent Networking
 
+- [Connect Guide](guides/connect.md) - Start here: connect machines with a code and hand tasks between agents
 - [Public Beacon](specs/agent-public-beacon.md) - `/connect`, private invitations, encrypted peer presence, and self-hosted relay runtime
 - [Implementation Ledger](specs/agent-network-implementation-status.md) - Verified behavior, deployment evidence, and remaining boundaries
 - [Domain Discovery](specs/agent-domain-discovery-contract.md) - Signed descriptors and origin pins, separate from workspace authorization

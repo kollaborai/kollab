@@ -185,36 +185,28 @@ without an explicit opt-in. This historical direct stream transport is separate
 from the WSS relay and the standard A2A workspace receiver. See the
 [direct endpoint reference](docs/specs/hub-remote-endpoint.md).
 
-### Connect workspaces through a beacon
+### Connect agents across machines
 
-In the current source, `/connect <domain>` verifies signed discovery and pins
-the publisher key, then opens an outbound WSS connection only when the document
-advertises a compatible relay. `/hub dns connect <domain>` is an alias. An
-identity-only publisher remains a discovery contact without a relay connection.
+`/connect` puts your agents on different machines into one private, end-to-end
+encrypted network through a beacon such as kollabor.ai, so one agent can hand
+another a task. Start with the [connect guide](docs/guides/connect.md):
 
 ```text
-/connect <beacon-domain>
-/connect invite
-# Privately copy the generated invitation file to the second computer.
-/connect join /absolute/path/to/invitation.txt
-/connect peers
-/connect approve <peer-public-key>
-/connect ping <peer-public-key>
-/connect disconnect
+# on the machine that is already set up
+/connect kollabor.ai
+/connect offer                  # shows a one-device, five-minute code
+# on the new machine
+/connect                        # paste the code into the private form
+# back on the first machine
+/connect requests
+/connect accept <receipt-id>
 ```
 
-Joining pins the inviter; the inviter approves the joining peer's key locally.
-Invitation rooms expose peer-key presence to their members. Approved peers can
-exchange encrypted ping/presence responses; this does not start an LLM turn or
-grant workspace access. `/connect` in attach mode operates on the daemon's
-identity and connection. Self-host the service with
-`kollab relay run --config /private/relay.json`.
-
-See the [public beacon contract](docs/specs/agent-public-beacon.md) for setup,
-limits and key handling, and the
-[implementation ledger](docs/specs/agent-network-implementation-status.md) for
-verification and deployment status. Workspace task authorization is a separate
-[A2A receiver flow](docs/operations/agent-a2a-workspace.md).
+Self-host the beacon with `kollab relay run --config /private/relay.json`. The
+[public beacon contract](docs/specs/agent-public-beacon.md) covers setup, limits
+and key handling, and the
+[implementation ledger](docs/specs/agent-network-implementation-status.md)
+covers verification and deployment status.
 
 ## Browser UI and Local Engine
 
