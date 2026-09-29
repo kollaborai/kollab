@@ -236,9 +236,11 @@ Removed. Each prints its redirect for one release instead of running:
               koordinator@alzan-prod-home
 ```
 
-- The join code is created when the screen opens and counts down. When it
-  expires the line reads `expired   press c for a new code`; `c` creates a new
-  one. If the relay is unreachable the line says so and the rest still renders.
+- The join code is created when the screen opens and counts down. A code works
+  for one device: once you accept or reject a request the line reads
+  `used   press c for a new code`, and when it expires it reads
+  `expired   press c for a new code`; `c` creates a new one. If the relay is
+  unreachable the line says so and the rest still renders.
 - Requests and the roster refresh about every two seconds. With more than one
   request, Up and Down select a row; `a` accepts and `r` rejects it. Accepting
   prints what it queued for the device: the request's profile settings and one
@@ -253,10 +255,18 @@ Removed. Each prints its redirect for one release instead of running:
   With no network, bare `/connect` opens the code form under `network      none`;
   leave the code empty and press Enter on the first device to start a network
   on the domain.
-- An attached window (`kollab --attach`), or a second window in the same
-  workspace, prints the owner's `/connect status` text instead of the screen.
+- An attached window (the default launch, or `kollab --attach`) opens the same
+  screen: the daemon owns the relay, so the requests and roster come from it
+  and `a`/`r` are sent to it. A second window in the same workspace with no
+  daemon prints the owner's `/connect status` text instead of the screen.
   `/connect knocks` opens the review for the joined directory: up/down select a
   knock and `a`/`r` act on the marked row.
+- On the joining device the code form answers as soon as the relay has the
+  request: `request sent to kollabor.ai; waiting for approval on another
+  device`. It then watches, and shows `joined <network> as <device>. trust:
+  <level>` (or `join request rejected`) when the other device decides. `Esc`
+  closes it and the request keeps waiting; `/connect status` shows where it
+  stands.
 
 Trust is one setting per network, defaulting to `open`: every accepted device's
 agents may message every other, under hub rules (no grants, no task envelope,

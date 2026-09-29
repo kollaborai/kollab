@@ -1377,6 +1377,8 @@ async def _drive_destination_enrollment(
     record: dict[str, Any],
     journal: EnrollmentRecoveryJournal,
     envelope_key: EnrollmentEnvelopeKey,
+    *,
+    on_submitted=None,
 ) -> dict[str, str]:
     client = commands.client
     offer_id = record["offer_id"]
@@ -1433,6 +1435,10 @@ async def _drive_destination_enrollment(
             _require_shape(submitted, {"status", "receipt"})
             if submitted["status"] != "pending" or submitted["receipt"] != record["round_id"]:
                 raise EnrollmentProtocolError("invalid_response")
+            if on_submitted is not None:
+                # The relay holds the request: from here the wait is for a
+                # person, not for the network (the join form says so).
+                on_submitted()
 
             async def submit_saved_proof(challenge: dict[str, Any]) -> None:
                 proof_payload = validate_phase_envelope(
@@ -1667,8 +1673,14 @@ async def _drive_destination_enrollment(
         )
 
 
-async def enroll_device(commands, domain: str, private_code: str) -> dict[str, str]:
-    """Complete or resume one destination-side enrollment."""
+async def enroll_device(
+    commands, domain: str, private_code: str, *, on_submitted=None
+) -> dict[str, str]:
+    """Complete or resume one destination-side enrollment.
+
+    ``on_submitted`` (no arguments) fires once the relay has the join request,
+    before the wait for the other device's decision.
+    """
     code = verifier = envelope_key = None
     offer_id = None
     claimed = False
@@ -1762,7 +1774,9 @@ async def enroll_device(commands, domain: str, private_code: str) -> dict[str, s
             # network write, so the relay can return this same decision later.
             journal.put(offer_id, record)
         drive_started = True
-        return await _drive_destination_enrollment(commands, record, journal, envelope_key)
+        return await _drive_destination_enrollment(
+            commands, record, journal, envelope_key, on_submitted=on_submitted
+        )
     except asyncio.CancelledError:
         raise
     except EnrollmentProtocolError as exc:

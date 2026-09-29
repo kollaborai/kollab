@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from .context import ContextListSnapshot, ConversationContext
-from .interface import StateService
+from .interface import StateService, enrollment_result
 from .snapshots import (
     AgentListSnapshot,
     AgentSnapshot,
@@ -776,17 +776,22 @@ class RemoteStateService(StateService):
             {"domain": domain, "code": code},
             timeout=max(self._timeout, 90.0),
         )
-        if not isinstance(result, dict):
+        checked = enrollment_result(result)
+        if checked is None:
             raise ValueError("daemon connect enrollment failed")
-        if result.get("error"):
-            raise ValueError("daemon connect enrollment failed")
-        status = result.get("status")
-        receipt_id = result.get("receipt_id")
-        if status == "pending" and isinstance(receipt_id, str):
-            return {"status": "pending", "receipt_id": receipt_id}
-        if isinstance(status, str) and status in {"approved", "rejected"}:
-            return {"status": status}
-        raise ValueError("daemon connect enrollment failed")
+        return checked
+
+    async def hub_enroll_status(self, receipt_id: str) -> dict[str, str]:
+        """Where a submitted join request stands, asked of the daemon."""
+        result = await self._rpc.call(
+            "state.hub_enroll_status",
+            {"receipt_id": receipt_id},
+            timeout=self._timeout,
+        )
+        checked = enrollment_result(result, allow_failed=True)
+        if checked is None:
+            raise ValueError("daemon connect request status failed")
+        return checked
 
     async def hub_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create an offer through the daemon for the private connect view."""
@@ -817,6 +822,35 @@ class RemoteStateService(StateService):
                 "code": code,
             }
         raise ValueError("daemon connect offer failed")
+
+    async def hub_connect_snapshot(self) -> dict[str, Any]:
+        """The daemon's Connect screen data; the caller validates its shape."""
+        result = await self._rpc.call(
+            "state.hub_connect_snapshot", {}, timeout=max(self._timeout, 30.0)
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("error")
+            or not isinstance(result.get("snapshot"), dict)
+        ):
+            raise ValueError("daemon connect screen failed")
+        return result["snapshot"]
+
+    async def hub_connect_decide(self, enrollment_id: str, decision: str) -> str:
+        """Accept or reject one join request on the daemon; "" when decided."""
+        result = await self._rpc.call(
+            "state.hub_connect_decide",
+            {"enrollment_id": enrollment_id, "decision": decision},
+            timeout=max(self._timeout, 30.0),
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("error")
+            or not isinstance(result.get("reason"), str)
+        ):
+            raise ValueError("daemon connect decision failed")
+        # The reason is shown on screen: printable text, one bounded line.
+        return "".join(char for char in result["reason"] if char.isprintable())[:200]
 
     async def hub_connect(self, command: str) -> str:
         result = await self._rpc.call(

@@ -174,6 +174,9 @@ ConnectSubmitCallback = Callable[
 EnrollmentOfferCallback = Callable[[str], dict[str, str] | Awaitable[dict[str, str]]]
 # Starts a network on a directory when the code is left empty; true on success.
 ConnectAttachCallback = Callable[[str], bool | Awaitable[bool]]
+# Where a submitted request stands: (receipt id, domain) -> pending, approved,
+# rejected or error. It raises when it cannot tell (the form keeps waiting).
+ConnectWaitCallback = Callable[[str, str], ConnectOutcome | Awaitable[ConnectOutcome]]
 
 
 class ConnectAltView(AltView):
@@ -184,6 +187,10 @@ class ConnectAltView(AltView):
     ``PrivateCode`` wrapper to the callback, and clears the wrapper afterwards.
     ``outcome`` is ``None`` on cancellation and otherwise contains only one of
     the typed, bounded ``ConnectOutcome`` values.
+
+    A submit that returns ``pending`` means the relay holds the request and a
+    person has to answer it. With ``on_wait`` the form says so at once, then
+    polls until the answer arrives; without it ``pending`` is the last word.
     """
 
     def __init__(
@@ -191,6 +198,7 @@ class ConnectAltView(AltView):
         domain: str = "kollabor.ai",
         on_submit: ConnectSubmitCallback | None = None,
         on_attach: ConnectAttachCallback | None = None,
+        on_wait: ConnectWaitCallback | None = None,
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect",
@@ -207,6 +215,9 @@ class ConnectAltView(AltView):
         self._domain = self._filter_text(domain, _MAX_DOMAIN_LENGTH)
         self._on_submit = on_submit
         self._on_attach = on_attach
+        self._on_wait = on_wait
+        self._sent = False  # the relay holds a request from this form
+        self._wait_note = ""
         self._renderer: Any = None
         self._code_chars: list[str] = []
         self._domain_cursor = len(self.domain)
@@ -242,6 +253,8 @@ class ConnectAltView(AltView):
         self._validation_error = ""
         self._focus = "code" if self.domain else "domain"
         self._stage = "entry"
+        self._sent = False
+        self._wait_note = ""
         self._paste_active = False
 
     async def render_frame(self, delta_time: float) -> bool:
@@ -322,12 +335,21 @@ class ConnectAltView(AltView):
         """Discard private entry state whenever this view leaves the stack."""
         self._paste_active = False
         self._clear_code_input()
+        await self._stop_waiting()
         await super().on_suspend()
 
     async def on_complete(self) -> None:
         self._paste_active = False
         self._clear_code_input()
+        await self._stop_waiting()
         await super().on_complete()
+
+    async def _stop_waiting(self) -> None:
+        """Closing the form stops watching; the request itself keeps waiting."""
+        tasks = self.background_tasks
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _render_entry(self, y: int, width: int) -> None:
         self._write_line(1, y, "network".ljust(_LABEL_WIDTH) + "none", width)
@@ -367,11 +389,24 @@ class ConnectAltView(AltView):
             message = outcome.detail or f"connected to {self.domain}"
         elif outcome.status is ConnectStatus.REJECTED:
             message = "join request rejected"
+        elif self._sent:
+            # It was submitted, so this is the wait that failed, not the send.
+            message = "the join request did not complete; get a new code and try again"
         else:
             message = "could not submit the join request"
 
         self._write_line(2, y, message, width)
-        self._write_line(2, y + 3, "enter/esc close", width)
+        if self._stage == "waiting":
+            if self._wait_note:
+                self._write_line(2, y + 1, self._wait_note, width)
+            self._write_line(
+                2,
+                y + 3,
+                "esc close   /connect status shows where the request stands",
+                width,
+            )
+        else:
+            self._write_line(2, y + 3, "enter/esc close", width)
 
     def _edit_focused_field(self, key_press: KeyPress) -> None:
         field = self._domain_chars() if self._focus == "domain" else self._code_chars
@@ -499,8 +534,48 @@ class ConnectAltView(AltView):
         finally:
             secret.clear()
 
+        if self._outcome.status is ConnectStatus.PENDING:
+            self._sent = True
+            if self._on_wait is not None:
+                self._stage = "waiting"
+                self.spawn_background_task(self._wait_for_decision(), "wait")
+                self.request_render()
+                return
         self._stage = "outcome"
         self.request_render()
+
+    async def _wait_for_decision(self) -> None:
+        """Poll until the other device answers; only an answer ends the wait.
+
+        A poll that fails says nothing about the request, so it never turns
+        into an error: the form keeps the request as waiting and says how to
+        check.
+        """
+        receipt = self._outcome.receipt_id if self._outcome else None
+        while receipt is not None and self._on_wait is not None:
+            await asyncio.sleep(_POLL_SECONDS)
+            try:
+                result = self._on_wait(receipt, self.domain)
+                if inspect.isawaitable(result):
+                    result = await result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                result = None
+            if type(result) is not ConnectOutcome:
+                self._wait_note = (
+                    "still waiting for approval on another device; "
+                    "check with /connect status"
+                )
+            elif result.status is ConnectStatus.PENDING:
+                self._wait_note = ""
+            else:
+                self._wait_note = ""
+                self._outcome = result
+                self._stage = "outcome"
+                self.request_render()
+                return
+            self.request_render()
 
     def _domain_chars(self) -> list[str]:
         return list(self.domain)
@@ -539,7 +614,7 @@ class ConnectScreenState:
     snapshot: ConnectSnapshot | None = None
     code: str = field(default="", repr=False)
     code_remaining: int = 0
-    code_status: str = "creating"  # creating | active | expired | failed
+    code_status: str = "creating"  # creating | active | used | expired | failed
     selected: int = 0
     notice: tuple[str, ...] = ()
     code_only: bool = False
@@ -563,6 +638,8 @@ def _code_value(state: ConnectScreenState) -> str:
         return f"{state.code}   one device, expires in {minutes}:{seconds:02d}"
     if state.code_status == "expired":
         return "expired   press c for a new code"
+    if state.code_status == "used":
+        return "used   press c for a new code"
     if state.code_status == "creating":
         return "creating…"
     unreachable = state.snapshot is not None and not state.snapshot.relay_online
@@ -890,6 +967,10 @@ class ConnectScreenAltView(AltView):
         self._snapshot = replace(snapshot, requests=remaining)
         self._selected = max(0, min(self._selected, len(remaining) - 1))
         self._armed = False
+        if self._code_status == "active":
+            # A code works for one device, and this request just used it.
+            self._clear_code()
+            self._code_status = "used"
 
     def _screen_state(self) -> ConnectScreenState:
         remaining = 0

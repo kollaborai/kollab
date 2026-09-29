@@ -15,11 +15,11 @@ The design contract for this feature is [the agent network spec](../specs/agent-
 You do this once per machine. Call the machine that is already connected A, and the new one B.
 
 1. On A, run `/connect`. The Connect screen opens with a code, eight characters shown as `XXXX-XXXX`, counting down. It works for one device, for five minutes. On a small terminal, `/connect code` shows just the code. A first device with no network opens the code form instead: leave the code empty and press Enter to start a network on kollabor.ai, then run `/connect` again.
-2. On B, run `/connect` with nothing after it. Type the code into the private form and press Enter. Upper or lower case, with or without the dash. B joins as `<hostname>-<folder>`; rename it any time with `/connect name <name>`.
+2. On B, run `/connect` with nothing after it. Type the code into the private form and press Enter. Upper or lower case, with or without the dash. As soon as the relay has the request, the form says `request sent to kollabor.ai; waiting for approval on another device` and keeps watching. When A decides, it turns into `joined marco-home as alzan-prod-home. trust: open` (or `join request rejected`). `Esc` closes the form and the request keeps waiting; `/connect status` shows where it stands. B joins as `<hostname>-<folder>`; rename it any time with `/connect name <name>`.
 3. Within a couple of seconds A's screen shows `alzan-prod-home wants to join   fingerprint 4d04…9f2e   [a]ccept [r]eject`. Press `a` to accept (with several requests, Up and Down pick one first), or run `/connect accept alzan-prod-home`. The screen then prints `accepted alzan-prod-home. it is now a trusted device on marco-home.` and lists it under `online`.
 4. Every device on the network is listed on that screen and in `/connect status`, with its agents as `agent@device`.
 
-The code has expired when the line reads `expired   press c for a new code`; press `c`. The screen closes with `Esc`. If you are attached to a daemon (`kollab --attach`), `/connect` prints the daemon's `/connect status` text instead of the screen; codes still come from `/connect code`.
+A code works for one device. Once you accept or reject a request, the line reads `used   press c for a new code`; after five minutes unused it reads `expired   press c for a new code`. Press `c` for a new one. The screen closes with `Esc`. In the default launch (a daemon plus an attached window) the screen is the same: it reads the daemon's requests and roster, and your `a` and `r` go to the daemon.
 
 Codes go only in that private form. If you type a code into a command or into chat, Kollab refuses it, and codes never reach its logs.
 
