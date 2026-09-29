@@ -252,13 +252,14 @@ class RelayAgentBridge:
         return state.peer_trust.get(peer_key, state.trust)
 
     def set_peer_trust(self, peer_key: str, level: str) -> str:
+        self._require_human_network_context("remote model turns cannot change peer trust")
         try:
             level = validate_trust(level)
         except ValueError as exc:
             raise RelayError(str(exc)) from exc
-        if level == "manual":
+        if level != "agents":
             raise RelayError(
-                "a peer's trust can only be open or agents; manual applies to the whole network"
+                "a peer's trust can only be set to agents; open and manual apply to the whole network"
             )
         store = self._state()
         validate_public_key(peer_key)
@@ -267,23 +268,26 @@ class RelayAgentBridge:
         return level
 
     def clear_peer_trust(self, peer_key: str) -> None:
+        self._require_human_network_context("remote model turns cannot change peer trust")
         store = self._state()
         if store.state.peer_trust.pop(peer_key, None) is not None:
             store.save()
 
-    def bind_peer_device(self, key: str, name: str) -> None:
+    def bind_peer_device(self, key: str, name: str) -> bool:
         """Bind a human device name to a peer's key at accept time.
 
         Idempotent when the same (key, name) pair repeats. Fails with a
         RelayError, and writes nothing, when the name is this device's own
         name or is already bound to a different key
-        (docs/specs/agent-network-simple-flow.md §4).
+        (docs/specs/agent-network-simple-flow.md §4). Returns whether this
+        call created a new binding (False when the pair already matched).
         """
+        self._require_human_network_context("remote model turns cannot bind peer devices")
         if not isinstance(name, str) or not NAME_RE.fullmatch(name):
             name = key[:8]
         store = self._state()
         if store.state.peer_devices.get(key) == name:
-            return
+            return False
         if name == self.device_name() or name in store.state.peer_devices.values():
             raise RelayError(
                 f"device name '{name}' is already on this network; "
@@ -291,6 +295,7 @@ class RelayAgentBridge:
             )
         store.state.peer_devices[key] = name
         store.save()
+        return True
 
     async def remote_agents(self) -> list[dict]:
         """Remote agents from the cached directory, keyed by agent@device.

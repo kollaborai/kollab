@@ -22,6 +22,37 @@ MAX_VISIBLE_ENROLLMENT_SCOPE_ITEMS = 4
 MANUAL_TRUST_COMMANDS = frozenset({"authorize", "send", "withdraw", "answer", "task", "cancel"})
 
 
+def offline_device_names(agent_bridge, remote_rows: list, approvals) -> list[str]:
+    """Devices with an approved peer key but no online row right now.
+
+    ``remote_agents()`` rows are always ``online: True`` (the directory only
+    lists agents currently reachable), so "offline" comes from comparing the
+    approved peer keys against who has an online row, not from a per-row
+    flag. Named from the recorded ``peer_devices`` binding, falling back to
+    ``key[:8]`` for an approved peer never bound to a name.
+    """
+    offline = {
+        row.get("device")
+        for row in remote_rows
+        if not row.get("online") and row.get("device")
+    }
+    try:
+        from .relay_conversations import RelayAddress
+
+        peer_devices = agent_bridge._state().state.peer_devices
+        online_keys = {
+            RelayAddress.parse(row["address"]).key
+            for row in remote_rows
+            if row.get("online") and row.get("address")
+        }
+        for key in approvals:
+            if key not in online_keys:
+                offline.add(peer_devices.get(key, key[:8]))
+    except Exception:
+        pass
+    return sorted(offline)
+
+
 class RelayCommands:
     def __init__(
         self,
@@ -286,26 +317,9 @@ class RelayCommands:
             lines.append(line)
         lines.extend(self._pending_request_lines())
 
-        offline_devices = {
-            row.get("device")
-            for row in remote_rows
-            if not row.get("online") and row.get("device")
-        }
-        try:
-            from .relay_conversations import RelayAddress
-
-            peer_devices = self.agent_bridge._state().state.peer_devices
-            online_keys = {
-                RelayAddress.parse(row["address"]).key
-                for row in remote_rows
-                if row.get("online") and row.get("address")
-            }
-            for key in self.client.state.approvals:
-                if key not in online_keys:
-                    offline_devices.add(peer_devices.get(key, key[:8]))
-        except Exception:
-            pass
-        offline_devices = sorted(offline_devices)
+        offline_devices = offline_device_names(
+            self.agent_bridge, remote_rows, self.client.state.approvals
+        )
         if offline_devices:
             lines.append(f"offline devices: {', '.join(offline_devices)}")
 

@@ -12,13 +12,14 @@ from nacl.signing import SigningKey
 
 from plugins.hub.enrollment_client import (
     EnrollmentIssuer,
+    EnrollmentProtocolError,
     _ActiveEnrollmentOffer,
     _device_key_fingerprint,
     _LiveEnrollmentRequest,
     _ProvisioningPlan,
 )
 from plugins.hub.enrollment_codes import EnrollmentEnvelopeKey
-from plugins.hub.enrollment_delegations import EnrollmentDelegationStore
+from plugins.hub.enrollment_delegations import DelegationCapacityError, EnrollmentDelegationStore
 from plugins.hub.plugin import CODE_IN_COMMAND, HubPlugin
 from plugins.hub.provisioning import ProfilePreferences
 from plugins.hub.relay_agent import RelayAgentBridge
@@ -347,6 +348,60 @@ async def test_accept_rejects_a_joiner_name_already_bound_to_another_key(tmp_pat
         round_id, agent_id=AGENT_ID, session_id=bridge.commands.client._session_id
     )
     assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_accept_rolls_back_the_binding_when_consume_fails(tmp_path, monkeypatch):
+    """consume() can still fail after bind_peer_device succeeds (e.g. the
+    delegation's device allowance ran out between the two calls); the name
+    binding it wrote must not be left behind for an unapproved key to squat
+    (docs/specs/agent-network-simple-flow.md §4).
+
+    ``decide()`` opens its own ``EnrollmentDelegationStore`` instance (same
+    file, fresh object), so the class method is patched rather than the
+    instance ``_add_pending`` hands back.
+    """
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "3" * 32
+    _store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    live.device_name = "laptop-kollab"
+
+    def _out_of_capacity(self, *_args, **_kwargs):
+        raise DelegationCapacityError("delegation has no device allowance remaining")
+
+    monkeypatch.setattr(EnrollmentDelegationStore, "consume", _out_of_capacity)
+
+    with pytest.raises(EnrollmentProtocolError):
+        await issuer.decide(round_id, decision="accept")
+
+    assert live.destination_key not in bridge._state().state.peer_devices
+
+
+@pytest.mark.asyncio
+async def test_accept_rollback_keeps_a_pre_existing_binding_on_consume_failure(tmp_path, monkeypatch):
+    """An earlier successful accept already bound this exact key to this
+    name; a later failed accept of the same key must not erase it."""
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "7" * 32
+    _store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    live.device_name = "laptop-kollab"
+    bridge.bind_peer_device(live.destination_key, "laptop-kollab")
+
+    def _out_of_capacity(self, *_args, **_kwargs):
+        raise DelegationCapacityError("delegation has no device allowance remaining")
+
+    monkeypatch.setattr(EnrollmentDelegationStore, "consume", _out_of_capacity)
+
+    with pytest.raises(EnrollmentProtocolError):
+        await issuer.decide(round_id, decision="accept")
+
+    assert bridge._state().state.peer_devices[live.destination_key] == "laptop-kollab"
 
 
 @pytest.mark.asyncio

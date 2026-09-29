@@ -461,11 +461,23 @@ async def test_roster_context_includes_network_line_and_remote_rows():
     hub.config = None
     hub._task_ledger = None
     hub._change_feed = None
+
+    # remote_agents() rows are always online: True in production (see
+    # RelayAgentBridge.remote_agents); a fully offline device instead has no
+    # row at all and shows up only through its approved key + bound name.
+    online_rows = [{**row, "online": True} for row in REMOTE_ROWS]
+    offline_peer_key = "f" * 64
     hub._relay_agent = SimpleNamespace(
-        remote_agents=lambda: REMOTE_ROWS,
+        remote_agents=lambda: online_rows,
         trust_level=lambda: "open",
         device_name=lambda: "mac-kollab",
         harness_context=_async_empty_list,
+        _state=lambda: SimpleNamespace(
+            state=SimpleNamespace(peer_devices={offline_peer_key: "laptop-kollab"})
+        ),
+        commands=SimpleNamespace(
+            client=SimpleNamespace(state=SimpleNamespace(approvals=[offline_peer_key]))
+        ),
     )
     hub._relay_commands = SimpleNamespace(
         client=SimpleNamespace(state=SimpleNamespace(origin="https://kollabor.ai"))
@@ -485,7 +497,7 @@ async def test_roster_context_includes_network_line_and_remote_rows():
     assert "this device: mac-kollab" in content
     assert "infra@alzan-prod-home - idle" in content
     assert "ops@alzan-prod-home - working: rotating logs" in content
-    assert "offline devices: alzan-prod-home" in content
+    assert "offline devices: laptop-kollab" in content
     assert "remote agents use the same tag with their full name:" in content
     assert '<hub_msg to="infra@alzan-prod-home">your message</hub_msg>' in content
 

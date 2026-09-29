@@ -7314,13 +7314,16 @@ class HubPlugin(BasePlugin):
                     lines.append(f"  {handle} - {status}: {task}")
                 else:
                     lines.append(f"  {handle} - {status}")
-            offline_devices = sorted(
-                {
-                    row.get("device")
-                    for row in remote_rows
-                    if not row.get("online") and row.get("device")
-                }
-            )
+            from .relay_commands import offline_device_names
+
+            relay = getattr(self, "_relay_agent", None)
+            offline_devices = []
+            if relay is not None:
+                try:
+                    approvals = relay.commands.client.state.approvals
+                except Exception:
+                    approvals = []
+                offline_devices = offline_device_names(relay, remote_rows, approvals)
             if offline_devices:
                 lines.append(f"offline devices: {', '.join(offline_devices)}")
         else:

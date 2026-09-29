@@ -212,12 +212,19 @@ async def test_effective_trust_manual_network_wins_over_peer_override(bridges):
 
 
 @pytest.mark.asyncio
-async def test_set_peer_trust_rejects_manual(bridges):
+async def test_set_peer_trust_rejects_manual_and_open(bridges):
+    """A peer can only be pinned to agents; a stranger never gets open, and
+    manual is a whole-network setting (docs/specs/agent-network-simple-flow.md
+    §3-4)."""
     members, _ = bridges
     (left, *_), (right, *_) = members
+    left_key = left.commands.client.public_key
 
-    with pytest.raises(RelayError, match="open or agents"):
-        right.set_peer_trust(left.commands.client.public_key, "manual")
+    with pytest.raises(RelayError, match="only be set to agents"):
+        right.set_peer_trust(left_key, "manual")
+
+    with pytest.raises(RelayError, match="only be set to agents"):
+        right.set_peer_trust(left_key, "open")
 
 
 @pytest.mark.asyncio

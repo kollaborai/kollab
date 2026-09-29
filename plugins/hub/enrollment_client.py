@@ -2807,8 +2807,9 @@ class EnrollmentIssuer:
             # (docs/specs/agent-network-simple-flow.md §4). A bridge double
             # without this method (some tests) skips the check.
             binder = getattr(bridge, "bind_peer_device", None)
+            bound_new_device = False
             if callable(binder):
-                binder(live.destination_key, live.device_name)
+                bound_new_device = bool(binder(live.destination_key, live.device_name))
             journal = self._recovery_journal(client)
             recovery_record = self._recovery_record(live, client)
             try:
@@ -2835,6 +2836,19 @@ class EnrollmentIssuer:
                     journal.delete(live.offer.offer_id)
                 except Exception:
                     pass
+                if bound_new_device:
+                    # consume() failed after the name was bound: the binding
+                    # is orphaned (an unapproved key squatting a device
+                    # name). Undo only the binding this call created; an
+                    # earlier accept of the same key keeps its name.
+                    state_getter = getattr(bridge, "_state", None)
+                    if callable(state_getter):
+                        try:
+                            relay_state = state_getter()
+                            relay_state.state.peer_devices.pop(live.destination_key, None)
+                            relay_state.save()
+                        except Exception:
+                            pass
                 raise EnrollmentProtocolError("unauthorized") from exc
             self._approved_offer_ids.add(live.offer.offer_id)
             recovery_record["status"] = "approved"
