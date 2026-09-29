@@ -1384,7 +1384,12 @@ async def test_issuer_requires_explicit_decision_after_proof(
 
         monkeypatch.setattr(relay, "approve", fail_peer_approval)
     task = asyncio.create_task(issuer._serve_offer(offer))
-    for _ in range(100):
+    # Real wall-clock deadline, not a fixed iteration count: a fixed count of
+    # 1ms sleeps assumes the event loop gets scheduled promptly, which is not
+    # true under full-suite CPU contention and was the source of a flaky
+    # "verified proof did not become a pending request" failure (issue #121).
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
         requests = issuer.pending_requests()
         if requests:
             break
