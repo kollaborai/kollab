@@ -107,6 +107,65 @@ async def test_test_status_keys_appends_the_technical_block(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_status_lists_offline_devices_for_approved_keys_with_no_online_agents(tmp_path):
+    offline_key = "b" * 64
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        remote_agents=lambda: [],
+        plugin=SimpleNamespace(_presence=None, _identity=None),
+        _enrollment_issuer=None,
+        _state=lambda: SimpleNamespace(
+            state=SimpleNamespace(peer_devices={offline_key: "laptop-kollab"})
+        ),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    commands.client.state.approvals = [offline_key]
+
+    status = await commands.format_status()
+
+    assert "offline devices: laptop-kollab" in status
+
+
+@pytest.mark.asyncio
+async def test_status_offline_device_without_a_recorded_name_shows_key_prefix(tmp_path):
+    offline_key = "c" * 64
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        remote_agents=lambda: [],
+        plugin=SimpleNamespace(_presence=None, _identity=None),
+        _enrollment_issuer=None,
+        _state=lambda: SimpleNamespace(state=SimpleNamespace(peer_devices={})),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    commands.client.state.approvals = [offline_key]
+
+    status = await commands.format_status()
+
+    assert f"offline devices: {offline_key[:8]}" in status
+
+
+@pytest.mark.asyncio
+async def test_status_shows_trust_suffix_when_peer_override_differs_from_network(tmp_path):
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "mac-kollab",
+        remote_agents=lambda: REMOTE_ROWS,
+        plugin=SimpleNamespace(
+            _presence=None, _identity=SimpleNamespace(identity="koordinator", agent_id="k1")
+        ),
+        _enrollment_issuer=None,
+        effective_trust=lambda key: "agents" if key == "a" * 64 else "open",
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+
+    status = await commands.format_status()
+
+    assert "infra@alzan-prod-home - idle  trust agents" in status
+
+
+@pytest.mark.asyncio
 async def test_connect_status_keys_reaches_format_status_with_show_keys(tmp_path):
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
@@ -215,6 +274,20 @@ async def test_connect_revoke_rejects_an_unknown_device(tmp_path):
     result = await commands._run("revoke some-unknown-device", source_agent=None)
 
     assert result == "connect: no known device matches 'some-unknown-device'; use its 64-hex peer key"
+
+
+@pytest.mark.asyncio
+async def test_resolve_peer_key_finds_an_offline_recorded_device_name(tmp_path):
+    offline_key = "a" * 64
+    bridge = SimpleNamespace(
+        remote_agents=lambda: [],
+        _state=lambda: SimpleNamespace(
+            state=SimpleNamespace(peer_devices={offline_key: "laptop-kollab"})
+        ),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+
+    assert await commands._resolve_peer_key("laptop-kollab") == offline_key
 
 
 # --------------------------------------------------------------------- #

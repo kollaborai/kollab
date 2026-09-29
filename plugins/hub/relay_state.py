@@ -126,6 +126,8 @@ class RelayState:
     inviter: str = ""
     device_name: str = ""
     trust: str = "open"
+    peer_devices: dict[str, str] = field(default_factory=dict)
+    peer_trust: dict[str, str] = field(default_factory=dict)
 
 
 class RelayStateStore:
@@ -156,9 +158,9 @@ class RelayStateStore:
         if self.state_path.exists() or self.state_path.is_symlink():
             payload = strict_json(self._read_private(self.state_path, 65536))
             # A subset check, not equality: an older state file predating
-            # device_name/trust is missing those keys, and the dataclass
-            # defaults fill them in. Any key outside the dataclass is still
-            # rejected.
+            # device_name/trust/peer_devices/peer_trust is missing those
+            # keys, and the dataclass defaults fill them in. Any key outside
+            # the dataclass is still rejected.
             if set(payload) - set(RelayState.__dataclass_fields__):
                 raise RelayError("unsupported relay state fields")
             self.state = RelayState(**payload)
@@ -203,10 +205,23 @@ class RelayStateStore:
             validate_public_key(key)
         if value.inviter:
             validate_public_key(value.inviter)
+        if not isinstance(value.peer_devices, dict) or len(value.peer_devices) > MAX_APPROVALS:
+            raise RelayError("invalid peer device names")
+        for key in value.peer_devices:
+            validate_public_key(key)
+        if not isinstance(value.peer_trust, dict) or len(value.peer_trust) > MAX_APPROVALS:
+            raise RelayError("invalid peer trust levels")
+        for key in value.peer_trust:
+            validate_public_key(key)
         try:
             if value.device_name:
                 validate_device_name(value.device_name)
             validate_trust(value.trust)
+            for name in value.peer_devices.values():
+                validate_device_name(name)
+            for level in value.peer_trust.values():
+                if level not in ("open", "agents"):
+                    raise ValueError("peer trust must be open or agents")
         except ValueError as exc:
             # device_names raises plain ValueError; every failure out of this
             # store must be the operator-visible RelayError, like every other

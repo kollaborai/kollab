@@ -127,9 +127,21 @@ class RelayCommands:
         return [row for row in rows if isinstance(row, dict)]
 
     async def _resolve_peer_key(self, token: str) -> str:
-        """A 64-hex peer key is returned unchanged; a device name resolves to it."""
+        """A 64-hex peer key is returned unchanged; a device name resolves to it.
+
+        The recorded binding (``peer_devices``) is checked first so an
+        offline device's name still resolves, not only an online one.
+        """
         if re.fullmatch(r"[0-9a-f]{64}", token):
             return token
+        if self.agent_bridge is not None:
+            try:
+                peer_devices = self.agent_bridge._state().state.peer_devices
+            except Exception:
+                peer_devices = {}
+            for key, name in peer_devices.items():
+                if name == token:
+                    return key
         for row in await self._remote_rows():
             if row.get("device") == token and row.get("address"):
                 try:
@@ -253,22 +265,47 @@ class RelayCommands:
             name = getattr(agent, "identity", None)
             if name:
                 lines.append(f"  {name} (this device)")
+        network_trust = self._trust_level()
+        effective_trust = getattr(self.agent_bridge, "effective_trust", None)
         for row in remote_rows:
             if not row.get("online"):
                 continue
             handle = row.get("handle") or format_handle(
                 row.get("name", "?"), row.get("device", "?")
             )
-            lines.append(f"  {handle} - {row.get('state', 'unknown')}")
+            line = f"  {handle} - {row.get('state', 'unknown')}"
+            if callable(effective_trust) and row.get("address"):
+                try:
+                    from .relay_conversations import RelayAddress
+
+                    peer = effective_trust(RelayAddress.parse(row["address"]).key)
+                    if peer != network_trust:
+                        line += f"  trust {peer}"
+                except Exception:
+                    pass
+            lines.append(line)
         lines.extend(self._pending_request_lines())
 
-        offline_devices = sorted(
-            {
-                row.get("device")
+        offline_devices = {
+            row.get("device")
+            for row in remote_rows
+            if not row.get("online") and row.get("device")
+        }
+        try:
+            from .relay_conversations import RelayAddress
+
+            peer_devices = self.agent_bridge._state().state.peer_devices
+            online_keys = {
+                RelayAddress.parse(row["address"]).key
                 for row in remote_rows
-                if not row.get("online") and row.get("device")
+                if row.get("online") and row.get("address")
             }
-        )
+            for key in self.client.state.approvals:
+                if key not in online_keys:
+                    offline_devices.add(peer_devices.get(key, key[:8]))
+        except Exception:
+            pass
+        offline_devices = sorted(offline_devices)
         if offline_devices:
             lines.append(f"offline devices: {', '.join(offline_devices)}")
 
@@ -560,6 +597,12 @@ class RelayCommands:
             )
         if head == "leave":
             await self.client.close(disable=True)
+            if self.agent_bridge is not None:
+                store = self.agent_bridge._state()
+                if store.state.peer_devices or store.state.peer_trust:
+                    store.state.peer_devices = {}
+                    store.state.peer_trust = {}
+                    store.save()
             return "left the network; automatic reconnect disabled for this workspace"
         if head == "rotate":
             origin = self.client.state.origin

@@ -2802,6 +2802,13 @@ class EnrollmentIssuer:
             # and mailbox worker do not. Never infer approval after restart.
             raise EnrollmentProtocolError("unavailable")
         if decision == "accept":
+            # Bind (or verify) the device name before anything is marked
+            # approved: a name collision must fail the accept outright
+            # (docs/specs/agent-network-simple-flow.md §4). A bridge double
+            # without this method (some tests) skips the check.
+            binder = getattr(bridge, "bind_peer_device", None)
+            if callable(binder):
+                binder(live.destination_key, live.device_name)
             journal = self._recovery_journal(client)
             recovery_record = self._recovery_record(live, client)
             try:

@@ -269,6 +269,101 @@ async def test_accept_rejects_an_unknown_device_name(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_accept_binds_the_joiners_device_name(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "6" * 32
+    _store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    live.device_name = "laptop-kollab"
+
+    accepted = await hub._handle_connect_command(f"accept {round_id}")
+
+    assert accepted == f"enrollment accepted; receipt: {round_id}"
+    assert bridge._state().state.peer_devices[live.destination_key] == "laptop-kollab"
+
+
+@pytest.mark.asyncio
+async def test_accept_without_a_device_name_falls_back_to_the_key_prefix(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "8" * 32
+    _store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    assert live.device_name == ""
+
+    accepted = await hub._handle_connect_command(f"accept {round_id}")
+
+    assert accepted == f"enrollment accepted; receipt: {round_id}"
+    assert (
+        bridge._state().state.peer_devices[live.destination_key]
+        == live.destination_key[:8]
+    )
+
+
+@pytest.mark.asyncio
+async def test_accept_rejects_a_joiner_name_matching_this_devices_own_name(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    bridge.set_device_name("mac-kollab")
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    now = int(time.time())
+    round_id = "9" * 32
+    store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    live.device_name = "mac-kollab"
+
+    result = await hub._handle_connect_command(f"accept {round_id}")
+
+    assert "already on this network" in result
+    assert live.decision is None
+    assert live.destination_key not in bridge._state().state.peer_devices
+    pending = store.get_enrollment_request(
+        round_id, agent_id=AGENT_ID, session_id=bridge.commands.client._session_id
+    )
+    assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_accept_rejects_a_joiner_name_already_bound_to_another_key(tmp_path):
+    hub, bridge = _local_hub(tmp_path)
+    issuer = EnrollmentIssuer(bridge)
+    bridge._enrollment_issuer = issuer
+    other_key = SigningKey.generate().verify_key.encode().hex()
+    bridge.bind_peer_device(other_key, "laptop-kollab")
+    now = int(time.time())
+    round_id = "4" * 32
+    store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
+    live.device_name = "laptop-kollab"
+
+    result = await hub._handle_connect_command(f"accept {round_id}")
+
+    assert "already on this network" in result
+    assert live.decision is None
+    assert bridge._state().state.peer_devices[other_key] == "laptop-kollab"
+    assert live.destination_key not in bridge._state().state.peer_devices
+    pending = store.get_enrollment_request(
+        round_id, agent_id=AGENT_ID, session_id=bridge.commands.client._session_id
+    )
+    assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_revoke_drops_the_peer_device_binding(tmp_path):
+    _hub, bridge = _local_hub(tmp_path)
+    peer_key = SigningKey.generate().verify_key.encode().hex()
+    bridge.bind_peer_device(peer_key, "laptop-kollab")
+    bridge.commands.client.state.approvals = [peer_key]
+    bridge.commands.client._store.save()
+
+    result = await bridge.commands.run(f"revoke {peer_key}", source_agent=AGENT_ID)
+
+    assert result.startswith("device revoked:")
+    assert peer_key not in bridge._state().state.peer_devices
+
+
+@pytest.mark.asyncio
 async def test_remote_turn_and_wrong_local_agent_cannot_decide_enrollment(tmp_path):
     hub, bridge = _local_hub(tmp_path)
     issuer = EnrollmentIssuer(bridge)

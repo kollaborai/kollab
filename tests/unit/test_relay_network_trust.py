@@ -184,6 +184,104 @@ async def test_resolve_handle_ambiguous(bridges):
 
 
 @pytest.mark.asyncio
+async def test_effective_trust_per_peer_override_and_clear(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    set_trust(left, "open")
+    set_trust(right, "open")
+    left_key = left.commands.client.public_key
+
+    assert right.effective_trust(left_key) == "open"
+
+    right.set_peer_trust(left_key, "agents")
+    assert right.effective_trust(left_key) == "agents"
+
+    right.clear_peer_trust(left_key)
+    assert right.effective_trust(left_key) == "open"
+
+
+@pytest.mark.asyncio
+async def test_effective_trust_manual_network_wins_over_peer_override(bridges):
+    """bridges() pins manual trust by default; a peer override cannot loosen it."""
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    left_key = left.commands.client.public_key
+    right.set_peer_trust(left_key, "agents")
+
+    assert right.effective_trust(left_key) == "manual"
+
+
+@pytest.mark.asyncio
+async def test_set_peer_trust_rejects_manual(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+
+    with pytest.raises(RelayError, match="open or agents"):
+        right.set_peer_trust(left.commands.client.public_key, "manual")
+
+
+@pytest.mark.asyncio
+async def test_receive_requires_grant_for_a_peer_with_an_agents_override_under_open_network(
+    bridges,
+):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    set_trust(left, "open")
+    set_trust(right, "open")
+    right.set_peer_trust(left.commands.client.public_key, "agents")
+
+    receipt = await left.send(address(right), "ping")
+
+    assert receipt["state"] == "rejected"
+    assert receipt["reason"] == "not_authorized"
+
+
+@pytest.mark.asyncio
+async def test_recorded_device_name_wins_over_self_report_in_delivery(bridges):
+    members, _ = bridges
+    (left, *_), (right, _, right_model, _) = members
+    set_trust(left, "open")
+    set_trust(right, "open")
+    right.bind_peer_device(left.commands.client.public_key, "recorded-name")
+
+    sent = await left.send(address(right), "check the tunnel")
+    assert sent["state"] == "queued"
+
+    await right._tick()
+
+    handle = format_handle("sapphire", "recorded-name")
+    assert handle in right_model.conversation_history[-1].content
+
+
+@pytest.mark.asyncio
+async def test_bind_peer_device_rejects_a_collision_and_is_idempotent(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    left_key = left.commands.client.public_key
+
+    right.bind_peer_device(left_key, "laptop-kollab")
+    # Re-accepting the same key with the same name is fine.
+    right.bind_peer_device(left_key, "laptop-kollab")
+    assert right._state().state.peer_devices[left_key] == "laptop-kollab"
+
+    with pytest.raises(RelayError, match="already on this network"):
+        right.set_device_name("laptop-kollab")
+
+
+@pytest.mark.asyncio
+async def test_rpc_directory_prefers_recorded_device_name_over_self_report(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    right_key = right.commands.client.public_key
+    left.bind_peer_device(right_key, "recorded-name")
+
+    await warm_directory(left)
+    rows = await left.remote_agents()
+
+    assert rows[0]["device"] == "recorded-name"
+
+
+@pytest.mark.asyncio
 async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridges):
     members, _ = bridges
     (left, *_), (right, *_) = members
