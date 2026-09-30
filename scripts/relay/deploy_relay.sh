@@ -56,6 +56,7 @@ for i in $(seq 1 20); do
 done
 echo "enrollment lookup: $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/enrollment/lookup -H 'content-type: application/json' -d '{}')"
 echo "contact lookup:    $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/contact/lookup -H 'content-type: application/json' -d '{}')"
+echo "contact links:     $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/contact/links -H 'content-type: application/json' -d '{}')  (400 = live, 404 = build without cross-room links)"
 echo "public health:     $(curl -s -m 8 https://kollabor.ai/relay/v1/health | head -c 120)"
 echo "rollback: sudo cp $BACKUP $DROPIN && sudo systemctl daemon-reload && sudo systemctl restart kollab-relay.service"
 EOF

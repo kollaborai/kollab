@@ -4,7 +4,7 @@
 > [agent-network-simple-flow.md](agent-network-simple-flow.md). This document is the wire
 > contract only; a command or flow that appears here and not there is not part of the design.
 
-Status: the relay routes described here run on kollabor.ai; the enrollment lookup and contact lookup routes ship with Kollab 0.11.0.
+Status: the relay routes described here run on kollabor.ai; the enrollment lookup and contact lookup routes and the cross-room links (`/relay/v1/contact/links`) ship with Kollab 0.11.0.
 
 ## Product boundary
 
@@ -45,13 +45,15 @@ strings, caps bodies at 64 KiB and proxies to workers. The public GET probe of
 deployed proxy-route check has been performed. See the [implementation
 ledger](agent-network-simple-flow.md).
 
-The contact-request source registers four further POST routes, also in
+The contact-request source registers five further POST routes, also in
 `plugins/hub/relay_service.py`: `/relay/v1/contact/requests` (submit a sealed
 introduction), `/relay/v1/contact/inbox` (list requests addressed to a key),
-`/relay/v1/contact/decisions` (accept or reject one), and
+`/relay/v1/contact/decisions` (accept or reject one),
 `/relay/v1/contact/lookup` (unsigned; body `{"v":1,"route":"<16 hex>"}`, answer
 `{"key":"<64 hex>"}`, 404 `unknown_route`, 409 `ambiguous_route`; the client
-recomputes the route from the returned key and refuses a mismatch). Same constraints:
+recomputes the route from the returned key and refuses a mismatch), and
+`/relay/v1/contact/links` (a key's signed consent to reach other keys across
+rooms; see [Cross-room links](#cross-room-links)). Same constraints:
 POST-only, no query strings, 64 KiB application-wide body cap
 (`web.Application(client_max_size=...)`), proxy to workers. The companion
 `deploy/nginx.conf` checkout is not part of this source tree, so whether it
@@ -65,10 +67,43 @@ Registration and routing:
 1. A connected peer receives `{type:"challenge", protocol:"kollab-relay/1", origin, nonce}`. Nonce is 64 lowercase hex characters; registration must arrive within 10 seconds.
 2. It sends `{type:"register", key, room, session, signature}`. The Ed25519 public key is 64 lowercase hex, the room capability is 256 random bits in 64 lowercase hex, and the session ID is 16 random bytes in 32 lowercase hex.
 3. The signature covers UTF-8 `kollab-relay/1\n<origin>\n<nonce>\n<key>\n<room>\n<session>` with no trailing newline. The server verifies possession before recording presence. It stores a hash of the room capability, not the raw capability.
-4. Success sends `registered`, then a recipient-specific `peers` snapshot excluding that recipient. Join, leave, and lease-expiry changes send updated snapshots. A room/key may have one live session; duplicate registration is rejected without replacing the current peer.
-5. A peer sends `{type:"send", to, id, ciphertext}`. The server checks exact frame shape, size, quota, and an online destination in the same room; it forwards ciphertext to that peer and waits for a bounded route acknowledgment. It never decrypts the payload or dials a caller-supplied address. Missing peers return `peer_offline`; messages are not queued.
+4. Success sends `registered`, then a recipient-specific `peers` snapshot excluding that recipient. Join, leave, and lease-expiry changes send updated snapshots. A room/key may have one live session; duplicate registration is rejected without replacing the current peer. Devices in other rooms that are linked to the recipient (see [Cross-room links](#cross-room-links)) are listed after the room's own peers in the same `{key, session}` shape.
+5. A peer sends `{type:"send", to, id, ciphertext}`. The server checks exact frame shape, size, quota, and an online destination in the same room, or a linked online destination in another room; it forwards ciphertext to that peer and waits for a bounded route acknowledgment. It never decrypts the payload or dials a caller-supplied address. Missing peers return `peer_offline`; messages are not queued.
 
 JSON parsing rejects duplicate keys and non-finite values. Frames are capped at 64 KiB; encoded ciphertext at 48 KiB. Per-connection ingress uses a 10-frame/second token bucket with burst 20. A route acknowledgment deadline is 3 seconds. Heartbeats are 20 seconds. The WebSocket profile rejects browser `Origin` headers and query parameters; credentials never go in a URL. `X-Real-IP` is trusted only when the immediate peer matches an exact configured proxy IP. `X-Forwarded-For` is not trusted.
+
+## Cross-room links
+
+An accepted stranger stays in its own room. Two devices in different rooms exchange sealed frames only while each of them has told the relay, with its own signature, that it consents to reach the other. The relay never takes one side's word for the other's consent, and it never enrolls a stranger into a room.
+
+**Declaration.** `POST /relay/v1/contact/links`, JSON:
+
+```json
+{"v":1,"key":"<64 hex>","peers":["<64 hex>"],"issued_at":1800921600,"nonce":"<32 hex>","signature":"<128 hex>"}
+```
+
+- The signature is the contact signature (domain `kollab-relay-contact-http/1`, method, canonical origin, path, canonical body without `signature`) made by `key`.
+- `peers` is sorted, has no duplicates, holds at most 64 keys and does not contain `key`. It replaces everything `key` declared before; an empty list withdraws.
+- The reply is `{"status":"stored"}` and nothing else. It does not say whether the other side has declared.
+- `key` must be registered on the WebSocket at that moment (403 `unauthorized`), which ties the stored declarations to live, connection-limited devices.
+- Same clock skew (120 s) and nonce replay window as the other contact routes, and the same per-source rate bucket (10 requests per 60 seconds). A request older than the stored declaration is refused (409 `conflict`), so a delayed request cannot undo a later withdrawal; a withdrawal keeps its timestamp for 5 minutes. At most 8,192 keys hold a declaration (429 `capacity`).
+- A declaration expires after 24 hours unless repeated. Devices repeat it after every relay registration, whenever their set changes, and every 6 hours.
+
+**Link.** Keys A and B are linked exactly while A's live declaration names B and B's names A. A link between two keys is not transitive and adds neither key to the other's room.
+
+**Routing.** A `send` frame goes to the destination in the sender's room as before. Only when that finds no one, the relay checks for a link with the destination key; if one exists and the destination is registered in any room, the ciphertext is forwarded to it with the same bounded acknowledgment. Anything else answers `peer_offline`, exactly as for an absent peer, so the answer never reveals whether a consent exists. The delivered `message` frame is unchanged.
+
+**Presence.** A registered device linked to the recipient appears in the recipient's `peers` snapshot after the room's own entries, as `{key, session}`. The whole snapshot stays within 256 entries; linked entries only fill what the room leaves. Registering, leaving, lease expiry and a declaration each push fresh snapshots to the affected rooms, and the 10-second room reconciliation repairs a missed one. Redis workers find a key's room through an expiring presence key beside the room lease.
+
+**Envelope binding.** The encrypted envelope's `room` field, the room hash between two members of one room, is for a stranger the hex of `sha256("kollab-relay-link/1\x00" || lower key || higher key)` over the two raw 32-byte keys, so both sides compute the same value. A message bound the other way is dropped by the client.
+
+**Device rules.** A client declares only the accepted strangers it approved (`links` in its relay state). A stranger reaches only the secure session and the `message`, `status`, `cancel` and `directory` operations, and the directory answer to a stranger lists only the agents it was allowed. Strangers get no mesh records (`peer.exchange`, `peer.forward`) and no network broadcast.
+
+**Compatibility.**
+
+- Old client, new relay: same-room registration, snapshots and routing are byte-identical. Linked entries appear in a snapshot only after two 0.11.0 devices declared each other, so an old client never receives one, and an entry it does not approve would be ignored anyway.
+- New client, old relay: `POST /relay/v1/contact/links` does not exist there (404 or a non-JSON reply). The client keeps the knock and the accept locally, retries the declaration at most once a minute, logs at debug level only, and nothing is delivered between the two networks until the directory is upgraded. Nothing about registration or same-room traffic changes.
+- Edge proxy: the route sits under the existing `POST /relay/v1/contact/` prefix, so a proxy that forwards that prefix needs no change.
 
 ## Shared state, quotas, and failure behavior
 
@@ -125,5 +160,5 @@ Clients use PyNaCl Ed25519-to-Curve25519 conversion and `Box` authenticated encr
 
 Encrypted envelope fields bind version, sender/recipient keys, sender/recipient sessions, room hash, message ID, timestamps, kind, and payload. The receiver checks the current session, room, peer key, expiry, replay ledger, and approval before processing. The 0.9.0 baseline supports `ping` and `pong`. Current source adds application request/response/cancel envelopes for directory, message, status and cancellation operations. A routing acknowledgment is not a destination receipt or task completion. An approved ping may return an explicitly disclosed workspace label and opaque workspace ID; it does not wake an LLM.
 
-The relay sees stable raw public keys, source IPs, room membership, timing, and ciphertext sizes. The same key is linkable across rooms. `Box` with long-lived device keys does not provide forward secrecy after key compromise. The service cannot revoke a copied room capability. A room rotation creates a new capability for this device and clears its local approvals; it does not invalidate an old invitation, close other members, or revoke old-room access at the relay. If an invite is exposed, rotate, distribute the new private invitation, and have affected peers explicitly disconnect/rejoin; treat the old room as still usable by existing holders.
+The relay sees stable raw public keys, source IPs, room membership, timing, and ciphertext sizes. The same key is linkable across rooms. It also sees which keys declared consent to which, so it knows which pairs of devices are linked; it still sees no frame contents. `Box` with long-lived device keys does not provide forward secrecy after key compromise. The service cannot revoke a copied room capability. A room rotation creates a new capability for this device and clears its local approvals; it does not invalidate an old invitation, close other members, or revoke old-room access at the relay. If an invite is exposed, rotate, distribute the new private invitation, and have affected peers explicitly disconnect/rejoin; treat the old room as still usable by existing holders.
 

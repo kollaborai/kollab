@@ -2,8 +2,9 @@
 
 The service authenticates room possession with an Ed25519 challenge, exposes
 only pseudonymous online peer keys/sessions, and routes bounded ciphertext to
-an online peer in the same room. It never decrypts messages, fetches caller
-URLs, executes agent tools, or stores an offline queue.
+an online peer in the same room, or in another room when both keys signed a
+declaration naming the other (`/relay/v1/contact/links`). It never decrypts
+messages, fetches caller URLs, executes agent tools, or stores an offline queue.
 """
 
 from __future__ import annotations
@@ -37,8 +38,10 @@ from .relay_backend import (
     ENROLLMENT_MAX_RATE_SOURCES,
     ENROLLMENT_RATE_LIMIT,
     ENROLLMENT_RATE_WINDOW_MS,
+    LINK_TTL_SECONDS,
     MAX_ACTIVE_ENROLLMENT_OFFERS,
     MAX_CONTACT_REQUESTS_PER_RECIPIENT,
+    MAX_LINK_PEERS,
     InMemoryBackend,
     PeerRecord,
     RedisRelayBackend,
@@ -52,6 +55,9 @@ HEALTH_PATH = "/relay/v1/health"
 WEBSOCKET_PATH = "/relay/v1/ws"
 MAX_FRAME_BYTES = 64 * 1024
 MAX_CIPHERTEXT_CHARS = 48 * 1024
+# The client rejects a peers snapshot longer than this; linked devices only fill what
+# the room leaves.
+MAX_SNAPSHOT_PEERS = 256
 MAX_CONNECTIONS_PER_NODE = 512
 MAX_CONNECTIONS_PER_ROOM = 16
 MAX_CONNECTIONS_PER_SOURCE = 16
@@ -263,6 +269,18 @@ CONTACT_JSON_SCHEMAS = {
             "signature": _HEX128,
         }
     ),
+    # A key's consent to link with other keys: `peers` replaces what it declared
+    # before. Two keys reach each other across rooms only while each names the other.
+    "links": _schema(
+        {
+            "v": {"const": 1},
+            "key": _HEX64,
+            "peers": {"type": "array", "items": _HEX64, "maxItems": MAX_LINK_PEERS},
+            "issued_at": _INTEGER,
+            "nonce": _HEX32,
+            "signature": _HEX128,
+        }
+    ),
     # Public route -> key lookup. Unsigned: knowing a route is the whole
     # point (it is copied, never typed), and the client never trusts the
     # answer without recomputing the route from the returned key.
@@ -275,6 +293,7 @@ CONTACT_REQUESTS_PATH = "/relay/v1/contact/requests"
 CONTACT_INBOX_PATH = "/relay/v1/contact/inbox"
 CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
 CONTACT_LOOKUP_PATH = "/relay/v1/contact/lookup"
+CONTACT_LINKS_PATH = "/relay/v1/contact/links"
 
 
 def generate_enrollment_code(offer_id: str) -> str:
@@ -521,6 +540,13 @@ def _validate_json_schema(schema: dict[str, Any], frame: dict[str, Any]) -> None
                 raise ValueError("invalid request field")
             if value < rules.get("minimum", 0):
                 raise ValueError("invalid request field")
+        elif expected_type == "array":
+            if not isinstance(value, list) or len(value) > rules["maxItems"]:
+                raise ValueError("invalid request field")
+            item_rules = rules["items"]
+            for item in value:
+                if not isinstance(item, str) or re.fullmatch(item_rules["pattern"], item) is None:
+                    raise ValueError("invalid request field")
         elif "const" in rules and value != rules["const"]:
             raise ValueError("invalid request field")
     if frame.get("v") != 1 or isinstance(frame.get("v"), bool):
@@ -648,7 +674,7 @@ class RelayState:
         self.connections: set[PeerConnection] = set()
         self.connections_by_id: dict[str, PeerConnection] = {}
         self.rooms: dict[str, dict[str, PeerConnection]] = {}
-        self.room_snapshots: dict[str, tuple[tuple[str, str], ...]] = {}
+        self.room_snapshots: dict[str, tuple] = {}
         self.ready = False
         self.shutting_down = False
         self.maintenance_task: asyncio.Task[None] | None = None
@@ -705,6 +731,7 @@ class RelayState:
         await self.room_changed(
             client.room_hash, exclude_connection_id=client.connection_id
         )
+        await self.notify_linked(client.key)
 
     async def release(self, client: PeerConnection) -> None:
         if client in self.connections:
@@ -728,6 +755,7 @@ class RelayState:
                         {record.node_id for record in records} - {self.config.node_id},
                     )
                     await self.room_changed(room_hash)
+                    await self.notify_linked(key)
             except RelayBackendError:
                 pass
         try:
@@ -750,6 +778,56 @@ class RelayState:
 
     async def forward(self, destination: PeerRecord, route: dict[str, str]) -> bool:
         return await self.backend.forward(destination, route)
+
+    async def linked_online(self, key: str) -> list[tuple[PeerRecord, str]]:
+        """Devices in other rooms that mutually linked with `key` and are online."""
+        found = []
+        for other in await self.backend.linked_keys(key):
+            located = await self.backend.locate(other)
+            if located is not None:
+                found.append(located)
+        return found
+
+    async def linked_entries(
+        self, key: str, room_keys: frozenset[str] | set[str] = frozenset()
+    ) -> list[dict[str, str]]:
+        """Snapshot rows for the linked devices `key` can currently reach."""
+        rows = [
+            {"key": record.key, "session": record.session}
+            for record, _ in await self.linked_online(key)
+            if record.key not in room_keys
+        ]
+        return sorted(rows, key=lambda row: row["key"])
+
+    async def linked_destination(
+        self, sender: str, recipient: str
+    ) -> tuple[PeerRecord, str] | None:
+        """The recipient and its room, only when both keys consented to the link."""
+        if not await self.backend.is_linked(sender, recipient):
+            return None
+        return await self.backend.locate(recipient)
+
+    async def _refresh_room_everywhere(self, room_hash: str) -> None:
+        records, _ = await self.backend.list_room(room_hash)
+        nodes = {record.node_id for record in records}
+        if self.config.node_id in nodes:
+            await self.room_changed(room_hash)
+        await self.backend.notify_room_change(room_hash, nodes - {self.config.node_id})
+
+    async def notify_linked(self, key: str) -> None:
+        """A device came or went: refresh the rooms of the devices linked to it."""
+        for room_hash in sorted({room for _, room in await self.linked_online(key)}):
+            await self._refresh_room_everywhere(room_hash)
+
+    async def links_changed(self, key: str, changed: list[str]) -> None:
+        """A consent set changed: refresh the rooms of `key` and of each changed peer."""
+        rooms = set()
+        for member in (key, *changed):
+            located = await self.backend.locate(member)
+            if located is not None:
+                rooms.add(located[1])
+        for room_hash in sorted(rooms):
+            await self._refresh_room_everywhere(room_hash)
 
     async def deliver_local(self, route: dict[str, Any]) -> bool:
         client = self.connections_by_id.get(str(route.get("connection_id", "")))
@@ -797,9 +875,29 @@ class RelayState:
             self.room_snapshots.pop(room_hash, None)
             return
         records, pruned = await self.backend.list_room(room_hash)
-        signature = tuple(
-            (record.key, record.session)
-            for record in sorted(records, key=lambda item: item.key)
+        room_keys = frozenset(record.key for record in records)
+        try:
+            linked = {
+                peer.key: await self.linked_entries(peer.key, room_keys)
+                for peer in local
+                if peer.key is not None
+            }
+        except RelayBackendError:
+            # Links are secondary: keep the last snapshot and let the next
+            # reconciliation retry rather than flash linked devices offline.
+            return
+        signature = (
+            tuple(
+                (record.key, record.session)
+                for record in sorted(records, key=lambda item: item.key)
+            ),
+            tuple(
+                sorted(
+                    (key, tuple((row["key"], row["session"]) for row in rows))
+                    for key, rows in linked.items()
+                    if rows
+                )
+            ),
         )
         changed = signature != self.room_snapshots.get(room_hash)
         if not force and not pruned and not changed:
@@ -821,6 +919,7 @@ class RelayState:
                 for record in sorted(records, key=lambda item: item.key)
                 if record.key != peer.key
             ]
+            snapshot += linked.get(peer.key, [])[: max(0, MAX_SNAPSHOT_PEERS - len(snapshot))]
             if not await _send_json(peer, {"type": "peers", "peers": snapshot}):
                 await _disconnect_peer(self, peer)
 
@@ -908,6 +1007,7 @@ def create_app(config: RelayConfig) -> web.Application:
     app.router.add_post(CONTACT_INBOX_PATH, contact_inbox_handler)
     app.router.add_post(CONTACT_DECISIONS_PATH, contact_decision_handler)
     app.router.add_post(CONTACT_LOOKUP_PATH, contact_lookup_handler)
+    app.router.add_post(CONTACT_LINKS_PATH, contact_links_handler)
     app.on_startup.append(start_relay)
     app.on_shutdown.append(shutdown_relay)
     app.on_cleanup.append(cleanup_relay)
@@ -1085,17 +1185,18 @@ async def websocket_handler(request: web.Request) -> web.StreamResponse:
             },
         ):
             return ws
-        if not await _send_json(
-            client,
-            {
-                "type": "peers",
-                "peers": [
-                    {"key": peer.key, "session": peer.session}
-                    for peer in sorted(room_records, key=lambda item: item.key)
-                    if peer.key != client.key
-                ],
-            },
-        ):
+        roster = [
+            {"key": peer.key, "session": peer.session}
+            for peer in sorted(room_records, key=lambda item: item.key)
+            if peer.key != client.key
+        ]
+        try:
+            roster += (
+                await state.linked_entries(key, frozenset(row["key"] for row in roster))
+            )[: max(0, MAX_SNAPSHOT_PEERS - len(roster))]
+        except RelayBackendError:
+            pass  # the next reconciliation adds them
+        if not await _send_json(client, {"type": "peers", "peers": roster}):
             return ws
         try:
             await state.activate(client, room_records)
@@ -1130,8 +1231,15 @@ async def websocket_handler(request: web.Request) -> web.StreamResponse:
                 await ws.close(code=WSCloseCode.POLICY_VIOLATION)
                 break
             state.metrics["relay_forward_attempts_total"] += 1
+            route_room = client.room_hash
             try:
                 recipient = await state.destination(client.room_hash, recipient_key)
+                if recipient is None:
+                    # Not in this room: reachable only through a link both
+                    # keys consented to. Anything else looks like an offline peer.
+                    linked = await state.linked_destination(client.key, recipient_key)
+                    if linked is not None:
+                        recipient, route_room = linked
             except RelayBackendError:
                 state.metrics["relay_forward_errors_total"] += 1
                 await _send_error(client, "backend_unavailable", message_id)
@@ -1142,7 +1250,7 @@ async def websocket_handler(request: web.Request) -> web.StreamResponse:
                 await _send_error(client, "peer_offline", message_id)
                 continue
             route = {
-                "room_hash": client.room_hash,
+                "room_hash": route_room,
                 "from": client.key,
                 "session": client.session,
                 "id": message_id,
@@ -1957,6 +2065,55 @@ async def contact_lookup_handler(request: web.Request) -> web.Response:
     if len(keys) > 1:
         raise _EnrollmentHTTPError(409, "ambiguous_route")
     return web.json_response({"key": keys[0]})
+
+
+def _verify_links_frame(
+    state: RelayState, request: web.Request, frame: dict[str, Any]
+) -> None:
+    if abs(int(time.time()) - frame["issued_at"]) > CONTACT_TIMESTAMP_SKEW_SECONDS:
+        raise _EnrollmentHTTPError(401, "invalid_contact")
+    peers = frame["peers"]
+    if peers != sorted(set(peers)) or frame["key"] in peers:
+        raise _EnrollmentHTTPError(400, "invalid_request")
+    if not verify_contact_request_signature(
+        frame["key"], state.config.origin, request.method, request.path, frame
+    ):
+        raise _EnrollmentHTTPError(401, "invalid_contact")
+
+
+@_enrollment_endpoint
+async def contact_links_handler(request: web.Request) -> web.Response:
+    """Record which other keys this key consents to link with.
+
+    The signed body replaces the signer's earlier declaration. Two devices in
+    different rooms reach each other only while each one's declaration names the
+    other, so neither side can create a link alone. The reply says nothing about
+    the other side.
+    """
+    state: RelayState = request.app["relay_state"]
+    frame = await _read_contact_frame(request, "links")
+    _verify_links_frame(state, request, frame)
+    # Only a key that is registered right now may declare, which ties the
+    # stored declarations to live, connection-limited devices.
+    if await state.backend.locate(frame["key"]) is None:
+        raise _EnrollmentHTTPError(403, "unauthorized")
+    await _consume_enrollment_nonce(state, frame, "key")
+    result, changed = await state.backend.sync_links(
+        frame["key"],
+        frame["peers"],
+        issued_at=frame["issued_at"],
+        ttl_ms=LINK_TTL_SECONDS * 1000,
+    )
+    if result == "capacity":
+        raise _EnrollmentHTTPError(429, "capacity")
+    if result == "stale":
+        raise _EnrollmentHTTPError(409, "conflict")
+    if changed:
+        try:
+            await state.links_changed(frame["key"], changed)
+        except RelayBackendError:
+            pass  # stored; the next room reconciliation tells the devices
+    return web.json_response({"status": "stored"})
 
 
 def _parse_trusted_proxy(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:

@@ -47,6 +47,14 @@ MAX_ACTIVE_CONTACT_REQUESTS = 4096
 MAX_CONTACT_REQUESTS_PER_RECIPIENT = 32
 CONTACT_REQUEST_TTL_MS = 24 * 60 * 60 * 1000
 CONTACT_INDEX_CLEANUP_BATCH = 256
+# Cross-room links: each key declares which other keys it consents to reach;
+# a link is active only when both sides declared each other.
+MAX_LINK_PEERS = 64
+MAX_ACTIVE_LINK_DECLARATIONS = 8192
+LINK_TTL_SECONDS = 24 * 60 * 60
+# A withdrawal keeps its timestamp this long (past the request clock skew), so a
+# delayed older declaration cannot undo it.
+LINK_WITHDRAWAL_SECONDS = 5 * 60
 
 
 class RelayBackendError(RuntimeError):
@@ -113,6 +121,11 @@ class InMemoryBackend:
         # impossible) hash collision, reported to callers as "ambiguous"
         # rather than silently picking one.
         self.contact_routes: dict[str, set[str]] = {}
+        # key -> (issued_at, the keys it consents to link with, expiry). A
+        # link between two keys exists only while each names the other.
+        self.link_declarations: dict[str, tuple[int, frozenset[str], float]] = {}
+        # key -> the room of its latest registration (the Redis presence index)
+        self.presence: dict[str, str] = {}
         self.state: Any = None
 
     async def start(self, state: Any) -> None:
@@ -159,6 +172,7 @@ class InMemoryBackend:
         if len(room) >= self.limits.max_connections_per_room:
             return "room_capacity", []
         room[member.key] = member
+        self.presence[member.key] = room_hash
         self.contact_routes.setdefault(contact_route_hex(member.key), set()).add(
             member.key
         )
@@ -176,6 +190,8 @@ class InMemoryBackend:
         del room[member.key]
         if not room:
             del self.rooms[room_hash]
+        if self.presence.get(member.key) == room_hash:
+            del self.presence[member.key]
         if not any(member.key in other for other in self.rooms.values()):
             self._discard_contact_route(member.key)
         return True, list(room.values())
@@ -192,6 +208,56 @@ class InMemoryBackend:
     async def lookup_contact_route(self, route_hex: str) -> list[str]:
         """Keys currently registered under this route (0, 1, or >1 = ambiguous)."""
         return sorted(self.contact_routes.get(route_hex, ()))
+
+    def _declared(self, key: str) -> frozenset[str]:
+        now = time.monotonic()
+        for other, (_, _, expires) in list(self.link_declarations.items()):
+            if expires <= now:
+                del self.link_declarations[other]
+        row = self.link_declarations.get(key)
+        return row[1] if row else frozenset()
+
+    async def sync_links(
+        self, key: str, peers: list[str], *, issued_at: int, ttl_ms: int
+    ) -> tuple[str, list[str]]:
+        """Replace what `key` consents to link with; return the peers that changed.
+
+        A declaration older than the stored one is refused, so a delayed
+        request cannot undo a later withdrawal.
+        """
+        before = self._declared(key)
+        stored = self.link_declarations.get(key)
+        if stored is not None and stored[0] > issued_at:
+            return "stale", []
+        if not peers:
+            self.link_declarations[key] = (
+                issued_at,
+                frozenset(),
+                time.monotonic() + LINK_WITHDRAWAL_SECONDS,
+            )
+            return "stored", sorted(before)
+        live = sum(1 for _, declared, _ in self.link_declarations.values() if declared)
+        if not before and live >= MAX_ACTIVE_LINK_DECLARATIONS:
+            return "capacity", []
+        self.link_declarations[key] = (
+            issued_at,
+            frozenset(peers),
+            time.monotonic() + ttl_ms / 1000,
+        )
+        return "stored", sorted(before ^ frozenset(peers))
+
+    async def linked_keys(self, key: str) -> list[str]:
+        """Keys that mutually consented to link with `key`."""
+        return sorted(other for other in self._declared(key) if key in self._declared(other))
+
+    async def is_linked(self, first: str, second: str) -> bool:
+        return second in self._declared(first) and first in self._declared(second)
+
+    async def locate(self, key: str) -> tuple[PeerRecord, str] | None:
+        """The live record and room of a key, wherever it is registered."""
+        room_hash = self.presence.get(key)
+        record = self.rooms.get(room_hash, {}).get(key) if room_hash else None
+        return (record, room_hash) if record is not None else None
 
     async def renew(
         self,
@@ -759,6 +825,41 @@ _TOUCH_CONTACT_ROUTE = """
 redis.call('SADD', KEYS[1], ARGV[1])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 return 1
+"""
+
+# Which room a key is registered in, so a linked device can be found from
+# another room. Only a hint: the room's own member hash stays authoritative.
+_DISCARD_PRESENCE = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0
+"""
+
+# Replace one key's consent set. An older request than the stored one is
+# refused, so a delayed post cannot undo a later withdrawal (a withdrawal is
+# stored as an empty set for a while). Returns the status and the previous peers.
+_SYNC_LINKS = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local ttl = tonumber(ARGV[1])
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[5]))
+for _, member in ipairs(expired) do redis.call('ZREM', KEYS[2], member) end
+local previous = redis.call('GET', KEYS[1])
+local before = {}
+if previous then
+  local decoded = cjson.decode(previous)
+  if tonumber(decoded['at']) > tonumber(ARGV[2]) then return {'stale'} end
+  before = decoded['peers']
+end
+if tonumber(ARGV[7]) == 0 then
+  redis.call('SET', KEYS[1], ARGV[6], 'PX', tonumber(ARGV[8]))
+  redis.call('ZREM', KEYS[2], ARGV[3])
+  return {'stored', unpack(before)}
+end
+if #before == 0 and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return {'capacity'} end
+redis.call('SET', KEYS[1], ARGV[6], 'PX', ttl)
+redis.call('ZADD', KEYS[2], now + ttl, ARGV[3])
+redis.call('PEXPIRE', KEYS[2], ttl * 2)
+return {'stored', unpack(before)}
 """
 
 _RENEW_ROOM = """
@@ -1504,6 +1605,7 @@ class RedisRelayBackend:
             if status != "ok":
                 return status, []
             await self._touch_contact_route(member.key)
+            await self._touch_presence(member.key, room_hash)
             return None, self._parse_hgetall(result[2:])
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
@@ -1535,6 +1637,7 @@ class RedisRelayBackend:
             removed = int(result[0]) == 1
             if removed:
                 await self._discard_contact_route(member.key, room_hash)
+                await self._discard_presence(member.key, room_hash)
             return removed, self._parse_hgetall(result[1:])
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
@@ -1578,6 +1681,107 @@ class RedisRelayBackend:
         except Exception as exc:
             raise RelayBackendError("contact route lookup is unavailable") from exc
         return sorted(members)
+
+    async def _touch_presence(self, key: str, room_hash: str) -> None:
+        # Best effort like the route index: a miss only hides the device from
+        # its linked peers until the next lease renewal.
+        try:
+            await self._redis.set(
+                self._presence_key(key), room_hash, px=LEASE_SECONDS * 1000
+            )
+        except Exception:
+            logger.warning("link presence index could not be updated")
+
+    async def _discard_presence(self, key: str, room_hash: str) -> None:
+        try:
+            await self._redis.eval(
+                _DISCARD_PRESENCE, 1, self._presence_key(key), room_hash
+            )
+        except Exception:
+            logger.warning("link presence index could not be updated")
+
+    async def sync_links(
+        self, key: str, peers: list[str], *, issued_at: int, ttl_ms: int
+    ) -> tuple[str, list[str]]:
+        """Replace what `key` consents to link with; return the peers that changed."""
+        try:
+            encoded = json.dumps(
+                {"at": issued_at, "peers": peers}, sort_keys=True, separators=(",", ":")
+            )
+            result = await self._redis.eval(
+                _SYNC_LINKS,
+                2,
+                self._link_key(key),
+                self._link_index_key(),
+                ttl_ms,
+                issued_at,
+                key,
+                MAX_ACTIVE_LINK_DECLARATIONS,
+                CONTACT_INDEX_CLEANUP_BATCH,
+                encoded,
+                len(peers),
+                LINK_WITHDRAWAL_SECONDS * 1000,
+            )
+            status = str(result[0])
+            if status != "stored":
+                return status, []
+            before = {str(item) for item in result[1:]}
+            return "stored", sorted(before ^ set(peers))
+        except Exception as exc:
+            raise RelayBackendError("link storage is unavailable") from exc
+
+    async def _declared(self, keys: list[str]) -> list[frozenset[str]]:
+        try:
+            rows = await self._redis.mget([self._link_key(key) for key in keys])
+            return [self._parse_link_row(row) for row in rows]
+        except RelayBackendError:
+            raise
+        except Exception as exc:
+            raise RelayBackendError("link lookup is unavailable") from exc
+
+    @staticmethod
+    def _parse_link_row(raw: Any) -> frozenset[str]:
+        if raw is None:
+            return frozenset()
+        try:
+            value = json.loads(raw, object_pairs_hook=_unique_pairs)
+        except (TypeError, ValueError):
+            raise RelayBackendError("stored link declaration is malformed") from None
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"at", "peers"}
+            or not isinstance(value["peers"], list)
+            or not all(_is_public_key(peer) for peer in value["peers"])
+        ):
+            raise RelayBackendError("stored link declaration is malformed")
+        return frozenset(value["peers"])
+
+    async def linked_keys(self, key: str) -> list[str]:
+        """Keys that mutually consented to link with `key`."""
+        (mine,) = await self._declared([key])
+        if not mine:
+            return []
+        candidates = sorted(mine)
+        theirs = await self._declared(candidates)
+        return [
+            other for other, declared in zip(candidates, theirs) if key in declared
+        ]
+
+    async def is_linked(self, first: str, second: str) -> bool:
+        mine, theirs = await self._declared([first, second])
+        return second in mine and first in theirs
+
+    async def locate(self, key: str) -> tuple[PeerRecord, str] | None:
+        """The live record and room of a key, wherever it is registered."""
+        try:
+            room_hash = await self._redis.get(self._presence_key(key))
+        except Exception as exc:
+            raise RelayBackendError("link presence lookup is unavailable") from exc
+        if not _is_room_hash(room_hash):
+            return None
+        records, _ = await self.list_room(room_hash)
+        record = next((item for item in records if item.key == key), None)
+        return (record, room_hash) if record is not None else None
 
     async def renew(
         self,
@@ -1623,6 +1827,7 @@ class RedisRelayBackend:
             renewed = int(room_result) == 1
             if renewed:
                 await self._touch_contact_route(member.key)
+                await self._touch_presence(member.key, room_hash)
             return renewed
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
@@ -2429,6 +2634,18 @@ class RedisRelayBackend:
     @staticmethod
     def _contact_route_key(route_hex: str) -> str:
         return f"kollab:relay:contact:{{mailbox}}:route:{route_hex}"
+
+    @staticmethod
+    def _link_key(key: str) -> str:
+        return f"kollab:relay:link:{{mailbox}}:declared:{key}"
+
+    @staticmethod
+    def _link_index_key() -> str:
+        return "kollab:relay:link:{mailbox}:declarers"
+
+    @staticmethod
+    def _presence_key(key: str) -> str:
+        return f"kollab:relay:link:{{mailbox}}:presence:{key}"
 
     @staticmethod
     def _node_channel_for(node_id: str) -> str:

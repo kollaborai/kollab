@@ -44,7 +44,7 @@ Configure the HTTPS reverse proxy for the same origin:
 - Forward `GET /relay/v1/health` to the supervisor's private health listener.
 - Forward WebSocket upgrades at `/relay/v1/ws` to the private worker listeners.
 - Forward `POST /relay/v1/enrollment/` (path prefix) to the private worker listeners. Without this route, `/connect code`, joining with a code, `/connect accept`, and `/connect reject` cannot reach the relay. See the [beacon HTTP contract](../specs/agent-public-beacon.md#http-and-websocket-contract) for the exact route list.
-- Forward `POST /relay/v1/contact/` (path prefix) to the private worker listeners. Without this route, `/connect knock` and `/connect knocks` cannot reach the relay. `POST /relay/v1/contact/lookup` (the public route -> key lookup a knock resolves before sending) is already covered by this prefix.
+- Forward `POST /relay/v1/contact/` (path prefix) to the private worker listeners. Without this route, `/connect knock` and `/connect knocks` cannot reach the relay. `POST /relay/v1/contact/lookup` (the public route -> key lookup a knock resolves before sending) and `POST /relay/v1/contact/links` (the signed consent that lets an accepted stranger's messages cross rooms) are already covered by this prefix.
 - Do not publish `/relay/v1/metrics`. Keep worker listeners and metrics private.
 
 Both prefixes are POST-only; the application rejects query strings and caps every request body at 64 KiB regardless of route.
