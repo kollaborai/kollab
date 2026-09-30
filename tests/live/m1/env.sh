@@ -8,8 +8,8 @@ M1_EXPECT_WHEELS=11
 M1_MAC_ROOT=$HOME/kollab-m1
 M1_MAC_VENV=$M1_MAC_ROOT/venv
 M1_MAC_WS=${M1_MAC_WS:-$HOME/kollab-m1-mac}
-M1_MAC_SESSION=m1-mac
-M1_SRV_SESSION=m1-srv
+M1_MAC_SESSION=${M1_MAC_SESSION:-m1-mac}
+M1_SRV_SESSION=${M1_SRV_SESSION:-m1-srv}
 # Remote paths are resolved against the remote $HOME by m1_srv_paths.
 M1_SRV_WS_NAME=${M1_SRV_WS_NAME:-kollab-m1-server}
 
