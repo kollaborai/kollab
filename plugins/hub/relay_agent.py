@@ -628,18 +628,22 @@ class RelayAgentBridge:
                 discovery_group = setting(
                     "peer_discovery_multicast_group", "239.255.77.77"
                 )
-                direct_peer_enabled = setting("peer_direct_enabled", False) is True
+                identity_manager = getattr(self.plugin, "_dns_identity", None)
+                # Direct links need this device's endpoint identity; without
+                # one the mesh still forwards over the relay.
+                direct_peer_enabled = (
+                    setting("peer_direct_enabled", True) is True
+                    and identity_manager is not None
+                )
                 self.peer_mesh = PeerMeshRuntime(
                     self.commands.client,
                     self.secure_transport,
                     self.owner.state_dir,
                     self._receive,
                     forwarding_enabled=lambda: setting(
-                        "peer_forward_enabled", False
+                        "peer_forward_enabled", True
                     ) is True,
-                    endpoint_identity_manager=getattr(
-                        self.plugin, "_dns_identity", None
-                    ),
+                    endpoint_identity_manager=identity_manager,
                     endpoint_registry=getattr(self.plugin, "_dns_registry", None),
                     endpoint_designation=self.identity.identity,
                     direct_endpoint=advertised_endpoint,
@@ -667,6 +671,9 @@ class RelayAgentBridge:
                     )
                     socket_server.set_peer_secure_handler(
                         self.peer_mesh.handle_direct_secure
+                    )
+                    socket_server.set_peer_identity_resolver(
+                        self.peer_mesh.endpoint_key_for
                     )
             except Exception:
                 # Peer routing is opt-in and may not prevent existing relay
@@ -700,6 +707,7 @@ class RelayAgentBridge:
         if socket_server is not None:
             socket_server.set_peer_forward_handler(None)
             socket_server.set_peer_secure_handler(None)
+            socket_server.set_peer_identity_resolver(None)
         if self.peer_mesh is not None:
             await self.peer_mesh.close()
             self.peer_mesh = None

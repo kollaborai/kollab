@@ -163,14 +163,7 @@ class SecureConversationTransport:
                         raise RelayError("secure session capacity reached")
                     request_lock = self._request_locks[key] = asyncio.Lock()
                 async with request_lock:
-                    state = self._outbound.get(key)
-                    if state is None:
-                        self._make_room(peer_key, inbound=False)
-                        state = await self._new_client_session(binding)
-                        self._outbound[key] = state
-                    self._assert_current(state)
-                    if not state.tls.established:
-                        await self._handshake(state, deadline)
+                    state = await self._open_locked(peer_key, key, binding, deadline)
                     raw = _encode_frame({"v": 1, "method": method, "payload": payload})
                     result = None
                     chunks = [
@@ -206,6 +199,63 @@ class SecureConversationTransport:
             logger.warning(
                 "secure %s request to %s failed: %s: %s",
                 method,
+                peer_key[:12],
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise RelayError("secure conversation transport failed") from None
+
+    async def _open_locked(
+        self,
+        peer_key: str,
+        key: tuple[str, str, str],
+        binding: tuple[str, str, str],
+        deadline: float,
+    ) -> _SessionState:
+        """The established outbound session for a binding; the request lock is held."""
+        state = self._outbound.get(key)
+        if state is None:
+            self._make_room(peer_key, inbound=False)
+            state = await self._new_client_session(binding)
+            self._outbound[key] = state
+        self._assert_current(state)
+        if not state.tls.established:
+            await self._handshake(state, deadline)
+        return state
+
+    async def ensure_session(self, peer_key: str, *, timeout: float = 10.0) -> None:
+        """Open the outbound secure session to a peer when none is established.
+
+        A peer-link proposal names the id of the TLS sessions it rides, and that
+        id agrees on both ends only once this node's own outbound session exists
+        beside any inbound one.
+        """
+        if (
+            type(timeout) not in (int, float)
+            or not math.isfinite(timeout)
+            or not 0 < timeout <= 300
+        ):
+            raise RelayError("secure request timeout must be at most 300 seconds")
+        binding = self._current_binding(peer_key)
+        key = binding
+        deadline = time.monotonic() + timeout
+        try:
+            async with asyncio.timeout(timeout):
+                self._prune_expired()
+                request_lock = self._request_locks.get(key)
+                if request_lock is None:
+                    if len(self._request_locks) >= MAX_SECURE_SESSIONS:
+                        raise RelayError("secure session capacity reached")
+                    request_lock = self._request_locks[key] = asyncio.Lock()
+                async with request_lock:
+                    await self._open_locked(peer_key, key, binding, deadline)
+        except asyncio.CancelledError:
+            self._discard_outbound(key)
+            raise
+        except Exception as exc:
+            self._discard_outbound(key)
+            logger.warning(
+                "secure session to %s failed: %s: %s",
                 peer_key[:12],
                 type(exc).__name__,
                 str(exc)[:200],
@@ -446,9 +496,9 @@ class SecureConversationTransport:
         validate_key(peer_key)
         if peer_key not in self._client.state.approvals:
             raise RelayError("peer requires explicit local approval")
-        status = self._client.status()
-        if status.get("state") != "online" or not status.get("session"):
-            raise RelayError("relay client is offline")
+        # The peer carrier knows the sessions of peers reached without a relay
+        # roster (by locator or by route), and its own when it has no relay
+        # registration; it answers first and the relay roster is the fallback.
         if self._binding_resolver is not None:
             resolved = self._binding_resolver(peer_key)
             if resolved is not None:
@@ -460,6 +510,9 @@ class SecureConversationTransport:
                 ):
                     raise RelayError("peer session binding is invalid")
                 return resolved
+        status = self._client.status()
+        if status.get("state") != "online" or not status.get("session"):
+            raise RelayError("relay client is offline")
         peer = next(
             (item for item in self._client.peers() if item["key"] == peer_key),
             None,

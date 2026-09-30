@@ -373,6 +373,9 @@ class AgentSocketServer:
         # model hook is involved in this callback.
         self._peer_forward_handler: Optional[Callable[..., Any]] = None
         self._peer_secure_handler: Optional[Callable[..., Any]] = None
+        # Resolves a designation to the endpoint key an approved device signed
+        # into its locator. It admits a peer to the carrier actions only.
+        self._peer_identity_resolver: Optional[Callable[[str], str]] = None
         self._peer_forward_semaphore = asyncio.Semaphore(
             REMOTE_PEER_FORWARD_MAX_CONCURRENCY
         )
@@ -813,15 +816,12 @@ class AgentSocketServer:
             await reject()
             return None
 
-        client_record = self._dns_registry.resolve(client_designation)
-        client_key = getattr(client_record, "public_key", "")
-        # Remote traffic requires a human-approved peer. Runtime allowlists
-        # and unknown/pending records are not communication authorization.
-        if (
-            client_record is None
-            or getattr(client_record, "approval_state", "") != "approved"
-            or not _valid_ed25519_key_hex(client_key)
-        ):
+        # Remote traffic requires a human-approved peer: a registry record the
+        # human approved, or the endpoint an approved device's own locator
+        # names (which reaches the peer carrier only). Runtime allowlists and
+        # unknown or pending records are not communication authorization.
+        client_key, _via_locator = self._remote_peer_identity(client_designation)
+        if not client_key:
             await reject()
             return None
 
@@ -903,6 +903,47 @@ class AgentSocketServer:
             raise TypeError("peer secure handler must be callable")
         self._peer_secure_handler = handler
 
+    def set_peer_identity_resolver(
+        self, resolver: Optional[Callable[[str], str]]
+    ) -> None:
+        """Install the locator lookup that admits approved devices' endpoints.
+
+        The callback maps an endpoint designation to the key a signed locator of
+        an approved device names for it, or to an empty string. A connection
+        admitted this way reaches ``peer_forward`` and ``peer_secure`` only: no
+        Hub message, ping or operator action.
+        """
+        if resolver is not None and not callable(resolver):
+            raise TypeError("peer identity resolver must be callable")
+        self._peer_identity_resolver = resolver
+
+    def _remote_peer_identity(self, designation: str) -> tuple[str, bool]:
+        """The key for a remote endpoint designation, and whether a locator gave it.
+
+        A designation this device's registry holds as approved keeps its
+        registered key. Otherwise the resolver may name the key an approved
+        device signed into its locator, never one that contradicts what the
+        registry already records for that designation.
+        """
+        record = self._dns_registry.resolve(designation) if self._dns_registry else None
+        registered = str(getattr(record, "public_key", "") or "").lower()
+        if record is not None and getattr(record, "approval_state", "") == "approved":
+            return (registered, False) if _valid_ed25519_key_hex(registered) else ("", False)
+        resolver = self._peer_identity_resolver
+        if resolver is None:
+            return "", False
+        try:
+            located = str(resolver(designation) or "").lower()
+        except Exception:
+            return "", False
+        if not _valid_ed25519_key_hex(located):
+            return "", False
+        if record is not None and (
+            getattr(record, "approval_state", "") == "rejected" or registered != located
+        ):
+            return "", False
+        return located, True
+
     def _allow_peer_forward_rate(self, public_key: str) -> bool:
         minute = int(time.monotonic() // 60)
         if minute != self._peer_forward_rate_minute:
@@ -922,12 +963,7 @@ class AgentSocketServer:
         """Recheck peer approval and key pin between remote requests."""
         if not self._dns_registry or not designation or not public_key:
             return False
-        record = self._dns_registry.resolve(designation)
-        return bool(
-            record
-            and getattr(record, "approval_state", "") == "approved"
-            and str(getattr(record, "public_key", "")).lower() == public_key
-        )
+        return self._remote_peer_identity(designation)[0] == public_key
 
     def _accept_connection(
         self,
@@ -1124,14 +1160,17 @@ class AgentSocketServer:
 
                 action = msg_data.get("action", "")
 
-                if require_auth and not self._remote_peer_is_current(
-                    authenticated_as, authenticated_public_key
-                ):
-                    writer.write(
-                        b'{"type":"error","msg":"remote peer is not approved"}\n'
+                carrier_only = False
+                if require_auth:
+                    current_key, carrier_only = self._remote_peer_identity(
+                        authenticated_as
                     )
-                    await writer.drain()
-                    return
+                    if not authenticated_public_key or current_key != authenticated_public_key:
+                        writer.write(
+                            b'{"type":"error","msg":"remote peer is not approved"}\n'
+                        )
+                        await writer.drain()
+                        return
 
                 # A verified peer key grants peer messaging, never operator
                 # access to the local daemon. The same dispatcher backs the
@@ -1143,10 +1182,9 @@ class AgentSocketServer:
                     and peer_cred[1] == os.getuid()
                 )
                 remote_admin = require_auth and action not in (
-                    "message",
-                    "ping",
-                    "peer_forward",
-                    "peer_secure",
+                    ("peer_forward", "peer_secure")
+                    if carrier_only
+                    else ("message", "ping", "peer_forward", "peer_secure")
                 )
                 local_admin = not require_auth and action not in ("message", "ping")
                 if remote_admin or (local_admin and not local_operator):

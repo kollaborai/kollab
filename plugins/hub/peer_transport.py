@@ -206,15 +206,16 @@ def verify_peer_locator(
     ):
         return None
     if endpoint_registry is not None:
+        # The pin can only deny. A designation this device already knows must
+        # keep its key and must not be rejected; one it has never seen is
+        # vouched for by the approved relay key that signed the locator.
         try:
-            current_endpoint = endpoint_registry.resolve(designation)
+            known = endpoint_registry.resolve(designation)
         except Exception:
             return None
-        if (
-            current_endpoint is None
-            or getattr(current_endpoint, "approval_state", "") != "approved"
-            or str(getattr(current_endpoint, "public_key", "")).lower()
-            != endpoint_key
+        if known is not None and (
+            getattr(known, "approval_state", "") == "rejected"
+            or str(getattr(known, "public_key", "")).lower() != endpoint_key
         ):
             return None
     payload = {name: value[name] for name in _LOCATOR_PAYLOAD_FIELDS}
@@ -550,6 +551,8 @@ class PeerMeshRuntime:
         self.locator_store = SQLitePeerLocatorStore(
             self.state_dir / "peer-locators.sqlite3"
         )
+        # The session this node runs under while it has no relay registration.
+        self._direct_session = secrets.token_hex(16)
         self.discovery = PeerDiscoveryService(
             advertise_enabled=discovery_advertise_enabled,
             scan_enabled=discovery_scan_enabled,
@@ -569,6 +572,7 @@ class PeerMeshRuntime:
             multicast_group=discovery_multicast_group,
             port=discovery_port,
             bind_address=discovery_bind_address,
+            session_provider=self.local_session,
         )
         self._local_locator_cache: tuple[str, int, dict[str, Any]] | None = None
         self._locators: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -618,6 +622,76 @@ class PeerMeshRuntime:
         self._locators.clear()
         self._local_locator_cache = None
 
+    def local_session(self) -> str:
+        """The session this node runs under right now.
+
+        While it is registered with the relay that is the relay session, which
+        peers on the roster verify. Without a relay it is a per-process direct
+        session, which peers learn from this node's signed locator or record.
+        """
+        status = self.client.status()
+        session = status.get("session")
+        if (
+            status.get("state") == "online"
+            and isinstance(session, str)
+            and _SESSION_ID.fullmatch(session)
+        ):
+            return session
+        return self._direct_session
+
+    def _roster_peer(self, peer_key: str) -> dict | None:
+        """The approved peer on the relay roster, if this node is registered."""
+        if self.client.status().get("state") != "online":
+            return None
+        return next(
+            (
+                item
+                for item in self.client.peers()
+                if item.get("key") == peer_key and item.get("approved")
+            ),
+            None,
+        )
+
+    def _peer_session(self, peer_key: str) -> tuple[str, str] | None:
+        """The session an approved peer runs under, and where it came from.
+
+        The relay roster wins, then the peer's signed locator (only while
+        direct links are on), then the signed record a route carried.
+        """
+        if peer_key not in self.client.state.approvals:
+            return None
+        roster = self._roster_peer(peer_key)
+        if roster is not None:
+            return "relay", roster["session"]
+        if self.direct_enabled:
+            locator = self._locator_for_peer(peer_key)
+            if locator is not None:
+                return "locator", locator["session_id"]
+        router = self._ensure_router()
+        record = self.record_store.get(peer_id_for_key(peer_key), scope=router.scope)
+        if (
+            record is None
+            or not record.session_id
+            or self.record_store.is_revoked(record.peer_id, scope=router.scope)
+        ):
+            return None
+        return "record", record.session_id
+
+    @staticmethod
+    def _own_addresses() -> frozenset[str]:
+        """The IPv4 addresses of this host's own interfaces."""
+        try:
+            import psutil
+
+            return frozenset(
+                item.address
+                for items in psutil.net_if_addrs().values()
+                for item in items
+                if item.family == socket.AF_INET
+            )
+        except Exception:
+            return frozenset()
+
     def _discovery_source_allowed(self, source: str) -> bool:
         try:
             address = ipaddress.ip_address(source)
@@ -627,17 +701,25 @@ class PeerMeshRuntime:
             return False
         if address.is_loopback or address.is_reserved:
             return False
-        if address.is_global:
+        if self.allow_private_network is not True:
             return False
-        return self.allow_private_network is True
+        # A second device on this host announces from the host's own address,
+        # which is public on a cloud machine; every other public source stays
+        # out.
+        return not address.is_global or source in self._own_addresses()
 
     def _local_locator_wire(self, session_id: str) -> dict[str, Any] | None:
-        """Create a short-lived locator only for this approved TLS endpoint."""
+        """Create a short-lived locator for this device's own TLS endpoint.
+
+        Only a device that belongs to a network advertises one, and it names
+        the session the device runs under, relay-registered or not.
+        """
         if (
             not self.direct_endpoint
             or self.endpoint_identity_manager is None
             or not self.endpoint_designation
-            or not self.client.status().get("state") == "online"
+            or not self.client.state.approvals
+            or session_id != self.local_session()
         ):
             return None
         now = int(time.time())
@@ -657,7 +739,6 @@ class PeerMeshRuntime:
             return None
         if (
             registration is None
-            or getattr(registration, "approval_state", "") != "approved"
             or str(getattr(registration, "public_key", "")).lower() != endpoint_key
             or endpoint_key == self.client.public_key
         ):
@@ -692,9 +773,7 @@ class PeerMeshRuntime:
         return dict(wire)
 
     def _verify_locator_wire(self, wire: dict[str, Any]) -> dict[str, Any] | None:
-        """Verify both signatures and the existing endpoint designation pin."""
-        if self.endpoint_registry is None:
-            return None
+        """Verify both signatures, the approved relay key and any known pin."""
         try:
             candidate = verify_peer_locator(
                 wire,
@@ -950,9 +1029,8 @@ class PeerMeshRuntime:
 
     def _ensure_local_record(self) -> PeerRecord:
         router = self._ensure_router()
-        status = self.client.status()
-        session = status.get("session", "")
-        if status.get("state") != "online" or not _SESSION_ID.fullmatch(str(session)):
+        session = self.local_session()
+        if session == self._direct_session and not self.direct_enabled:
             raise RelayError("peer mesh requires an active relay session")
         endpoint = self._relay_endpoint()
         roles = ("agent", "forwarder") if self._forwarding_enabled() is True else ("agent",)
@@ -985,28 +1063,50 @@ class PeerMeshRuntime:
         self._local_record = record
         return record
 
+    def _live_peers(self) -> dict[str, str]:
+        """Approved peers this node can reach right now, with their sessions.
+
+        Roster peers while registered with the relay, plus peers reached by a
+        live signed locator when direct links are on.
+        """
+        live: dict[str, str] = {}
+        if self.client.status().get("state") == "online":
+            live.update(
+                {
+                    peer["key"]: peer["session"]
+                    for peer in self.client.peers()
+                    if peer.get("approved")
+                }
+            )
+        if self.direct_enabled:
+            for key in tuple(self.client.state.approvals):
+                if key in live:
+                    continue
+                locator = self._locator_for_peer(key)
+                if locator is not None:
+                    live[key] = locator["session_id"]
+        return live
+
     def _refresh_online_neighbors(self) -> None:
         router = self.router
         if router is None:
             return
-        status = self.client.status()
-        if status.get("state") != "online":
-            for peer_id in router.authenticated_neighbors:
+        live = self._live_peers()
+        live_ids = {peer_id_for_key(key) for key in live}
+        for peer_id in router.authenticated_neighbors:
+            if peer_id not in live_ids:
                 try:
                     router.set_authenticated_neighbor(peer_id, False)
                 except PeerRouteError:
                     pass
-            return
-        for peer in self.client.peers():
-            if not peer.get("approved"):
-                continue
-            peer_id = peer_id_for_key(peer["key"])
+        for peer_key, session in live.items():
+            peer_id = peer_id_for_key(peer_key)
             record = self.record_store.get(peer_id, scope=router.scope)
             link = router.link_between(self.local_peer_id, peer_id)
-            tls_id = self.secure_transport.link_session_id(peer["key"])
+            tls_id = self.secure_transport.link_session_id(peer_key)
             if (
                 record is not None
-                and record.session_id == peer["session"]
+                and record.session_id == session
                 and link is not None
                 and tls_id == link.session_id
             ):
@@ -1016,23 +1116,17 @@ class PeerMeshRuntime:
                     pass
 
     def binding_for(self, peer_key: str) -> tuple[str, str, str] | None:
-        """Bind TLS to signed registration sessions when no direct relay edge exists."""
+        """Bind TLS to the sessions both ends run under.
+
+        A peer on the relay roster binds to its relay session. One reached only
+        by locator or route binds to the session its signed locator or record
+        names, and this node's side is its own local session, relay or direct.
+        """
         validate_key(peer_key)
-        status = self.client.status()
-        if status.get("state") != "online" or not status.get("session"):
+        found = self._peer_session(peer_key)
+        if found is None:
             return None
-        direct = next(
-            (peer for peer in self.client.peers() if peer["key"] == peer_key), None
-        )
-        if direct is not None:
-            return peer_key, status["session"], direct["session"]
-        router = self._ensure_router()
-        record = self.record_store.get(peer_id_for_key(peer_key), scope=router.scope)
-        if record is None or not record.session_id:
-            return None
-        if self.record_store.is_revoked(record.peer_id, scope=router.scope):
-            return None
-        return peer_key, status["session"], record.session_id
+        return peer_key, self.local_session(), found[1]
 
     def _on_peer_session_event(self, event: PeerSessionEvent) -> None:
         if self._closed:
@@ -1118,6 +1212,10 @@ class PeerMeshRuntime:
             remote_record = self.record_store.get(
                 peer_id_for_key(peer_key), scope=local_record.scope
             )
+            # A link proposal names the id of the TLS sessions both nodes hold
+            # with each other. Open this node's own session first, so the id it
+            # proposes is the one the peer computes when the proposal arrives.
+            await self.secure_transport.ensure_session(peer_key, timeout=3)
             for _attempt in range(2):
                 proposal = (
                     self._make_link_signature(local_record, remote_record, peer_key)
@@ -1454,12 +1552,17 @@ class PeerMeshRuntime:
         router.set_authenticated_neighbor(peer_id, True, session_id=tls_id)
 
     def _direct_peer(self, peer_key: str) -> dict:
+        """The approved peer a signed exchange may come from or go to.
+
+        It is on the relay roster, or its live signed locator names the
+        session its records must carry.
+        """
         if peer_key not in self.client.state.approvals:
             raise PeerRouteError("peer exchange requires local approval")
-        direct = next((item for item in self.client.peers() if item["key"] == peer_key), None)
-        if direct is None or not direct.get("approved"):
+        live = self._live_peers()
+        if peer_key not in live:
             raise PeerRouteError("peer exchange requires a live direct session")
-        return direct
+        return {"key": peer_key, "session": live[peer_key], "approved": True}
 
     def _forward_frame(
         self,
@@ -1635,6 +1738,21 @@ class PeerMeshRuntime:
             router.add_link(link, now=now)
         return envelope, route, trace, records, links, expected_local_index
 
+    def endpoint_key_for(self, designation: str) -> str:
+        """The endpoint key an approved device's live locator gives a designation.
+
+        Empty when no approved device names it, or when two name it with
+        different keys: an ambiguous name admits nobody.
+        """
+        if not self.direct_enabled:
+            return ""
+        keys = set()
+        for peer_key in tuple(self.client.state.approvals):
+            locator = self._locator_for_peer(peer_key)
+            if locator is not None and locator.get("endpoint_designation") == designation:
+                keys.add(str(locator.get("endpoint_public_key", "")).lower())
+        return keys.pop() if len(keys) == 1 else ""
+
     def _direct_caller(self, designation: str, endpoint_public_key: str) -> str:
         """Map a current endpoint-authenticated caller to its approved relay key."""
         candidates = [
@@ -1677,21 +1795,30 @@ class PeerMeshRuntime:
             raise PeerRouteError("secure record handler returned an invalid response")
         return result
 
+    def _admit_transit(self, ingress_peer_key: str) -> None:
+        """Bound what this node forwards for others: per peer, in total, at once."""
+        minute = int(time.time() // 60)
+        for stale in [key for key in self._forward_counts if key[1] != minute]:
+            del self._forward_counts[stale]
+        for stale in [key for key in self._forward_total if key != minute]:
+            del self._forward_total[stale]
+        if (
+            self._forward_counts[(ingress_peer_key, minute)]
+            >= MAX_PEER_FORWARD_PER_PEER_PER_MINUTE
+            or self._forward_total[minute] >= MAX_PEER_FORWARD_TOTAL_PER_MINUTE
+            or self._forward_semaphore.locked()
+        ):
+            raise PeerRouteError("peer forwarding is over its limit")
+        self._forward_counts[(ingress_peer_key, minute)] += 1
+        self._forward_total[minute] += 1
+
     async def handle_forward(
         self, ingress_peer_key: str, frame: dict[str, Any]
     ) -> dict[str, Any]:
         """Verify and forward one opaque end-to-end encrypted application frame."""
         if self._closed or ingress_peer_key not in self.client.state.approvals:
             raise PeerRouteError("peer forwarding is not approved")
-        ingress = next(
-            (
-                item
-                for item in self.client.peers()
-                if item.get("key") == ingress_peer_key and item.get("approved")
-            ),
-            None,
-        )
-        if ingress is None:
+        if ingress_peer_key not in self._live_peers():
             raise PeerRouteError("peer forwarding ingress is offline")
         try:
             envelope, route, trace, records, links, local_index = self._route_material(
@@ -1702,6 +1829,7 @@ class PeerMeshRuntime:
                 return await self._deliver_envelope(envelope, records[envelope.origin])
             if self._forwarding_enabled() is not True:
                 raise PeerRouteError("peer forwarding is disabled")
+            self._admit_transit(ingress_peer_key)
             next_id = route[local_index + 1]
             next_record = records[next_id]
             ingress_link = next(
@@ -1731,11 +1859,12 @@ class PeerMeshRuntime:
                 peer_links=links,
             )
             next_frame = self._forward_frame(route, envelope, new_trace)
-            response = await self._send_forward_to_peer(
-                next_record.public_key,
-                next_frame,
-                timeout=max(1.0, min(envelope.expires_at - int(time.time()), MAX_PEER_FORWARD_TTL_SECONDS)),
-            )
+            async with self._forward_semaphore:
+                response = await self._send_forward_to_peer(
+                    next_record.public_key,
+                    next_frame,
+                    timeout=max(1.0, min(envelope.expires_at - int(time.time()), MAX_PEER_FORWARD_TTL_SECONDS)),
+                )
             self.forwarded_frames += 1
             return response
         except asyncio.CancelledError:
@@ -1817,21 +1946,11 @@ class PeerMeshRuntime:
             return {"v": 1, "error": "delivery_failed"}
 
     def _peer_session_source(self, peer_key: str) -> tuple[str, str]:
-        """Return `relay` or `locator` plus the authenticated instance session."""
-        direct = next(
-            (item for item in self.client.peers() if item["key"] == peer_key), None
-        )
-        if direct is not None and direct.get("approved"):
-            return "relay", direct["session"]
-        candidate = self._locators.get(peer_key)
-        if candidate is not None and candidate["expires_at"] > int(time.time()):
-            return "locator", candidate["session_id"]
-        record = self.record_store.get(
-            peer_id_for_key(peer_key), scope=self._ensure_router().scope
-        )
-        if record is not None:
-            return "record", record.session_id
-        raise PeerRouteError("peer has no current authenticated session")
+        """Return `relay`, `locator` or `record` plus the peer's session."""
+        found = self._peer_session(peer_key)
+        if found is None:
+            raise PeerRouteError("peer has no current authenticated session")
+        return found
 
     def known_peer_keys(self, requested: str = "") -> list[tuple[str, str]]:
         router = self._ensure_router()

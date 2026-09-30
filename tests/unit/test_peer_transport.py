@@ -573,8 +573,11 @@ async def test_locator_only_peer_is_reached_directly_and_refreshed(mesh_network)
     assert destination_key not in {peer["key"] for peer in clients["origin"].peers()}
     origin_mesh.direct_enabled = True
     origin_mesh.endpoint_identity_manager = object()
+    destination_session = clients["destination"]._session_id
     origin_mesh._locator_for_peer = (
-        lambda key: {"relay_public_key": key} if key == destination_key else None
+        lambda key: {"relay_public_key": key, "session_id": destination_session}
+        if key == destination_key
+        else None
     )
     carried = []
 
@@ -766,3 +769,158 @@ async def test_direct_peer_forward_uses_tls_identity_and_bounded_listener(
         secure.close()
         await local.close()
         await server.stop()
+
+
+async def _carrier_server(tmp_path, *, register_client, resolver):
+    """A TLS endpoint whose registry may or may not know the dialing designation."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cert, key = _mint_tls_cert(tmp_path)
+    server_storage = DNSStorage(tmp_path / "server-dns")
+    server_identity = IdentityManager(server_storage)
+    server_registry = AgentRegistry(server_storage)
+    _, server_key = server_identity.get_or_create_keypair("server-agent")
+    server_registry.register(
+        AgentRecord(
+            designation="server-agent", public_key=server_key, approval_state="approved"
+        )
+    )
+    client_identity = IdentityManager(DNSStorage(tmp_path / "client-dns"))
+    _, client_key = client_identity.get_or_create_keypair("client-agent")
+    if register_client is not None:
+        server_registry.register(
+            AgentRecord(
+                designation="client-agent",
+                public_key=register_client.get("key", client_key),
+                approval_state=register_client["state"],
+            )
+        )
+    calls = []
+
+    async def receive_message(_message):
+        raise AssertionError("a peer carrier frame must not enter Hub dispatch")
+
+    async def secure_handler(designation, public_key, method, payload):
+        calls.append((designation, public_key, method))
+        return {"records": []}
+
+    server = AgentSocketServer(
+        "carrier-server", receive_message, socket_name=f"carrier-{secrets.token_hex(3)}"
+    )
+    server.set_dns_auth(
+        server_registry, server_identity, require_auth=False, local_designation="server-agent"
+    )
+    server.enable_endpoint("127.0.0.1", 0, build_server_ssl_context(cert, key))
+    server.set_peer_secure_handler(secure_handler)
+    if resolver:
+        server.set_peer_identity_resolver(
+            lambda designation: client_key if designation == "client-agent" else ""
+        )
+    await server.start()
+    port = server._tcp_server.sockets[0].getsockname()[1]
+    return SimpleNamespace(
+        server=server,
+        port=port,
+        cert=cert,
+        server_key=server_key,
+        client_key=client_key,
+        client_identity=client_identity,
+        calls=calls,
+    )
+
+
+async def _dial(carrier):
+    reader, writer = await asyncio.open_connection(
+        "127.0.0.1",
+        carrier.port,
+        ssl=build_client_ssl_context(carrier.cert),
+        server_hostname="127.0.0.1",
+    )
+    ok = await AgentMessenger.do_remote_client_handshake(
+        reader,
+        writer,
+        carrier.client_identity,
+        "client-agent",
+        "server-agent",
+        carrier.server_key,
+        timeout=3,
+    )
+    return ok, reader, writer
+
+
+async def _line(reader):
+    return json.loads(await asyncio.wait_for(reader.readline(), 3))
+
+
+@pytest.mark.asyncio
+async def test_a_locator_named_endpoint_reaches_the_peer_carrier_and_nothing_else(tmp_path):
+    carrier = await _carrier_server(tmp_path, register_client=None, resolver=True)
+    try:
+        ok, reader, writer = await _dial(carrier)
+        assert ok
+        try:
+            writer.write(b'{"action":"ping"}\n')
+            await writer.drain()
+            assert (await _line(reader))["msg"] == "local operator authorization required"
+        finally:
+            writer.close()
+        ok, reader, writer = await _dial(carrier)
+        try:
+            writer.write(
+                b'{"action":"peer_secure","method":"secure_identity","payload":{}}\n'
+            )
+            await writer.drain()
+            assert (await _line(reader))["type"] == "peer_secure_result"
+        finally:
+            writer.close()
+        assert carrier.calls == [("client-agent", carrier.client_key, "secure_identity")]
+    finally:
+        await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_locator_never_overrides_what_the_registry_records(tmp_path):
+    # The registry holds this designation under another key, or rejected: the
+    # locator's claim does not replace either, and the dial ends at the handshake.
+    other = SigningKey.generate().verify_key.encode().hex()
+    for name, record in (
+        ("other-key", {"state": "approved", "key": other}),
+        ("rejected", {"state": "rejected"}),
+    ):
+        carrier = await _carrier_server(tmp_path / name, register_client=record, resolver=True)
+        try:
+            ok, _reader, writer = await _dial(carrier)
+            writer.close()
+            assert not ok, name
+        finally:
+            await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_endpoint_is_turned_away_without_a_locator(tmp_path):
+    carrier = await _carrier_server(tmp_path, register_client=None, resolver=False)
+    try:
+        ok, _reader, writer = await _dial(carrier)
+        writer.close()
+        assert not ok
+    finally:
+        await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_auto_approved_local_agent_is_a_carrier_peer_not_a_message_sender(tmp_path):
+    # Runtime allowlists are not communication authorization: a same-host agent
+    # the registry only auto-approved reaches the carrier through its locator.
+    carrier = await _carrier_server(
+        tmp_path, register_client={"state": "auto_approved"}, resolver=True
+    )
+    try:
+        ok, reader, writer = await _dial(carrier)
+        assert ok
+        try:
+            writer.write(b'{"action":"ping"}\n')
+            await writer.drain()
+            assert (await _line(reader))["msg"] == "local operator authorization required"
+        finally:
+            writer.close()
+    finally:
+        await carrier.server.stop()

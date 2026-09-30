@@ -266,9 +266,12 @@ class PeerDiscoveryService:
         bind_address: str = "0.0.0.0",
         advertise_target: tuple[str, int] | None = None,
         advertise_interval: float = PEER_DISCOVERY_ADVERTISE_INTERVAL,
+        session_provider: Callable[[], str] | None = None,
     ) -> None:
         if type(advertise_enabled) is not bool or type(scan_enabled) is not bool:
             raise TypeError("peer discovery opt-ins must be bools")
+        if session_provider is not None and not callable(session_provider):
+            raise TypeError("session provider must be callable")
         if advertise_enabled and not callable(locator_provider):
             raise TypeError("advertising requires a signed locator provider")
         if scan_enabled and not all(
@@ -347,7 +350,11 @@ class PeerDiscoveryService:
         self.bind_address = bind_address
         self.advertise_target = target
         self.advertise_interval = float(advertise_interval)
-        self.session_id = secrets.token_hex(16)
+        self._startup_session_id = secrets.token_hex(16)
+        # A locator names the session its owner is running right now. A caller
+        # whose session changes while the service runs (a relay reconnect)
+        # supplies it here; otherwise the startup session stands.
+        self._session_provider = session_provider
         self._transport: asyncio.DatagramTransport | None = None
         self._socket: socket.socket | None = None
         self._advertiser: asyncio.Task[None] | None = None
@@ -367,6 +374,15 @@ class PeerDiscoveryService:
         self.datagrams_received = 0
         self.candidates_accepted = 0
         self.datagrams_rejected = 0
+
+    @property
+    def session_id(self) -> str:
+        if self._session_provider is None:
+            return self._startup_session_id
+        session = self._session_provider()
+        if not isinstance(session, str) or not _HEX_16.fullmatch(session):
+            raise PeerDiscoveryError("session provider returned an invalid session")
+        return session
 
     @property
     def started(self) -> bool:
@@ -462,8 +478,9 @@ class PeerDiscoveryService:
     async def _advertise_once(self) -> None:
         if self._closed or self._transport is None or self.locator_provider is None:
             return
+        session_id = self.session_id
         wire = await _invoke_bounded(
-            self.locator_provider, self.session_id, timeout=PEER_DISCOVERY_CALLBACK_TIMEOUT
+            self.locator_provider, session_id, timeout=PEER_DISCOVERY_CALLBACK_TIMEOUT
         )
         if wire is None:
             return
@@ -471,8 +488,8 @@ class PeerDiscoveryService:
             raise PeerDiscoveryError("locator provider returned an invalid value")
         wire_dict = dict(wire)
         validated = validate_locator_wire(wire_dict, now=self._clock())
-        if validated["session_id"] != self.session_id:
-            raise PeerDiscoveryError("locator provider returned a different startup session")
+        if validated["session_id"] != session_id:
+            raise PeerDiscoveryError("locator provider returned a different session")
         encoded = _canonical_wire(validated)
         digest = hashlib.sha256(encoded).hexdigest()
         revision = validated["revision"]
