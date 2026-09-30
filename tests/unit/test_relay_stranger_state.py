@@ -83,3 +83,19 @@ def test_client_saves_keep_links_written_by_another_store(tmp_path):
     client.approve(other)
 
     assert RelayStateStore(workspace, state_dir).state.links == [PEER_KEY]
+
+
+def test_a_stranger_who_joins_with_a_code_becomes_a_member(tmp_path):
+    workspace, state_dir = _workspace(tmp_path)
+    client = RelayClient(workspace, state_dir=state_dir)
+    bridge_store = RelayStateStore(workspace, state_dir)
+    bridge_store.state.links = [PEER_KEY]
+    bridge_store.state.peer_trust = {PEER_KEY: "agents"}
+    bridge_store.save()
+    client.approve(PEER_KEY)
+
+    client.add_config_recipient(PEER_KEY)  # the issuer just accepted its join code
+
+    saved = RelayStateStore(workspace, state_dir).state
+    assert saved.links == [] and PEER_KEY not in saved.peer_trust
+    assert saved.config_recipients == [PEER_KEY] and saved.approvals == [PEER_KEY]

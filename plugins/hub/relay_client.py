@@ -317,13 +317,24 @@ class RelayClient:
                 )
 
     def add_config_recipient(self, key: str) -> None:
-        """Remember a device accepted with a join code: it gets the sealed config."""
+        """Remember a device accepted with a join code: it gets the sealed config.
+
+        A joined device is a member, not a stranger. An earlier knock left it a
+        cross-room link and agents trust, which would make the two ends bind
+        their messages to different rooms.
+        """
         validate_public_key(key)
         self._adopt_bridge_fields()
-        if key not in self.state.config_recipients:
-            if len(self.state.config_recipients) >= MAX_APPROVALS:
-                raise RelayError("config recipient capacity reached", "capacity")
+        recipient = key not in self.state.config_recipients
+        if recipient and len(self.state.config_recipients) >= MAX_APPROVALS:
+            raise RelayError("config recipient capacity reached", "capacity")
+        was_stranger = key in self.state.links
+        if was_stranger:
+            self.state.links.remove(key)
+            self.state.peer_trust.pop(key, None)
+        if recipient:
             self.state.config_recipients.append(key)
+        if recipient or was_stranger:
             self._store.save()
 
     def revoke(self, key: str):
