@@ -9,7 +9,6 @@ from tests.unit.test_relay_agent_bridge import (
     address,
     allow,
     authorize,
-    bridges,
     in_turn,
 )
 

@@ -19,7 +19,6 @@ from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_commands import NO_NETWORK, offline_device_names
 from plugins.hub.relay_state import RelayStateStore
 from tests.unit.test_hub_network_surface import _relay_commands
-from tests.unit.test_relay_agent_bridge import address, bridges  # noqa: F401
 
 KEY = SigningKey.generate().verify_key.encode().hex()
 

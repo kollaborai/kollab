@@ -525,7 +525,7 @@ folds publisher, key file and relay into `kollab relay serve --domain`.
 
 1. **Simple flow, 0.11.0.** Sections 4 to 8. Proven as a user on installed
    packages on the Mac and alzan-prod: Story 1, Story 2 and Story 3 exactly as
-   written, transcript clean on both sides, at 390 and 820 columns.
+   written, transcript clean on both sides, at 80 and 120 columns.
 2. **Sealed config sync.** Section 9. Story 8.
 3. **Mesh.** Section 10.
 4. **One-command self-host.** Section 11.

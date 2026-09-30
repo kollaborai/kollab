@@ -8,13 +8,13 @@ import uuid
 import pytest
 from nacl.signing import SigningKey
 
+from kollabor_ai.oauth import token_storage as token_storage_module
+from kollabor_ai.oauth.openai_oauth import OAuthError, OAuthTokens
+from kollabor_ai.oauth.token_storage import OAuthTokenStorage
 from kollabor_config.provisioned_state import (
     ProvisionedStateError,
     ProvisionedStateFile,
 )
-from kollabor_ai.oauth.openai_oauth import OAuthError, OAuthTokens
-from kollabor_ai.oauth import token_storage as token_storage_module
-from kollabor_ai.oauth.token_storage import OAuthTokenStorage
 from plugins.hub import provisioning_store as store_module
 from plugins.hub.provisioning import (
     NetworkPreferences,

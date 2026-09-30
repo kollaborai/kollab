@@ -10,7 +10,7 @@ import pytest
 
 from plugins.hub.device_names import default_device_name, format_handle, key_label
 from plugins.hub.relay_state import RelayError
-from tests.unit.test_relay_agent_bridge import Directory, address, allow, bridges  # noqa: F401
+from tests.unit.test_relay_agent_bridge import Directory, address, allow
 
 
 def set_trust(bridge, level):
