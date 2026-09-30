@@ -254,8 +254,12 @@ query vault data across agents:
 schedule recurring work:
 
   <hub_cron_add interval="5m">check build status</hub_cron_add>  add cron job
+  <hub_cron_add to="infra@alzan-prod-home" interval="1h">check the tunnel</hub_cron_add>
+                                                 same, sent to another agent
   <hub_cron_list/>                               list scheduled jobs
   <hub_cron_delete>job-id</hub_cron_delete>      delete a cron job
+
+without `to` the message comes back to you. `to` takes a local agent name or a remote `agent@device` from your roster; the remote agent wakes on its own machine at every interval and answers with `hub_msg`. an offline device is accepted and retried; a fire that was not delivered shows as `last fire failed` in `hub_cron_list`, and a job for a device that is not on the network is dropped.
 
 ### context management
 

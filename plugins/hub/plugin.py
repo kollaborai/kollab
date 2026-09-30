@@ -294,12 +294,13 @@ class HubCronJob:
     """A scheduled recurring message to a hub agent."""
 
     id: str
-    target: str  # identity or "all"
+    target: str  # identity, "all", or an agent@device on the network
     message: str
     interval_seconds: float
     next_fire: float
     recurring: bool = True
     created_at: float = field(default_factory=time.time)
+    last_error: str = ""  # why the latest fire to an agent@device was not delivered
 
 
 def _compile_marker_pattern(markers: Tuple[str, ...]) -> "re.Pattern[str]":
@@ -1489,20 +1490,21 @@ class HubPlugin(BasePlugin):
             "hub_vaults", self._handle_hub_vaults_tool
         )
 
-        # hub_cron_add (flexible attribute order)
+        # hub_cron_add
+        # Matches: <hub_cron_add interval="5m">msg</hub_cron_add>
+        #          <hub_cron_add to="infra@alzan-prod-home" interval="1h">msg</hub_cron_add>
+        # `to` (`target` is the older spelling) names who gets the reminder;
+        # without it the reminder comes back to the sender. The handler reports
+        # a missing interval, so the tag is not left on screen for it.
         def _extract_hub_cron_add(m):
-            attrs = m.group(1)
-            msg = m.group(2).strip()
-            i_match = _re.search(r'interval="([^"]+)"', attrs)
+            attrs = tag_attrs(m.group(1))
             return {
-                "interval": i_match.group(1).strip() if i_match else "",
-                "message": msg,
+                "interval": attrs.get("interval", "").strip(),
+                "target": (attrs.get("to") or attrs.get("target") or "").strip(),
+                "message": m.group(2).strip(),
             }
 
-        cron_add_pat = _re.compile(
-            r"<hub_cron_add\s+([^>]+)>(.*?)</hub_cron_add>",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        cron_add_pat = tag_pattern("hub_cron_add")
         response_parser.register_plugin_tag(
             "hub_cron_add", cron_add_pat, "hub_cron_add", _extract_hub_cron_add
         )
@@ -3935,31 +3937,41 @@ class HubPlugin(BasePlugin):
         """Execute a hub_cron_add tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        target = tool_data.get("target", "")
+        # The XML tag reads `to` (or the older `target`) into "target"; a native
+        # call passes `to`. Without either, the reminder comes back to us.
+        target = str(tool_data.get("to") or tool_data.get("target") or "").strip()
         interval = tool_data.get("interval", "")
         msg = tool_data.get("message", "")
 
         if not target:
             target = self._identity.identity if self._identity else ""
 
-        if not target or not interval:
+        def refuse(error: str):
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_cron_add",
                 success=False,
-                error="requires target and interval attributes",
+                error=error,
             )
+
+        if not target or not interval:
+            return refuse('requires an interval attribute, for example interval="5m"')
+
+        error = self._cron_target_error(target)
+        if error:
+            return refuse(error)
+
+        # A remote task may reply only to its sender (see _handle_hub_msg_tool);
+        # a job it schedules would send to another device after the turn ended.
+        relay = getattr(self, "_relay_agent", None)
+        if parse_handle(target) and relay is not None and relay._turn.get() is not None:
+            return refuse("a remote task cannot schedule messages to other devices")
 
         # Enforce 30s minimum for XML-originated cron
         try:
             secs = _parse_interval(interval)
             if secs < 30:
-                return ToolExecutionResult(
-                    tool_id=tool_data.get("id", "unknown"),
-                    tool_type="hub_cron_add",
-                    success=False,
-                    error="minimum interval is 30s",
-                )
+                return refuse("minimum interval is 30s")
         except ValueError:
             pass  # let _cron_add handle the error
 
@@ -5769,6 +5781,83 @@ class HubPlugin(BasePlugin):
                 return await self._deliver_to_agent(agent, reminder_msg)
         return False
 
+    async def _cron_device_gone(self, device: str) -> bool:
+        """True when the network is reachable and never told us about `device`.
+
+        An offline device stays known through its recorded name, so only a
+        typo, a revoked device or this device's own name (its agents are never
+        on the remote roster) reads as gone. With no way to tell (no bridge,
+        relay unreachable) the answer is no.
+        """
+        unknown = getattr(getattr(self, "_relay_agent", None), "device_unknown", None)
+        try:
+            return callable(unknown) and bool(await unknown(device))
+        except Exception:
+            return False
+
+    async def _fire_cron_job(self, job: HubCronJob) -> bool:
+        """Send one due cron job. True when the job must be dropped.
+
+        An agent@device target goes out through _route_message, the path
+        hub_msg uses: handle resolution, trust and relay. The router reports a
+        refusal instead of raising, so it is read here, logged with its reason
+        and kept for hub_cron_list; a job whose device is not on the network is
+        dropped rather than failing on every interval.
+        """
+        target = job.target
+        scope = self._resolve_scope(target)
+        if target in ("all", "*"):
+            to = "*"
+            scope = MessageScope.BROADCAST.value
+        else:
+            to = target
+
+        msg = HubMessage(
+            action="message",
+            from_agent=self._identity.agent_id,
+            from_identity="hub-cron",
+            to=to,
+            content=f"[cron {job.id}] {job.message}",
+            scope=scope,
+        )
+        handle = parse_handle(target)
+        try:
+            rejections = await self._route_message(msg)
+        except Exception as exc:
+            if not handle:
+                raise
+            # The router turns a refusal into a reason; what escapes it is
+            # unexpected, so only its class is kept.
+            rejections = [(target, f"send failed ({type(exc).__name__})")]
+
+        if handle and rejections:
+            reason = rejections[0][1]
+            job.last_error = reason
+            if await self._cron_device_gone(handle[1]):
+                logger.warning(
+                    "hub cron %s dropped: device %s is not on this network (%s)",
+                    job.id,
+                    handle[1],
+                    reason,
+                )
+                return True
+            logger.warning(
+                "hub cron %s not delivered to %s: %s", job.id, target, reason
+            )
+            return False
+
+        # Self-targeted cron: _route_message skips self
+        # (open channel model), so deliver directly.
+        my_identity = self._identity.identity if self._identity else ""
+        if my_identity and target == my_identity:
+            await self._on_message_received(msg)
+
+        if handle:
+            job.last_error = ""
+            self._display_outgoing_message(target, msg.content)
+        logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
+        return False
+
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
         while True:
@@ -5787,44 +5876,16 @@ class HubPlugin(BasePlugin):
 
                 # --- Hub cron jobs ---
                 if has_cron_jobs:
-                    fired: List[str] = []
                     remove_ids: List[str] = []
 
-                    for job in self._hub_cron_jobs:
+                    for job in list(self._hub_cron_jobs):
                         if now >= job.next_fire:
-                            target = job.target
-                            scope = self._resolve_scope(target)
-                            if target in ("all", "*"):
-                                to = "*"
-                                scope = MessageScope.BROADCAST.value
-                            else:
-                                to = target
+                            gone = await self._fire_cron_job(job)
 
-                            msg = HubMessage(
-                                action="message",
-                                from_agent=self._identity.agent_id,
-                                from_identity="hub-cron",
-                                to=to,
-                                content=f"[cron {job.id}] {job.message}",
-                                scope=scope,
-                            )
-                            await self._route_message(msg)
-
-                            # Self-targeted cron: _route_message skips self
-                            # (open channel model), so deliver directly.
-                            my_identity = (
-                                self._identity.identity if self._identity else ""
-                            )
-                            if my_identity and target == my_identity:
-                                await self._on_message_received(msg)
-
-                            logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
-                            fired.append(job.id)
-
-                            if job.recurring:
-                                job.next_fire = now + job.interval_seconds
-                            else:
+                            if gone or not job.recurring:
                                 remove_ids.append(job.id)
+                            else:
+                                job.next_fire = now + job.interval_seconds
 
                     if remove_ids:
                         self._hub_cron_jobs = [
@@ -7498,7 +7559,8 @@ class HubPlugin(BasePlugin):
         lines.append('  <hub_vault name="identity"/>  -- read agent vault summary')
         lines.append("  <hub_vaults/>  -- list all vaults")
         lines.append(
-            '  <hub_cron_add target="name" interval="5m">' "message</hub_cron_add>"
+            '  <hub_cron_add to="name" interval="5m">message</hub_cron_add>'
+            "  -- to is optional (you); agent@device for a remote agent"
         )
         lines.append("  <hub_cron_list/>  -- list cron jobs")
         lines.append("  <hub_cron_delete>job-id</hub_cron_delete>")
@@ -10630,6 +10692,22 @@ class HubPlugin(BasePlugin):
                 "  clear"
             )
 
+    @staticmethod
+    def _cron_target_error(target: str) -> str:
+        """Why `target` cannot be a cron target, or "" when it can.
+
+        A name, `all` or `*` is left to the fire path as before. Anything shaped
+        like a network address has to be a real agent@device: a relay: address
+        or a half-typed handle would never resolve. Whether the device is online
+        is not asked here; an offline remote is fine to schedule.
+        """
+        if target.startswith("relay:") or ("@" in target and not parse_handle(target)):
+            return (
+                "bad target: use an agent name, or agent@device as "
+                "/connect status lists it"
+            )
+        return ""
+
     def _cron_add(self, args: str) -> str:
         """Add a new cron job: /hub cron add <target> <interval> <message>."""
         parts = args.strip().split(maxsplit=2)
@@ -10637,6 +10715,13 @@ class HubPlugin(BasePlugin):
             return "usage: /hub cron add <target> <interval> <message>"
 
         target, interval_str, message = parts
+
+        error = self._cron_target_error(target)
+        if error:
+            return error
+        handle = parse_handle(target)
+        if handle:
+            target = format_handle(*handle)
 
         try:
             interval_seconds = _parse_interval(interval_str)
@@ -10671,6 +10756,8 @@ class HubPlugin(BasePlugin):
                 f" | next in {self._format_seconds(remaining)}"
             )
             lines.append(f"    msg: {job.message[:80]}")
+            if job.last_error:
+                lines.append(f"    last fire failed: {job.last_error[:80]}")
         return "\n".join(lines)
 
     def _cron_delete(self, job_id: str) -> str:

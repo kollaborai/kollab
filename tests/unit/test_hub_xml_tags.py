@@ -128,6 +128,15 @@ CONVERTED = {
         {"peer": "lapis", "filter": "file:kollabor/"},
         {"peer": "lapis", "filter": "file:kollabor/"},
     ),
+    "hub_cron_add": (
+        "<hub_cron_add {attrs}>check the tunnel</hub_cron_add>",
+        {"interval": "5m", "to": "infra@alzan-prod-home"},
+        {
+            "interval": "5m",
+            "target": "infra@alzan-prod-home",
+            "message": "check the tunnel",
+        },
+    ),
 }
 
 # The tags that take one attribute or none. A new tag has to be put in one of
@@ -137,7 +146,7 @@ ONE_OR_NO_ATTRIBUTE = set("""
     scratchpad_get state_update task_checkpoint task_complete task_approve
     task_reject lane_claim lane_release file_changed file_watch file_unwatch
     feed_recent feed_file claims hub_agents hub_queue hub_claim hub_work hub_vault
-    hub_vaults hub_cron_add hub_cron_list hub_cron_delete vault_write
+    hub_vaults hub_cron_list hub_cron_delete vault_write
     global_vault_write crystal_read context_query evict
     """.split())
 

@@ -992,7 +992,8 @@ Identity column width is 12 chars (left-aligned). Source:
 ##### `<hub_cron_add>` / `<hub_cron_list/>` / `<hub_cron_delete>`
 
 ```xml
-<hub_cron_add target="monitor" interval="30s">check api health</hub_cron_add>
+<hub_cron_add to="monitor" interval="30s">check api health</hub_cron_add>
+<hub_cron_add to="infra@alzan-prod-home" interval="1h">check the tunnel</hub_cron_add>
 <hub_cron_list/>
 <hub_cron_delete>job-abc123</hub_cron_delete>
 ```
@@ -1007,7 +1008,8 @@ Cron add errors (attribute validation comes first, then interval
 validation, then the handler):
 
 ```
-[hub_cron_add] error: requires target and interval
+[hub_cron_add] error: requires an interval attribute, for example interval="5m"
+[hub_cron_add] error: bad target: use an agent name, or agent@device as /connect status lists it
 [hub_cron_add] error: minimum interval is 30s
 [hub_cron_add] usage: /hub cron add <target> <interval> <message>
 [hub_cron_add] bad interval: <reason>

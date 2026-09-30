@@ -715,13 +715,13 @@ crystal_delete = ToolDefinition(
 
 hub_cron_add = ToolDefinition(
     name="hub-cron-add",
-    description="Schedule a recurring task.",
+    description="Schedule a recurring message to yourself or to another agent.",
     category="hub",
     risk_level="medium",
     requires_permission=False,
     xml_tag="hub_cron_add",
     xml_form="mixed",
-    xml_attributes=["interval"],
+    xml_attributes=["interval", "to"],
     xml_body_param="message",
     parameters=[
         ToolParameter(
@@ -736,19 +736,37 @@ hub_cron_add = ToolDefinition(
             description="Interval (e.g. '5m', '1h', '30s')",
             required=True,
         ),
+        ToolParameter(
+            name="to",
+            type="string",
+            description=(
+                "Who receives the message: an agent name, or agent@device for an "
+                "agent on another machine, exactly as the hub context lists it. "
+                "Default: you"
+            ),
+            required=False,
+        ),
     ],
     examples=[
         '<hub_cron_add interval="5m">check build status</hub_cron_add>',
+        '<hub_cron_add to="infra@alzan-prod-home" interval="1h">'
+        "check the wireguard tunnel and report the handshake age</hub_cron_add>",
     ],
     result_format="Cron job ID.",
     key_rules=[
         "interval format: '30s', '5m', '1h' — seconds, minutes, hours",
-        "cron sends the message to you on each interval — you get re-invoked",
+        "without `to`, cron sends the message to you on each interval — you get re-invoked",
+        "`to` is an agent name or an agent@device from your roster; an agent@device "
+        "wakes on its own machine, runs the message with its own tools and answers by hub_msg",
+        "a malformed `to` is refused; an offline agent@device is accepted and tried on "
+        "each interval — a failed fire shows as 'last fire failed' in hub_cron_list, "
+        "and a job for a device that is not on the network is dropped",
         "use for periodic checks like build status, test runs, or health checks",
         "delete cron jobs when done to avoid unnecessary re-invocations",
     ],
     safety_features=[
         "each cron invocation re-invokes the agent — too many crons wastes resources",
+        "a remote target runs work on another machine at every interval — keep it rare",
         "always clean up cron jobs when the task is complete",
     ],
 )

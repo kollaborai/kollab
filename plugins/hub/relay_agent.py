@@ -387,6 +387,27 @@ class RelayAgentBridge:
                 continue
         return rows
 
+    async def device_unknown(self, name: str) -> bool:
+        """Whether the relay is reachable and no approved device can be `name`.
+
+        A device is known by a recorded peer name or by an agent on the live
+        roster. An approved device with neither (unnamed and offline) might be
+        the one meant, so nothing is unknown while one exists, nor while the
+        relay is unreachable and presence is unknowable. Reads through the
+        owner, so a second agent in the workspace answers the same.
+        """
+        try:
+            if (await self._owner_call("relay.status", {})).get("state") != "online":
+                return False
+            rows = await self.remote_agents()
+            state = self._state().state
+        except Exception:
+            return False
+        if name in {*state.peer_devices.values(), *(row["device"] for row in rows)}:
+            return False
+        online = {RelayAddress.parse(row["address"]).key for row in rows}
+        return set(state.approvals) <= set(state.peer_devices) | online
+
     async def resolve_handle(self, handle: str) -> str:
         """The relay: address for an approved agent@device, or a clear RelayError."""
         parsed = parse_handle(handle)

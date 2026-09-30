@@ -131,7 +131,13 @@ Hub cron lets you send messages to agents on a schedule:
 ```
 /hub cron add lapis 5m "status update: what are you working on?"
 /hub cron add all 1h "run the test suite and report results"
+/hub cron add infra@alzan-prod-home 1h "check the wireguard tunnel and report"
 ```
+
+An `agent@device` target sends to an agent on another machine of your
+network, the same way `hub_msg` does. An offline device is retried on every
+interval, a failed send is logged and shown by `/hub cron list`, and a job
+for a device that is not on the network is dropped.
 
 Intervals support `s` (seconds), `m` (minutes), `h` (hours), or
 combinations like `2h30m`.

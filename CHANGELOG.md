@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `ContactReviewAltView: missing 3 required positional arguments` error at every launch is gone; the knock review builds without callbacks like the Connect screen does.
 - Hub XML tags take their attributes in any order and either quote style: `<hub_msg wait="true" to="lapis">` runs and is hidden instead of staying on screen as raw text, and `<hub_broadcast scope="network">` parses.
 - `wait="true"` on `hub_msg` / `hub_reply` (and the idle phrases that set it) ends the sender's turn once the send succeeds; a rejected send, a send to nobody, or a failed tool in the same reply keeps the turn going.
+- `hub_cron_add` can target another machine: `to="agent@device"` on the tag, `to` on the native tool, sent through the same network path as `hub_msg` (leaving `to` out still means the sender itself, and the tag's old `target` attribute, which nothing read, now counts as `to`). A malformed target is refused when the job is added, an offline device is accepted, a fire that is not delivered is logged with its reason and shows as `last fire failed` in `hub_cron_list`, and a job whose device is not on the network is dropped with a logged reason instead of failing on every interval.
 
 ## [0.10.7] - 2026-09-28
 
