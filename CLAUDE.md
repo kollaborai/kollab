@@ -6,6 +6,9 @@ Before maintaining Kollab, read `bundles/skills/kollab-development/SKILL.md`.
 It defines the unreleased development policy, current-implementation workflow,
 agent handoff requirements, and conditional relay operations guide.
 
+In-flight work (remove when #121 merges): the agent network on branch
+`issue-121-network-simple-flow`. Start at `docs/handoff/agent-network/HANDOFF.md`.
+
 ## Project Overview
 
 **Kollab Interface** - Terminal-based LLM chat application where **everything has hooks**. Every action triggers customizable hooks that plugins can attach to for complete customization.

@@ -1,6 +1,6 @@
 # Kollab agent network, milestone 1: handoff
 
-Repo: /Users/malmazan/dev/kollab. In-repo copies: docs/handoff/agent-network-m1/ (this folder), tests/live/m1/ (two-machine proof), scripts/relay/deploy_relay*.sh (relay deploy). Full archive with transcripts and every run: the scratchpad path in INVENTORY.md.
+Repo: /Users/malmazan/dev/kollab. In-repo copies: docs/handoff/agent-network/ (this folder), tests/live/m1/ (two-machine proof), scripts/relay/deploy_relay*.sh (relay deploy). Full archive with transcripts and every run: the scratchpad path in INVENTORY.md.
 
 Repo: /Users/malmazan/dev/kollab. Branch: issue-121-network-simple-flow, tip afa383d, 28 commits on top of main (ab3edaf). Not pushed. No PR. Issue #121.
 
