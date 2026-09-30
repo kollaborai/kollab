@@ -43,6 +43,7 @@ from .config_sync import (
     Receiver,
     Snapshot,
     SnapshotBuilder,
+    core_blob,
     decode_need,
     kollab_root,
     pack_files,
@@ -189,13 +190,7 @@ class ConfigSyncService:
     ) -> None:
         try:
             async with asyncio.timeout(PUSH_LIMIT_SECONDS):
-                blob = pack_json(
-                    {
-                        "config": snapshot.config,
-                        "mcp": snapshot.mcp,
-                        "primary_name": self._device_name(),
-                    }
-                )
+                blob = core_blob(snapshot, self._device_name())
                 body = {
                     "digest": snapshot.digest,
                     "files_digest": snapshot.files_digest,

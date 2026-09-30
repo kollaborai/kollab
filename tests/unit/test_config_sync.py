@@ -833,3 +833,33 @@ def test_a_symlinked_folder_below_skills_is_never_written_through(
 
     assert reply == {"error": "unsafe"}
     assert list(outside.iterdir()) == []
+
+
+def test_a_keyring_key_the_primary_cannot_read_stays_on_the_secondary(homes, keys):
+    """A restarted primary with a locked keyring must not make secondaries delete the key."""
+    primary, secondary = keys
+    path = ("kollabor", "llm", "profiles", "keyed", "api_key")
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        healthy = cs.SnapshotBuilder(keyring_get={"keyed": KEYRING_KEY_TEXT}.get).build()
+        locked = cs.SnapshotBuilder(keyring_get=lambda _name: None).build()
+    receiver = cs.Receiver(secondary)
+
+    def push(snapshot, revision):
+        sealed = cs.seal(
+            "core", {"digest": snapshot.digest}, cs.core_blob(snapshot, "mac-kollab"),
+            issuer_key=primary, recipient_public_key=bytes(secondary.verify_key),
+            revision=revision,
+        )  # fmt: skip
+        with homes("server") as kollab:
+            reply, _ = receiver.core(
+                sealed, primary_key=bytes(primary.verify_key).hex(), primary_name="mac-kollab"
+            )
+            managed = {tuple(key) for key in cs.read_managed_config().keys}
+            return reply, dict(cs.walk_leaves(json.loads((kollab / "config.json").read_text()))), managed
+
+    reply, config, managed = push(healthy, 1)
+    assert reply == {"ok": True} and config[path] == KEYRING_KEY_TEXT
+    reply, config, managed = push(locked, 2)
+    assert reply == {"ok": True}
+    assert config[path] == KEYRING_KEY_TEXT and path in managed

@@ -187,6 +187,7 @@ class Snapshot:
     digest: str
     files_digest: str
     skipped: int
+    keep: tuple[tuple[str, ...], ...] = ()  # secrets the keyring would not give up
 
     def __repr__(self) -> str:
         return (
@@ -218,6 +219,18 @@ def sync_body(snapshot: Snapshot) -> dict:
     """The signed header of a manifest. ``partial`` means some files did not fit,
     so a file missing from the manifest is not one the primary dropped."""
     return {"digest": snapshot.digest, "partial": snapshot.skipped > 0}
+
+
+def core_blob(snapshot: Snapshot, primary_name: str) -> bytes:
+    """What a core push seals: the settings and the device name that owns them."""
+    return pack_json(
+        {
+            "config": snapshot.config,
+            "mcp": snapshot.mcp,
+            "keep": [list(path) for path in snapshot.keep],
+            "primary_name": primary_name,
+        }
+    )
 
 
 def _read_object(path: Path) -> dict:
@@ -272,18 +285,20 @@ class SnapshotBuilder:
         self._hashes: dict[str, tuple[int, int, str, int]] = {}
         self._resolved: dict[str, str] = {}
         self._core_signature: tuple | None = None
-        self._core: tuple[dict, dict] = ({}, {})
+        self._core: tuple[dict, dict, tuple] = ({}, {}, ())
 
     def build(self) -> Snapshot:
-        config, mcp = self._core_parts()
+        config, mcp, keep = self._core_parts()
         files, skipped = _fit_manifest(*self._scan_files())
         files_digest = hashlib.sha256(_canonical_json(manifest_rows(files))).hexdigest()
         digest = hashlib.sha256(
-            _canonical_json({"config": config, "mcp": mcp, "files": files_digest})
+            _canonical_json(
+                {"config": config, "mcp": mcp, "keep": keep, "files": files_digest}
+            )
         ).hexdigest()
-        return Snapshot(config, mcp, tuple(files), digest, files_digest, skipped)
+        return Snapshot(config, mcp, tuple(files), digest, files_digest, skipped, keep)
 
-    def _core_parts(self) -> tuple[dict, dict]:
+    def _core_parts(self) -> tuple[dict, dict, tuple]:
         config_path = kollab_root(self._root) / "config.json"
         mcp_path = mcp_settings_path(self._root)
         signature = (_stat_signature(config_path), _stat_signature(mcp_path))
@@ -291,6 +306,7 @@ class SnapshotBuilder:
             return self._core
         raw_config = _read_object(config_path)
         leaves: dict[tuple[str, ...], Any] = {}
+        unresolved: list[tuple[str, ...]] = []
         profiles = _dig(raw_config, "kollabor", "llm", "profiles")
         for path, value in walk_leaves(raw_config):
             if is_local_only(path):
@@ -302,7 +318,11 @@ class SnapshotBuilder:
                 name = value[len(SENTINEL) :]
                 value = self._keyring_get(name) or self._resolved.get(name)
                 if not value:
-                    continue  # unresolvable here; the secondary keeps its own
+                    # Say so, or secondaries read the gap as a deleted key. Not
+                    # retried until config.json changes: a missing macOS Keychain
+                    # entry pops a dialog on every read.
+                    unresolved.append(path)
+                    continue
                 self._resolved[name] = value
             if path[-1] == "api_key" and _is_oauth_profile(profiles, path):
                 continue
@@ -320,7 +340,7 @@ class SnapshotBuilder:
             if isinstance(servers, dict)
             else {}
         )
-        self._core_signature, self._core = signature, (config, mcp)
+        self._core_signature, self._core = signature, (config, mcp, tuple(sorted(unresolved)))
         return self._core
 
     def _scan_files(self) -> tuple[list[FileEntry], int]:
@@ -776,6 +796,13 @@ class Receiver:
         config, servers = core.get("config"), core.get("mcp")
         if not isinstance(config, dict) or not isinstance(servers, dict):
             raise ConfigSyncError("invalid")
+        keep = core.get("keep", [])
+        if not isinstance(keep, list) or not all(
+            isinstance(path, list) and path and all(isinstance(part, str) for part in path)
+            for path in keep
+        ):
+            raise ConfigSyncError("invalid")
+        kept = {tuple(path) for path in keep}  # the primary could not read these
         # The primary already filters; a secondary never trusts that.
         leaves = {
             path: value
@@ -787,7 +814,7 @@ class Receiver:
         current = _read_object(config_path)
         before = copy.deepcopy(current)
         previous = {tuple(path) for path in record.keys} if record else set()
-        for path in previous - leaves.keys():
+        for path in previous - leaves.keys() - kept:
             delete_leaf(current, path)
         for path, value in leaves.items():
             set_leaf(current, path, value)
@@ -815,7 +842,7 @@ class Receiver:
                 primary_name=primary_name,
                 revision=revision,
                 digest=digest,
-                keys=tuple(sorted(leaves)),
+                keys=tuple(sorted(leaves.keys() | (previous & kept))),
                 mcp_servers=tuple(sorted(n for n in servers if isinstance(n, str))),
                 files=dict(record.files) if record else {},
             ),
