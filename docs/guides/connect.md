@@ -23,7 +23,11 @@ A code works for one device. Once you accept or reject a request, the line reads
 
 Codes go only in that private form. If you type a code into a command or into chat, Kollab refuses it, and codes never reach its logs.
 
-**What accepting copies.** Accepting sends B the model settings and one api key from A's active profile, sealed so only B can open them. B stores them as a separate profile named `kollab-…` and keeps using its own login. If A's login is a ChatGPT sign-in, nothing is copied: two machines sharing one refresh token would sign each other out, so B runs its own `/login`.
+**What accepting copies.** A's settings follow A onto every device it accepts by code, sealed so only that device can open them: the overrides in `~/.kollab/config.json` (loadouts, models, API keys), MCP servers, `agents/` and `skills/`. They go out when you accept, again within about ten seconds of any change on A (switch your loadout with `/llm` and B follows), and when B reconnects. A wins: on B each synced setting is read-only in `/config`, marked `managed by A`, and an API key shows only as `set`.
+
+Not copied: ChatGPT sign-ins (two machines sharing one refresh token would sign each other out, so B runs its own `/login`), project `.kollab/` folders, vaults, conversations, and the settings that describe one machine (`kollabor.updates`, `kollabor.permissions`, `plugins.hub`, `plugins.voice`). A stranger you accept from a knock gets none of it.
+
+`/connect leave` on B keeps the values it received as its own. `/connect revoke B` on A, or revoking A on B, stops the updates. Joining also copies A's active API-key profile once, as a private profile named `kollab-…`, so B can list that loadout next to the synced ones.
 
 ## Message an agent on another machine
 

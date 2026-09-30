@@ -65,7 +65,7 @@ human-only-answer rule, the `invite`/`join` file pairing, and the `K1-…`
 | Join code | 8 characters, `XXXX-XXXX`, one device, 5 minutes. See section 8. |
 | Strangers | Kept and shown as `knock` / `knocks`. A stranger never gets `open`. |
 | Automation | `kollab --hub msg agent@device "text"` from any shell. `hub_cron_add` on top. |
-| Sealed config | Everything, continuously, primary wins. OAuth logins excepted. |
+| Sealed config | Everything but OAuth logins and machine-local settings, continuously, primary wins. |
 | Mesh | Relay now. Direct/LAN mesh is milestone 3, proven live before it ships. Same commands. |
 | Conversation rules | Hub rules apply across machines. No question cap, no task envelope, no human-only answers under `open` and `agents`. The Codex task model exists only under `manual`. |
 
@@ -158,7 +158,7 @@ Marco presses `a`.
 
 ```
  accepted alzan-prod-home. it is now a trusted device on mac-kollab-net.
- sealed config sent (settings, agents, skills, mcp, api keys; not oauth logins)
+ sealed config queued: settings, agents, skills, mcp, api keys; not oauth logins
  online       koordinator (this device)
               koordinator@alzan-prod-home
 ```
@@ -167,7 +167,16 @@ Server:
 
 ```
  joined mac-kollab-net as alzan-prod-home. trust: open
- config received from mac-kollab (managed by mac-kollab in /config)
+```
+
+A few seconds later, once the sealed config has landed, `/connect` on the
+server shows a `config` row under this device:
+
+```
+ Connect
+ network      mac-kollab-net  via kollabor.ai   trust: open
+ this device  alzan-prod-home
+ config       received from mac-kollab   managed by mac-kollab in /config
 ```
 
 That is the whole join. No `/connect kollabor.ai` first: with no network,
@@ -384,12 +393,20 @@ apart from the numbers, and it is only reachable through this setting.
 
 ### Story 8: the sealed config follows Marco
 
-On the Mac, Marco switches his loadout to `anthropic/claude-opus-5-5`. Within
-a minute, `/config` on alzan-prod-home shows the same loadout, marked
-`managed by mac-kollab`. The API key travelled sealed to alzan-prod-home's
-key; the relay never saw it. His ChatGPT OAuth login did not travel: the
-server keeps its own `/login`, because two devices sharing one refresh token
-sign each other out.
+On the Mac, Marco switches his loadout with `/llm` to `anthropic/claude-opus-5-5`.
+Within a minute, `/config` on alzan-prod-home shows the same loadout in the
+Loadout and Model rows that lead LLM Settings, read-only and marked
+`managed by mac-kollab`:
+
+```
+ Loadout: anthropic   managed by mac-kollab
+ Model: claude-opus-5-5   managed by mac-kollab
+```
+
+The API key travelled sealed to alzan-prod-home's key; the relay never saw it,
+and `/config` shows it only as `set`. His ChatGPT OAuth login did not travel:
+the server keeps its own `/login`, because two devices sharing one refresh
+token sign each other out.
 
 ### Story 9: a device is lost
 
@@ -583,17 +600,51 @@ How it stays secure with 40 bits:
 
 ## 9. The sealed config
 
-- Primary: the device that issued the join code. One primary per network;
-  `/connect trust` and this are the network's only settings.
-- Synced: global `~/.kollab/config.json` overrides, `agents/`, `skills/`,
-  MCP servers, API keys. Sealed to each device's key; the directory never
-  reads it.
-- Not synced: OAuth logins (each device runs `/login`), project `.kollab/`,
-  vaults, conversations, scratchpads.
-- Primary wins. On a secondary, synced keys show `managed by <primary>` in
-  `/config` and are read-only there.
-- When: on accept, on every change on the primary while the device is online,
-  and on reconnect.
+- Primary: the device that issued the join code. A device takes config only
+  from the device whose code it joined with, so a network with one issuer has
+  one primary. In a chain (A issues to B, B issues to C) B is C's primary and
+  passes on what A sent it. A stranger accepted from a knock (Story 5) is never
+  sent config. `/connect trust` and this are the network's only settings.
+- Synced: global `~/.kollab/config.json` overrides (loadouts, models, profiles),
+  MCP servers, API keys, `agents/`, `skills/`. A key that lives only in the
+  primary's OS keyring is read from it and sent. The device stores it in its own
+  `~/.kollab/config.json`, mode 0600. Every bundle is signed by the primary and
+  sealed to the receiving device's key, and travels over the network's secure
+  conversation path: the directory carries ciphertext and never reads it.
+- Not synced:
+  - OAuth logins. Each device runs `/login`. The `oauth/` directory is never
+    read and no access, refresh or id token leaves the primary.
+  - Project `.kollab/`, vaults, conversations, scratchpads.
+  - Machine-local settings, which a secondary also refuses from its primary:
+    `kollabor.updates`, `kollabor.permissions` (approval mode), `plugins.hub`,
+    `plugins.voice`, version stamps.
+  - Symlinks and caches. A file over 512 KiB (30 KB compressed) and anything
+    past 1500 files is skipped and counted.
+- Primary wins. The secondary sets every key the primary sends, keeps its own
+  keys the primary does not send, and deletes a key or file the primary
+  dropped. It records what it manages in `~/.kollab/private/managed-config.json`.
+- On a secondary, `/config` shows each synced key as a read-only line
+  `<label>: <value>   managed by <primary>`; a secret shows as `set`. The
+  Loadout and Model rows lead LLM Settings on every device. They are read-only
+  everywhere (change the loadout with `/llm`); on a secondary they name the
+  primary. `/llm` on a secondary still switches locally until the primary next
+  changes something or the device reconnects.
+- Accepting a device prints `sealed config queued: settings, agents, skills,
+  mcp, api keys; not oauth logins`. The joined device's Connect screen gets a
+  `config` row, `received from <primary>   managed by <primary> in /config`,
+  once the first bundle has landed (Story 1).
+- When: on accept, on every change on the primary while the device is online
+  (the primary looks every 10 seconds; a loadout switch is one small request),
+  and on reconnect. A failed push retries after 10 seconds, doubling up to 5
+  minutes. The running app follows settings and MCP servers at once; agents and
+  skills are read the next time they are used. Each bundle carries a revision:
+  a device holding a newer one answers `stale` and the primary raises its own.
+- Leaving. `/connect leave` on a secondary keeps the received values as its own
+  and stops managing them. `/connect revoke <device>` on the primary ends the
+  updates to that device; revoking the primary on a secondary does the same
+  from that side. `/connect rotate` empties the list of devices the primary
+  updates, so they join again. Revoking never revokes a key at the provider.
+- A network joined before this milestone has no recipients: join once more.
 
 ## 10. The mesh branch (#99)
 
@@ -646,7 +697,13 @@ prints both. Operator detail is in
 1. **Simple flow, 0.11.0.** Sections 4 to 8. Proven as a user on installed
    packages on the Mac and alzan-prod: Story 1, Story 2 and Story 3 exactly as
    written, transcript clean on both sides, at 80 and 120 columns.
-2. **Sealed config sync.** Section 9. Story 8.
+2. **Sealed config sync.** Section 9. Story 8. Proven on the Mac and alzan-prod
+   from installed packages, on the network the milestone 1 proof joins: the Mac
+   switches its loadout and, within 60 seconds, `/config` on the server shows
+   the same loadout marked `managed by <mac device>`; the API key exists on
+   the server (same digest, mode 0600); no pane and no log on either host shows
+   a key; the server's OAuth login and vaults are untouched; a skill made and
+   deleted on the Mac appears and disappears on the server (`tests/live/m2`).
 3. **Mesh.** Section 10.
 4. **One-command self-host.** Section 11. Proven on selfhost.kollabor.ai
    (alzan-prod) with the one command in place of the relay, the publisher and the
@@ -687,6 +744,13 @@ document before it merges.
 - **primary**: the device whose config the network follows.
 
 ## 15. Open, ask Marco
+
+- The join-time key copy. Accepting a join still copies the issuer's active
+  API-key profile once, as a private profile `kollab-<16 hex>` on the joining
+  device (the milestone 1 provisioning path). The sealed config carries that
+  key now, so the copy is redundant and a duplicate loadout can show on the
+  joined device. Removing it touches the delegation store, the recovery
+  journal and the challenge scope, so it stays until Marco says remove it.
 
 - Story 1's no-network screen. Joining Marco's network by code needs a code
   field on a device with no network, so bare `/connect` there opens the code
