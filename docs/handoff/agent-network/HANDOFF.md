@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30, branch tip 432ad68 (code complete for milestones 1-4 and Story 5).
+network. Updated at every merge. Last update: 2026-09-30 08:40 MST, branch tip 3232c3d (5273 unit tests pass).
 
 ## Read first, in this order
 
@@ -118,6 +118,21 @@ runs; pipe output through `tail`; read functions, not whole files.
 6. **Reviews.** One capped review agent per milestone, then fixes, then re-run the
    affected live proof.
 7. **Ask Marco how to release.** Default: one release after everything is proven.
+
+## Live results on build 0.11.0.dev2 (432ad68), 2026-09-30
+
+- M1 re-proof: PASS 20/20, clean transcript, including the new `s3-overlap` (two shells, one agent).
+- M3 mesh: c1 (endpoints) and c2 (C joins) pass after proof-script fixes; c3 found a product bug (a peer
+  link outlived its TLS session and refused every replacement handshake), fixed in 716362c. Rerun on dev3.
+- Story 5: `/connect knock` and `/connect knocks` refused in an attached window (default launch); fixed in
+  aa1ccd1's parent (daemon RPCs). Rerun on dev3.
+- M4 self-host: `kollab relay serve --domain selfhost.kollabor.ai` runs on alzan-prod behind the edge
+  (tmux m4-serve); Story 6 join, message, no kollabor.ai, clean stop and same identity after restart all
+  pass. s6-09/s6-14 fail when the remote agent answers in plain text instead of hub_msg; the fix (forward the
+  final text when a request's turn sent no reply) is in progress. Rerun on dev3.
+- Also fixed from live runs: the join-request notice (a request prints one line even with the Connect
+  screen closed), and proof-script issues in m3 and m4 (see git log tests/live/).
+- The m4 edge helper hops through alzan-prod: alzan-edge's ssh accepts only alzan-prod's key.
 
 ## Decisions taken 2026-09-30 (Marco can veto)
 
