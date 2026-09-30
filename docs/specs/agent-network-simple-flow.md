@@ -618,8 +618,8 @@ How it stays secure with 40 bits:
   - Machine-local settings, which a secondary also refuses from its primary:
     `kollabor.updates`, `kollabor.permissions` (approval mode), `plugins.hub`,
     `plugins.voice`, version stamps.
-  - Symlinks and caches. A file over 512 KiB (30 KB compressed) and anything
-    past 1500 files is skipped and counted.
+  - Symlinks and caches. A file over 512 KiB (30 KB compressed), and anything
+    past 1500 files or 64 MiB in all, is skipped and counted.
 - Primary wins. The secondary sets every key the primary sends, keeps its own
   keys the primary does not send, and deletes a key or file the primary
   dropped. It records what it manages in `~/.kollab/private/managed-config.json`.
