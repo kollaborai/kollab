@@ -178,6 +178,10 @@ CONNECT_REMOVED = {
 # A finished join stays readable this long for a window that is still polling.
 _CONNECT_JOIN_KEEP_SECONDS = 900.0
 
+# How long an attached window waits to learn whether its daemon runs the relay
+# before it opens `/connect code` as if it does.
+_CONNECT_OWNER_CHECK_SECONDS = 1.5
+
 CODE_IN_COMMAND = (
     "connect: codes never go in a command. Run /connect with nothing after it "
     "and paste the code into the private form."
@@ -8968,13 +8972,50 @@ class HubPlugin(BasePlugin):
         return bool(getattr(getattr(self, "_cli_args", None), "attach", None))
 
     def _relay_owned_elsewhere(self) -> bool:
-        """True in a window whose workspace relay another window owns."""
+        """True in a process whose workspace relay another window owns."""
         if self._attached() or self._relay_commands is not None:
             return False
         try:
             return self._relay_agent.owner.owner() is not None
         except Exception:
             return False
+
+    def _shared_state_snapshot(self, domain: str):
+        """What a process that does not run the relay can say: network, trust, device."""
+        from .relay_commands import ConnectSnapshot
+
+        return ConnectSnapshot(
+            network=self._relay_network_name(domain) if domain else "",
+            domain=domain,
+            trust=self._relay_trust_level(),
+            device=self._relay_device_name(),
+            relay_online=False,  # not shown: only the owner sees the relay
+            read_only=True,
+        )
+
+    async def _read_only_snapshot(self, domain: str, fetched=None):
+        """The Connect screen's data when this window cannot act, else None.
+
+        A window that lost the workspace lock to another window knows it from
+        the lock. An attached window's daemon says it in its snapshot; the
+        caller may already hold that snapshot, and a fetch that stalls (a slow
+        relay behind the knock count) means the daemon runs the relay.
+        """
+        if not self._attached():
+            return (
+                self._shared_state_snapshot(domain)
+                if self._relay_owned_elsewhere()
+                else None
+            )
+        snapshot = fetched
+        if snapshot is None:
+            try:
+                snapshot = await asyncio.wait_for(
+                    self._attached_connect_snapshot(), _CONNECT_OWNER_CHECK_SECONDS
+                )
+            except asyncio.TimeoutError:
+                return None
+        return snapshot if snapshot is not None and snapshot.read_only else None
 
     async def _attached_connect_snapshot(self):
         """The daemon's Connect snapshot, or None when it cannot supply one."""
@@ -8994,10 +9035,12 @@ class HubPlugin(BasePlugin):
         from .relay_commands import NO_NETWORK
 
         status = None
+        snapshot = None
         if self._attached():
             # The daemon owns the relay, so the screen's data and decisions
             # come from it over the state service. A daemon too old to send a
-            # snapshot only has its status text to show.
+            # snapshot only has its status text to show; one that lost the
+            # workspace lock to another window sends a read-only snapshot.
             snapshot = await self._attached_connect_snapshot()
             if snapshot is None:
                 status = str(await self._attached_connect("status"))
@@ -9011,17 +9054,17 @@ class HubPlugin(BasePlugin):
                 if self._relay_commands is not None:
                     status = None
             domain = self._relay_network_domain()
-            if self._relay_owned_elsewhere():
-                # Another window runs the network: this one still opens the
-                # screen, read-only, and says so.
-                return await self._open_connect_screen(domain)
+        if (snapshot is not None and snapshot.read_only) or self._relay_owned_elsewhere():
+            # Another window runs the network: this one still opens the
+            # screen, read-only, and says so.
+            return await self._open_connect_screen(domain, snapshot=snapshot)
         if status is not None:
             if status.splitlines()[:1] == [NO_NETWORK]:
                 return await self._open_connect_altview("kollabor.ai")
             return status
         if not domain:
             return await self._open_connect_altview("kollabor.ai")
-        return await self._open_connect_screen(domain)
+        return await self._open_connect_screen(domain, snapshot=snapshot)
 
     async def _open_connect_altview(self, domain: str = "kollabor.ai") -> str:
         """Open the private enrollment form without putting its code in chat."""
@@ -9207,9 +9250,16 @@ class HubPlugin(BasePlugin):
         return result if result.get("status") else {"status": "failed"}
 
     async def _connect_snapshot(self):
-        """The Connect screen's data; only the process that owns the relay has it."""
+        """The Connect screen's data; only the process that owns the relay has it.
+
+        A process that lost the workspace lock to another window can still say
+        what the shared state knows, marked read-only, so the window attached
+        to it shows the same one line a second window does.
+        """
         commands = self._relay_commands
         if commands is None:
+            if self._relay_owned_elsewhere():
+                return self._shared_state_snapshot(self._relay_network_domain())
             raise ValueError("connect screen unavailable")
         return await commands.connect_snapshot()
 
@@ -9230,12 +9280,13 @@ class HubPlugin(BasePlugin):
         return ""
 
     async def _open_connect_screen(
-        self, domain: str, *, code_only: bool = False
+        self, domain: str, *, code_only: bool = False, snapshot=None
     ) -> str:
         """Open the Connect screen; `/connect code` opens only its private code.
 
         The join code is created here and shown only in the private view: it
         never goes through the message coordinator, history, or a log.
+        ``snapshot`` is the attached daemon's, when the caller already has it.
         """
         if not self.event_bus:
             return "connect: the Connect screen is unavailable"
@@ -9291,18 +9342,7 @@ class HubPlugin(BasePlugin):
             # Another window owns the relay: a code, a request and a decision
             # all live there, so this screen shows what the shared state says
             # and offers nothing else.
-            note = CONNECT_OWNED_ELSEWHERE if self._relay_owned_elsewhere() else ""
-            snapshot = (
-                ConnectSnapshot(
-                    network=self._relay_network_name(domain) if domain else "",
-                    domain=domain,
-                    trust=self._relay_trust_level(),
-                    device=self._relay_device_name(),
-                    relay_online=False,  # not shown: only the owner sees the relay
-                )
-                if note and not code_only
-                else None
-            )
+            read_only = await self._read_only_snapshot(domain, snapshot)
             await stack_mgr.push(
                 ConnectScreenAltView(
                     domain=domain,
@@ -9310,8 +9350,8 @@ class HubPlugin(BasePlugin):
                     on_load=None if code_only else load,
                     on_decide=None if code_only else decide,
                     code_only=code_only,
-                    snapshot=snapshot,
-                    note=note,
+                    snapshot=None if code_only else read_only,
+                    note=CONNECT_OWNED_ELSEWHERE if read_only is not None else "",
                 ),
                 "connect-code" if code_only else "connect-screen",
                 reuse=False,

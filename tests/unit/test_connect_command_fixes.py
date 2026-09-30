@@ -366,7 +366,7 @@ async def test_bare_connect_in_a_follower_window_opens_the_screen_not_the_status
 
     follower._run_connect_command.assert_awaited_once_with("status")
     follower._open_connect_altview.assert_not_awaited()
-    follower._open_connect_screen.assert_awaited_once_with("kollabor.ai")
+    follower._open_connect_screen.assert_awaited_once_with("kollabor.ai", snapshot=None)
 
 
 @pytest.mark.asyncio
@@ -380,7 +380,7 @@ async def test_bare_connect_in_a_follower_window_with_no_network_opens_the_scree
     await follower._handle_connect_command("")
 
     follower._open_connect_altview.assert_not_awaited()
-    follower._open_connect_screen.assert_awaited_once_with("")
+    follower._open_connect_screen.assert_awaited_once_with("", snapshot=None)
 
 
 @pytest.mark.asyncio
@@ -392,7 +392,7 @@ async def test_bare_connect_in_the_owner_window_still_opens_the_screen():
     await owner._handle_connect_command("")
 
     owner._run_connect_command.assert_not_awaited()
-    owner._open_connect_screen.assert_awaited_once_with("kollabor.ai")
+    owner._open_connect_screen.assert_awaited_once_with("kollabor.ai", snapshot=None)
 
 
 # ------------------------------------------------------ remote-target refusals

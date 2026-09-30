@@ -30,7 +30,8 @@ from plugins.altview.connect_altview import (
     ConnectScreenState,
     connect_screen_lines,
 )
-from plugins.hub.plugin import HubPlugin
+from plugins.hub import plugin as plugin_module
+from plugins.hub.plugin import CONNECT_OWNED_ELSEWHERE, HubPlugin
 from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow
 from plugins.hub.relay_state import RelayError
 
@@ -339,19 +340,123 @@ async def test_attached_bare_connect_falls_back_to_status_text_for_an_old_daemon
     assert stack.push.await_count == 0
 
 
-@pytest.mark.asyncio
-async def test_attached_bare_connect_falls_back_when_the_daemon_is_not_the_owner():
-    rig = _Rig()
-    rig.daemon._relay_commands = None  # the daemon does not own the relay
-    rig.remote.hub_connect = AsyncMock(
-        return_value="network marco-home via kollabor.ai"
+def _daemon_lost_the_lock(rig: _Rig) -> None:
+    """The daemon's workspace relay is owned by another window (a --no-daemon one)."""
+    rig.daemon._relay_commands = None
+    rig.daemon._relay_agent.owner = SimpleNamespace(owner=lambda: {"pid": 4242})
+    rig.daemon._relay_agent._state = lambda: SimpleNamespace(
+        state=SimpleNamespace(origin="https://kollabor.ai")
     )
+    rig.remote.hub_connect = AsyncMock(return_value="network marco-home via kollabor.ai")
+
+
+async def _rendered(rig: _Rig, size=(100, 30)):
+    view, name = rig.pushed()
+    renderer = _FakeRenderer(size)
+    await view.on_enter(renderer)
+    await view.render_frame(0.0)
+    text = renderer.text()
+    await view.on_complete()
+    return view, name, text
+
+
+@pytest.mark.asyncio
+async def test_attached_bare_connect_in_a_daemon_that_is_not_the_owner_opens_the_read_only_screen():
+    rig = _Rig()
+    _daemon_lost_the_lock(rig)
+
+    assert await rig.window._handle_connect_command("") == ""
+
+    view, name, text = await _rendered(rig)
+    assert name == "connect-screen" and type(view) is ConnectScreenAltView
+    assert "network      marco-home  via kollabor.ai   trust: open" in text
+    assert "this device  alzan-prod-home" in text
+    assert CONNECT_OWNED_ELSEWHERE in text
+    assert "join code" not in text and "requests" not in text and "online" not in text
+    rig.remote.hub_connect.assert_not_awaited()  # not the status text
+    methods = [method for method, _ in rig.wire_calls]
+    assert methods == ["state.hub_connect_snapshot"]  # asked once, nothing else
+
+
+@pytest.mark.asyncio
+async def test_attached_connect_code_in_a_daemon_that_is_not_the_owner_offers_no_code():
+    rig = _Rig()
+    _daemon_lost_the_lock(rig)
+
+    assert await rig.window._handle_connect_command("code") == ""
+
+    view, name, text = await _rendered(rig)
+    assert name == "connect-code" and view.code_only
+    assert CONNECT_OWNED_ELSEWHERE in text
+    assert "join code" not in text and "creating" not in text and "press c" not in text
+    assert "state.hub_enrollment_offer" not in [m for m, _ in rig.wire_calls]
+
+
+@pytest.mark.asyncio
+async def test_attached_connect_code_in_a_daemon_that_owns_the_relay_is_unchanged():
+    rig = _Rig()
+
+    assert await rig.window._handle_connect_command("code") == ""
+
+    view, name = rig.pushed()
+    assert name == "connect-code" and view.code_only and view._note == ""
+    assert view._on_create is not None
+    # One snapshot to learn the daemon runs the relay; the code comes from it.
+    assert [m for m, _ in rig.wire_calls] == ["state.hub_connect_snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_attached_connect_code_does_not_wait_on_a_slow_daemon_snapshot(monkeypatch):
+    rig = _Rig()
+    monkeypatch.setattr(plugin_module, "_CONNECT_OWNER_CHECK_SECONDS", 0.01)
+
+    async def slow():
+        await asyncio.sleep(5)
+
+    rig.remote.hub_connect_snapshot = slow
+
+    assert await rig.window._handle_connect_command("code") == ""
+
+    view, name = rig.pushed()
+    assert name == "connect-code" and view._note == ""  # a busy daemon runs the relay
+
+
+@pytest.mark.asyncio
+async def test_attached_bare_connect_in_a_daemon_that_is_not_the_owner_and_has_no_network():
+    rig = _Rig()
+    _daemon_lost_the_lock(rig)
+    rig.daemon._relay_agent._state = lambda: SimpleNamespace(
+        state=SimpleNamespace(origin="")
+    )
+
+    assert await rig.window._handle_connect_command("") == ""
+
+    _view, name, text = await _rendered(rig)
+    assert name == "connect-screen"
+    assert "network      none" in text and CONNECT_OWNED_ELSEWHERE in text
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_with_no_relay_bridge_at_all_still_falls_back_to_status_text():
+    rig = _Rig()
+    rig.daemon._relay_commands = None  # not the owner, and no other owner either
+    rig.remote.hub_connect = AsyncMock(return_value="network marco-home via kollabor.ai")
 
     assert await rig.window._handle_connect_command("") == (
         "network marco-home via kollabor.ai"
     )
 
     assert rig.stack.push.await_count == 0
+
+
+def test_a_snapshot_from_a_daemon_that_predates_read_only_is_a_normal_one():
+    wire = _snapshot().to_wire()
+    del wire["read_only"]
+
+    assert ConnectSnapshot.from_wire(wire).read_only is False
+    assert ConnectSnapshot.from_wire({**wire, "read_only": True}).read_only is True
+    with pytest.raises(ValueError):
+        ConnectSnapshot.from_wire({**wire, "read_only": "yes"})
 
 
 @pytest.mark.asyncio

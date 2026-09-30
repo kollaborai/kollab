@@ -174,6 +174,8 @@ workspace with no daemon opens the same screen read-only: the network and this
 device, then `another window in this workspace runs the network; use /connect
 there`. It shows no code, requests or roster and takes no `a`/`r`, because a
 code, a request and a decision all live in the window that runs the network.
+An attached window whose daemon lost the workspace to such a window gets the
+same screen, read from the daemon.
 
 ### Story 2: Marco asks his agent to have the server agent check the tunnel
 

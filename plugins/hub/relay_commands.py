@@ -55,6 +55,10 @@ class ConnectSnapshot:
     local_agents: tuple[str, ...] = ()
     remote_agents: tuple[str, ...] = ()
     offline_devices: tuple[str, ...] = ()
+    # True when the process that built this does not run the relay (another
+    # window in the workspace does): only the network, trust and device are
+    # known, and the screen offers no code or decisions.
+    read_only: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         """Plain JSON types, for the daemon's reply to an attached window.
@@ -72,6 +76,7 @@ class ConnectSnapshot:
             "local_agents": list(self.local_agents),
             "remote_agents": list(self.remote_agents),
             "offline_devices": list(self.offline_devices),
+            "read_only": self.read_only,
             "requests": [
                 {
                     "enrollment_id": row.enrollment_id,
@@ -102,7 +107,12 @@ class ConnectSnapshot:
             "offline_devices",
             "requests",
         }
-        if not isinstance(value, dict) or set(value) != fields:
+        # A daemon that predates ``read_only`` sends none: the screen is normal.
+        if (
+            not isinstance(value, dict)
+            or not fields <= set(value) <= fields | {"read_only"}
+            or not isinstance(value.get("read_only", False), bool)
+        ):
             raise ValueError("invalid connect snapshot")
         knocks = value["knocks"]
         if (
@@ -150,6 +160,7 @@ class ConnectSnapshot:
             local_agents=_wire_texts(value["local_agents"]),
             remote_agents=_wire_texts(value["remote_agents"]),
             offline_devices=_wire_texts(value["offline_devices"]),
+            read_only=value.get("read_only", False),
         )
 
 

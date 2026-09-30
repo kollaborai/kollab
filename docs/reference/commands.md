@@ -265,7 +265,9 @@ Removed. Each prints its redirect for one release instead of running:
   daemon (one window owns the network) opens the screen read-only: the network
   and this device, then `another window in this workspace runs the network; use
   /connect there`, with no code, requests, roster or `a`/`r`. `/connect code`
-  there says the same line, and so does a workspace with no network.
+  there says the same line, and so does a workspace with no network. An
+  attached window whose daemon lost the workspace to a single-process window
+  gets the same screen, read from the daemon.
   `/connect knocks` opens the review for the joined directory: up/down select a
   knock and `a`/`r` act on the marked row.
 - On the joining device the code form answers as soon as the relay has the
