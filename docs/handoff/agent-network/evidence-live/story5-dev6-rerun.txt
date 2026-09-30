@@ -1,0 +1,21 @@
+pre-installed-build                PASS   -
+pre-relay-links                    PASS   -
+pre-fresh-workspaces               PASS   -
+pre-llm-login                      PASS   -
+s0-launch                          PASS   s0-01-mac-launch.txt
+s1-two-networks                    PASS   s1-03-mac-hub-status.txt
+s1-mac-has-two-agents              PASS   s1-03-mac-hub-status.txt
+s2-mac-contact-route               PASS   s2-01-mac-status.txt
+s3-server-knocks                   PASS   s3-01-srv-knock.txt
+s4-mac-accepts-knock               PASS   s4-02-mac-accepted.txt
+s5-mac-allows-one-agent            PASS   s5-01-mac-allow.txt
+s6-link-and-visibility             PASS   s6-01-srv-hub-status.txt
+s7-delivered-and-answered          PASS   s7-01-allowed-reply.txt
+s8-other-agent-unreachable         PASS   s8-01-other-agent.txt
+s9-deny-refuses                    PASS   s9-01-after-deny.txt
+s10-allow-again-works              PASS   s10-01-reallowed-reply.txt
+s11-revoke-cuts-the-link           PASS   s11-01-after-revoke.txt
+z1-panes-clean                     PASS   -
+z2-log-mac                         PASS   logscan-mac.txt
+z2-log-srv                         PASS   logscan-srv.txt
+PASS: 20 steps, transcript clean.

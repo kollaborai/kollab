@@ -233,3 +233,6 @@ docs/scratchpad/
 # Claude Code session artifacts
 /2026-*-deploy-handoff-*.txt
 /2027-*-deploy-handoff-*.txt
+
+# Live proof evidence (captures, logs) stays local
+tests/live/*/evidence/

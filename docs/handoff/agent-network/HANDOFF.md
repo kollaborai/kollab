@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30 11:10 MST, branch tip 6751917 = build 0.11.0.dev5.
+network. Updated at every merge. Last update: 2026-09-30 12:20 MST. All milestones proven live on build 0.11.0.dev6 (cc50acf).
 
 ## Read first, in this order
 
@@ -38,8 +38,8 @@ network. Updated at every merge. Last update: 2026-09-30 11:10 MST, branch tip 6
   pushed, no PR.
 - Unit suite at 432ad68: 5242 passed, 9 skipped
   (`KOLLAB_NO_KEYRING=1 .venv/bin/python -m pytest tests/unit/ -q`, ~80 s).
-- Relay on kollabor.ai: release 20260930-6751917, deployed 2026-09-30 10:47 MST, all routes live.
-  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-104701
+- Relay on kollabor.ai: release 20260930-cc50acf, deployed 2026-09-30 11:36 MST, all routes live.
+  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-113640
   /etc/systemd/system/kollab-relay.service.d/source-v2.conf && sudo systemctl daemon-reload &&
   sudo systemctl restart kollab-relay.service`. Deploy from a clean worktree: the script refuses a
   dirty tree, and the main checkout has the three foreign files.
@@ -105,7 +105,7 @@ runs; pipe output through `tail`; read functions, not whole files.
    branch `worktree-agent-a6deca3db4a406544` (merge it with the M2/M3 finishes);
    what is left is in `agent-reports/manual-trust-numbers.md`.
 4. **Small follow-ups**. DONE on branch `worktree-agent-af4249fd94ef7790b` (merge it with the others): the `hub_cron_add` failure text, the `hub_msg` tool definition, the `relay:` address in the outgoing box, the `authorize` expiry time and the `relay serve` stop republish. The two follow-ups still in the section below are not done; notes in `agent-reports/small-fixes.md`.
-5. **Live runs, one at a time.** IN PROGRESS: wheels 0.11.0.dev2 from 432ad68 installed; the M1
+5. **Live runs, one at a time.** DONE: all five pass on dev6 (see Final state). Setup was: wheels 0.11.0.dev2 from 432ad68 installed; the M1
    re-proof runs in workspaces `~/kollab-m1-mac-r8` / `~/kollab-m1-server-r8`
    (`M1_VERSION=0.11.0.dev2 M1_MAC_WS=$HOME/kollab-m1-mac-r8 M1_SRV_WS_NAME=kollab-m1-server-r8`). Build and install first:
    `bash tests/live/m1/build_wheels.sh <ref> <dir>` then `install_both.sh <dir>`.
@@ -119,9 +119,26 @@ runs; pipe output through `tail`; read functions, not whole files.
    affected live proof.
 7. **Ask Marco how to release.** Default: one release after everything is proven.
 
+## Final state: every milestone proven live on 0.11.0.dev6 (cc50acf), 2026-09-30
+
+Both machines ran the installed build, default launch, relay 20260930-cc50acf; every transcript clean.
+
+| Proof | Result | Evidence |
+|---|---|---|
+| M1 simple flow (Stories 1-3, overlap, 80 columns) | PASS 20/20 | `evidence-live/final-round-dev6-summary.txt` |
+| M2 sealed config sync (Story 8) | PASS 11/11 | same |
+| M3 mesh (A -> B -> C, C on no relay) | PASS 13/13 | same |
+| M4 one-command self-host (Story 6, restart) | PASS 27/27 | same |
+| Story 5 strangers (knock, allow, deny, revoke) | PASS 20/20 | `evidence-live/story5-dev6-rerun.txt` |
+
+Story 5's first dev6 run passed every functional step; its transcript scan caught a harness keystroke
+loss (`/connect knoks`). The shared typing helper now checks slash commands before Enter (7f6c126,
+96a94ce) and the rerun on the same build passed clean. selfhost.kollabor.ai runs the one command
+(tmux `m4-serve` on alzan-prod). Nothing is pushed; no PR, issue or release.
+
 ## Round on build 0.11.0.dev5 (6751917), 2026-09-30 10:40-11:07
 
-Summary: `evidence-dev3/final-round-dev5-summary.txt`.
+Summary: `evidence-live/final-round-dev5-summary.txt`.
 
 - PASS, clean transcript: M1 20/20 (Story 3 and the overlap now pass: the turn-end fix works on the member
   path), M2 11/11, M4 27/27.
@@ -133,7 +150,7 @@ Summary: `evidence-dev3/final-round-dev5-summary.txt`.
 
 ## Round on build 0.11.0.dev4 (f0dec4c), 2026-09-30 09:47-10:24
 
-Summaries: `evidence-dev3/final-round-dev4-summary.txt`, `evidence-dev3/m1-m3-rerun-dev4-summary.txt`.
+Summaries: `evidence-live/final-round-dev4-summary.txt`, `evidence-live/m1-m3-rerun-dev4-summary.txt`.
 
 - PASS, clean transcript: M2 11/11 (sealed config sync live, after the stale managed-record fix),
   Story 5 20/20, M4 27/27, and M1 20/20 in the first run.
@@ -148,7 +165,7 @@ Summaries: `evidence-dev3/final-round-dev4-summary.txt`, `evidence-dev3/m1-m3-re
 
 ## Final round on build 0.11.0.dev3 (71798d1), 2026-09-30 08:43-09:09
 
-Summary: `evidence-dev3/final-round-summary.txt`. Driver: the scratchpad `final_round.sh` (build, relay deploy,
+Summary: `evidence-live/final-round-summary.txt`. Driver: the scratchpad `final_round.sh` (build, relay deploy,
 install both, every proof, cleanup that keeps the selfhost one command running).
 
 - M1: PASS 20/20, clean transcript.
