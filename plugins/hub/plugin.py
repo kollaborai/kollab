@@ -171,12 +171,12 @@ CONNECT_ADVANCED = [
         "<agent@device> <request>",
         "Authorize and send one request (trust manual)",
     ),
-    SubcommandInfo("withdraw", "<grant-id>", "Withdraw a sending grant (trust manual)"),
+    SubcommandInfo("withdraw", "<number>", "Withdraw a request you authorized (trust manual)"),
     SubcommandInfo(
-        "answer", "<event-id> <text>", "Answer a pending question (trust manual)"
+        "answer", "<number> <text>", "Answer a pending question (trust manual)"
     ),
-    SubcommandInfo("task", "<agent@device> <id>", "Inspect a remote task (trust manual)"),
-    SubcommandInfo("cancel", "<agent@device> <id>", "Cancel a remote task (trust manual)"),
+    SubcommandInfo("task", "<agent@device> <number>", "Inspect a remote request (trust manual)"),
+    SubcommandInfo("cancel", "<agent@device> <number>", "Cancel a remote request (trust manual)"),
     SubcommandInfo("rotate", "", "Replace the network secret after a lost device"),
 ]
 
@@ -3062,7 +3062,10 @@ class HubPlugin(BasePlugin):
             )
         elif msg.metadata.get("relay_receipt"):
             receipt = msg.metadata["relay_receipt"]
-            output = f"remote task {receipt['id']}: {receipt['state']}; acceptance is not completion"
+            output = (
+                f"remote {self._remote_request_label(msg, receipt)}: "
+                f"{receipt['state']}; acceptance is not completion"
+            )
         elif handle:
             # The network accepted it (a rejection returned above). Local
             # presence knows nothing of agent@device, so it cannot say the peer
@@ -7506,6 +7509,25 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.warning(f"Hub message display failed: {e}")
 
+    def _remote_request_label(self, message, receipt) -> str:
+        """`request N` for a request a human authorized, the event kind for the rest.
+
+        A screen shows the network's short number, never the real id.
+        """
+        kind = message.metadata.get("relay_kind", "message")
+        if kind != "message":
+            return kind
+        try:
+            return f"request {self._relay_agent.number('request', receipt['id'])}"
+        except Exception:  # a number is a courtesy; the line still says what happened
+            return "request"
+
+    def _relay_question_number(self, event_id) -> int | None:
+        try:
+            return self._relay_agent.number("question", event_id)
+        except Exception:
+            return None
+
     def _display_hub_message(self, message: HubMessage) -> None:
         """Display an incoming hub message with agent-colored TagBox.
 
@@ -7541,23 +7563,23 @@ class HubPlugin(BasePlugin):
             and not is_operator_direct
         )
 
+        # Manual-trust relay events carry the sender's verified address; a screen
+        # shows the name and the short number instead (section 13).
+        meta = message.metadata or {}
+        sender = meta.get("display_from") or message.from_identity
+        content = message.content
+        if meta.get("relay_event") == "question":
+            number = self._relay_question_number(meta.get("relay_event_id"))
+            if number:
+                content += f" (answer with /connect answer {number} <text>)"
+
         if is_human_elsewhere:
             # Show "user -> koordinator" (observed), not "user -> lapis"
-            self._render_hub_box(
-                message.from_identity,
-                source_agent,
-                message.content,
-                observing=True,
-            )
+            self._render_hub_box(sender, source_agent, content, observing=True)
         elif is_intended:
-            self._render_hub_box(message.from_identity, my_name, message.content)
+            self._render_hub_box(sender, my_name, content)
         else:
-            self._render_hub_box(
-                message.from_identity,
-                message.to,
-                message.content,
-                observing=True,
-            )
+            self._render_hub_box(sender, message.to, content, observing=True)
 
     def _display_outgoing_message(self, to_name: str, content: str) -> None:
         """Display an outgoing hub message with agent-colored TagBox."""

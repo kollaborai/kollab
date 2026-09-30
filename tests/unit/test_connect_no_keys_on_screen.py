@@ -14,7 +14,7 @@ import os
 import re
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,15 @@ from plugins.hub.device_names import key_label
 from plugins.hub.dns.discovery import DiscoveryResult
 from plugins.hub.plugin import CONNECT_OWNED_ELSEWHERE, HubPlugin, format_connect_help
 from plugins.hub.relay_commands import RelayCommands
+
+from .test_relay_agent_bridge import (  # noqa: F401 - bridges is a fixture
+    address,
+    allow,
+    authorize,
+    bridges,
+    handle,
+    in_turn,
+)
 
 LEAK = re.compile(r"[0-9a-f]{32,}|ed25519:|relay:|receipt", re.IGNORECASE)
 
@@ -264,4 +273,91 @@ async def test_no_key_receipt_or_relay_address_on_any_connect_surface(
         for name, text in surfaces.items()
         if (match := LEAK.search(text))
     }
+    assert leaks == {}
+
+
+@pytest.mark.asyncio
+async def test_manual_trust_commands_print_numbers_never_ids_or_relay_addresses(bridges):  # noqa: F811
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    allow(left, right)
+    target = await handle(left, right)
+
+    surfaces = {"authorize": await left.command(f"authorize {target} Create proof.txt")}
+    surfaces["withdraw"] = await left.command("withdraw 1")
+    surfaces["send"] = await left.command(f"send {target} Create proof.txt")
+    await right._tick()
+    surfaces["task"] = await left.command(f"task {target} 2")
+    surfaces["cancel"] = await left.command(f"cancel {target} 2")
+    # The refusals print what the human typed, or nothing of the ids.
+    surfaces["stale withdraw"] = await left.command("withdraw 99")
+    surfaces["stale task"] = await left.command(f"task {target} 99")
+    surfaces["stale answer"] = await left.command("answer 99 hi")
+    surfaces["hex id"] = await left.command("withdraw " + "a" * 32)
+    for usage in ("withdraw", "answer 1", f"task {target}", f"cancel {target}"):
+        surfaces["usage " + usage] = await left.command(usage)
+
+    # Non-vacuous: the numbers really are what the screens say.
+    assert "request 1;" in surfaces["authorize"]
+    assert surfaces["withdraw"].startswith("request 1 withdrawn")
+    assert surfaces["send"].startswith(f"request 2 to {target}: ")
+    assert surfaces["task"].startswith(f"request 2 on {target}: ")
+    assert surfaces["cancel"].startswith(f"request 2 on {target}: ")
+    leaks = {name: text for name, text in surfaces.items() if LEAK.search(text)}
+    assert leaks == {}
+
+
+@pytest.mark.asyncio
+async def test_manual_trust_events_show_name_and_number_never_ids_or_relay_addresses(
+    bridges,  # noqa: F811
+):
+    members, _ = bridges
+    (left, left_hub, *_), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    grant = authorize(left, right, "Create proof.txt")
+    surfaces = {
+        "tool result, start": (
+            await left_hub._handle_hub_msg_tool(
+                {
+                    "id": "start",
+                    "to": address(right),
+                    "content": "Create proof.txt",
+                    "thread_id": grant["id"],
+                }
+            )
+        ).output
+    }
+    await right._tick()
+    # The remote task lands on the far screen under the sender's name.
+    for index, call in enumerate(right_hub._display_hub_message.call_args_list):
+        message = call.args[0]
+        surfaces[f"far sender {index}"] = (
+            message.metadata.get("display_from") or message.from_identity
+        )
+
+    question = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    surfaces["tool result, question"] = question.output
+    payload = left.store.event(question.metadata["relay_receipt"]["id"])["payload"]
+    left_hub._render_hub_box = MagicMock()
+    HubPlugin._display_hub_message(left_hub, left._correlated_event_message(payload))
+    sender, to, content = left_hub._render_hub_box.call_args.args
+    surfaces["question box"] = f"{sender} -> {to}\n{content}"
+    number = left.number("question", payload["id"])
+    surfaces["answer"] = await left.command(f"answer {number} Use the workspace root.")
+
+    assert surfaces["tool result, start"].startswith("remote request 1: ")
+    assert surfaces["far sender 0"].count("@") == 1
+    assert f"(answer with /connect answer {number} <text>)" in surfaces["question box"]
+    assert surfaces["answer"].startswith(f"question {number} answered: ")
+    leaks = {name: text for name, text in surfaces.items() if LEAK.search(text)}
     assert leaks == {}

@@ -138,6 +138,12 @@ def _safe_enrollment_offer_result(value) -> dict[str, str]:
     }
 
 
+def _receipt_line(label: str, receipt: dict) -> str:
+    """One human line for a receipt: the state and why, never the receipt itself."""
+    extra = receipt.get("reason") or receipt.get("detail")
+    return f"{label}: {receipt.get('state', 'unknown')}" + (f" ({extra})" if extra else "")
+
+
 @dataclass
 class ActiveRelayTask:
     record: dict = field(repr=False)  # peer key, addresses and message ids
@@ -2117,6 +2123,7 @@ class RelayAgentBridge:
                 "relay_reply_to": payload["id"],
                 "relay_parent_reply_to": payload["reply_to"],
                 "relay_peer": payload["from"],
+                "display_from": self._sender_handle(payload),
             },
         )
 
@@ -2187,7 +2194,11 @@ class RelayAgentBridge:
             scope=MessageScope.DIRECT.value,
             thread_id=payload["thread_id"],
             reply_to=payload["reply_to"],
-            metadata={"relay_event": payload["kind"]},
+            metadata={
+                "relay_event": payload["kind"],
+                "relay_event_id": payload["id"],
+                "display_from": self._sender_handle(payload),
+            },
         )
         self.plugin._display_hub_message(message)
 
@@ -2469,6 +2480,35 @@ class RelayAgentBridge:
         """The human name for a peer key: its bound device name, never the key."""
         return self._state().state.peer_devices.get(peer_key) or key_label(peer_key)
 
+    def number(self, kind: str, ref: str) -> int:
+        """The short number a screen shows for a request or a question on this network."""
+        return self.store.number(self.commands.client.state.room, kind, ref)
+
+    def _resolve_number(self, kind: str, text: str) -> tuple[int, str]:
+        """The number a human typed and the real id behind it; unknown or stale is refused."""
+        if not (text.isascii() and text.isdigit()) or len(text) > 9:
+            raise RelayError(f"give the {kind} number that /connect printed")
+        ref = self.store.resolve_number(
+            self.commands.client.state.room, kind, int(text)
+        )
+        if ref is None:
+            raise RelayError(f"no {kind} numbered {int(text)} on this network")
+        return int(text), ref
+
+    def _sender_handle(self, payload) -> str:
+        """agent@device for a relay sender: the name this network bound, never the address."""
+        try:
+            key = RelayAddress.parse(payload["from"]).key
+            device = (
+                self._state().state.peer_devices.get(key)
+                or payload.get("from_device")
+                or key_label(key)
+            )
+            return format_handle(payload["from_identity"], device)
+        except (RelayError, KeyError, TypeError, ValueError):
+            # A label must never block delivery, and never falls back to the address.
+            return "remote agent"
+
     async def application_command(self, head, rest, source_agent=None):
         self._require_human_network_context(
             "remote model turns cannot issue human network commands"
@@ -2535,8 +2575,12 @@ class RelayAgentBridge:
             grant = self.store.authorize_contact(
                 client.state.room, sender, target, content, ttl=TASK_TIMEOUT
             )
+            number = self.number("request", grant["id"])
             if head == "authorize":
-                return f"communication authorized: {grant['id']}; expires at {grant['expires']}; recipient {handle}"
+                return (
+                    f"communication authorized: request {number}; "
+                    f"expires at {grant['expires']}; recipient {handle}"
+                )
             receipt = await self.send(
                 target,
                 content,
@@ -2544,19 +2588,21 @@ class RelayAgentBridge:
                 grant_id=grant["id"],
                 source_agent=source_agent,
             )
-            return "remote receipt: " + json.dumps(receipt, sort_keys=True)
+            return _receipt_line(f"request {number} to {handle}", receipt)
         if head == "withdraw":
             if len(parts) != 1:
-                return "usage: /connect withdraw <grant-id>"
-            self.store.withdraw_contact(client.state.room, parts[0])
+                return "usage: /connect withdraw <number>"
+            number, grant_id = self._resolve_number("request", parts[0])
+            self.store.withdraw_contact(client.state.room, grant_id)
             return (
-                "communication withdrawn; late replies cannot start work here; "
+                f"request {number} withdrawn; late replies cannot start work here; "
                 "use /connect cancel to stop remote work"
             )
         if head == "answer":
-            question_id, sep, content = rest.partition(" ")
+            number_text, sep, content = rest.partition(" ")
             if not sep or not content.strip():
-                return "usage: /connect answer <event-id> <text>"
+                return "usage: /connect answer <number> <text>"
+            number, question_id = self._resolve_number("question", number_text)
             question = self.store.event(question_id)
             if (
                 question is None
@@ -2593,21 +2639,22 @@ class RelayAgentBridge:
                 kind="answer",
                 source_agent=agent.agent_id,
             )
-            return "conversation answer: " + json.dumps(receipt, sort_keys=True)
+            return _receipt_line(f"question {number} answered", receipt)
         if head in {"task", "cancel"}:
             if len(parts) != 2:
-                return f"usage: /connect {head} <agent@device> <message id>"
+                return f"usage: /connect {head} <agent@device> <number>"
             address = RelayAddress.parse(await self.resolve_handle(parts[0]))
+            number, request_id = self._resolve_number("request", parts[1])
             if self.secure_transport is None:
                 raise RelayError("secure conversation transport is unavailable")
             receipt = await self.secure_transport.request(
                 address.key,
                 "status" if head == "task" else "cancel",
-                {"to": str(address), "id": parts[1]},
+                {"to": str(address), "id": request_id},
             )
             if head == "cancel":
-                self.store.forget_expectation(parts[1], room=client.state.room)
-            return json.dumps(receipt, sort_keys=True)
+                self.store.forget_expectation(request_id, room=client.state.room)
+            return _receipt_line(f"request {number} on {parts[0]}", receipt)
         raise RelayError("unsupported conversation command")
 
     def _authorize_active(self, *, turn_id=None):
@@ -2726,7 +2773,7 @@ class RelayAgentBridge:
                 scope=MessageScope.DIRECT.value,
                 thread_id=payload["thread_id"],
                 reply_to=payload["reply_to"],
-                metadata={},
+                metadata={"display_from": self._sender_handle(payload)},
             )
             self._injecting_message = message
             await self.plugin._on_message_received(message)

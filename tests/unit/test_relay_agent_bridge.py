@@ -2476,9 +2476,10 @@ async def test_manual_commands_take_and_print_agent_at_device_never_a_relay_addr
         )
     for usage in ("task", "cancel"):
         assert await left.command(f"{usage} {target}") == (
-            f"usage: /connect {usage} <agent@device> <message id>"
+            f"usage: /connect {usage} <agent@device> <number>"
         )
-    assert await left.command("withdraw") == "usage: /connect withdraw <grant-id>"
+    assert await left.command("withdraw") == "usage: /connect withdraw <number>"
+    assert await left.command("answer 1") == "usage: /connect answer <number> <text>"
 
 
 @pytest.mark.asyncio
@@ -2499,3 +2500,154 @@ async def test_manual_commands_refuse_a_relay_address_and_an_unknown_handle(brid
             assert refused.startswith("connect: unknown agent@device"), (command, refused)
             assert "relay:" not in refused
     assert left.store.contacts(left.commands.client.state.room) == []
+
+
+# --- manual trust: a human types short numbers, never ids or relay addresses ---
+
+
+@pytest.mark.asyncio
+async def test_conversation_numbers_are_stable_per_network_and_never_reused(
+    bridges, monkeypatch
+):
+    import plugins.hub.relay_conversations as conversations
+
+    members, _ = bridges
+    (left, *_), _ = members
+    store, room, other = left.store, left.commands.client.state.room, "c" * 64
+    ids = [secrets.token_hex(16) for _ in range(6)]
+
+    assert store.number(room, "request", ids[0]) == 1
+    assert store.number(room, "question", ids[1]) == 2  # one count for both kinds
+    assert store.number(room, "request", ids[0]) == 1  # stable while the item lives
+    assert store.number(other, "request", ids[2]) == 1  # each network counts alone
+    assert store.resolve_number(room, "request", 1) == ids[0]
+    assert store.resolve_number(room, "question", 2) == ids[1]
+    assert store.resolve_number(room, "request", 2) is None  # a question is no request
+    assert store.resolve_number(room, "request", 9) is None
+    assert store.resolve_number(other, "request", 2) is None
+    for bad in ("", "nothex", "A" * 32):
+        with pytest.raises(RelayError):
+            store.number(room, "request", bad)
+    with pytest.raises(RelayError):
+        store.number(room, "thread", ids[3])
+
+    # Only numbers far behind the newest are dropped, and a dropped number is
+    # never handed out again.
+    monkeypatch.setattr(conversations, "NUMBER_KEEP", 2)
+    assert [store.number(room, "request", ref) for ref in ids[3:]] == [3, 4, 5]
+    assert [store.resolve_number(room, "request", n) for n in (1, 2, 3)] == [None] * 3
+    assert store.resolve_number(room, "request", 5) == ids[5]
+    assert store.number(room, "request", secrets.token_hex(16)) == 6
+
+
+@pytest.mark.asyncio
+async def test_manual_commands_print_and_take_short_numbers(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    allow(left, right)
+    target = await handle(left, right)
+    room = left.commands.client.state.room
+
+    first = await left.command(f"authorize {target} Create proof.txt")
+    second = await left.command(f"authorize {target} Create proof.txt")
+    assert first.startswith("communication authorized: request 1; expires at ")
+    assert first.endswith(f"recipient {target}")
+    assert second.startswith("communication authorized: request 2;")
+    one = left.store.resolve_number(room, "request", 1)
+    two = left.store.resolve_number(room, "request", 2)
+    assert {one, two} == {g["id"] for g in left.store.contacts(room)}
+
+    withdrawn = await left.command("withdraw 1")
+    assert withdrawn.startswith("request 1 withdrawn; late replies cannot start work")
+    states = {g["id"]: g["state"] for g in left.store.contacts(room)}
+    assert (states[one], states[two]) == ("revoked", "ready")
+
+    sent = await left.command(f"send {target} Create proof.txt")
+    assert sent.startswith(f"request 3 to {target}: ")
+    await right._tick()
+    assert (await left.command(f"task {target} 3")).startswith(
+        f"request 3 on {target}: "
+    )
+    assert (await left.command(f"cancel {target} 3")).startswith(
+        f"request 3 on {target}: "
+    )
+
+    # A number nobody issued, or one that is not the right kind, is refused; so
+    # is anything that is not a number (the old 32-hex ids included).
+    for command in ("withdraw 99", f"task {target} 99", f"cancel {target} 99"):
+        assert "no request numbered 99 on this network" in await left.command(command)
+    assert "no question numbered 3 on this network" in await left.command("answer 3 hi")
+    for command in (
+        f"withdraw {one}",
+        "withdraw one",
+        "withdraw 1.5",
+        f"task {target} {two}",
+    ):
+        assert "give the request number that /connect printed" in await left.command(
+            command
+        )
+    assert "give the question number" in await left.command(f"answer {two} hi")
+
+
+@pytest.mark.asyncio
+async def test_a_question_shows_its_number_and_the_sender_by_name(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+
+    # The remote task itself reaches the screen under the sender's name.
+    shown = [call.args[0] for call in right_hub._display_hub_message.call_args_list]
+    labels = [m.metadata.get("display_from") for m in shown if m.metadata]
+    assert labels and all("@" in label and "relay:" not in label for label in labels)
+
+    result = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    assert result.output == "remote question: pending; acceptance is not completion"
+    question_id = result.metadata["relay_receipt"]["id"]
+    payload = left.store.event(question_id)["payload"]
+
+    left_hub._render_hub_box = MagicMock()
+    HubPlugin._display_hub_message(left_hub, left._correlated_event_message(payload))
+    sender, _, content = left_hub._render_hub_box.call_args.args
+    number = left.number("question", question_id)
+    assert sender.startswith(payload["from_identity"] + "@") and "relay:" not in sender
+    assert content.endswith(f"(answer with /connect answer {number} <text>)")
+    assert question_id not in content and payload["from"] not in content
+
+    answered = await left.command(f"answer {number} Use the workspace root.")
+    assert answered.startswith(f"question {number} answered: ")
+    assert "no longer pending" in await left.command(f"answer {number} again")
+
+
+@pytest.mark.asyncio
+async def test_starting_a_request_reports_its_number_not_its_id(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, *_) = members
+    allow(left, right)
+    grant = authorize(left, right, "Create proof.txt")
+
+    result = await left_hub._handle_hub_msg_tool(
+        {
+            "id": "start",
+            "to": address(right),
+            "content": "Create proof.txt",
+            "thread_id": grant["id"],
+        }
+    )
+
+    assert result.success
+    assert result.output.startswith("remote request 1: ")
+    assert result.output.endswith("; acceptance is not completion")
+    assert grant["id"] not in result.output

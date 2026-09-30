@@ -29,6 +29,9 @@ MAX_EVENT_CONTENT = 2048
 MAX_TASKS = 1024
 MAX_EVENTS = 2048
 MAX_OUTBOX = 1024
+# A human's short numbers per network: how many of the newest stay resolvable.
+NUMBER_KEEP = 2048
+NUMBER_KINDS = frozenset({"request", "question"})
 MAX_ACTIVE = 64
 MAX_AGENT_ACTIVE = 8
 # Most replies a turn-end frame can announce; more than the receiving agent's
@@ -276,6 +279,9 @@ class ConversationStore:
                     state TEXT NOT NULL DEFAULT 'queued', detail TEXT NOT NULL DEFAULT '');
                 CREATE INDEX IF NOT EXISTS outbound_queue_ready
                     ON outbound_queue(state, expires, created);
+                CREATE TABLE IF NOT EXISTS numbers (
+                    room TEXT NOT NULL, n INTEGER NOT NULL, kind TEXT NOT NULL,
+                    ref TEXT NOT NULL, PRIMARY KEY(room, n), UNIQUE(room, ref));
             """)
             db.execute("BEGIN IMMEDIATE")
             # Preserve private receipts from earlier development builds; those
@@ -800,6 +806,43 @@ class ConversationStore:
                 ),
             )
             return {"id": payload["id"], "state": "queued", "duplicate": False}
+
+    def number(self, room: str, kind: str, ref: str) -> int:
+        """The short number a human types for one request or question.
+
+        One count per network, shared by both kinds. A number stays the same
+        while its item lives and is never handed out twice: only numbers more
+        than NUMBER_KEEP behind the newest are dropped. ``resolve_number`` maps
+        it back to the real id, which never reaches a screen.
+        """
+        validate_key(room)
+        if kind not in NUMBER_KINDS or not isinstance(ref, str) or not ID.fullmatch(ref):
+            raise RelayError("invalid conversation number")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT n FROM numbers WHERE room=? AND ref=?", (room, ref)
+            ).fetchone()
+            if row is not None:
+                return row[0]
+            n = db.execute(
+                "SELECT COALESCE(MAX(n), 0) + 1 FROM numbers WHERE room=?", (room,)
+            ).fetchone()[0]
+            db.execute("DELETE FROM numbers WHERE room=? AND n<=?", (room, n - NUMBER_KEEP))
+            db.execute(
+                "INSERT INTO numbers (room,n,kind,ref) VALUES (?,?,?,?)",
+                (room, n, kind, ref),
+            )
+            return n
+
+    def resolve_number(self, room: str, kind: str, n: int) -> str | None:
+        """The real id behind a number, or None when this network never issued it."""
+        validate_key(room)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT ref FROM numbers WHERE room=? AND n=? AND kind=?", (room, n, kind)
+            ).fetchone()
+        return row[0] if row is not None else None
 
     def withdraw_contact(self, room: str, grant_id: str):
         validate_key(room)
