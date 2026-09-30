@@ -283,7 +283,10 @@ Removed. Each prints its redirect for one release instead of running:
   attached window whose daemon lost the workspace to a single-process window
   gets the same screen, read from the daemon.
   `/connect knocks` opens the review for the joined directory: up/down select a
-  knock and `a`/`r` act on the marked row.
+  knock and `a`/`r` act on the marked row. In an attached window the daemon
+  sends `/connect knock` and holds the knocks, so the review lists its knocks
+  and `a`/`r` decide there; a daemon older than the window answers `attached
+  daemon does not support private contact requests`.
 - On the joining device the code form answers as soon as the relay has the
   request: `request sent to kollabor.ai; waiting for approval on another
   device`. It then watches, and shows `joined <network> as <device>. trust:

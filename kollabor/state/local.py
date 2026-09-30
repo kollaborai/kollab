@@ -2263,6 +2263,41 @@ class LocalStateService(StateService):
             return "connect screen is unavailable"
         return str(await handler(enrollment_id, decision) or "")
 
+    async def hub_contact_knock(
+        self, domain: str, route: str, introduction: str
+    ) -> str:
+        """Send a knock through the Hub that owns the relay."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_send_knock", None)
+        if handler is None:
+            return "connect: knock is unavailable"
+        return str(await handler(domain, route, introduction))
+
+    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
+        """The knocks the Hub that owns the relay holds for this device."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_contact_pending", None)
+        if handler is None:
+            raise ValueError("knock review is unavailable")
+        return await handler(domain)
+
+    async def hub_contact_decide(
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        sender_key: str,
+        device_name: str,
+    ) -> str:
+        """Accept or reject one knock through the Hub that owns the relay."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_decide_contact_request", None)
+        if handler is None:
+            return "knock review is unavailable"
+        return str(
+            await handler(domain, receipt_id, decision, sender_key, device_name) or ""
+        )
+
     async def hub_connect(self, command: str) -> str:
         hub = self._resolve_hub_plugin()
         if hub is None:

@@ -217,6 +217,11 @@ CODE_IN_COMMAND = (
 CONNECT_OWNED_ELSEWHERE = (
     "another window in this workspace runs the network; use /connect there"
 )
+# What an attached window says when its daemon predates the knock RPCs.
+CONNECT_NO_CONTACT_DAEMON = (
+    "connect: attached daemon does not support private contact requests"
+)
+_KNOCK_USAGE = 'connect: use /connect knock <route> "text"'
 
 
 def format_connect_help(show_all: bool = False) -> str:
@@ -255,6 +260,43 @@ def _parse_knock_route(value: str) -> tuple[str, str]:
     if not _looks_like_connect_target(domain):
         raise ValueError("not a contact route")
     return domain, match.group("route").lower()
+
+
+def _contact_requests(rows):
+    """The relay's pending-knock rows as review requests; raises on any bad row."""
+    from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
+
+    requests = []
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {
+                "receipt_id",
+                "sender_key",
+                "expires_at",
+                "introduction",
+                "device_name",
+            }
+            or not isinstance(row["receipt_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", row["receipt_id"])
+            or not isinstance(row["sender_key"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["sender_key"])
+            or type(row["expires_at"]) is not int
+            or not isinstance(row["introduction"], str)
+            or not isinstance(row["device_name"], str)
+        ):
+            raise ValueError("invalid private contact request")
+        requests.append(
+            PendingContactRequest(
+                row["receipt_id"],
+                row["sender_key"],
+                row["expires_at"],
+                PrivateMessage(row["introduction"]),
+                row["device_name"],
+            )
+        )
+    return requests
 
 
 def _looks_like_connect_target(value: str) -> bool:
@@ -9119,15 +9161,12 @@ class HubPlugin(BasePlugin):
         if head == "knocks":
             if len(parts) > 2:
                 return "connect: use /connect knocks [relay-domain]"
-            if getattr(getattr(self, "_cli_args", None), "attach", None):
-                return (
-                    "connect: attached daemon does not support private contact requests"
-                )
-            domain = (
-                parts[1]
-                if len(parts) == 2
-                else self._relay_network_domain() or "kollabor.ai"
-            )
+            if len(parts) == 2:
+                domain = parts[1]
+            elif self._attached():
+                domain = ""  # the daemon that owns the relay knows its network
+            else:
+                domain = self._relay_network_domain() or "kollabor.ai"
             return await self._open_contact_review_altview(domain)
         known = {sub.name for sub in CONNECT_SUBCOMMANDS} | {
             sub.name for sub in CONNECT_ADVANCED
@@ -9556,25 +9595,54 @@ class HubPlugin(BasePlugin):
         A route is public (it is copied, never typed), so unlike a join code
         it is a plain command argument.
         """
-        usage = 'connect: use /connect knock <route> "text"'
         parts = rest.split(None, 1)
         if len(parts) != 2 or not parts[1].strip():
-            return usage
+            return _KNOCK_USAGE
         route_token, text = parts[0], parts[1].strip()
         if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
             text = text[1:-1]
         try:
             domain, route_hex = _parse_knock_route(route_token)
         except ValueError:
-            return usage
+            return _KNOCK_USAGE
         from plugins.hub.contact_requests import ContactProtocolError, validate_introduction
 
         try:
             introduction = validate_introduction(text)
         except ContactProtocolError:
-            return usage
-        if getattr(getattr(self, "_cli_args", None), "attach", None):
-            return "connect: attached daemon does not support private contact requests"
+            return _KNOCK_USAGE
+        if self._attached():
+            return await self._attached_knock(domain, route_hex, introduction)
+        return await self._send_knock(domain, route_hex, introduction)
+
+    async def _attached_knock(self, domain: str, route_hex: str, introduction: str) -> str:
+        """The daemon owns the relay: it sends the knock and says how it went."""
+        from kollabor_rpc import RpcMethodNotFound
+
+        bus = getattr(self, "event_bus", None)
+        state = bus.get_service("state_service") if bus else None
+        handler = getattr(state, "hub_contact_knock", None)
+        if handler is None:
+            return CONNECT_NO_CONTACT_DAEMON
+        try:
+            return await handler(domain, route_hex, introduction)
+        except RpcMethodNotFound:
+            return CONNECT_NO_CONTACT_DAEMON
+        except Exception:
+            return "connect: knock could not be sent"
+
+    async def _send_knock(self, domain: str, route_hex: str, introduction: str) -> str:
+        """Send one knock from the process that owns the relay.
+
+        Runs here in a single-process window and in the daemon for an attached
+        one; the text is what the human reads either way.
+        """
+        from plugins.hub.contact_requests import ContactProtocolError, validate_introduction
+
+        try:
+            introduction = validate_introduction(introduction)
+        except ContactProtocolError:
+            return _KNOCK_USAGE
         if self._identity is None or self._rpc_server is None:
             return "connect: knock is unavailable"
         try:
@@ -9606,69 +9674,49 @@ class HubPlugin(BasePlugin):
             return "connect: private contact review is unavailable"
         try:
             from plugins.altview.contact_altview import ContactReviewAltView
-            from plugins.hub.contact_requests import (
-                PendingContactRequest,
-                PrivateMessage,
-            )
+
+            attached = self._attached()
+            state = self.event_bus.get_service("state_service") if attached else None
+            # An attached window reads and decides through the daemon that owns
+            # the relay. Asking once here tells a daemon that predates the knock
+            # RPCs apart, and the screen shows what was asked.
+            fetched = None
+            if attached:
+                from kollabor_rpc import RpcMethodNotFound
+
+                try:
+                    fetched = await state.hub_contact_pending(domain)
+                except RpcMethodNotFound:
+                    return CONNECT_NO_CONTACT_DAEMON
+                except Exception:
+                    fetched = None  # the screen says the inbox is unavailable
 
             async def load():
-                rows = await self._run_connect_contact_pending(domain)
-                requests = []
-                for row in rows:
-                    if (
-                        not isinstance(row, dict)
-                        or set(row)
-                        != {
-                            "receipt_id",
-                            "sender_key",
-                            "expires_at",
-                            "introduction",
-                            "device_name",
-                        }
-                        or not isinstance(row["receipt_id"], str)
-                        or not re.fullmatch(r"[0-9a-f]{32}", row["receipt_id"])
-                        or not isinstance(row["sender_key"], str)
-                        or not re.fullmatch(r"[0-9a-f]{64}", row["sender_key"])
-                        or type(row["expires_at"]) is not int
-                        or not isinstance(row["introduction"], str)
-                        or not isinstance(row["device_name"], str)
-                    ):
-                        raise ValueError("invalid private contact request")
-                    requests.append(
-                        PendingContactRequest(
-                            row["receipt_id"],
-                            row["sender_key"],
-                            row["expires_at"],
-                            PrivateMessage(row["introduction"]),
-                            row["device_name"],
-                        )
+                nonlocal fetched
+                rows, fetched = fetched, None
+                if rows is None:
+                    rows = await (
+                        state.hub_contact_pending(domain)
+                        if attached
+                        else self._run_connect_contact_pending(domain)
                     )
-                return requests
+                return _contact_requests(rows)
 
-            async def decide(request: PendingContactRequest, decision: str):
+            async def decide(request, decision: str):
                 """None when decided; otherwise the reason it was not."""
-                result = await self._run_connect_contact_decision(
+                args = (
                     domain,
                     request.receipt_id,
                     decision,
-                    sender_key=request.sender_key,
-                    device_name=request.device_name,
+                    request.sender_key,
+                    request.device_name,
                 )
-                if isinstance(result, dict) and "status" in result:
-                    return None
-                error = result.get("error") if isinstance(result, dict) else None
-                if error == "already_named":
-                    try:
-                        old = self._relay_agent._peer_name(request.sender_key)
-                    except Exception:
-                        old = "another name"
-                    return f"this device is already on your network as {old}"
-                return {
-                    "name_taken": "that device name is already on this network",
-                    "capacity": "too many approved devices or pending knocks",
-                    "conflict": "that knock was already decided",
-                    "unavailable": "that knock is no longer available",
-                }.get(error, "try again")
+                reason = await (
+                    state.hub_contact_decide(*args)
+                    if attached
+                    else self._decide_contact_request(*args)
+                )
+                return reason or None
 
             stack_mgr = None
             try:
@@ -9722,6 +9770,44 @@ class HubPlugin(BasePlugin):
             sender_key=sender_key,
             device_name=device_name,
         )
+
+    async def _contact_pending(self, domain: str):
+        """The knocks waiting for this device; an empty domain means its own network."""
+        return await self._run_connect_contact_pending(
+            domain or self._relay_network_domain() or "kollabor.ai"
+        )
+
+    async def _decide_contact_request(
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        sender_key: str,
+        device_name: str,
+    ) -> str:
+        """Accept or reject one knock; "" when decided, else the reason it was not."""
+        result = await self._run_connect_contact_decision(
+            domain or self._relay_network_domain() or "kollabor.ai",
+            receipt_id,
+            decision,
+            sender_key=sender_key,
+            device_name=device_name,
+        )
+        if isinstance(result, dict) and "status" in result:
+            return ""
+        error = result.get("error") if isinstance(result, dict) else None
+        if error == "already_named":
+            try:
+                old = self._relay_agent._peer_name(sender_key)
+            except Exception:
+                old = "another name"
+            return f"this device is already on your network as {old}"
+        return {
+            "name_taken": "that device name is already on this network",
+            "capacity": "too many approved devices or pending knocks",
+            "conflict": "that knock was already decided",
+            "unavailable": "that knock is no longer available",
+        }.get(error, "try again")
 
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device enrollment offer in the owning relay daemon."""

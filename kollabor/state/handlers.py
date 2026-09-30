@@ -81,6 +81,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.hub_enroll_status       (where a submitted join request stands)
         state.hub_connect_snapshot    (Connect screen data for an attached window)
         state.hub_connect_decide      (accept or reject one join request)
+        state.hub_contact_knock       (send a knock through the relay's owner)
+        state.hub_contact_pending     (knocks waiting for this device)
+        state.hub_contact_decide      (accept or reject one knock)
     """
 
     async def _get_conversation(params: dict[str, Any]) -> dict[str, Any]:
@@ -507,6 +510,74 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             return {"error": "connect decision could not be sent"}
         return {"reason": reason if isinstance(reason, str) else "try again"}
 
+    def _knock_domain(domain: Any) -> bool:
+        """A relay domain, or "" for the daemon's own network."""
+        return (
+            isinstance(domain, str)
+            and len(domain) <= 253
+            and not any(ord(char) < 32 or ord(char) == 127 for char in domain)
+        )
+
+    async def _hub_contact_knock(params: dict[str, Any]) -> dict[str, Any]:
+        domain = params.get("domain")
+        route = params.get("route")
+        introduction = params.get("introduction")
+        if (
+            set(params) != {"domain", "route", "introduction"}
+            or not _knock_domain(domain)
+            or not domain
+            or not isinstance(route, str)
+            or not re.fullmatch(r"[0-9a-f]{16}", route)
+            or not isinstance(introduction, str)
+            or not 0 < len(introduction) <= 2048
+        ):
+            return {"error": "invalid knock request"}
+        try:
+            text = await state_service.hub_contact_knock(domain, route, introduction)
+        except Exception:
+            return {"error": "knock could not be sent"}
+        return {"text": text}
+
+    async def _hub_contact_pending(params: dict[str, Any]) -> dict[str, Any]:
+        domain = params.get("domain")
+        if set(params) != {"domain"} or not _knock_domain(domain):
+            return {"error": "invalid knock inbox request"}
+        try:
+            rows = await state_service.hub_contact_pending(domain)
+        except Exception:
+            return {"error": "knock inbox is unavailable"}
+        if not isinstance(rows, list):
+            return {"error": "knock inbox is unavailable"}
+        return {"requests": rows}
+
+    async def _hub_contact_decide(params: dict[str, Any]) -> dict[str, Any]:
+        domain = params.get("domain")
+        receipt_id = params.get("receipt_id")
+        decision = params.get("decision")
+        sender_key = params.get("sender_key")
+        device_name = params.get("device_name")
+        if (
+            set(params)
+            != {"domain", "receipt_id", "decision", "sender_key", "device_name"}
+            or not _knock_domain(domain)
+            or not isinstance(receipt_id, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", receipt_id)
+            or not isinstance(decision, str)
+            or decision not in {"accept", "reject"}
+            or not isinstance(sender_key, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sender_key)
+            or not isinstance(device_name, str)
+            or len(device_name) > 256
+        ):
+            return {"error": "invalid knock decision"}
+        try:
+            reason = await state_service.hub_contact_decide(
+                domain, receipt_id, decision, sender_key, device_name
+            )
+        except Exception:
+            return {"error": "knock decision could not be sent"}
+        return {"reason": reason if isinstance(reason, str) else "try again"}
+
     async def _hub_enrollment_offer(params: dict[str, Any]) -> dict[str, Any]:
         domain = params.get("domain")
         if (
@@ -661,6 +732,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.hub_enrollment_offer": _hub_enrollment_offer,
         "state.hub_connect_snapshot": _hub_connect_snapshot,
         "state.hub_connect_decide": _hub_connect_decide,
+        "state.hub_contact_knock": _hub_contact_knock,
+        "state.hub_contact_pending": _hub_contact_pending,
+        "state.hub_contact_decide": _hub_contact_decide,
         "state.hub_connect": _hub_connect,
         "state.hub_send_msg": _hub_send_msg,
         "state.list_hub_agents": _list_hub_agents,

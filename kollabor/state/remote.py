@@ -39,6 +39,11 @@ from .snapshots import (
 logger = logging.getLogger(__name__)
 
 
+def _screen_text(value: str) -> str:
+    """A daemon's words for the screen: printable text, one bounded line."""
+    return "".join(char for char in value if char.isprintable())[:200]
+
+
 class RemoteStateService(StateService):
     """RPC-backed StateService. Wraps a kollabor_rpc.RpcClient.
 
@@ -849,8 +854,68 @@ class RemoteStateService(StateService):
             or not isinstance(result.get("reason"), str)
         ):
             raise ValueError("daemon connect decision failed")
-        # The reason is shown on screen: printable text, one bounded line.
-        return "".join(char for char in result["reason"] if char.isprintable())[:200]
+        return _screen_text(result["reason"])
+
+    async def hub_contact_knock(
+        self, domain: str, route: str, introduction: str
+    ) -> str:
+        """Send a knock through the daemon that owns the relay; its answer."""
+        result = await self._rpc.call(
+            "state.hub_contact_knock",
+            {"domain": domain, "route": route, "introduction": introduction},
+            timeout=max(self._timeout, 90.0),
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("error")
+            or not isinstance(result.get("text"), str)
+        ):
+            raise ValueError("daemon knock failed")
+        return _screen_text(result["text"])
+
+    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
+        """The knocks the daemon holds for this device; the caller validates rows."""
+        result = await self._rpc.call(
+            "state.hub_contact_pending",
+            {"domain": domain},
+            timeout=max(self._timeout, 30.0),
+        )
+        rows = (
+            result.get("requests")
+            if isinstance(result, dict) and not result.get("error")
+            else None
+        )
+        if not isinstance(rows, list) or len(rows) > 32:
+            raise ValueError("daemon knock inbox failed")
+        return rows
+
+    async def hub_contact_decide(
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        sender_key: str,
+        device_name: str,
+    ) -> str:
+        """Accept or reject one knock on the daemon; "" when decided."""
+        result = await self._rpc.call(
+            "state.hub_contact_decide",
+            {
+                "domain": domain,
+                "receipt_id": receipt_id,
+                "decision": decision,
+                "sender_key": sender_key,
+                "device_name": device_name,
+            },
+            timeout=max(self._timeout, 30.0),
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("error")
+            or not isinstance(result.get("reason"), str)
+        ):
+            raise ValueError("daemon knock decision failed")
+        return _screen_text(result["reason"])
 
     async def hub_connect(self, command: str) -> str:
         result = await self._rpc.call(

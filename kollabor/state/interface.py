@@ -625,6 +625,35 @@ class StateService(Protocol):
         """Accept or reject one join request; "" when decided, else the reason."""
         ...
 
+    async def hub_contact_knock(
+        self, domain: str, route: str, introduction: str
+    ) -> str:
+        """Send a knock to a stranger's contact route through the relay's owner.
+
+        Returns what the human reads: ``knock sent to <domain>/c/<route>`` or
+        ``connect: <reason>``.
+        """
+        ...
+
+    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
+        """Knocks waiting for this device, as the relay lists them.
+
+        An empty ``domain`` means the daemon's own network. Raises when the
+        daemon cannot list them; the window validates every row.
+        """
+        ...
+
+    async def hub_contact_decide(
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        sender_key: str,
+        device_name: str,
+    ) -> str:
+        """Accept or reject one knock; "" when decided, else the reason."""
+        ...
+
     async def hub_connect(self, command: str) -> str:
         """Run beacon commands on the daemon that owns workspace identity."""
         ...
