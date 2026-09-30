@@ -129,3 +129,15 @@ def test_hub_msg_tool_description_separates_initial_question_and_answer_roles():
     assert "Only a receiver inside an active remote task" in kind.description
     assert "start a remote task with kind='message'" in guidance
     assert "use kind='question' only as the receiver" in guidance
+
+
+def test_hub_msg_tool_addresses_a_remote_agent_as_agent_at_device():
+    to = next(parameter for parameter in hub_msg.parameters if parameter.name == "to")
+    rules = " ".join(hub_msg.key_rules)
+
+    assert "agent@device" in hub_msg.description
+    assert "agent@device" in to.description
+    assert "agent@device" in rules
+    assert "end your turn with wait='true'" in rules
+    assert any('to="infra@alzan-prod-home"' in line for line in hub_msg.examples)
+    assert "authorized remote relay agent" not in hub_msg.description
