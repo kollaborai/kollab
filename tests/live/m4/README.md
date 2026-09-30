@@ -55,8 +55,9 @@ bash m4/teardown.sh --restore-old                # or: put the manual stack and 
 - `s6-11` neither `/connect status` nor either `kollab.log` names bare `kollabor.ai`.
 - `s6-12` .. `s6-14` Ctrl-C stops the one command without a traceback; started again it loads the same signing key (revision higher);
   both devices reconnect on their own and answer another message.
-- `z0` .. `z2` the command's own output, every captured pane and both kollab logs hold no join code, 64-hex string, `relay:` address,
-  receipt or error text.
+- `z0` .. `z4` the command's own output and every captured pane hold no join code, 64-hex string, `relay:` address, receipt or error
+  text. Each kollab log is scanned in two windows: launch to the first message must be clean (`z2`); the relay restart after it may log
+  reconnects but no traceback and no leak (`z3`); and no log names bare `kollabor.ai` anywhere (`z4`).
 
 `verify_serve.sh` on its own checks the parts an outsider can: the `_agent` TXT record, discovery through the client code (DNS, TLS,
 signature, relay advertised, same publisher key and a higher revision than `evidence/pre.env`), health, `/relay/v1/metrics` not public,

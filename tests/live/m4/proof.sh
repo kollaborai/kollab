@@ -134,6 +134,17 @@ log_scan() { # log_scan <mac|srv> <offset>: counters on stdout, code from CODE v
     printf %s "$CODE" | m1_ssh python3 "$M1_SRV_ROOT/bin/scan.py" file "$(log_path srv)" "$2"
   fi
 }
+log_window_scan() { # log_window_scan <mac|srv> <start> <end>: scan.py counters for the log bytes [start, end)
+  local tmp
+  if [ "$1" = mac ]; then
+    tmp=$(mktemp)
+    tail -c +$(($2 + 1)) "$(log_path mac)" 2>/dev/null | head -c $(($3 - $2)) >"$tmp" || true   # tail may get SIGPIPE
+    printf %s "$CODE" | python3 "$SCAN" file "$tmp" 0
+    rm -f "$tmp"
+  else
+    printf %s "$CODE" | m1_ssh "T=\$(mktemp) && tail -c +$(($2 + 1)) '$(log_path srv)' 2>/dev/null | head -c $(($3 - $2)) >\"\$T\" && python3 '$M1_SRV_ROOT/bin/scan.py' file \"\$T\" 0; rc=\$?; rm -f \"\$T\"; exit \$rc"
+  fi
+}
 log_count() { # log_count <mac|srv> <offset> <ERE>: matching lines in the log after the offset
   if [ "$1" = mac ]; then
     tail -c +$(($2 + 1)) "$(log_path mac)" 2>/dev/null | grep -Ec -- "$3" || true
@@ -176,7 +187,9 @@ esac
 
 SERVE_PID0=$(serve_pid)
 [ -n "$SERVE_PID0" ] || abort pre-one-command "no 'kollab relay serve --domain $M4_DOMAIN' process on $M1_HOST: run serve_up.sh up"
-m1_ssh "pgrep -f '[k]ollab-relay-selfhost|[d]iscovery_publish.*$M4_DOMAIN|[h]ttp.server' >/dev/null" </dev/null && abort pre-one-command "the manual stack still runs next to the one command (relay run / publisher / static server): stop it, or run serve_up.sh up"
+# The same finder serve_up.sh used: the manual relay, publisher and static server, by what they are configured to do.
+manual_left=$(m1_ssh python3 - "$M4_DOMAIN" <"$M4_DIR/inspect_old.py" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(k for k in ("relay", "publisher", "static") if d[k]))') || abort pre-one-command "could not look for the manual stack on $M1_HOST"
+[ -z "$manual_left" ] || abort pre-one-command "the manual stack still runs next to the one command ($manual_left): run serve_up.sh up"
 rec pre-one-command PASS - "pid $SERVE_PID0 on $M1_HOST; none of the three manual processes runs"
 
 if bash "$M4_DIR/verify_serve.sh" >"$EVID/pre-verify.log" 2>&1; then
@@ -235,16 +248,17 @@ rec s0-launch PASS s0-01-mac-launch.txt "both TUIs up; see s0-02-srv-launch.txt"
 
 # ============================================ Story 6: the first device ====
 say "Story 6: the Mac starts a network on $M4_DOMAIN"
-b=$(count_pat mac 'trust: ')
+ANSWER='trust: |connect: |beacon: '   # the status text, or the reason /connect gave up (key_changed, dns_unavailable, http_error ...)
+b=$(count_pat mac "$ANSWER")
 cmd mac "/connect $M4_DOMAIN"
-if wait_for mac 'trust: ' 150 "$b"; then
+if wait_for mac "$ANSWER" 150 "$b"; then
   sleep 2
   cap mac s6-01-mac-first-device 1
   status_line=$(newest_with mac 'network .*trust: ')
   if grep -Eq "selfhost\.kollabor\.ai" <<<"$status_line"; then
     rec s6-01-first-device PASS s6-01-mac-first-device.txt "the Mac is on: ${status_line# }"
   else
-    abort s6-01-first-device "the status line does not name $M4_DOMAIN: '$status_line'" s6-01-mac-first-device.txt
+    abort s6-01-first-device "no network status naming $M4_DOMAIN; /connect answered: '$(newest_with mac 'connect: |beacon: ' | sed -E 's/^[[:space:]]+//')'" s6-01-mac-first-device.txt
   fi
 else
   cap mac s6-01-mac-first-device-failed 1
@@ -394,6 +408,10 @@ if [ -z "$touched" ]; then
 else
   rec s6-11-nothing-touches-kollabor-ai FAIL s6-09-mac-status.txt "kollabor.ai appears in:$touched"
 fi
+# The strict log window ends here: joining and the first message. A restart of the relay makes clients log
+# reconnects, which the second window allows (it still forbids tracebacks and leaks).
+MAC_LOG1=$(log_size mac)
+SRV_LOG1=$(log_size srv)
 
 # ------------------------------------- stop the one command, start it again ----
 say "restart: stopping 'kollab relay serve' on $M1_HOST, then starting it again"
@@ -463,15 +481,31 @@ if [ "${#PANE_FINDINGS[@]}" -eq 0 ]; then
 else
   rec z1-panes-clean FAIL pane-findings.txt "findings in: ${PANE_FINDINGS[*]}"
 fi
+late=""
 for h in mac srv; do
-  if [ "$h" = mac ]; then off=$MAC_LOG0; else off=$SRV_LOG0; fi
-  res=$(log_scan "$h" "$off")
+  if [ "$h" = mac ]; then off0=$MAC_LOG0; off1=$MAC_LOG1; else off0=$SRV_LOG0; off1=$SRV_LOG1; fi
+  end=$(log_size "$h")
+  res=$(log_window_scan "$h" "$off0" "$off1")
   printf '%s\n' "$res" >"$EVID/logscan-$h.txt"
   if grep -qx 'missing=1' <<<"$res"; then
     rec "z2-log-$h" FAIL "logscan-$h.txt" "no log at $(log_path "$h")"
   elif [ "$(kv "$res" code)" = 0 ] && [ "$(kv "$res" hex64)" = 0 ] && [ "$(kv "$res" relay)" = 0 ] && [ "$(kv "$res" errhits)" = 0 ]; then
-    rec "z2-log-$h" PASS "logscan-$h.txt" "$(kv "$res" size) bytes scanned, clean"
+    rec "z2-log-$h" PASS "logscan-$h.txt" "$(kv "$res" size) bytes from launch to the first message, clean"
   else
     rec "z2-log-$h" FAIL "logscan-$h.txt" "code=$(kv "$res" code) hex64=$(kv "$res" hex64) relay=$(kv "$res" relay) errhits=$(kv "$res" errhits)"
   fi
+  res=$(log_window_scan "$h" "$off1" "$end")
+  printf '%s\n' "$res" >"$EVID/logscan-$h-restart.txt"
+  traces=$(log_count "$h" "$off1" 'Traceback|Failed executing')
+  if [ "$(kv "$res" code)" = 0 ] && [ "$(kv "$res" hex64)" = 0 ] && [ "$(kv "$res" relay)" = 0 ] && [ "${traces:-1}" = 0 ]; then
+    rec "z3-log-$h-restart" PASS "logscan-$h-restart.txt" "no traceback or leak across the relay restart ($(kv "$res" errhits) error-level lines, reconnects expected)"
+  else
+    rec "z3-log-$h-restart" FAIL "logscan-$h-restart.txt" "code=$(kv "$res" code) hex64=$(kv "$res" hex64) relay=$(kv "$res" relay) tracebacks=${traces:-?}"
+  fi
+  [ "$(log_count "$h" "$off0" "$URLS")" = 0 ] || late="$late $h-log"
 done
+if [ -z "$late" ]; then
+  rec z4-kollabor-ai-never-named PASS - "no log names kollabor.ai from launch to the end, restart included"
+else
+  rec z4-kollabor-ai-never-named FAIL - "kollabor.ai appears in:$late"
+fi
