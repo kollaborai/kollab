@@ -710,6 +710,28 @@ def test_a_file_the_primary_skips_is_not_deleted_from_a_secondary(homes, keys):
         assert "skills/grow/notes.md" in read_managed_config().files
 
 
+def test_a_manifest_too_big_for_one_request_is_cut_to_fit_and_counted(homes):
+    import base64
+
+    from plugins.hub.config_sync_service import MAX_BUNDLE_CHARS
+
+    with homes("mac") as kollab:
+        for i in range(cs.MAX_FILES):
+            folder = kollab / "skills" / f"s{i // 8:04d}"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"f{i % 8}.md").write_text(f"file {i}\n" + "x" * (i * 37 % 9000))
+        snapshot = builder().build()
+    rows = [[e.path, e.sha256, e.size, int(e.executable)] for e in snapshot.files]
+    sealed = cs.seal(
+        "sync", cs.sync_body(snapshot), cs.pack_json({"manifest": rows}),
+        issuer_key=SigningKey.generate(),
+        recipient_public_key=bytes(SigningKey.generate().verify_key), revision=1,
+    )  # fmt: skip
+    assert len(base64.b64encode(sealed)) <= MAX_BUNDLE_CHARS
+    assert 0 < len(snapshot.files) < cs.MAX_FILES
+    assert snapshot.skipped == cs.MAX_FILES - len(snapshot.files)
+
+
 def make_sync(primary, secondary, manifest, revision=1):
     return cs.seal(
         "sync", {"digest": "0" * 64}, cs.pack_json({"manifest": manifest}),

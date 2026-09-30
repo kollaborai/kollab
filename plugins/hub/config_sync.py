@@ -81,6 +81,9 @@ MAX_FILE_BYTES = 512 * 1024
 # needs one.
 MAX_ZFILE_BYTES = 30_000
 MAX_BATCH_FILES = 60
+# The whole manifest is one request too: sealed and base64 encoded it must stay
+# under the service MAX_BUNDLE_CHARS (about 1000 files worth, fewer than MAX_FILES).
+MAX_MANIFEST_ZBYTES = 44_000
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_CORE_BYTES = 4 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -192,6 +195,25 @@ class Snapshot:
         )
 
 
+def manifest_rows(files: list[FileEntry]) -> list[list]:
+    return [[e.path, e.sha256, e.size, int(e.executable)] for e in files]
+
+
+def _fit_manifest(files: list[FileEntry], skipped: int) -> tuple[list[FileEntry], int]:
+    """Drop the last files until the manifest fits one secure request.
+
+    They are skipped and counted like any file that cannot travel, and the
+    partial flag keeps them on secondaries. ponytail: cuts a tenth per step.
+    """
+    while (
+        files
+        and len(pack_json({"manifest": manifest_rows(files)})) > MAX_MANIFEST_ZBYTES
+    ):
+        cut = max(1, len(files) // 10)
+        files, skipped = files[:-cut], skipped + cut
+    return files, skipped
+
+
 def sync_body(snapshot: Snapshot) -> dict:
     """The signed header of a manifest. ``partial`` means some files did not fit,
     so a file missing from the manifest is not one the primary dropped."""
@@ -254,12 +276,8 @@ class SnapshotBuilder:
 
     def build(self) -> Snapshot:
         config, mcp = self._core_parts()
-        files, skipped = self._scan_files()
-        files_digest = hashlib.sha256(
-            _canonical_json(
-                [[e.path, e.sha256, e.size, int(e.executable)] for e in files]
-            )
-        ).hexdigest()
+        files, skipped = _fit_manifest(*self._scan_files())
+        files_digest = hashlib.sha256(_canonical_json(manifest_rows(files))).hexdigest()
         digest = hashlib.sha256(
             _canonical_json({"config": config, "mcp": mcp, "files": files_digest})
         ).hexdigest()
