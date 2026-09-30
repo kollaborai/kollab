@@ -14,6 +14,7 @@ FILES = (
     "plugins/hub/relay_service.py",
     "plugins/hub/relay_backend.py",
     "plugins/hub/relay_runtime.py",
+    "plugins/hub/relay_selfhost.py",
     "plugins/hub/relay_client.py",
     "plugins/hub/relay_state.py",
     "plugins/hub/relay_commands.py",

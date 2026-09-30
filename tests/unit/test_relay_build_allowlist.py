@@ -16,6 +16,7 @@ ENTRY_MODULES = (
     "plugins.hub.relay_service",
     "plugins.hub.relay_backend",
     "plugins.hub.relay_runtime",
+    "plugins.hub.relay_selfhost",
     "plugins.hub.dns.discovery_publish",
 )
 
