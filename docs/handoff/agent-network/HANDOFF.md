@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30 08:40 MST, branch tip 3232c3d (5273 unit tests pass).
+network. Updated at every merge. Last update: 2026-09-30 09:15 MST, branch tip 71798d1 = build 0.11.0.dev3 (5284 unit tests pass).
 
 ## Read first, in this order
 
@@ -38,8 +38,8 @@ network. Updated at every merge. Last update: 2026-09-30 08:40 MST, branch tip 3
   pushed, no PR.
 - Unit suite at 432ad68: 5242 passed, 9 skipped
   (`KOLLAB_NO_KEYRING=1 .venv/bin/python -m pytest tests/unit/ -q`, ~80 s).
-- Relay on kollabor.ai: release 20260930-432ad68, deployed 2026-09-30 07:04 MST, all routes live.
-  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-070408
+- Relay on kollabor.ai: release 20260930-71798d1, deployed 2026-09-30 08:48 MST, all routes live.
+  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-084806
   /etc/systemd/system/kollab-relay.service.d/source-v2.conf && sudo systemctl daemon-reload &&
   sudo systemctl restart kollab-relay.service`. Deploy from a clean worktree: the script refuses a
   dirty tree, and the main checkout has the three foreign files.
@@ -118,6 +118,22 @@ runs; pipe output through `tail`; read functions, not whole files.
 6. **Reviews.** One capped review agent per milestone, then fixes, then re-run the
    affected live proof.
 7. **Ask Marco how to release.** Default: one release after everything is proven.
+
+## Final round on build 0.11.0.dev3 (71798d1), 2026-09-30 08:43-09:09
+
+Summary: `evidence-dev3/final-round-summary.txt`. Driver: the scratchpad `final_round.sh` (build, relay deploy,
+install both, every proof, cleanup that keeps the selfhost one command running).
+
+- M1: PASS 20/20, clean transcript.
+- Story 5: PASS 20/20, clean (knock, accept, allow one agent, answered, other agent unreachable, deny,
+  allow again, revoke).
+- M4: PASS 27/27, clean (Story 6 on selfhost.kollabor.ai, clean stop, same identity after restart,
+  devices back and answering, kollabor.ai never named). selfhost.kollabor.ai now runs the one command
+  (tmux `m4-serve` on alzan-prod).
+- M3: FAIL at c3-members (B and C do not list each other). Debug agent running.
+- M2: FAIL at s8-loadout (the server lacked the Mac's key after 60 s). Debug agent running.
+- Never run tests/live/m1/teardown.sh or story5/teardown.sh while m4-serve should stay up: they kill every
+  process from ~/kollab-m1/venv, the one command included.
 
 ## Live results on build 0.11.0.dev2 (432ad68), 2026-09-30
 
