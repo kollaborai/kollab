@@ -170,7 +170,6 @@ fi
 say "c2: C joins A's network"
 m1_ssh "mkdir -p '$M3_C_WS'"
 srv_probe config "$M3_C_WS" "$M3_C_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" >/dev/null
-NET0=$(srv_probe netdirs)
 launch_srv "$M3_C_SESSION" "$M3_C_WS" "--as $M3_C_AS"
 wait_ready c || abort c2-c-joins "C's TUI showed nothing 90s after launch"
 MAC_BASE=$(raw mac 500)
@@ -209,9 +208,10 @@ wait_for mac 'accepted|trusted device' 60 "$b_acc" || { cap mac c2-03-mac-accept
 wait_for c 'joined ' 90 || { cap c c2-04-c-not-joined; abort c2-c-joins "C never printed a 'joined ...' line" c2-04-c-not-joined.txt; }
 tm mac clear-history -t "$M1_MAC_SESSION" || true      # the join code is off the Mac's screen and scrollback from here on
 cap c c2-04-c-joined
-NET1=$(srv_probe netdirs)
-C_STATE_DIR=$(comm -13 <(printf '%s\n' "$NET0" | sort) <(printf '%s\n' "$NET1" | sort))
-[ "$(printf '%s\n' "$C_STATE_DIR" | grep -c .)" = 1 ] || abort c2-c-joins "expected one new ~/.kollab/network/<digest> after C joined, saw: $(printf '%s' "$C_STATE_DIR" | tr '\n' ' ')" c2-04-c-joined.txt
+# The state dir is sha256(workspace path) (plugins/hub/local_directory.py
+# _workspace_id). Teardown removes it, so it exists only if this run's join made it.
+C_STATE_DIR=$(m1_ssh "printf %s '$M3_C_WS' | sha256sum | cut -d' ' -f1")
+m1_ssh "test -d \"\$HOME/.kollab/network/$C_STATE_DIR\"" || abort c2-c-joins "C joined but its state dir ~/.kollab/network/<sha256 of $M3_C_WS> is missing" c2-04-c-joined.txt
 rec c2-c-joins PASS c2-04-c-joined.txt "C ($C_REQ, hub identity $M3_C_AS) joined A's network; state dir $C_STATE_DIR"
 
 # ======================== c3: B and C are members of each other's network without any seeding ====

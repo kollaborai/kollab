@@ -32,8 +32,12 @@ REMOTE
 say "srv: removing $M3_C_WS and $M3_TLS, restoring B's workspace config"
 m1_ssh "python3 '$M1_SRV_ROOT/bin/m3probe.py' unconfig '$M1_SRV_WS' 2>&1 || true"
 m1_ssh "rm -rf -- '$M3_C_WS' '$M3_TLS'"
+# C starts every run as a stranger: drop its network state (sha256 of the
+# workspace path) and its project dir.
+C_PROJECT=$(m1_project_dir "$M3_C_WS" "$M1_SRV_HOME")
+m1_ssh "d=\$(printf %s '$M3_C_WS' | sha256sum | cut -d' ' -f1); rm -rf -- \"\$HOME/.kollab/network/\$d\" '$C_PROJECT'"
 say "srv: restarting B ($M1_SRV_SESSION) on its restored config"
 stop_ws "$M1_SRV_SESSION" "$M1_SRV_WS" >/dev/null
 launch_srv "$M1_SRV_SESSION" "$M1_SRV_WS"
-say "left in place on purpose: m3/evidence/, C's ~/.kollab/network/<digest> and ~/.kollab/projects/*kollab-m3-c* state, C's hub vault"
+say "left in place on purpose: m3/evidence/ and C's hub vault"
 say "teardown done; run m1/teardown.sh next"
