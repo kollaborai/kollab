@@ -309,9 +309,19 @@ received as `1. ana-laptop  fingerprint 91c0…77ab  "Ana from Webceive. Can you
 ops agent…"  [a]ccept [r]eject`. Accepting makes that device a peer with
 `agents` trust and nothing allowed until `/connect allow ana-laptop <agent>`;
 it is never `open`. A name already on the network fails the accept with
-`could not accept <device>: <reason>` and the knock stays pending. The relay
-still delivers only between devices in the same room, so an accepted stranger
-cannot message an agent yet (constitution section 15).
+`could not accept <device>: <reason>` and the knock stays pending.
+
+The stranger stays in its own network; it never joins yours. The directory
+routes between the two devices only while each one has told it, with a signed
+message, that it consents to reach the other: the knocking device does so when
+it knocks (it must be on the directory it knocked), yours when you accept.
+Once linked, the stranger's agents see and can message only the agents you
+`/connect allow`, and the allowed agents can answer the agent that knocked. It
+appears in your roster as `agent@device`, with `trust agents` next to it in
+`/connect status`. `/connect deny <device> [agent]` refuses at once;
+`/connect revoke <device>` also removes the link at the directory. A directory
+that predates links (older than 0.11.0) still records the knock and the accept,
+but delivers nothing between the two networks.
 
 `/connect status` never shows keys, workspace ids, or `relay:` addresses —
 only names.

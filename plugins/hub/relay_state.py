@@ -141,6 +141,9 @@ class RelayState:
     # Devices this one accepted with a join code: the only peers that receive
     # the sealed config (a knock-accepted stranger never does).
     config_recipients: list[str] = field(default_factory=list)
+    # Accepted strangers: devices in their own room, reached through the
+    # directory only while both sides consent to the link.
+    links: list[str] = field(default_factory=list)
 
 
 class RelayStateStore:
@@ -233,6 +236,14 @@ class RelayStateStore:
         if not isinstance(value.peer_trust, dict) or len(value.peer_trust) > MAX_APPROVALS:
             raise RelayError("invalid peer trust levels")
         for key in value.peer_trust:
+            validate_public_key(key)
+        if (
+            not isinstance(value.links, list)
+            or len(value.links) > MAX_APPROVALS
+            or len(set(value.links)) != len(value.links)
+        ):
+            raise RelayError("invalid stranger links")
+        for key in value.links:
             validate_public_key(key)
         try:
             if value.device_name:

@@ -98,7 +98,9 @@ network exactly as a local message is observed by the rest of the hub.
 
 **Strangers.** A device outside your network can send a sealed introduction to
 your contact route. Accepting makes it a peer with `agents` trust and nothing
-allowed until you `/connect allow`. Never `open`.
+allowed until you `/connect allow`. Never `open`. The stranger stays in its own
+network: the directory links its device key to yours across rooms only while
+both devices consented (Story 5).
 
 **Directory.** kollabor.ai, or any domain that runs the relay, the signed
 discovery publisher and one DNS TXT record. See section 11.
@@ -291,6 +293,27 @@ Now Ana's agents can message `ops@mac-kollab` and nothing else. Marco can
 `/connect deny ana-laptop` at any time, and `/connect revoke ana-laptop` to
 remove the peer.
 
+How the message gets there. Ana's device stays in her own network; it never
+joins Marco's. The directory routes between the two device keys across rooms
+only while both consented, and it learns that from two signed declarations,
+never from one side's word: Ana's device declares Marco's key when it
+knocks (it has to be on the directory it knocked), and Marco's declares Ana's
+when he accepts. The declaration is refreshed while each device is online and
+withdrawn by `/connect revoke` or `/connect leave`. The relay still sees
+sealed frames only, and now also which two keys agreed to be linked.
+
+What each side sees. Ana's roster lists exactly the agents Marco allowed, as
+`ops@mac-kollab`; a message to any other agent on his device does not resolve.
+Marco's device refuses a message to an agent he did not allow even if Ana
+names it (`not_authorized`), and `/connect deny` takes effect on the next
+message. `ops` answers with `hub_msg` to `lapis@ana-laptop`: the agent that
+knocked stays reachable by Marco's device, and nothing else on Ana's side is.
+A stranger is not on the network: it gets no mesh records, is left out of
+`hub_broadcast scope="network"`, and its device appears in `/connect status`
+with `trust agents`. A directory older than 0.11.0 has no link route: the
+knock and the accept still work and nothing is delivered between the two
+networks.
+
 ### Story 6: a company runs its own directory
 
 Webceive sets up `agents.webceive.com` following section 11: one TXT record,
@@ -432,7 +455,7 @@ Tools. No new tool names. XML tag and native tool go through one handler each:
 |---|---|---|
 | `hub_msg to= message=` | local name, or `relay:` address with a human grant | `to` accepts `agent@device`. Under `open`/`agents` the runtime delivers it as a hub message. Under `manual` the Codex `kind`/`thread_id`/grant rules apply. |
 | `hub_agents`, `hub_status` | local roster | plus remote agents as `agent@device`, device online state, current task, offline devices |
-| `hub_broadcast` | all local agents | local by default; `scope="network"` reaches every reachable agent under `open` |
+| `hub_broadcast` | all local agents | local by default; `scope="network"` reaches every reachable agent on the network under `open`, never an accepted stranger's |
 | `hub_cron_add`, `hub_cron_list`, `hub_cron_delete` | local reminders | the reminder message may target `agent@device` |
 | `hub_capture`, `hub_spawn`, `hub_stop`, `hub_restart` | local | stay local; a remote target returns `not allowed on a remote device; ask <agent@device> to do it` |
 | task, scratchpad, vault, state tags | local | unchanged |
@@ -586,20 +609,10 @@ document before it merges.
 - **join code**: `XXXX-XXXX`, one device, five minutes.
 - **trust**: `open`, `agents`, `manual`, per network.
 - **knock**: a sealed introduction from outside the network.
+- **link**: the directory's record that two device keys in different rooms each signed a consent to reach the other; how an accepted stranger's messages cross rooms.
 - **primary**: the device whose config the network follows.
 
 ## 15. Open, ask Marco
-
-- Story 5's last step. The relay delivers a message only between two devices
-  in the same room (`plugins/hub/relay_service.py`, the room check on every
-  route). A knock is sealed and reviewed across rooms, and accepting it approves
-  Ana's key and binds her name, but her agents still cannot reach
-  `ops@mac-kollab` because her device is in her own room. Codex never built
-  that step either. Two ways to finish it: the relay routes between two keys
-  that accepted each other (cross-room delivery, relay work), or accepting a
-  knock enrolls the stranger's device into the accepting device's room with
-  `agents` trust (client work, reuses enrollment). Marco decides which, or
-  neither for milestone 1.
 
 - Story 1's no-network screen. Joining Marco's network by code needs a code
   field on a device with no network, so bare `/connect` there opens the code

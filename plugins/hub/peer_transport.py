@@ -1030,8 +1030,11 @@ class PeerMeshRuntime:
                 self._ensure_local_record()
             except (RelayError, PeerRouteError, PeerRecordError):
                 return
+            strangers = getattr(self.client.state, "links", ())
             peers = [
-                peer["key"] for peer in self.client.peers() if peer.get("approved")
+                peer["key"]
+                for peer in self.client.peers()
+                if peer.get("approved") and peer["key"] not in strangers
             ][:MAX_PEER_EXCHANGE_RECORDS]
             if peers:
                 await asyncio.gather(
@@ -1041,7 +1044,13 @@ class PeerMeshRuntime:
             self._refresh_online_neighbors()
 
     async def exchange_peer(self, peer_key: str) -> None:
-        if self._closed or peer_key not in self.client.state.approvals:
+        # An accepted stranger is not a mesh member: it never gets this
+        # network's peer records.
+        if (
+            self._closed
+            or peer_key not in self.client.state.approvals
+            or peer_key in getattr(self.client.state, "links", ())
+        ):
             return
         lock = self._peer_exchange_locks.get(peer_key)
         if lock is None:

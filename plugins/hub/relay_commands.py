@@ -206,16 +206,25 @@ def network_label(network: str, domain: str) -> str:
     return domain if network == domain else f"{network}  via {domain}"
 
 
+def directory_origin(value: str) -> str | None:
+    """The canonical origin a directory name, URL or network ID stands for."""
+    try:
+        target = RelayCommands._resolve_network_target(value)
+        return normalize_target(target, document=False).origin
+    except (ValueError, TypeError, OSError):
+        return None
+
+
 def offline_device_names(agent_bridge, remote_rows: list, client) -> list[str]:
-    """Approved devices in this room that have no online row right now.
+    """Approved devices that have no online row right now.
 
     ``remote_agents()`` rows are always ``online: True`` (the directory only
     lists agents currently reachable), so "offline" comes from comparing the
     approved peer keys against the relay's live roster and the online rows,
     not from a per-row flag. Nobody is offline while the relay itself is
-    unreachable (presence is unknowable then), and an accepted stranger is
-    left out: it lives in its own room, so it never shows up online here
-    (docs/specs/agent-network-simple-flow.md section 15). Named from the
+    unreachable (presence is unknowable then). An accepted stranger is listed
+    like any device once it has a name (the accepting side binds one; the
+    knocking side learns it only from a directory answer). Named from the
     recorded ``peer_devices`` binding, falling back to ``key_label``.
     """
     if client.status().get("state") != "online":
@@ -234,10 +243,11 @@ def offline_device_names(agent_bridge, remote_rows: list, client) -> list[str]:
             for row in remote_rows
             if row.get("online") and row.get("address")
         }
-        strangers = getattr(state, "peer_trust", {})
+        strangers = getattr(state, "links", [])
         for key in client.state.approvals:
-            if key not in online_keys and key not in strangers:
-                offline.add(state.peer_devices.get(key) or key_label(key))
+            if key in online_keys or (key in strangers and key not in state.peer_devices):
+                continue
+            offline.add(state.peer_devices.get(key) or key_label(key))
     except Exception:
         pass
     return sorted(offline)
@@ -613,6 +623,9 @@ class RelayCommands:
     async def resolve_contact_route(self, domain: str, route_hex: str) -> str:
         return await self._contacts().resolve_route(domain, route_hex)
 
+    async def sync_links(self, domain: str, keys: list[str]) -> None:
+        await self._contacts().sync_links(domain, keys)
+
     async def pending_contact_requests(self, domain: str):
         return await self._contacts().pending(domain)
 
@@ -811,6 +824,10 @@ class RelayCommands:
             if self.agent_bridge is not None:
                 self.agent_bridge._state()
                 self.agent_bridge.store.revoke(self.client.state.room, key)
+                # A stranger's path runs through the directory: withdraw it now.
+                sync_links = getattr(self.agent_bridge, "sync_links", None)
+                if callable(sync_links):
+                    await sync_links(force=True)
             return (
                 f"device revoked: {rest}\n"
                 "Its grants are gone and it gets no more of your sealed config. "
@@ -825,6 +842,9 @@ class RelayCommands:
             ):
                 return f"connect: this device is not on {rest}"
             inviter = self.client.state.inviter
+            sync_links = getattr(self.agent_bridge, "sync_links", None)
+            if callable(sync_links):
+                await sync_links(force=True, keys=[])  # while still connected
             await self.client.leave()
             if inviter:
                 # The synced settings stay, as this device's own from now on.

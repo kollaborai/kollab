@@ -26,11 +26,13 @@ CONTACT_REQUESTS_PATH = "/relay/v1/contact/requests"
 CONTACT_INBOX_PATH = "/relay/v1/contact/inbox"
 CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
 CONTACT_LOOKUP_PATH = "/relay/v1/contact/lookup"
+CONTACT_LINKS_PATH = "/relay/v1/contact/links"
 CONTACT_SIGNATURE_DOMAIN = b"kollab-relay-contact-http/1\x00"
 CONTACT_MAX_TTL_SECONDS = 24 * 60 * 60
 CONTACT_MAX_INTRODUCTION_BYTES = 2048
 CONTACT_MAX_ENVELOPE_BYTES = 6 * 1024
 CONTACT_MAX_REQUESTS = 32
+CONTACT_MAX_LINK_PEERS = 64
 CONTACT_MAX_HTTP_FRAME_BYTES = 512 * 1024
 CONTACT_TIMESTAMP_SKEW_SECONDS = 120
 _HEX_32 = re.compile(r"[0-9a-f]{32}\Z")
@@ -523,6 +525,27 @@ class ContactRequestManager:
         ):
             raise ContactProtocolError("invalid_response")
         return ContactDecision(request_id, status)
+
+    async def sync_links(self, domain: str, peers: list[str]) -> None:
+        """Declare which other devices this key consents to link with.
+
+        The signed list replaces the last one. The directory routes between
+        two devices in different rooms only while each one's list names the
+        other, so this alone never opens a path.
+        """
+        keys = sorted({validate_contact_key(peer.lower()) for peer in peers})
+        if len(keys) > CONTACT_MAX_LINK_PEERS:
+            raise ContactProtocolError("capacity")
+        origin, ca, cidrs = await self._route(domain)
+        frame = _signed_frame(
+            self.commands.client._store.key,
+            origin,
+            CONTACT_LINKS_PATH,
+            {"key": self.commands.client.public_key, "peers": keys},
+        )
+        result = await self._post(origin, CONTACT_LINKS_PATH, frame, ca=ca, cidrs=cidrs)
+        if result != {"status": "stored"}:
+            raise ContactProtocolError("invalid_response")
 
     async def resolve_route(self, domain: str, route_hex: str) -> str:
         """Resolve a contact route to its key.

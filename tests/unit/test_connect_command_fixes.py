@@ -250,10 +250,14 @@ def _client(state="online", online=(), approvals=()):
     )
 
 
-def _named(peer_devices, peer_trust=None):
+def _named(peer_devices, peer_trust=None, links=()):
     return SimpleNamespace(
         _state=lambda: SimpleNamespace(
-            state=SimpleNamespace(peer_devices=peer_devices, peer_trust=peer_trust or {})
+            state=SimpleNamespace(
+                peer_devices=peer_devices,
+                peer_trust=peer_trust or {},
+                links=list(links),
+            )
         )
     )
 
@@ -270,12 +274,26 @@ def test_a_peer_in_the_relay_roster_is_never_offline_even_before_its_directory_a
     assert offline_device_names(_named({KEY: "alzan-prod-home"}), [], client) == []
 
 
-def test_an_accepted_stranger_lives_in_another_room_and_is_not_listed_offline():
+def test_an_accepted_stranger_is_listed_offline_by_its_name_like_any_device():
     stranger = SigningKey.generate().verify_key.encode().hex()
     client = _client(approvals=[KEY, stranger])
-    bridge = _named({KEY: "laptop-kollab", stranger: "ana-laptop"}, {stranger: "agents"})
+    bridge = _named(
+        {KEY: "laptop-kollab", stranger: "ana-laptop"}, {stranger: "agents"}, [stranger]
+    )
 
-    assert offline_device_names(bridge, [], client) == ["laptop-kollab"]
+    assert offline_device_names(bridge, [], client) == ["ana-laptop", "laptop-kollab"]
+
+    online = _client(online=[stranger], approvals=[KEY, stranger])
+    assert offline_device_names(bridge, [], online) == ["laptop-kollab"]
+
+
+def test_a_knocked_device_without_a_name_yet_is_not_listed_offline():
+    """The knocking side learns the other device's name from its directory answer."""
+    knocked = SigningKey.generate().verify_key.encode().hex()
+    client = _client(approvals=[knocked])
+
+    bridge = _named({}, {knocked: "agents"}, [knocked])
+    assert offline_device_names(bridge, [], client) == []
 
 
 def test_an_unbound_offline_peer_shows_a_hash_label_never_its_key():

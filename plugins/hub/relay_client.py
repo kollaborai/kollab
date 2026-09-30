@@ -76,6 +76,19 @@ APPLICATION_ERRORS = frozenset(
     {"busy", "not_supported", "failed", "deadline", "cancelled"}
 )
 RequestHandler = Callable[[str, str, dict], Awaitable[dict]]
+LINK_BINDING_DOMAIN = b"kollab-relay-link/1\x00"
+
+
+def link_binding(first: str, second: str) -> str:
+    """The envelope `room` value between two keys that are linked across rooms.
+
+    Both keys compute the same value, so it binds a message to this pair of
+    devices the way the room hash binds one to a room.
+    """
+    low, high = sorted((first, second))
+    return hashlib.sha256(
+        LINK_BINDING_DOMAIN + bytes.fromhex(low) + bytes.fromhex(high)
+    ).hexdigest()
 
 
 @dataclass
@@ -248,6 +261,7 @@ class RelayClient:
         self.state.peer_devices = {}
         self.state.peer_trust = {}
         self.state.config_recipients = []
+        self.state.links = []
         self._store.save()
 
     async def leave(self) -> None:
@@ -277,6 +291,7 @@ class RelayClient:
             "peer_devices",
             "peer_trust",
             "config_recipients",
+            "links",
         ):
             setattr(self.state, name, getattr(disk, name))
 
@@ -328,6 +343,9 @@ class RelayClient:
                 changed = True
             if self.state.peer_trust.pop(key, None) is not None:
                 changed = True
+            if key in self.state.links:
+                self.state.links.remove(key)
+                changed = True
             if changed:
                 self._store.save()
         finally:
@@ -343,6 +361,16 @@ class RelayClient:
                 self._notify_peer_session_listeners(
                     PeerSessionEvent("peer_revoked", key, previous_session, None)
                 )
+
+    def _binding(self, peer_key: str) -> str:
+        """What an envelope's `room` must say for this peer.
+
+        An accepted stranger lives in its own room, so its messages are bound
+        to the pair of keys instead of a room both sides share.
+        """
+        if peer_key in self.state.links:
+            return link_binding(self.public_key, peer_key)
+        return hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
 
     def _settle_application_peer(self, key: str, reason: str) -> None:
         for request_id, pending in tuple(self._application_pending.items()):
@@ -861,7 +889,7 @@ class RelayClient:
             "to": key,
             "from_session": self._session_id,
             "to_session": self._peers[key],
-            "room": hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest(),
+            "room": self._binding(key),
             "id": message_id,
             "sent_at": now,
             "expires_at": now + 30,
@@ -963,8 +991,7 @@ class RelayClient:
             or body["to"] != self.public_key
             or body["from_session"] != frame["session"]
             or body["to_session"] != self._session_id
-            or body["room"]
-            != hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
+            or body["room"] != self._binding(key)
             or body["id"] != frame["id"]
         ):
             raise RelayError("encrypted envelope binding mismatch")

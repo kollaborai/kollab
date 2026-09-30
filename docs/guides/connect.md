@@ -53,9 +53,18 @@ Someone outside your network can introduce themselves. Your `/connect status` sh
 /connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Webceive. Can your ops agent review a nginx config?"
 ```
 
-`/connect knocks` shows what you received, with the sender's device name and fingerprint, and `a` accepts or `r` rejects. Accepting records the device with `agents` trust and nothing allowed until you `/connect allow <device> <agent>`.
+`/connect knocks` shows what you received, with the sender's device name and fingerprint, and `a` accepts or `r` rejects. Accepting records the device with `agents` trust and nothing allowed until you allow an agent:
 
-Today a knock is an introduction only. Messages between two different networks are not delivered yet; that step is listed as open in the spec.
+```text
+/connect allow ana-laptop ops
+```
+
+Now Ana's agents can message `ops@mac-kollab` and nothing else. Ana never joins your network: her device stays in her own, and the directory passes messages between the two devices only because each side consented, she when she knocked and you when you accepted. She sees only the agents you allowed, in her roster as `ops@mac-kollab`, and `ops` can answer the agent she knocked from. Her device needs to be on the same directory as yours (kollabor.ai here) when she knocks.
+
+- `/connect deny ana-laptop ops` (or without the agent) stops delivery at once.
+- `/connect revoke ana-laptop` removes the device and the link at the directory.
+- `/connect status` lists her allowed agents with `trust agents` next to them.
+- If the directory is older than 0.11.0, the knock and the accept work but nothing is delivered between the two networks until the directory is upgraded.
 
 ## If something goes wrong
 

@@ -11937,6 +11937,7 @@ class HubPlugin(BasePlugin):
             relay = getattr(self, "_relay_agent", None)
             resolve = getattr(relay, "resolve_handle", None)
             send = getattr(relay, "send", None)
+            is_stranger = getattr(relay, "is_stranger", None)
             reached = 0
             if callable(resolve) and callable(send):
                 from .relay_state import RelayError
@@ -11944,6 +11945,8 @@ class HubPlugin(BasePlugin):
                 for row in await self._refresh_remote_agent_rows():
                     if not row.get("online"):
                         continue
+                    if callable(is_stranger) and is_stranger(row.get("address", "")):
+                        continue  # an accepted stranger is not on this network
                     handle = row.get("handle") or format_handle(
                         row.get("name", "?"), row.get("device", "?")
                     )
