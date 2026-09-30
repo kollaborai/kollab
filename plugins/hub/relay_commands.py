@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kollabor_config.managed_config import clear_managed_config
+
 from .device_names import (
     DEFAULT_TRUST,
     contact_route_hex,
@@ -789,13 +791,17 @@ class RelayCommands:
                 key = await self._resolve_peer_key(rest)
             except ValueError as exc:
                 return f"connect: {exc}"
+            if key == self.client.state.inviter:
+                # Revoking the primary ends its say over this device's settings.
+                clear_managed_config(primary_key=key)
             self.client.revoke(key)
             if self.agent_bridge is not None:
                 self.agent_bridge._state()
                 self.agent_bridge.store.revoke(self.client.state.room, key)
             return (
                 f"device revoked: {rest}\n"
-                "Its grants are gone. Provider credentials it copied are not revoked at the provider."
+                "Its grants are gone and it gets no more of your sealed config. "
+                "Provider credentials it copied are not revoked at the provider."
             )
         if head == "leave":
             origin = self.client.state.origin
@@ -805,7 +811,11 @@ class RelayCommands:
                 origin.removeprefix("https://")
             ):
                 return f"connect: this device is not on {rest}"
+            inviter = self.client.state.inviter
             await self.client.leave()
+            if inviter:
+                # The synced settings stay, as this device's own from now on.
+                clear_managed_config(primary_key=inviter)
             return "left the network; this device can join another with a code"
         if head == "rotate":
             origin = self.client.state.origin

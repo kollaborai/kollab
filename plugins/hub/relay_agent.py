@@ -22,6 +22,8 @@ from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import CancellationOrigin
 from kollabor_ai.message_content import content_to_text
 
+from .config_sync import Applied
+from .config_sync_service import ConfigSyncService
 from .device_names import (
     NAME_RE,
     default_device_name,
@@ -172,6 +174,7 @@ class RelayAgentBridge:
         self._outbox_lock = asyncio.Lock()
         self._enrollment_issuer = None
         self.secure_transport: SecureConversationTransport | None = None
+        self.config_sync: ConfigSyncService | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
 
@@ -488,6 +491,7 @@ class RelayAgentBridge:
                 self.commands.client, self.commands.client._store.key.encode()
             )
             self.commands.client.set_request_handler(self._receive)
+            self.make_config_sync().start()
             try:
                 from .peer_transport import PeerMeshRuntime
 
@@ -589,6 +593,9 @@ class RelayAgentBridge:
         if self.peer_mesh is not None:
             await self.peer_mesh.close()
             self.peer_mesh = None
+        if self.config_sync is not None:
+            await self.config_sync.close()
+            self.config_sync = None
         if self.secure_transport is not None:
             self.secure_transport.close()
             self.secure_transport = None
@@ -1515,6 +1522,10 @@ class RelayAgentBridge:
             if self.peer_mesh is None:
                 raise RelayError("peer exchange is unavailable")
             return await self.peer_mesh.handle_exchange(peer, payload)
+        if method == "config_sync":
+            if self.config_sync is None:
+                raise RelayError("config sync is unavailable")
+            return await self.config_sync.receive(peer, payload)
         if method == "message":
             message = validate_message(
                 payload,
@@ -1649,7 +1660,7 @@ class RelayAgentBridge:
         raise RelayError("unsupported relay operation")
 
     async def _receive_secure_application(self, peer, method, payload):
-        if method not in {"message", "status", "cancel", "directory", "peer.exchange"}:
+        if method not in {"message", "status", "cancel", "directory", "peer.exchange", "config_sync"}:
             raise RelayError("unsupported secure conversation operation")
         try:
             return await self._receive(peer, method, payload, _secure=True)
@@ -2267,6 +2278,49 @@ class RelayAgentBridge:
             "truncated": len(rows) > MAX_DIRECTORY
             or len(peer_sessions) > MAX_REMOTE_PEERS,
         }
+
+    def make_config_sync(self, root=None) -> ConfigSyncService:
+        """The sealed-config service for this device (started by the owner)."""
+        self.config_sync = ConfigSyncService(
+            key=self.commands.client._store.key,
+            transport=self.secure_transport,
+            online=self._config_online_peers,
+            recipients=lambda: list(self._state().state.config_recipients),
+            primary=lambda: self._state().state.inviter,
+            device_name=self.device_name,
+            peer_name=self._peer_name,
+            after_apply=self._config_applied,
+            root=root,
+        )
+        return self.config_sync
+
+    def _config_online_peers(self) -> dict[str, str]:
+        """Approved peers on the relay right now: key -> their relay session."""
+        client = self.commands.client
+        if client.status().get("state") != "online":
+            return {}
+        approved = set(client.state.approvals)
+        return {p["key"]: p["session"] for p in client.peers() if p["key"] in approved}
+
+    async def _config_applied(self, applied: Applied) -> None:
+        """Make the running app follow settings its primary just wrote to disk."""
+        config = getattr(self.plugin, "config", None)
+        if applied.config_changed and hasattr(config, "reload"):
+            config.reload()
+        bus = self.plugin.event_bus
+        state_service = bus.get_service("state_service") if bus else None
+        if state_service is None:
+            return
+        if applied.profiles_changed:
+            active = config.get("kollabor.llm.active_profile") if config else None
+            try:
+                await state_service.set_active_profile(active or "default", reload_profile=True)
+            except ValueError:
+                # The primary's loadout needs a login this device lacks (OAuth
+                # never travels); the settings still show as managed.
+                logger.info("config sync: the synced loadout cannot be activated here")
+        if applied.mcp_changed:
+            await state_service.reload_mcp_servers()
 
     def _peer_name(self, peer_key: str) -> str:
         """The human name for a peer key: its bound device name, never the key."""

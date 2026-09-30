@@ -138,6 +138,9 @@ class RelayState:
     trust: str = "open"
     peer_devices: dict[str, str] = field(default_factory=dict)
     peer_trust: dict[str, str] = field(default_factory=dict)
+    # Devices this one accepted with a join code: the only peers that receive
+    # the sealed config (a knock-accepted stranger never does).
+    config_recipients: list[str] = field(default_factory=list)
 
 
 class RelayStateStore:
@@ -218,6 +221,14 @@ class RelayStateStore:
         if not isinstance(value.peer_devices, dict) or len(value.peer_devices) > MAX_APPROVALS:
             raise RelayError("invalid peer device names")
         for key in value.peer_devices:
+            validate_public_key(key)
+        if (
+            not isinstance(value.config_recipients, list)
+            or len(value.config_recipients) > MAX_APPROVALS
+            or len(set(value.config_recipients)) != len(value.config_recipients)
+        ):
+            raise RelayError("invalid config recipients")
+        for key in value.config_recipients:
             validate_public_key(key)
         if not isinstance(value.peer_trust, dict) or len(value.peer_trust) > MAX_APPROVALS:
             raise RelayError("invalid peer trust levels")

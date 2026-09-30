@@ -247,6 +247,7 @@ class RelayClient:
         # device-name bindings would only block those names from reuse.
         self.state.peer_devices = {}
         self.state.peer_trust = {}
+        self.state.config_recipients = []
         self._store.save()
 
     async def leave(self) -> None:
@@ -269,7 +270,14 @@ class RelayClient:
         name, trust and peer bindings back over the bridge's newer ones.
         """
         disk = RelayStateStore(self.workspace, self.state_dir).state
-        for name in ("device_name", "network_name", "trust", "peer_devices", "peer_trust"):
+        for name in (
+            "device_name",
+            "network_name",
+            "trust",
+            "peer_devices",
+            "peer_trust",
+            "config_recipients",
+        ):
             setattr(self.state, name, getattr(disk, name))
 
     def approve(self, key: str):
@@ -293,6 +301,16 @@ class RelayClient:
                     PeerSessionEvent("peer_appeared", key, None, session)
                 )
 
+    def add_config_recipient(self, key: str) -> None:
+        """Remember a device accepted with a join code: it gets the sealed config."""
+        validate_public_key(key)
+        self._adopt_bridge_fields()
+        if key not in self.state.config_recipients:
+            if len(self.state.config_recipients) >= MAX_APPROVALS:
+                raise RelayError("config recipient capacity reached", "capacity")
+            self.state.config_recipients.append(key)
+            self._store.save()
+
     def revoke(self, key: str):
         validate_key(key)
         was_approved = key in self.state.approvals
@@ -300,6 +318,9 @@ class RelayClient:
         try:
             self._adopt_bridge_fields()
             changed = False
+            if key in self.state.config_recipients:
+                self.state.config_recipients.remove(key)
+                changed = True
             if key in self.state.approvals:
                 self.state.approvals.remove(key)
                 changed = True

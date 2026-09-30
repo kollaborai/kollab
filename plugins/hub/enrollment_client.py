@@ -2744,6 +2744,7 @@ class EnrollmentIssuer:
                 if not any(member.public_key.hex() == destination_key for member in directory.members()):
                     continue
                 client.approve(destination_key)
+                client.add_config_recipient(destination_key)
                 store.mark_peer_approved(
                     record.enrollment_id,
                     destination_public_key=destination_key,
@@ -3761,6 +3762,7 @@ class EnrollmentIssuer:
                             )
                             receipt_persisted = True
                             client.approve(destination_key)
+                            client.add_config_recipient(destination_key)
                             store.mark_peer_approved(
                                 round_id,
                                 destination_public_key=destination_key,

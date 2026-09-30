@@ -30,6 +30,13 @@ from .config_utils import (
 )
 from .llm_task_config import BackgroundTasksConfig, LLMTaskConfig, QueueConfig
 from .loader import ConfigLoader
+from .managed_config import (
+    ManagedConfig,
+    clear_managed_config,
+    managed_by,
+    read_managed_config,
+    write_managed_config,
+)
 from .manager import ConfigManager
 from .plugin_config_manager import PluginConfigManager, get_plugin_config_manager
 from .plugin_schema import (
@@ -49,6 +56,11 @@ __all__ = [
     "ConfigManager",
     "ConfigLoader",
     "ConfigService",
+    "ManagedConfig",
+    "clear_managed_config",
+    "managed_by",
+    "read_managed_config",
+    "write_managed_config",
     "ProvisionedStateError",
     "ProvisionedStateFile",
     "default_provisioned_state_path",
