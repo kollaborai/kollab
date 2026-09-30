@@ -432,7 +432,10 @@ else
   rec s6-12-serve-stops-cleanly FAIL s6-12-serve-after-stop.txt "still running after 60s, or the pane shows a traceback/error"
 fi
 sleep 5   # let the devices notice; they reconnect with backoff
-m1_ssh "tmux send-keys -t $M4_SERVE_SESSION -l \"bash '$M4_SRV_ROOT/serve-cmd.sh'\"; tmux send-keys -t $M4_SERVE_SESSION Enter" </dev/null
+# Ctrl-C also ends the tmux session (the wrapping shell dies with its child), so start it
+# again exactly the way serve_up.sh does. The new pane has no earlier 'ready' line.
+m1_ssh "tmux kill-session -t $M4_SERVE_SESSION 2>/dev/null || true; tmux new-session -d -s $M4_SERVE_SESSION -x 150 -y 50 \"bash '$M4_SRV_ROOT/serve-cmd.sh'; exec bash\"" </dev/null
+READY0=0
 up=0
 for _ in $(seq 1 45); do
   sleep 2
