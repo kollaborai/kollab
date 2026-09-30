@@ -39,6 +39,7 @@ def config(workspace, port, cert, key, ca):
     path = Path(workspace) / ".kollab" / "config.json"
     backup = path.with_name("config.json.m3-bak")
     none_marker = path.with_name("config.json.m3-none")
+    path.parent.mkdir(parents=True, exist_ok=True)
     if not backup.exists() and not none_marker.exists():
         if path.exists():
             backup.write_text(path.read_text())
