@@ -980,3 +980,26 @@ async def test_a_refused_direct_secure_record_still_takes_the_routed_path(mesh_n
     with pytest.raises(Exception):
         await mesh.request(destination, "secure_identity", {"x": 1}, timeout=3)
     assert attempts, "the direct refusal ended the request before the routed path was tried"
+
+
+@pytest.mark.asyncio
+async def test_the_direct_endpoint_turns_an_accepted_stranger_away_from_forwarding(mesh_network):
+    # relay_agent refuses peer.forward from an accepted stranger; a locator-admitted
+    # endpoint reaches handle_direct_forward without that dispatcher, so it checks too.
+    import time
+
+    from plugins.hub.peer_router import PeerRouteError
+
+    clients, states, *_ = mesh_network
+    mesh = states["relay"]["mesh"]
+    stranger = clients["origin"].public_key
+    clients["relay"].state.links.append(stranger)
+    endpoint_key = "ab" * 32
+    mesh._locators[stranger] = {
+        "expires_at": int(time.time()) + 60,
+        "relay_public_key": stranger,
+        "endpoint_designation": "stranger-endpoint",
+        "endpoint_public_key": endpoint_key,
+    }
+    with pytest.raises(PeerRouteError, match="stranger"):
+        await mesh.handle_direct_forward("stranger-endpoint", endpoint_key, {})

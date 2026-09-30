@@ -1777,9 +1777,10 @@ class PeerMeshRuntime:
     async def handle_direct_forward(
         self, designation: str, endpoint_public_key: str, frame: dict[str, Any]
     ) -> dict[str, Any]:
-        return await self.handle_forward(
-            self._direct_caller(designation, endpoint_public_key), frame
-        )
+        peer_key = self._direct_caller(designation, endpoint_public_key)
+        if peer_key in getattr(self.client.state, "links", ()):
+            raise PeerRouteError("an accepted stranger is not a mesh member")
+        return await self.handle_forward(peer_key, frame)
 
     async def handle_direct_secure(
         self,
