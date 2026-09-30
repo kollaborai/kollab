@@ -7,8 +7,16 @@ the wire formats and configuration. Recheck them before editing or deploying.
 ## Read the owner of the behavior
 
 - `kollabor_cli_main.py`: early headless entrypoint. `kollab relay run --config
-  <private-file>` invokes the supervisor; `kollab relay serve` runs one worker.
-  Confirm the installed artifact contains the command before recommending it.
+  <private-file>` invokes the supervisor; `kollab relay serve --domain <domain>`
+  is the one-command directory (`relay_selfhost.py`); `kollab relay serve --origin
+  <origin>` runs one bare worker. Confirm the installed artifact contains the
+  command before recommending it.
+- `plugins/hub/relay_selfhost.py`: `serve --domain`. Builds the relay app with
+  `create_app` on the in-memory backend, adds the key file route, and renews the
+  signed document with `discovery_publish.publish` while the relay is ready. Owns
+  the state directory (`service.key`, `publisher.json`, `serve.lock`,
+  `public/agent-keys.json`) and prints the TXT record and the nginx/Caddy/systemd
+  config. It must not fork relay or publisher logic.
 - `plugins/hub/relay_runtime.py`: worker supervision, readiness, managed Valkey
   sidecar ownership and restarts; external backend configuration.
 - `plugins/hub/relay_service.py`: registration challenge, presence, bounded routing,

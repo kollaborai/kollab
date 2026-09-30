@@ -348,17 +348,25 @@ remote agents the same way (`agent@device - state (device online|offline)`).
 `open` trust; without that scope, or under any other trust level, a broadcast
 stays local.
 
-Run the service from the same application:
+Run your own directory from the same application:
 
 ```bash
-kollab relay run --config /private/relay.json
-kollab relay serve --help
+kollab relay serve --domain agents.example.com   # relay + signed key file in one process
+kollab relay serve --domain agents.example.com --print nginx   # or caddy, systemd
+kollab relay run --config /private/relay.json    # several workers, shared backend
 ```
 
-`run` supervises workers with an external Valkey backend or an explicitly
-configured managed sidecar. `serve` runs one worker. Neither command launches an
-interactive assistant. See the [public beacon contract](../specs/agent-public-beacon.md)
-for the private config format, quotas, deployment, and recovery boundaries.
+`serve --domain` creates or loads its signing key under
+`~/.kollab/relay/<domain>` (`--state-dir`), serves the relay and the key file on
+one local port (`--bind`, `--port`, default `127.0.0.1:9078`), and prints the DNS
+TXT record and the five proxy routes it needs. `--print` prints a proxy or
+systemd config for the same settings and exits. `run` supervises workers with an
+external Valkey backend or an explicitly configured managed sidecar; the bare
+worker it supervises is `kollab relay serve --origin`. None of these launches an
+interactive assistant. See [Signed discovery and relay service
+operations](../operations/kollabor-ai-discovery-publication.md) for the options and
+limits, and the [public beacon contract](../specs/agent-public-beacon.md) for the
+private config format, quotas, deployment, and recovery boundaries.
 
 
 ## --context Flag

@@ -10,7 +10,8 @@ Status: the relay routes described here run on kollabor.ai; the enrollment looku
 
 This is one optional subsystem of the Kollab app. It is not a separate relay product or a hosted account service.
 
-- `kollab relay serve` runs one relay worker. A worker can use an external Redis-compatible shared backend. Explicit `--dev-in-memory` is single-process development only.
+- `kollab relay serve --domain <domain>` runs a whole directory in one process: one relay worker on the in-memory backend, the signed discovery publisher and the key file (`/.well-known/agent-keys.json`) on the same port. It changes none of the routes below. See [the operations guide](../operations/kollabor-ai-discovery-publication.md).
+- `kollab relay serve --origin <origin>` runs one bare relay worker. A worker can use an external Redis-compatible shared backend. Explicit `--dev-in-memory` is single-process development only.
 - `kollab relay run --config <private-file>` supervises multiple workers and can manage one standalone Valkey sidecar. It does not provision a Redis/Valkey Cluster.
 - Multiple workers or hosts share an operator-provisioned standalone Redis/Valkey service or Redis/Valkey Cluster. Cluster mode uses sharded Pub/Sub and requires backend support for `SSUBSCRIBE` and `SPUBLISH`.
 - The signed Kollab domain descriptor is the locator. It advertises the same-origin control route only when the service is intentionally published. An identity-only publisher must not guess or advertise an absent relay.

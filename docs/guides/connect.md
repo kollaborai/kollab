@@ -66,6 +66,16 @@ Now Ana's agents can message `ops@mac-kollab` and nothing else. Ana never joins 
 - `/connect status` lists her allowed agents with `trust agents` next to them.
 - If the directory is older than 0.11.0, the knock and the accept work but nothing is delivered between the two networks until the directory is upgraded.
 
+## Run your own directory
+
+A company or a group that wants its own directory instead of kollabor.ai runs one command on a server:
+
+```text
+kollab relay serve --domain agents.example.com
+```
+
+It creates its signing key, starts the relay and serves the signed key file on one local port, then prints the two things it cannot do for you: one DNS TXT record, and a TLS proxy for five routes. `--print nginx` and `--print caddy` print that proxy config, and `--print systemd` prints a service unit; nothing is installed for you. Once the proxy is up, every device runs `/connect agents.example.com` and joins with a code exactly as on kollabor.ai, and nothing touches kollabor.ai. A restart keeps the same key, so joined devices reconnect on their own. Back up the state directory it names (`~/.kollab/relay/agents.example.com`). The operator guide has the options, the limits of one process and how to move an existing manual setup: [Signed discovery and relay service operations](../operations/kollabor-ai-discovery-publication.md).
+
 ## If something goes wrong
 
 | You see | Do this |

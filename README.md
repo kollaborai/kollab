@@ -203,7 +203,9 @@ the network observes it, like the local hub. Start with the
 kollab --hub msg ops@alzan-prod-home "check the tunnel"
 ```
 
-Self-host the directory with `kollab relay run --config /private/relay.json`. The
+Run your own directory on your own domain with one command, `kollab relay serve
+--domain agents.example.com`: it prints the DNS record and the proxy routes it still
+needs (`kollab relay run --config` is the form for several workers). The
 [agent network contract](docs/specs/agent-network-simple-flow.md) is the design;
 the [public beacon contract](docs/specs/agent-public-beacon.md) covers the relay's
 routes, limits and key handling.

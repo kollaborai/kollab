@@ -102,8 +102,8 @@ allowed until you `/connect allow`. Never `open`. The stranger stays in its own
 network: the directory links its device key to yours across rooms only while
 both devices consented (Story 5).
 
-**Directory.** kollabor.ai, or any domain that runs the relay, the signed
-discovery publisher and one DNS TXT record. See section 11.
+**Directory.** kollabor.ai, or any domain that runs `kollab relay serve` and
+adds one DNS TXT record. See section 11.
 
 ## 5. User stories, with the screens
 
@@ -316,9 +316,38 @@ networks.
 
 ### Story 6: a company runs its own directory
 
-Webceive sets up `agents.webceive.com` following section 11: one TXT record,
-`kollab relay run`, the discovery publisher, the key file, five proxy routes.
-Every employee then runs:
+Webceive's admin has SSH to a server with `pip install kollab`. One command:
+
+```
+kollab relay serve --domain agents.webceive.com
+```
+
+```
+kollab relay serve: agents.webceive.com
+  state    /home/ops/.kollab/relay/agents.webceive.com
+           new signing key created; back this directory up
+  listen   http://127.0.0.1:9078  (plain HTTP, behind your TLS proxy)
+  proxies  X-Real-IP trusted from 127.0.0.1 ::1
+
+still to do, once:
+  1. DNS: add this TXT record
+       _agent.agents.webceive.com  TXT  "v=aid1;u=https://agents.webceive.com/.well-known/agent-keys.json"
+  2. TLS proxy: terminate TLS for agents.webceive.com and forward only these routes to 127.0.0.1:9078
+       GET   /.well-known/agent-keys.json     key file
+       GET   /relay/v1/health                 health
+       WS    /relay/v1/ws                     websocket
+       POST  /relay/v1/enrollment/*           join codes
+       POST  /relay/v1/contact/*              knocks
+     paste-ready: kollab relay serve --domain agents.webceive.com --print nginx   (or --print caddy)
+  3. keep it running: kollab relay serve --domain agents.webceive.com --print systemd
+
+then devices connect with /connect agents.webceive.com
+
+ready: relay up, key file published (revision 2)
+```
+
+The admin adds the record, pastes the proxy config and installs the unit; the
+command prints them, it never installs anything itself. Every employee then runs:
 
 ```
 /connect agents.webceive.com
@@ -326,7 +355,9 @@ Every employee then runs:
 
 and joins with a code from a device already on the company network. Nothing
 touches kollabor.ai. A device can be on kollabor.ai and on the company network
-at the same time; `/connect status` lists both.
+at the same time; `/connect status` lists both. If the server restarts, the
+signing key and revision counter come back from the state directory, so the
+published identity is the same and every joined device reconnects on its own.
 
 ### Story 7: a team that wants a human on every message
 
@@ -565,11 +596,32 @@ Disposition:
 
 ## 11. Self-hosting a directory
 
-Unchanged from
-[kollabor-ai-discovery-publication.md](../operations/kollabor-ai-discovery-publication.md):
-one `_agent.<domain>` TXT record, `kollab relay run --config`, the discovery
-publisher, a static key file, and a TLS proxy with five routes. Milestone 4
-folds publisher, key file and relay into `kollab relay serve --domain`.
+`kollab relay serve --domain <domain>` is the whole setup (Story 6). One process
+runs the relay, keeps the signed discovery document published and serves it as
+the key file, all on one local port. What stays with the operator is one
+`_agent.<domain>` TXT record and a TLS proxy with five routes; the command
+prints both. Operator detail is in
+[kollabor-ai-discovery-publication.md](../operations/kollabor-ai-discovery-publication.md).
+
+- **State.** `~/.kollab/relay/<domain>` (`--state-dir` moves it): the signing key
+  (mode 0600, in a 0700 directory) and the revision counter, one process per
+  directory. This is the published identity. Restarts reuse it; lose it and every
+  device that pinned the old key refuses the new one, so it gets backed up. A
+  directory that runs the standalone publisher today is adopted as it is.
+- **What it prints.** The TXT record value and the five routes (key file, health,
+  websocket, `enrollment/*`, `contact/*`). `--print nginx|caddy` prints that
+  proxy config and `--print systemd` a unit that runs the same command as the
+  same user on the same state directory. Nothing is written for the operator:
+  installing a unit needs root and is theirs to do.
+- **Client addresses.** A proxy on the same machine is trusted for `X-Real-IP`, so
+  per-address limits see the client and not the proxy. A proxy elsewhere needs
+  `--trusted-proxy <ip>`; an office behind one address needs
+  `--max-connections-per-source`.
+- **Backend.** One worker on the in-memory backend. The managed Valkey sidecar
+  never persisted either: a join code or knock that is waiting at a restart ends,
+  everything else is rebuilt as devices reconnect. Several workers or hosts keep
+  `kollab relay run --config`, which is what kollabor.ai runs; it and the bare
+  worker `kollab relay serve --origin` are unchanged.
 
 ## 12. Milestones and the proof bar
 
@@ -578,7 +630,11 @@ folds publisher, key file and relay into `kollab relay serve --domain`.
    written, transcript clean on both sides, at 80 and 120 columns.
 2. **Sealed config sync.** Section 9. Story 8.
 3. **Mesh.** Section 10.
-4. **One-command self-host.** Section 11.
+4. **One-command self-host.** Section 11. Proven on selfhost.kollabor.ai
+   (alzan-prod) with the one command in place of the relay, the publisher and the
+   static server: two devices join a network on that domain and exchange a
+   message, a restart of the command keeps the published key and both devices
+   come back, and nothing touches kollabor.ai (`tests/live/m4`).
 
 "Proven" means the live run, not unit tests. Every milestone updates this
 document before it merges.
