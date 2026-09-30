@@ -183,6 +183,13 @@ CODE_IN_COMMAND = (
     "and paste the code into the private form."
 )
 
+# The one line the Connect screen shows in a window that does not own the
+# workspace's relay: it can read the network, but a code, a request and a
+# decision all live in the window that runs it.
+CONNECT_OWNED_ELSEWHERE = (
+    "another window in this workspace runs the network; use /connect there"
+)
+
 
 def format_connect_help(show_all: bool = False) -> str:
     """Aligned /connect usage built from the same lists as the command menu."""
@@ -8898,6 +8905,15 @@ class HubPlugin(BasePlugin):
         """True in a window attached to a daemon, which owns the relay."""
         return bool(getattr(getattr(self, "_cli_args", None), "attach", None))
 
+    def _relay_owned_elsewhere(self) -> bool:
+        """True in a window whose workspace relay another window owns."""
+        if self._attached() or self._relay_commands is not None:
+            return False
+        try:
+            return self._relay_agent.owner.owner() is not None
+        except Exception:
+            return False
+
     async def _attached_connect_snapshot(self):
         """The daemon's Connect snapshot, or None when it cannot supply one."""
         from .relay_commands import ConnectSnapshot
@@ -8933,6 +8949,10 @@ class HubPlugin(BasePlugin):
                 if self._relay_commands is not None:
                     status = None
             domain = self._relay_network_domain()
+            if self._relay_owned_elsewhere():
+                # Another window runs the network: this one still opens the
+                # screen, read-only, and says so.
+                return await self._open_connect_screen(domain)
         if status is not None:
             if status.splitlines()[:1] == [NO_NETWORK]:
                 return await self._open_connect_altview("kollabor.ai")
@@ -9206,6 +9226,21 @@ class HubPlugin(BasePlugin):
                 stack_mgr = AltViewStackManager(self.event_bus, renderer)
                 self.event_bus.register_service("altview_stack_manager", stack_mgr)
 
+            # Another window owns the relay: a code, a request and a decision
+            # all live there, so this screen shows what the shared state says
+            # and offers nothing else.
+            note = CONNECT_OWNED_ELSEWHERE if self._relay_owned_elsewhere() else ""
+            snapshot = (
+                ConnectSnapshot(
+                    network=self._relay_network_name(domain) if domain else "",
+                    domain=domain,
+                    trust=self._relay_trust_level(),
+                    device=self._relay_device_name(),
+                    relay_online=False,  # not shown: only the owner sees the relay
+                )
+                if note and not code_only
+                else None
+            )
             await stack_mgr.push(
                 ConnectScreenAltView(
                     domain=domain,
@@ -9213,6 +9248,8 @@ class HubPlugin(BasePlugin):
                     on_load=None if code_only else load,
                     on_decide=None if code_only else decide,
                     code_only=code_only,
+                    snapshot=snapshot,
+                    note=note,
                 ),
                 "connect-code" if code_only else "connect-screen",
                 reuse=False,

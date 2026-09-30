@@ -169,6 +169,12 @@ That is the whole join. No `/connect kollabor.ai` first: with no network,
 `/connect` joins kollabor.ai on its own; `/connect example.org` chooses
 another directory.
 
+One window per workspace runs the network. A second window in the same
+workspace with no daemon opens the same screen read-only: the network and this
+device, then `another window in this workspace runs the network; use /connect
+there`. It shows no code, requests or roster and takes no `a`/`r`, because a
+code, a request and a decision all live in the window that runs the network.
+
 ### Story 2: Marco asks his agent to have the server agent check the tunnel
 
 Mac, in chat with his agent lapis:

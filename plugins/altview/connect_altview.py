@@ -21,7 +21,12 @@ from typing import Any, Awaitable, Callable
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
-from plugins.hub.device_names import clip_display, display_name, request_row
+from plugins.hub.device_names import (
+    NAME_DISPLAY_MAX,
+    clip_display,
+    display_name,
+    request_row,
+)
 from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow, network_label
 
 _MAX_DOMAIN_LENGTH = 253
@@ -593,7 +598,7 @@ class ConnectAltView(AltView):
 
     def _write_line(self, x: int, y: int, text: str, width: int) -> None:
         if self._renderer is not None and x < width:
-            self._renderer.write_at(x, y, text[: max(0, width - x)], "")
+            self._renderer.write_at(x, y, clip_display(text, width - x), "")
 
     @staticmethod
     def _filter_text(value: str, limit: int) -> str:
@@ -618,6 +623,12 @@ class ConnectScreenState:
     selected: int = 0
     notice: tuple[str, ...] = ()
     code_only: bool = False
+    # Why this window cannot act on the network. With it the screen shows what
+    # the window knows and offers nothing else.
+    note: str = ""
+
+
+_WANTS_TO_JOIN = " wants to join"
 
 
 def _fit(text: str, width: int) -> str:
@@ -655,9 +666,14 @@ def _request_rows(state: ConnectScreenState, width: int) -> list[str]:
     rows: list[str] = []
     for index, request in enumerate(requests):
         marker = ("> " if index == state.selected else "  ") if len(requests) > 1 else ""
-        who = f"{marker}{display_name(request.device or 'unknown device')} wants to join"
+        # The name shows whole; only one wider than the row gives way (with an
+        # ellipsis), never the words after it.
+        name = display_name(
+            request.device or "unknown device",
+            min(NAME_DISPLAY_MAX, max(1, room - len(marker) - len(_WANTS_TO_JOIN))),
+        )
         rows += request_row(
-            who,
+            f"{marker}{name}{_WANTS_TO_JOIN}",
             f"fingerprint {request.fingerprint}",
             room,
             hint="[a]ccept [r]eject",
@@ -666,7 +682,15 @@ def _request_rows(state: ConnectScreenState, width: int) -> list[str]:
     return rows
 
 
+def _network_value(snapshot: ConnectSnapshot) -> str:
+    if not snapshot.domain:
+        return "none"
+    return f"{network_label(snapshot.network, snapshot.domain)}   trust: {snapshot.trust}"
+
+
 def _footer(state: ConnectScreenState) -> str:
+    if state.note:
+        return " esc close"
     keys = []
     requests = state.snapshot.requests if state.snapshot and not state.code_only else ()
     if len(requests) > 1:
@@ -694,7 +718,14 @@ def connect_screen_lines(
     """
     lines = [_fit(" Connect code" if state.code_only else " Connect", width)]
     snapshot = state.snapshot
-    if state.code_only:
+    if state.note:
+        # This window cannot act on the network: what it knows, and why that is all.
+        if snapshot is not None and not state.code_only:
+            lines += _block("network", [_network_value(snapshot)], width)
+            lines += _block("this device", [snapshot.device or "unnamed"], width)
+            lines.append("")
+        lines.append(_fit(" " + state.note, width))
+    elif state.code_only:
         lines += _block("join code", [_code_value(state)], width)
         if state.code_status == "active":
             lines.append(_fit(" type it into /connect on the other machine", width))
@@ -702,8 +733,7 @@ def connect_screen_lines(
         lines += _block("network", ["loading…"], width)
         lines += _block("join code", [_code_value(state)], width)
     else:
-        network = network_label(snapshot.network, snapshot.domain)
-        lines += _block("network", [f"{network}   trust: {snapshot.trust}"], width)
+        lines += _block("network", [_network_value(snapshot)], width)
         lines += _block("this device", [snapshot.device or "unnamed"], width)
         lines += _block("join code", [_code_value(state)], width)
         if snapshot.requests or not state.notice:
@@ -742,6 +772,10 @@ class ConnectScreenAltView(AltView):
     the roster refresh from ``on_load`` in a background task, so a slow relay
     never stalls rendering or input. With ``code_only`` it shows just the
     code (``/connect code``); nothing but this private view ever holds it.
+
+    With ``note`` this window cannot act on the network (another window in the
+    workspace owns it): the view shows its own ``snapshot`` and the note, and
+    creates no code, polls nothing and decides nothing.
     """
 
     def __init__(
@@ -752,6 +786,8 @@ class ConnectScreenAltView(AltView):
         on_decide: Callable[[JoinRequestRow, str], Any] | None = None,
         *,
         code_only: bool = False,
+        snapshot: ConnectSnapshot | None = None,
+        note: str = "",
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect-screen",
@@ -772,6 +808,8 @@ class ConnectScreenAltView(AltView):
         self._on_load = on_load
         self._on_decide = on_decide
         self.code_only = code_only
+        self._note = note
+        self._fixed_snapshot = snapshot
         self._renderer: Any = None
         self._private_code: PrivateCode | None = None
         self._expires_at = 0
@@ -793,9 +831,11 @@ class ConnectScreenAltView(AltView):
         self._armed = True
         self._clear_code()
         self._code_status = "creating"
-        self._snapshot = None
+        self._snapshot = self._fixed_snapshot
         self._selected = 0
         self._notice = ()
+        if self._note:
+            return  # nothing to create, poll or decide from this window
         self._start_code()
         if not self.code_only and self._on_load is not None:
             self.spawn_background_task(self._poll(), "poll")
@@ -822,9 +862,11 @@ class ConnectScreenAltView(AltView):
 
     async def handle_input(self, key_press: KeyPress) -> bool:
         if key_press.name == "Escape" or (
-            self.code_only and key_press.name == "Enter"
+            (self.code_only or self._note) and key_press.name == "Enter"
         ):
             return True
+        if self._note:
+            return False
         count = len(self._snapshot.requests) if self._snapshot else 0
         if key_press.name == "ArrowUp":
             self._selected = max(0, self._selected - 1)
@@ -990,6 +1032,7 @@ class ConnectScreenAltView(AltView):
             selected=self._selected,
             notice=self._notice,
             code_only=self.code_only,
+            note=self._note,
         )
 
     def _clear_code(self) -> None:

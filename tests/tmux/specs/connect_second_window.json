@@ -1,0 +1,266 @@
+{
+  "name": "connect-second-window",
+  "description": "A second window in a workspace with no daemon opens the Connect screen instead of printing /connect status text. It cannot act on the network (the first window owns it), so the screen shows the network and this device, says so in one plain line, and offers no code, requests or accept/reject keys; /connect code and a workspace with no network say the same. The first window keeps the full screen. Checked at 80 and 120 columns (issue #121, Story 1).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; cd \"$H/ws\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 80,
+    "term_height": 30
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "throwaway HOME with two workspaces; ws is on an offline network, ws2 is on none",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\" \"$H/ws2\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; ln -sfn \"$R/plugins\" \"$H/ws2/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'mac-kollab'; s.save()\""
+    },
+    {
+      "action": "shell",
+      "description": "start the first window of each workspace (they own the relay) and wait until both hold it",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; S=kollab-spec-second-window; tmux -L $S kill-server 2>/dev/null; for w in ws ws2; do tmux -L $S new-session -d -s owner-$w -x 80 -y 30 && tmux -L $S send-keys -t owner-$w -l \"cd $H/$w && env HOME=$H KOLLAB_NO_KEYRING=1 PYTHONPATH=$R $R/.venv/bin/python $R/main.py --no-daemon\" && tmux -L $S send-keys -t owner-$w Enter; done; for i in $(seq 1 80); do [ $(find \"$H/.kollab/network\" -name relay-owner.json 2>/dev/null | wc -l) -ge 2 ] && break; sleep 0.5; done; [ $(find \"$H/.kollab/network\" -name relay-owner.json | wc -l) -ge 2 ]"
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "second window, 80 columns: bare /connect opens the screen, read-only"
+    },
+    {
+      "action": "type",
+      "text": "/connect",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "another window in this workspace runs the network",
+      "timeout": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ Connect *$",
+      "description": "the screen is titled Connect"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "network +relay\\.invalid +trust: open",
+      "description": "it shows the workspace's network from the shared state"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "this device +mac-kollab",
+      "description": "it shows this device"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ another window in this workspace runs the network; use /connect there *$",
+      "description": "one plain line says why nothing else is offered"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ esc close *$",
+      "description": "the only key is esc"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|requests|online|knocks|new code|\\[a\\]ccept|accept|reject",
+      "description": "no code, requests, roster or decision keys that only the first window can carry out"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "contact route|reconnect on launch disabled|\\(this device\\)",
+      "description": "not the /connect status text"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "[0-9a-f]{64}|relay:",
+      "description": "no key or relay address"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^▄{80} *$",
+      "description": "the title bar is exactly as wide as the terminal"
+    },
+    {
+      "action": "type",
+      "text": "car",
+      "delay": 0.1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|creating|accept|reject",
+      "description": "c, a and r do nothing here"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "second window: /connect code offers no code"
+    },
+    {
+      "action": "type",
+      "text": "/connect code",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "^ Connect code *$",
+      "timeout": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ another window in this workspace runs the network; use /connect there *$",
+      "description": "the code screen says the same one line"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|press c|creating|could not create",
+      "description": "no code, and no key that would fail"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "second window, 120 columns"
+    },
+    {
+      "action": "shell",
+      "description": "widen this window to 120 columns (the runner is this shell's parent and names its tmux socket and session after its pid and this spec)",
+      "command": "tmux -L kollab-test-$PPID-connect-second-window resize-window -t connect-second-window-$PPID -x 120 -y 30"
+    },
+    {
+      "action": "sleep",
+      "seconds": 3
+    },
+    {
+      "action": "type",
+      "text": "/connect",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "^▄{120} *$",
+      "timeout": 15,
+      "description": "the screen is redrawn at 120 columns"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^▄{120} *$",
+      "description": "the screen was drawn at 120 columns"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "network +relay\\.invalid +trust: open",
+      "description": "network row at 120"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ another window in this workspace runs the network; use /connect there *$",
+      "description": "the plain line at 120"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|requests|online|knocks|new code|accept|reject",
+      "description": "nothing to act on at 120 either"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "a second window in a workspace with no network says none, not the code form"
+    },
+    {
+      "action": "shell",
+      "description": "start a second window in ws2 (which has no network) and open /connect in it",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; S=kollab-spec-second-window; tmux -L $S new-session -d -s second-ws2 -x 80 -y 30 && tmux -L $S send-keys -t second-ws2 -l \"cd $H/ws2 && env HOME=$H KOLLAB_NO_KEYRING=1 PYTHONPATH=$R $R/.venv/bin/python $R/main.py --no-daemon\" && tmux -L $S send-keys -t second-ws2 Enter; sleep 12; for c in / c o n n e c t; do tmux -L $S send-keys -t second-ws2 -l \"$c\"; sleep 0.06; done; tmux -L $S send-keys -t second-ws2 Enter; sleep 5; tmux -L $S capture-pane -t second-ws2 -p"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "network +none",
+      "description": "no network is said plainly"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ another window in this workspace runs the network; use /connect there *$",
+      "description": "the same one line"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|first device|enter privately|enter domain",
+      "description": "no code form whose submit could only fail here"
+    },
+    {
+      "action": "section",
+      "title": "the first window keeps the full screen"
+    },
+    {
+      "action": "shell",
+      "description": "open /connect in the first window of ws and read it",
+      "command": "S=kollab-spec-second-window; for c in / c o n n e c t; do tmux -L $S send-keys -t owner-ws -l \"$c\"; sleep 0.06; done; tmux -L $S send-keys -t owner-ws Enter; sleep 5; tmux -L $S capture-pane -t owner-ws -p; tmux -L $S send-keys -t owner-ws Escape"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "network +relay\\.invalid +trust: open",
+      "description": "the first window shows the network"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "join code +",
+      "description": "the first window has the join code row"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "requests +none",
+      "description": "and the requests row"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "online +.*\\(this device\\)",
+      "description": "and the online row"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "c new code +esc close",
+      "description": "and its keys"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "another window in this workspace",
+      "description": "the owner is not told another window owns the network"
+    }
+  ],
+  "teardown": [
+    {
+      "action": "shell",
+      "description": "stop the other windows",
+      "command": "tmux -L kollab-spec-second-window kill-server",
+      "allow_failure": true
+    }
+  ]
+}

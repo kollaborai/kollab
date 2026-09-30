@@ -253,7 +253,10 @@ class ContactReviewAltView(AltView):
         self._requests.clear()
 
     def _write_wrapped(self, y: int, text: str, width: int) -> None:
-        for offset, line in enumerate(textwrap.wrap(text, max(1, width - 2), break_on_hyphens=False)[:3]):
+        lines = textwrap.wrap(text, max(1, width - 2), break_on_hyphens=False)
+        if len(lines) > 3:  # a whole device name can push it past three lines
+            lines[2] += "…"
+        for offset, line in enumerate(lines[:3]):
             self._write(2, y + offset, line, width)
 
     def _write(self, x: int, y: int, text: str, width: int) -> None:

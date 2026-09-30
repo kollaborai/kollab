@@ -103,7 +103,9 @@ def key_label(public_key_hex: str) -> str:
 # screen that lists requests (the Connect screen, the knock review) builds its
 # rows here: measured in terminal columns, never in characters.
 
-NAME_DISPLAY_MAX = 20
+# The longest a valid device name can be (NAME_RE). A name is cut for being wider
+# than its row, never for being long: callers pass the room their row has.
+NAME_DISPLAY_MAX = 63
 _MIN_QUOTE = 8
 _SEP = "   "
 
@@ -137,7 +139,8 @@ def clip_display(text: str, width: int) -> str:
 
 def display_name(name: str, limit: int = NAME_DISPLAY_MAX) -> str:
     """A sender-chosen name safe for one row: no control characters, no tabs,
-    capped at `limit` columns with an ellipsis."""
+    capped at `limit` columns with an ellipsis. The default keeps any valid name
+    whole; a row passes the room it has."""
     printable = "".join(
         char
         for char in str(name)

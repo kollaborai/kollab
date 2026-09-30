@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -24,7 +25,7 @@ from plugins.altview.connect_altview import ConnectScreenState, connect_screen_l
 from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
 from plugins.hub.device_names import key_label
 from plugins.hub.dns.discovery import DiscoveryResult
-from plugins.hub.plugin import HubPlugin, format_connect_help
+from plugins.hub.plugin import CONNECT_OWNED_ELSEWHERE, HubPlugin, format_connect_help
 from plugins.hub.relay_commands import RelayCommands
 
 LEAK = re.compile(r"[0-9a-f]{32,}|ed25519:|relay:|receipt", re.IGNORECASE)
@@ -195,6 +196,9 @@ async def test_no_key_receipt_or_relay_address_on_any_connect_surface(
             )
             surfaces[f"connect screen {width} {code_only}"] = "\n".join(
                 connect_screen_lines(state, width)
+            )
+            surfaces[f"connect screen, second window {width} {code_only}"] = "\n".join(
+                connect_screen_lines(replace(state, note=CONNECT_OWNED_ELSEWHERE), width)
             )
     surfaces["connect help"] = format_connect_help(show_all=True)
     # `/connect <domain>` on a directory that advertises no relay prints the

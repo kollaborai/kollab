@@ -250,7 +250,9 @@ Removed. Each prints its redirect for one release instead of running:
   travels; each device runs `/login`). After each decision the next request
   needs a fresh keypress. A duplicate device name or any other refusal is
   printed on the screen.
-- Rows that do not fit the terminal split or end in `…`; nothing wraps.
+- Rows that do not fit the terminal split or end in `…`; nothing wraps. A
+  device name (up to 63 characters) shows whole; only a name wider than its
+  row is cut with `…`, and `wants to join` stays.
 - `Esc` closes it. The code exists only in this private view, never in chat,
   history or logs.
 - `/connect code` opens the same view with just the code (small terminals).
@@ -260,7 +262,10 @@ Removed. Each prints its redirect for one release instead of running:
 - An attached window (the default launch, or `kollab --attach`) opens the same
   screen: the daemon owns the relay, so the requests and roster come from it
   and `a`/`r` are sent to it. A second window in the same workspace with no
-  daemon prints the owner's `/connect status` text instead of the screen.
+  daemon (one window owns the network) opens the screen read-only: the network
+  and this device, then `another window in this workspace runs the network; use
+  /connect there`, with no code, requests, roster or `a`/`r`. `/connect code`
+  there says the same line, and so does a workspace with no network.
   `/connect knocks` opens the review for the joined directory: up/down select a
   knock and `a`/`r` act on the marked row.
 - On the joining device the code form answers as soon as the relay has the

@@ -1,0 +1,182 @@
+{
+  "name": "connect-request-names",
+  "description": "Join requests with the longest allowed device name (63 characters) on the Connect screen: at 120 columns the name shows in full, at 80 it ends in an ellipsis and 'wants to join' stays, and the accept notice follows the same rule; no row wraps (issue #121, Story 1). The requests are canned by tests/tmux/lib/connect_canned_requests.py because a spec has no second device or relay.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-request-names\"; cd \"$H/ws\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/connect_canned_requests.py\" lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab ana-laptop lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 80,
+    "term_height": 30
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a workspace on an offline network",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-request-names\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'mac-kollab'; s.save()\""
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "80 columns: the longest name is cut with an ellipsis and the words stay"
+    },
+    {
+      "action": "type",
+      "text": "/connect",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "wants to join",
+      "timeout": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^▄{80} *$",
+      "description": "the screen is drawn at 80 columns"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ requests +> (lab-){12}l… wants to join *$",
+      "description": "the selected request: the name ends in an ellipsis on one line, then the words"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ +ana-laptop wants to join *$",
+      "description": "a short name is whole"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ +(lab-){12}l… wants to join *$",
+      "description": "the other long request is cut the same way, without a marker"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "(lab-){15}lab",
+      "description": "the whole 63 characters do not fit 80 columns"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "fingerprint 4d04…9f2e +\\[a\\]ccept \\[r\\]eject",
+      "description": "the fingerprint and the whole hint sit under the name"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "[0-9a-f]{32}|relay:",
+      "description": "no receipt or relay address"
+    },
+    {
+      "action": "section",
+      "title": "80 columns: the accept notice is cut by width too"
+    },
+    {
+      "action": "type",
+      "text": "a",
+      "delay": 0.1
+    },
+    {
+      "action": "wait_for",
+      "pattern": "^ accepted ",
+      "timeout": 10
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ accepted (lab-){15}lab\\. it i… *$",
+      "description": "the notice names the device and ends in an ellipsis"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "120 columns: the longest name shows in full"
+    },
+    {
+      "action": "shell",
+      "description": "widen this window to 120 columns (the runner is this shell's parent and names its tmux socket and session after its pid and this spec)",
+      "command": "tmux -L kollab-test-$PPID-connect-request-names resize-window -t connect-request-names-$PPID -x 120 -y 30"
+    },
+    {
+      "action": "sleep",
+      "seconds": 3
+    },
+    {
+      "action": "type",
+      "text": "/connect",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "^▄{120} *$",
+      "timeout": 15,
+      "description": "the screen is redrawn at 120 columns"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "wants to join",
+      "timeout": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ +(lab-){15}lab wants to join *$",
+      "description": "the whole name, then the words, on one line"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "…\\s+wants to join",
+      "description": "nothing is cut at 120"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "ana-laptop wants to join +fingerprint 4d04…9f2e +\\[a\\]ccept \\[r\\]eject",
+      "description": "a short row fits on one line at 120"
+    },
+    {
+      "action": "section",
+      "title": "120 columns: the accept notice names the longest device in full"
+    },
+    {
+      "action": "arrow",
+      "direction": "Down"
+    },
+    {
+      "action": "type",
+      "text": "a",
+      "delay": 0.1
+    },
+    {
+      "action": "wait_for",
+      "pattern": "^ accepted ",
+      "timeout": 10
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ accepted (lab-){15}lab\\. it is now a trusted device on relay\\.invalid\\. *$",
+      "description": "the whole notice fits at 120"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

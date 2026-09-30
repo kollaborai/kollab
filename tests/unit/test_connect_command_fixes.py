@@ -3,7 +3,7 @@
 Constitution: docs/specs/agent-network-simple-flow.md. Names, never keys or
 receipts, on anything a human reads; allow/deny mean nothing under open trust;
 leaving a network lets the device join another; a second window in the
-workspace still gets the Connect screen or its status text.
+workspace gets the Connect screen too (read-only, see test_connect_second_window).
 """
 
 from __future__ import annotations
@@ -316,7 +316,9 @@ def _plugin(*, origin="", attach=False, owner=True):
         else None
     )
     plugin._relay_agent = SimpleNamespace(
-        _state=lambda: SimpleNamespace(state=SimpleNamespace(origin=origin))
+        _state=lambda: SimpleNamespace(state=SimpleNamespace(origin=origin)),
+        # A follower's lock probe finds the other window's record.
+        owner=SimpleNamespace(owner=lambda: None if owner else {"pid": 4242}),
     )
     return plugin
 
@@ -353,29 +355,32 @@ async def test_a_follower_window_knows_the_workspaces_network_from_the_shared_st
 
 
 @pytest.mark.asyncio
-async def test_bare_connect_in_a_follower_window_shows_the_owners_status_text():
+async def test_bare_connect_in_a_follower_window_opens_the_screen_not_the_status_text():
     follower = _plugin(origin="https://kollabor.ai", owner=False)
     status = "network marco-home  via kollabor.ai  trust: open\nthis device alzan-prod-home"
     follower._run_connect_command = AsyncMock(return_value=status)
     follower._open_connect_altview = AsyncMock(return_value="")
     follower._open_connect_screen = AsyncMock(return_value="")
 
-    assert await follower._handle_connect_command("") == status
+    assert await follower._handle_connect_command("") == ""
 
     follower._run_connect_command.assert_awaited_once_with("status")
     follower._open_connect_altview.assert_not_awaited()
-    follower._open_connect_screen.assert_not_awaited()
+    follower._open_connect_screen.assert_awaited_once_with("kollabor.ai")
 
 
 @pytest.mark.asyncio
-async def test_bare_connect_in_a_follower_window_with_no_network_opens_the_code_form():
+async def test_bare_connect_in_a_follower_window_with_no_network_opens_the_screen_too():
+    # The code form would offer a submit that only the owner can carry out.
     follower = _plugin(origin="", owner=False)
     follower._run_connect_command = AsyncMock(return_value=NO_NETWORK + "\ncontact route none")
     follower._open_connect_altview = AsyncMock(return_value="")
+    follower._open_connect_screen = AsyncMock(return_value="")
 
     await follower._handle_connect_command("")
 
-    follower._open_connect_altview.assert_awaited_once_with("kollabor.ai")
+    follower._open_connect_altview.assert_not_awaited()
+    follower._open_connect_screen.assert_awaited_once_with("")
 
 
 @pytest.mark.asyncio
