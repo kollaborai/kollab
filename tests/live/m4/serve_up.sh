@@ -122,7 +122,9 @@ PY
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then printf "[m4 FATAL] stopped partway; the old stack may be down. Put it back (stops m4-serve, restarts sh-*, restores the vhost): bash %s/teardown.sh --restore-old\n" "$M4_DIR" >&2; fi' EXIT
 say "stopping the old stack (SIGTERM, supervisor first; state is kept)"
 for pid in $OLD_RELAY_PID $OLD_PUB_PID $OLD_STATIC_PID; do
-  m1_ssh "kill -TERM $pid 2>/dev/null; for _ in \$(seq 1 60); do kill -0 $pid 2>/dev/null || exit 0; sleep 1; done; echo 'pid $pid is still running after 60 s' >&2; exit 1" || die "pid $pid is still running after 60 s; the rest of the old stack was left as it is"
+  # A zombie (state Z) has exited and only waits for its parent to reap it; kill -0 still
+  # succeeds on it, so count it as stopped.
+  m1_ssh "kill -TERM $pid 2>/dev/null; for _ in \$(seq 1 60); do case \$(ps -o stat= -p $pid 2>/dev/null) in ''|Z*) exit 0;; esac; sleep 1; done; echo 'pid $pid is still running after 60 s' >&2; exit 1" || die "pid $pid is still running after 60 s; the rest of the old stack was left as it is"
 done
 for session in "${M4_OLD_SESSIONS[@]}"; do m1_ssh "tmux kill-session -t '=$session' 2>/dev/null || true"; done
 m1_ssh "! ss -ltn 2>/dev/null | awk '{print \$4}' | grep -q '[:.]$M4_PORT\$'" </dev/null || die "port $M4_PORT is still listening on $M1_HOST after the old stack stopped (set M4_PORT)"
