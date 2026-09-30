@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 import logging
@@ -80,6 +81,10 @@ class SecureConversationTransport:
         self._certificate = identity_certificate(bytes(self._identity_seed))
         self._outbound: dict[tuple[str, str, str], _SessionState] = {}
         self._inbound: dict[tuple[str, str, str, str], _SessionState] = {}
+        # The id of the session carrying the request being dispatched right now.
+        self._carrying: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+            f"secure-carrying-session-{id(self)}", default=None
+        )
         self._request_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._remove_listener = client.add_peer_session_listener(
             self._on_peer_session_event
@@ -127,6 +132,38 @@ class SecureConversationTransport:
             if key[:3] == binding and state.tls.established and state.link_session_id
         )
         return min(candidates) if candidates else None
+
+    def live_link_session_ids(self, peer_key: str) -> set[str]:
+        """Ids of every established session with the peer, in either direction.
+
+        A node's half of a session can outlive the peer's half (the peer drops
+        its side after a failed request), so two nodes never agree on "the"
+        session by looking at their own tables; a link is checked by asking
+        whether the session it names is among these.
+        """
+        binding = self._current_binding(peer_key)
+        ids = {
+            state.link_session_id
+            for key, state in self._outbound.items()
+            if key == binding and state.tls.established and state.link_session_id
+        }
+        ids.update(
+            state.link_session_id
+            for key, state in self._inbound.items()
+            if key[:3] == binding and state.tls.established and state.link_session_id
+        )
+        return ids
+
+    def outbound_link_session_id(self, peer_key: str) -> str | None:
+        """The id of this node's own established session to the peer, if any."""
+        state = self._outbound.get(self._current_binding(peer_key))
+        if state is None or not state.tls.established or not state.link_session_id:
+            return None
+        return state.link_session_id
+
+    def carrying_link_session_id(self) -> str | None:
+        """The id of the inbound session that carried the request being handled."""
+        return self._carrying.get()
 
     def identity_response(self, peer_key: str, payload: dict) -> dict:
         self._current_binding(peer_key)
@@ -329,9 +366,13 @@ class SecureConversationTransport:
                         if update.packet is not None:
                             # Keep TLS control output ordered before the response.
                             packets = [update.packet]
-                        result = await self._dispatch_secure_request(
-                            peer_key, request, dispatch
-                        )
+                        carrying = self._carrying.set(state.link_session_id or None)
+                        try:
+                            result = await self._dispatch_secure_request(
+                                peer_key, request, dispatch
+                            )
+                        finally:
+                            self._carrying.reset(carrying)
                         response_raw = _encode_frame({"v": 1, "result": result})
                         if len(response_raw) > MAX_SECURE_CHUNK_BYTES:
                             raise SecureSessionError(

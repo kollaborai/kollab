@@ -7,6 +7,7 @@ mesh; the relay wire and the UDP locator broadcast are the only stand-ins.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -441,12 +442,13 @@ async def test_ensure_session_refuses_a_bad_timeout_and_an_unapproved_peer(mesh3
 
 @pytest.mark.asyncio
 async def test_a_link_proposal_is_made_only_after_the_outbound_session_is_open(mesh3):
-    b, c = mesh3.b, mesh3.c
-    deliver_locator(b, c)
-    deliver_locator(c, b)
+    # The lower peer id of a pair writes its link.
+    low, high = sorted((mesh3.b, mesh3.c), key=lambda node: node.mesh.local_peer_id)
+    deliver_locator(low, high)
+    deliver_locator(high, low)
     order = []
-    ensure = b.mesh.secure_transport.ensure_session
-    propose = b.mesh._make_link_signature
+    ensure = low.mesh.secure_transport.ensure_session
+    propose = low.mesh._make_link_signature
 
     async def spy_ensure(peer_key, **kwargs):
         await ensure(peer_key, **kwargs)
@@ -456,15 +458,16 @@ async def test_a_link_proposal_is_made_only_after_the_outbound_session_is_open(m
         order.append(("proposal", peer_key))
         return propose(local, remote, peer_key)
 
-    b.mesh.secure_transport.ensure_session = spy_ensure
-    b.mesh._make_link_signature = spy_propose
-    await settle(b, c)
+    low.mesh.secure_transport.ensure_session = spy_ensure
+    low.mesh._make_link_signature = spy_propose
+    await settle(low, high)
 
-    assert ("proposal", c.key) in order
+    assert ("proposal", high.key) in order
     for index, (event, peer) in enumerate(order):
         if event == "proposal":
             assert ("session", peer) in order[:index], "a proposal came before its session"
-    assert b.mesh.router.link_between(b.mesh.local_peer_id, c.mesh.local_peer_id) is not None
+    assert low.mesh.router.link_between(low.mesh.local_peer_id, high.mesh.local_peer_id) is not None
+    assert high.mesh.router.link_between(low.mesh.local_peer_id, high.mesh.local_peer_id) is not None
 
 
 def test_the_forwarding_limits_are_the_documented_ones():
@@ -821,3 +824,73 @@ async def test_the_registry_pin_can_only_deny_a_signed_locator(mesh3):
     assert server._remote_peer_identity("ghost") == ("", False)
     with pytest.raises(TypeError):
         server.set_peer_identity_resolver("nope")
+
+
+@pytest.mark.asyncio
+async def test_links_between_members_stay_valid_across_thirty_concurrent_refreshes(
+    mesh3, monkeypatch
+):
+    """Members refresh at the same tick every 15 s for 7.5 minutes (past every TTL).
+
+    Each pair keeps one live link that both ends agree on, and traffic keeps flowing:
+    A reaches C through B, and B reaches C on the direct endpoint.
+    """
+    a, b, c = mesh3.a, mesh3.b, mesh3.c
+    await link_everything(mesh3)
+    clock = {"now": time.time()}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    ids = {node.name: node.mesh.local_peer_id for node in (a, b, c)}
+
+    async def directory(asker, peer):
+        reply = await asker.bridge.secure_transport.request(peer.key, "directory", {}, timeout=5)
+        assert set(reply) == {"agents", "truncated"}
+
+    for round_number in range(30):
+        clock["now"] += 15
+        for receiver, sender in ((b, c), (c, b)):  # the UDP service re-announces each tick
+            wire = sender.mesh._local_locator_wire(sender.mesh.local_session())
+            candidate = _normalize_candidate(wire, receiver.mesh._verify_locator_wire(wire))
+            receiver.mesh.locator_store.accept_candidate(candidate)  # False while unchanged
+            receiver.mesh._accept_locator_candidate(candidate)
+        await asyncio.gather(*(node.mesh.refresh() for node in (a, b, c)))
+        for left, right in ((a, b), (b, c)):
+            ends = {
+                node.name: node.mesh.router.link_between(ids[left.name], ids[right.name])
+                for node in (left, right)
+            }
+            where = (round_number, left.name, right.name, ends)
+            assert all(ends.values()), where
+            assert len({link.link_id for link in ends.values()}) == 1, where
+        await directory(a, c)  # A -> B -> C
+        await directory(b, c)
+
+
+@pytest.mark.asyncio
+async def test_links_recover_when_a_member_drops_its_secure_sessions(mesh3, monkeypatch):
+    """A lapsed or failed session leaves the peer's half behind; the pair still agrees next round."""
+    a, b, c = mesh3.a, mesh3.b, mesh3.c
+    await link_everything(mesh3)
+    clock = {"now": time.time()}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    ids = {node.name: node.mesh.local_peer_id for node in (a, b, c)}
+    for round_number in range(8):
+        clock["now"] += 15
+        if round_number in (2, 5):  # C drops its sessions, then B does
+            (c if round_number == 2 else b).bridge.secure_transport._clear_sessions()
+        for receiver, sender in ((b, c), (c, b)):
+            wire = sender.mesh._local_locator_wire(sender.mesh.local_session())
+            candidate = _normalize_candidate(wire, receiver.mesh._verify_locator_wire(wire))
+            receiver.mesh.locator_store.accept_candidate(candidate)
+            receiver.mesh._accept_locator_candidate(candidate)
+        for _pass in range(2):
+            await asyncio.gather(*(node.mesh.refresh() for node in (a, b, c)))
+        for left, right in ((a, b), (b, c)):
+            ends = {
+                node.name: node.mesh.router.link_between(ids[left.name], ids[right.name])
+                for node in (left, right)
+            }
+            where = (round_number, left.name, right.name, ends)
+            assert all(ends.values()), where
+            assert len({link.link_id for link in ends.values()}) == 1, where
+        reply = await c.bridge.secure_transport.request(b.key, "directory", {}, timeout=5)
+        assert set(reply) == {"agents", "truncated"}

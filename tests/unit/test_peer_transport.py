@@ -159,10 +159,17 @@ async def mesh_network(tmp_path):
     try:
         # First establish B-C, then A-B. The second B-C exchange gossips A's
         # signed record/link to C so the end-to-end TLS binding works without
-        # a relay registration between A and C.
-        await states["relay"]["mesh"].exchange_peer(clients["destination"].public_key)
-        await states["origin"]["mesh"].exchange_peer(clients["relay"].public_key)
-        await states["relay"]["mesh"].exchange_peer(clients["destination"].public_key)
+        # a relay registration between A and C. The lower peer id of a pair
+        # writes its link, so it starts the exchange.
+        async def exchange(left, right):
+            first, second = sorted(
+                (left, right), key=lambda name: states[name]["mesh"].local_peer_id
+            )
+            await states[first]["mesh"].exchange_peer(clients[second].public_key)
+
+        await exchange("relay", "destination")
+        await exchange("origin", "relay")
+        await exchange("relay", "destination")
         yield clients, states, application_calls, dispatch_calls, wire
     finally:
         for state in states.values():
@@ -173,32 +180,32 @@ async def mesh_network(tmp_path):
 
 @pytest.mark.asyncio
 async def test_link_refresh_reuses_statement_until_half_life(mesh_network, monkeypatch):
-    # Re-signing an unchanged link with a new timestamp under the same revision
-    # was rejected as equivocation on the periodic refresh, tearing down the
-    # healthy session (the source of this file's intermittent failures).
+    # An unchanged link is not proposed again: a restated statement carries the
+    # old timestamp, which the peer refuses after a minute, and a fresh timestamp
+    # under the same revision is equivocation. The link is renewed, as a higher
+    # revision with a fresh timestamp, once half its lifetime is gone.
     import plugins.hub.peer_transport as peer_transport
 
     clients, states, _, _, _ = mesh_network
-    mesh = states["origin"]["mesh"]
-    relay_key = clients["relay"].public_key
+    proposer, other = sorted(
+        ("origin", "relay"), key=lambda name: states[name]["mesh"].local_peer_id
+    )
+    mesh = states[proposer]["mesh"]  # the lower peer id writes the link
+    peer_key = clients[other].public_key
     records = mesh.router.record_snapshot()
     local = records[mesh.local_peer_id]
-    remote = records[peer_id_for_key(relay_key)]
+    remote = records[peer_id_for_key(peer_key)]
     link = mesh.router.link_between(mesh.local_peer_id, remote.peer_id)
     assert link is not None
     real_time = time.time
 
     monkeypatch.setattr(peer_transport.time, "time", lambda: real_time() + 1)
-    again = mesh._make_link_signature(local, remote, relay_key)["payload"]
-    assert (again["revision"], again["issued_at"], again["expires_at"]) == (
-        link.revision,
-        link.issued_at,
-        link.expires_at,
-    )
+    assert mesh._make_link_signature(local, remote, peer_key) is None
 
     monkeypatch.setattr(peer_transport.time, "time", lambda: link.expires_at - 10)
-    renewed = mesh._make_link_signature(local, remote, relay_key)["payload"]
+    renewed = mesh._make_link_signature(local, remote, peer_key)["payload"]
     assert renewed["revision"] > link.revision
+    assert renewed["issued_at"] == link.expires_at - 10
 
 
 @pytest.mark.asyncio
@@ -980,6 +987,29 @@ async def test_a_refused_direct_secure_record_still_takes_the_routed_path(mesh_n
     with pytest.raises(Exception):
         await mesh.request(destination, "secure_identity", {"x": 1}, timeout=3)
     assert attempts, "the direct refusal ended the request before the routed path was tried"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mesh_route_to_a_peer_on_the_relay_falls_back_to_the_relay_once(mesh_network):
+    import time
+
+    from plugins.hub.peer_router import TransientPeerDeliveryError
+
+    clients, states, *_ = mesh_network
+    mesh = states["origin"]["mesh"]
+    relay_key = clients["relay"].public_key
+    mesh.direct_enabled = True
+    mesh._locators[relay_key] = {"expires_at": int(time.time()) + 60}
+    attempts = []
+
+    async def stale(peer_key, frame, *, timeout):
+        attempts.append(peer_key)
+        raise TransientPeerDeliveryError("the link went stale")
+
+    mesh._send_forward_to_peer = stale
+    result = await mesh.request(relay_key, "secure_identity", {}, timeout=3)
+    assert set(result) == {"certificate"}
+    assert attempts, "the mesh route was not tried first"
 
 
 @pytest.mark.asyncio
