@@ -7,8 +7,10 @@ M4_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 M4_DOMAIN=${M4_DOMAIN:-selfhost.kollabor.ai}
 M4_EDGE_HOST=${M4_EDGE_HOST:-alzan-edge}
 # The one command listens here on alzan-prod. The bind address and the trusted proxy come from the
-# old selfhost relay config (serve_up.sh reads them); this is only the port. The old stack used 9177-9180.
-M4_PORT=${M4_PORT:-9190}
+# old selfhost relay config (serve_up.sh reads them); this is only the port. The old stack used 9177 (key file),
+# 9178 and 9179 (relay workers) and 9180 (health). 9178 is a port the edge already reaches through the firewall;
+# it is free once the old stack has stopped.
+M4_PORT=${M4_PORT:-9178}
 M4_SERVE_SESSION=${M4_SERVE_SESSION:-m4-serve}
 M4_OLD_SESSIONS=(sh-relay sh-pub sh-static)
 

@@ -53,6 +53,16 @@ PORT=$(sed -n 's/^PORT=//p' <<<"$serve_env")
 [ -n "$BIND" ] && [ -n "$PORT" ] || die "serve.env on $M1_HOST has no BIND/PORT"
 TARGET=$BIND:$PORT
 
+# The edge has to be able to reach the one command through the firewall before the vhost points at it.
+reach=$(m4_edge "curl -sS -m 5 http://$TARGET/relay/v1/health" 2>&1 || true)
+if grep -q '"status": "ok"' <<<"$reach"; then
+  say "the edge reaches http://$TARGET: $reach"
+elif [ "$MODE" = apply ]; then
+  die "the edge cannot reach http://$TARGET (got: $reach). Open that port to $M4_EDGE_HOST on $M1_HOST (firewall), or run serve_up.sh with another M4_PORT the firewall allows. Nothing was changed."
+else
+  say "WARNING: the edge cannot reach http://$TARGET (got: $reach); apply would refuse"
+fi
+
 m4_edge "sudo -n cat '$VHOST'" >"$EVID/vhost-before.conf" || die "could not read $VHOST"
 python3 "$M4_DIR/repoint_vhost.py" "$TARGET" <"$EVID/vhost-before.conf" >"$EVID/vhost-after.conf" || die "repoint_vhost.py refused this vhost; nothing was changed. Edit it by hand: every route goes to http://$TARGET"
 if cmp -s "$EVID/vhost-before.conf" "$EVID/vhost-after.conf"; then

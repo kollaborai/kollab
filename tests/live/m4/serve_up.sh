@@ -72,8 +72,6 @@ if [ "$MODE" = plan ]; then
 fi
 
 # ---- up ---------------------------------------------------------------------------------------------
-m1_ssh "! ss -ltn 2>/dev/null | awk '{print \$4}' | grep -q '[:.]$M4_PORT\$'" || die "port $M4_PORT is already listening on $M1_HOST (set M4_PORT)"
-
 say "recording the public manifest before the change"
 curl -sS -m 20 "https://$M4_DOMAIN/.well-known/agent-keys.json" >"$EVID/pre-manifest.json" || die "could not fetch the public manifest of $M4_DOMAIN"
 python3 - "$EVID/pre-manifest.json" >"$EVID/pre.env" <<'PY'
@@ -109,6 +107,7 @@ for pid in $OLD_RELAY_PID $OLD_PUB_PID $OLD_STATIC_PID; do
   m1_ssh "kill -TERM $pid 2>/dev/null; for _ in \$(seq 1 60); do kill -0 $pid 2>/dev/null || exit 0; sleep 1; done; echo 'pid $pid is still running after 60 s' >&2; exit 1" || die "could not stop pid $pid; nothing further was changed. Restore with: ssh $M1_HOST bash $M4_SRV_ROOT/restore-old-stack.sh"
 done
 for session in "${M4_OLD_SESSIONS[@]}"; do m1_ssh "tmux kill-session -t $session 2>/dev/null || true"; done
+m1_ssh "! ss -ltn 2>/dev/null | awk '{print \$4}' | grep -q '[:.]$M4_PORT\$'" </dev/null || die "port $M4_PORT is still listening on $M1_HOST after the old stack stopped (set M4_PORT). Restore with: ssh $M1_HOST bash $M4_SRV_ROOT/restore-old-stack.sh"
 
 say "starting the one command in tmux $M4_SERVE_SESSION"
 {

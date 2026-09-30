@@ -10,7 +10,7 @@ rule. Nothing here has been run yet.
 
 | Where | What |
 |---|---|
-| alzan-prod | Stops the manual selfhost stack (relay supervisor, standalone publisher, static server; tmux `sh-relay`, `sh-pub`, `sh-static`). State stays. Starts tmux `m4-serve` running the one command from the m1 venv. Writes `~/kollab-m4/` (`serve.env`, `serve-cmd.sh`, `restore-old-stack.sh`). |
+| alzan-prod | Stops the manual selfhost stack (relay supervisor, standalone publisher, static server; tmux `sh-relay`, `sh-pub`, `sh-static`). State stays. Starts tmux `m4-serve` running the one command from the m1 venv, on the old relay config's bind address (10.0.0.5) and trusted proxy (the edge), at port 9178 (`M4_PORT`): the old first worker's port, so the edge's firewall path already exists. Writes `~/kollab-m4/` (`serve.env`, `serve-cmd.sh`, `restore-old-stack.sh`). |
 | alzan-edge | Rewrites the `selfhost.kollabor.ai` nginx vhost so its five routes reach the one port instead of three (`edge_vhost.sh`, `sudo -n`, backup in `/etc/nginx/m4-backups/`, `nginx -t` before the reload, automatic put-back on failure). |
 | this Mac | tmux `m4-mac`, workspace `~/kollab-m4-mac`, evidence in `m4/evidence/` (git-ignored). |
 | kollabor.ai | Nothing. The proof asserts that no screen and no log names it. |
