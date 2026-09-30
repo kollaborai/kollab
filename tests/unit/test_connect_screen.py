@@ -143,6 +143,32 @@ def test_screen_matches_story_one_with_no_requests():
     ]
 
 
+def test_a_managed_device_says_where_its_config_came_from():
+    snapshot = _snapshot(config_from="mac-kollab", device="alzan-prod-home")
+
+    lines = connect_screen_lines(_state(snapshot=snapshot), 120)
+
+    assert lines[2:4] == [
+        " this device  alzan-prod-home",
+        " config       received from mac-kollab   managed by mac-kollab in /config",
+    ]
+
+
+def test_an_unmanaged_device_shows_no_config_row():
+    lines = connect_screen_lines(_state(snapshot=_snapshot()), 120)
+
+    assert not any(line.startswith(" config") for line in lines)
+
+
+def test_the_config_row_fits_at_eighty_columns_with_a_long_name():
+    snapshot = _snapshot(config_from="a-rather-long-primary-name")
+
+    lines = connect_screen_lines(_state(snapshot=snapshot), 80)
+
+    assert all(len(line) <= 80 for line in lines)
+    assert any(line.startswith(" config       received from") for line in lines)
+
+
 def test_one_request_is_one_row_with_name_fingerprint_and_keys():
     lines = connect_screen_lines(_state(snapshot=_snapshot(requests=(_row(),))), 120)
 
@@ -399,7 +425,7 @@ async def test_a_accepts_the_selected_request_and_says_what_was_sent(monkeypatch
     assert calls["decide"] == [("alzan-prod-home", "accept")]
     assert "accepted alzan-prod-home. it is now a trusted device on marco-home." in text
     assert (
-        "sealed config queued for alzan-prod-home: profile settings and one api key"
+        "sealed config queued: settings, agents, skills, mcp, api keys; not oauth logins"
         in text
     )
     assert "alzan-prod-home wants to join" not in text
@@ -427,7 +453,8 @@ async def test_a_held_key_cannot_decide_the_next_request_unseen(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_accept_without_a_profile_only_grants_network_access(monkeypatch):
+async def test_every_accepted_device_is_promised_the_sealed_config(monkeypatch):
+    """The join no longer copies one profile: whoever is accepted follows this device."""
     monkeypatch.setattr(_TIME, lambda: 1_000)
     plain = _row(categories=("conversation:send",))
     view, renderer, _ = await _open(_snapshot(requests=(plain,)))
@@ -436,7 +463,8 @@ async def test_accept_without_a_profile_only_grants_network_access(monkeypatch):
     text = await _text(view, renderer)
 
     assert "accepted alzan-prod-home." in text
-    assert "queued for" not in text
+    assert "sealed config queued: settings, agents, skills, mcp, api keys;" in text
+    assert "profile settings and one api key" not in text
     await view.on_complete()
 
 

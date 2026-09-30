@@ -236,6 +236,36 @@ async def test_connect_snapshot_with_the_relay_down_still_returns_and_skips_knoc
 
 
 @pytest.mark.asyncio
+async def test_connect_snapshot_names_the_primary_once_its_config_arrived(tmp_path, monkeypatch):
+    from nacl.signing import SigningKey
+
+    from kollabor_config.managed_config import ManagedConfig, write_managed_config
+    from plugins.hub.relay_commands import ConnectSnapshot
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "alzan-prod-home",
+        remote_agents=_async_remote_agents,
+        plugin=SimpleNamespace(_presence=None, _identity=None),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    primary = SigningKey.generate().verify_key.encode().hex()
+    commands.client.state.inviter = primary
+    commands.client._store.save()
+
+    assert (await commands.connect_snapshot()).config_from == ""  # nothing has arrived
+
+    write_managed_config(ManagedConfig(primary_key=primary, primary_name="mac-kollab"))
+    snapshot = await commands.connect_snapshot()
+    assert snapshot.config_from == "mac-kollab"
+    assert ConnectSnapshot.from_wire(snapshot.to_wire()).config_from == "mac-kollab"
+
+    write_managed_config(ManagedConfig(primary_key="f" * 64, primary_name="someone-else"))
+    assert (await commands.connect_snapshot()).config_from == ""  # not this device's primary
+
+
+@pytest.mark.asyncio
 async def test_status_lists_offline_devices_for_approved_keys_with_no_online_agents(tmp_path):
     offline_key = "b" * 64
     bridge = SimpleNamespace(

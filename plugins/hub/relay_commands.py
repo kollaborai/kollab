@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kollabor_config.managed_config import clear_managed_config
+from kollabor_config.managed_config import clear_managed_config, read_managed_config
 
 from .device_names import (
     DEFAULT_TRUST,
@@ -61,6 +61,8 @@ class ConnectSnapshot:
     # window in the workspace does): only the network, trust and device are
     # known, and the screen offers no code or decisions.
     read_only: bool = False
+    # The primary that manages this device's settings, once its config arrived.
+    config_from: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         """Plain JSON types, for the daemon's reply to an attached window.
@@ -79,6 +81,7 @@ class ConnectSnapshot:
             "remote_agents": list(self.remote_agents),
             "offline_devices": list(self.offline_devices),
             "read_only": self.read_only,
+            "config_from": self.config_from,
             "requests": [
                 {
                     "enrollment_id": row.enrollment_id,
@@ -107,6 +110,7 @@ class ConnectSnapshot:
             "local_agents",
             "remote_agents",
             "offline_devices",
+            "config_from",
             "requests",
         }
         # A daemon that predates ``read_only`` sends none: the screen is normal.
@@ -163,6 +167,7 @@ class ConnectSnapshot:
             remote_agents=_wire_texts(value["remote_agents"]),
             offline_devices=_wire_texts(value["offline_devices"]),
             read_only=value.get("read_only", False),
+            config_from=_wire_text(value["config_from"]) if value["config_from"] else "",
         )
 
 
@@ -395,7 +400,15 @@ class RelayCommands:
             offline_devices=tuple(
                 offline_device_names(self.agent_bridge, remote_rows, self.client)
             ),
+            config_from=self._config_from(),
         )
+
+    def _config_from(self) -> str:
+        """The primary's name when its sealed config has landed on this device."""
+        record = read_managed_config()
+        if record is None or record.primary_key != self.client.state.inviter:
+            return ""
+        return record.primary_name
 
     async def _remote_rows(self) -> list:
         """Rows from the relay bridge's remote_agents(), degrading to none."""

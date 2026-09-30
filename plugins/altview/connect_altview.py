@@ -735,6 +735,13 @@ def connect_screen_lines(
     else:
         lines += _block("network", [_network_value(snapshot)], width)
         lines += _block("this device", [snapshot.device or "unnamed"], width)
+        if snapshot.config_from:
+            source = display_name(snapshot.config_from)
+            lines += _block(
+                "config",
+                [f"received from {source}   managed by {source} in /config"],
+                width,
+            )
         lines += _block("join code", [_code_value(state)], width)
         if snapshot.requests or not state.notice:
             lines += _block("requests", _request_rows(state, width), width)
@@ -751,17 +758,6 @@ def connect_screen_lines(
         lines += _block("online", online or ["none"], width)
     lines += ["", _fit(_footer(state), width)]
     return _clip(lines, width, max_lines)
-
-
-def _sent_summary(categories: tuple[str, ...]) -> str:
-    """What accepting queues for the new device, from the request's own scope.
-
-    An oauth login never travels (constitution section 9), so a provider
-    category always means an api key.
-    """
-    if any(category.startswith("provider:") for category in categories):
-        return "profile settings and one api key"
-    return ""
 
 
 class ConnectScreenAltView(AltView):
@@ -996,13 +992,13 @@ class ConnectScreenAltView(AltView):
             self._notice = (f"could not {decision} {who}: {reason}",)
             return
         if decision == "accept":
-            notice = [
-                f"accepted {who}. it is now a trusted device on {snapshot.network}."
-            ]
-            sent = _sent_summary(row.categories)
-            if sent:
-                notice.append(f"sealed config queued for {who}: {sent}")
-            self._notice = tuple(notice)
+            # Every accepted device follows this one's settings (section 9); an
+            # oauth login is the one thing that never travels.
+            self._notice = (
+                f"accepted {who}. it is now a trusted device on {snapshot.network}.",
+                "sealed config queued: settings, agents, skills, mcp, api keys;"
+                " not oauth logins",
+            )
         else:
             self._notice = (f"rejected {who}.",)
         remaining = tuple(item for item in snapshot.requests if item is not row)
