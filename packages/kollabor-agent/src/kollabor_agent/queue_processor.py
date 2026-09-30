@@ -487,6 +487,28 @@ class QueueProcessor:
         except asyncio.QueueEmpty:
             self.dropped_messages += 1
 
+    def note_chain_end(self) -> None:
+        """Tell the hub a whole chain just finished (a remote request's turn ends here).
+
+        Finished means nothing is left to do: the last response needed no tool
+        follow-up (`turn_completed`), no message is queued behind it, and no
+        other turn is mid-flight. `is_processing` alone is false for a moment
+        between a tool result and the next model call, so it is not the signal.
+        A chain that yielded to a queued message is not over; the one that takes
+        over reports instead.
+        """
+        try:
+            if (
+                self.processing_queue.empty()
+                and not self._turn_lock.locked()
+                and (self.turn_completed or self.cancel_processing or self.last_turn_error)
+            ):
+                hub = self.event_bus.get_service("hub_plugin") if self.event_bus else None
+                if hub is not None:
+                    hub.network_chain_ended(failed=bool(self.last_turn_error))
+        except Exception as exc:
+            logger.debug(f"note_chain_end error: {exc}")
+
     async def process_queue(
         self,
         task_manager,
@@ -654,6 +676,7 @@ class QueueProcessor:
             self.is_processing = False
             self.current_processing_tokens = 0
             self.processing_start_time = None
+            self.note_chain_end()
 
             if self.cancel_processing:
                 logger.info("Processing cancelled by user")

@@ -398,6 +398,9 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
         turn_completed = False
         processing_queue = asyncio.Queue()
 
+        def note_chain_end(self):
+            pass
+
     class ContinuationCoordinator:
         def __init__(self):
             self.renderer = SimpleNamespace(pipe_mode=False)

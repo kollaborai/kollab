@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from kollabor_agent.queue_processor import QueueProcessor
 from kollabor_events import EventType
-from plugins.hub import plugin as plugin_module
 from plugins.hub.device_names import default_device_name, format_handle
 from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
@@ -119,9 +119,9 @@ async def _model_turn(plugin, llm, *texts, to=ASKER):
 
 
 async def _settle(plugin, llm, start: float = 100.0):
-    """The relay ticks every 0.2 s: idle from ``start``, past the settle interval."""
-    for offset in (0.0, 0.5, 1.5):
-        await plugin.settle_network_turn(llm, now=start + offset)
+    """The queue processor reports the chain done; the relay's next tick sends the end."""
+    plugin.network_chain_ended(failed=bool(llm._queue_processor.last_turn_error))
+    await plugin.settle_network_turn(llm, now=start)
 
 
 def _ends(sent: list) -> list:
@@ -288,7 +288,11 @@ async def test_the_turn_end_frame_carries_the_reply_count_and_closes_the_request
 
 
 @pytest.mark.asyncio
-async def test_the_end_frame_waits_for_the_model_to_run_and_then_go_quiet():
+async def test_a_gap_with_the_model_idle_between_the_tool_and_the_answer_is_not_the_end():
+    # Live (dev4): the terminal tool ran at 10:21:09, the hub_msg answer went at
+    # 10:21:14, and in between the model read idle for over a second. The old idle
+    # debounce sent the end frame then, and the shell printed "finished without a
+    # reply" while the answer was still coming.
     sent: list = []
     plugin, llm = _responder(sent)
     await plugin._on_message_received(_request(T1, W1))
@@ -298,26 +302,97 @@ async def test_the_end_frame_waits_for_the_model_to_run_and_then_go_quiet():
         await plugin.settle_network_turn(llm, now=now)
     assert _ends(sent) == [] and plugin.network_turn_open()
 
-    # The model is running.
+    # The model is called and runs a terminal tool; then a gap with nothing running.
     await plugin._set_working({"messages": []})
     llm.is_processing = True
-    for now in (200.0, 205.0, 230.0):
+    llm.is_processing = False
+    for now in (200.0, 200.5, 201.5, 204.0):
+        await plugin.settle_network_turn(llm, now=now)
+    assert _ends(sent) == [] and plugin.network_turn_open()
+
+    # The next model call answers with hub_msg; the chain is still not finished.
+    await plugin._set_working({"messages": []})
+    llm.is_processing = True
+    await plugin._handle_hub_msg_tool({"id": "t0", "to": ASKER, "content": "46G free on /"})
+    await plugin.settle_network_turn(llm, now=206.0)
+    assert _ends(sent) == []
+
+    # The queue processor finishes the chain: the end frame follows the answer.
+    llm.is_processing = False
+    plugin.network_chain_ended()
+    await plugin.settle_network_turn(llm, now=206.2)
+
+    assert [s["content"] for s in _replies(sent)] == ["46G free on /"]
+    [end] = _ends(sent)
+    assert end["turn_end"] == {"replies": 1, "failed": False}
+    assert sent[-1] is end and not plugin.network_turn_open()
+
+
+@pytest.mark.asyncio
+async def test_a_plain_text_answer_after_a_gap_is_forwarded_then_the_turn_ends():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await plugin._set_working({"messages": []})  # the terminal tool call
+    for now in (200.0, 201.5, 204.0):  # the gap
+        await plugin.settle_network_turn(llm, now=now)
+    assert _ends(sent) == [] and _replies(sent) == []
+
+    await _plain_answer(plugin, llm, "46G free on /")
+    await plugin.settle_network_turn(llm, now=206.0)
+    assert _ends(sent) == [] and _replies(sent) == []  # chain not reported done yet
+
+    plugin.network_chain_ended()
+    await plugin.settle_network_turn(llm, now=206.2)
+
+    assert [s["content"] for s in _replies(sent)] == ["46G free on /"]
+    [end] = _ends(sent)
+    assert end["turn_end"] == {"replies": 1, "failed": False}
+    assert sent[-1] is end
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_errors_after_a_gap_still_ends_failed():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await plugin._set_working({"messages": []})
+    for now in (200.0, 201.5, 204.0):
         await plugin.settle_network_turn(llm, now=now)
     assert _ends(sent) == []
 
-    # Idle, but a hand-off to the user queue can pick it up again: not yet.
-    llm.is_processing = False
-    await plugin.settle_network_turn(llm, now=300.0)
-    await plugin.settle_network_turn(llm, now=300.6)
-    llm.is_processing = True
-    await plugin.settle_network_turn(llm, now=300.7)
-    llm.is_processing = False
-    await plugin.settle_network_turn(llm, now=301.0)
-    await plugin.settle_network_turn(llm, now=301.9)
-    assert _ends(sent) == []
+    plugin.network_chain_ended(failed=True)
+    await plugin.settle_network_turn(llm, now=205.0)
 
-    await plugin.settle_network_turn(llm, now=302.1)
-    assert len(_ends(sent)) == 1 and not plugin.network_turn_open()
+    [end] = _ends(sent)
+    assert end["turn_end"] == {"replies": 0, "failed": True}
+    assert end["content"] == FAILED and _replies(sent) == []
+
+
+@pytest.mark.asyncio
+async def test_two_queued_requests_each_end_on_their_own_chain_end():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await _model_turn(plugin, llm, "one")
+    await _settle(plugin, llm)
+    assert not plugin.network_turn_open()
+
+    # The second request is handed over; a chain end before the model runs for it
+    # (some other chain's) is not its turn.
+    await plugin._on_message_received(_request(T2, W2))
+    plugin.network_chain_ended()
+    await plugin.settle_network_turn(llm, now=300.0)
+    assert plugin.network_turn_open() and len(_ends(sent)) == 1
+
+    await _model_turn(plugin, llm, "two")
+    await _settle(plugin, llm, start=310.0)
+
+    assert [(s["thread_id"], s["content"]) for s in _replies(sent)] == [(T1, "one"), (T2, "two")]
+    assert [(s["thread_id"], s["turn_end"]) for s in _ends(sent)] == [
+        (T1, {"replies": 1, "failed": False}),
+        (T2, {"replies": 1, "failed": False}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -382,8 +457,11 @@ async def test_a_request_that_finds_the_model_busy_waits_for_that_chain_to_finis
     for now in (100.0, 101.0):
         await plugin.settle_network_turn(llm, now=now)
     llm.is_processing = False
+    plugin.network_chain_ended()  # the running chain's end is not the request's turn
     for now in (110.0, 111.0, 120.0):
         await plugin.settle_network_turn(llm, now=now)
+    plugin.network_chain_ended()  # nor is one before the model ran for it
+    await plugin.settle_network_turn(llm, now=121.0)
     assert _ends(sent) == [] and plugin.network_turn_open()
 
     # Its own turn (the retry chain) runs and ends.
@@ -478,12 +556,6 @@ def test_only_a_plain_message_can_be_a_turn_end():
 # --------------------------------------------------------------------- #
 
 
-@pytest.fixture
-def instant_settle(monkeypatch):
-    """The relay loop runs on real time; these tests step it by hand."""
-    monkeypatch.setattr(plugin_module, "_NET_TURN_SETTLE_SECONDS", 0.0)
-
-
 async def _network(bridges):
     members, _ = bridges
     (left, hub_left, left_model, _), (right, hub_right, right_model, _) = members
@@ -531,8 +603,8 @@ async def _far_turn(net, *texts):
         )
         assert result.success, result.output
     net.right_model.is_processing = False
-    await net.hub_right.settle_network_turn(net.right_model)  # idle starts
-    await net.hub_right.settle_network_turn(net.right_model)  # settled: end frame
+    net.hub_right.network_chain_ended()  # the queue processor finished the chain
+    await net.hub_right.settle_network_turn(net.right_model)  # the tick: end frame
 
 
 async def _drain_left(net, ticks: int = 10):
@@ -543,7 +615,7 @@ async def _drain_left(net, ticks: int = 10):
 
 @pytest.mark.asyncio
 async def test_a_shell_gets_the_interim_the_answer_and_the_end_over_the_real_relay(
-    bridges, instant_settle
+    bridges
 ):
     net = await _network(bridges)
     shell = await _shell_request(net, "rotate the nginx logs")
@@ -570,7 +642,7 @@ async def test_a_shell_gets_the_interim_the_answer_and_the_end_over_the_real_rel
 
 @pytest.mark.asyncio
 async def test_the_end_frame_is_neither_shown_nor_given_to_the_model(
-    bridges, instant_settle
+    bridges
 ):
     net = await _network(bridges)
     shell = await _shell_request(net, "rotate the nginx logs")
@@ -591,7 +663,7 @@ async def test_the_end_frame_is_neither_shown_nor_given_to_the_model(
 
 @pytest.mark.asyncio
 async def test_the_relay_hands_the_model_one_request_at_a_time_and_each_shell_gets_its_own(
-    bridges, instant_settle
+    bridges
 ):
     net = await _network(bridges)
     first = await _shell_request(net, "first: report the hostname")
@@ -624,7 +696,7 @@ async def test_the_relay_hands_the_model_one_request_at_a_time_and_each_shell_ge
 
 @pytest.mark.asyncio
 async def test_requests_handled_in_reverse_order_still_answer_their_own_shell(
-    bridges, instant_settle
+    bridges
 ):
     net = await _network(bridges)
     first = await _shell_request(net, "first: report the hostname")
@@ -652,7 +724,7 @@ async def test_requests_handled_in_reverse_order_still_answer_their_own_shell(
 
 @pytest.mark.asyncio
 async def test_an_agent_that_asked_gets_the_reply_and_no_end_frame_reaches_its_model(
-    bridges, instant_settle
+    bridges
 ):
     """Story 2: lapis asks, infra answers. lapis wakes on the answer (a normal
     hub message) and the runtime's end frame never appears to it."""
@@ -818,12 +890,12 @@ async def _far_plain_turn(net, text: str):
     net.right_model.is_processing = True
     await net.hub_right._parse_hub_messages(_response(text))
     net.right_model.is_processing = False
-    await net.hub_right.settle_network_turn(net.right_model)  # idle starts
-    await net.hub_right.settle_network_turn(net.right_model)  # settled: reply, end
+    net.hub_right.network_chain_ended()  # the queue processor finished the chain
+    await net.hub_right.settle_network_turn(net.right_model)  # the tick: reply, end
 
 
 @pytest.mark.asyncio
-async def test_a_shell_gets_a_plain_text_answer_over_the_real_relay(bridges, instant_settle):
+async def test_a_shell_gets_a_plain_text_answer_over_the_real_relay(bridges):
     net = await _network(bridges)
     shell = await _shell_request(net, "report free disk space")
     await net.right._tick()
@@ -837,3 +909,74 @@ async def test_a_shell_gets_a_plain_text_answer_over_the_real_relay(bridges, ins
         {"type": "network_reply", "from": net.to_right, "content": "412 GB free on /."},
         {"type": "network_done", "replies": 1},
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_shell_waits_out_a_gap_before_the_answer_and_gets_it_then_the_end(bridges):
+    net = await _network(bridges)
+    shell = await _shell_request(net, "report free disk space")
+    await net.right._tick()  # the request reaches the model
+    await net.hub_right._set_working({"messages": []})  # the terminal tool call
+    for now in (200.0, 200.5, 201.5, 204.0):  # the model reads idle for over a second
+        await net.hub_right.settle_network_turn(net.right_model, now=now)
+    await _drain_left(net)
+    assert net.hub_right.network_turn_open() and not shell.done()
+    assert shell.frames == []  # no "finished without a reply" while the answer is coming
+
+    await _far_turn(net, "46G free on /")
+
+    await _drain_left(net)
+    frames = await asyncio.wait_for(shell, timeout=5)
+    assert frames == [
+        {"type": "network_reply", "from": net.to_right, "content": "46G free on /"},
+        {"type": "network_done", "replies": 1},
+    ]
+
+
+# --------------------------------------------------------------------- #
+# The queue processor reports a chain finished only when nothing is left
+# --------------------------------------------------------------------- #
+
+
+def _processor(*, queued=0, completed=True, error=None, cancelled=False):
+    qp = QueueProcessor.__new__(QueueProcessor)
+    qp.processing_queue = asyncio.Queue()
+    for item in range(queued):
+        qp.processing_queue.put_nowait(item)
+    qp._turn_lock = asyncio.Lock()
+    qp.turn_completed = completed
+    qp.last_turn_error = error
+    qp._cancel_processing = cancelled
+    hub = MagicMock()
+    qp.event_bus = SimpleNamespace(get_service=lambda name: hub if name == "hub_plugin" else None)
+    return qp, hub
+
+
+@pytest.mark.parametrize(
+    "state, reported",
+    [
+        ({}, {"failed": False}),  # the model's last response needed no follow-up
+        ({"error": "503 from the provider"}, {"failed": True}),
+        ({"completed": False, "cancelled": True}, {"failed": False}),  # ESC
+        ({"completed": False}, None),  # a tool result still has to go back to the model
+        ({"queued": 1}, None),  # yielded to a queued message: its chain reports
+    ],
+)
+def test_the_queue_processor_reports_a_chain_only_when_nothing_is_left(state, reported):
+    qp, hub = _processor(**state)
+    qp.note_chain_end()
+    if reported is None:
+        hub.network_chain_ended.assert_not_called()
+    else:
+        hub.network_chain_ended.assert_called_once_with(**reported)
+
+
+@pytest.mark.asyncio
+async def test_the_queue_processor_does_not_report_while_another_turn_is_mid_flight():
+    qp, hub = _processor()
+    await qp._turn_lock.acquire()  # a model call is in progress
+    qp.note_chain_end()
+    hub.network_chain_ended.assert_not_called()
+    qp._turn_lock.release()
+    qp.note_chain_end()
+    hub.network_chain_ended.assert_called_once_with(failed=False)

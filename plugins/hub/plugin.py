@@ -106,10 +106,10 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
-# A remote request's turn has ended once the model has been idle this long
-# (docs/specs/agent-network-simple-flow.md section 7). One request is dropped
-# when no turn came for it within the shell's own wait ceiling.
-_NET_TURN_SETTLE_SECONDS = 1.0
+# A remote request's turn ends when the queue processor finishes the whole chain
+# that handled it (`HubPlugin.network_chain_ended`, docs/specs/agent-network-
+# simple-flow.md section 7). One request is dropped when no turn came for it
+# within the shell's own wait ceiling.
 _NET_TURN_MAX_SECONDS = 600.0
 # Carried by the end-of-turn frame; only the failed text is ever printed.
 _NET_TURN_DONE = "The receiving agent finished this request."
@@ -151,7 +151,8 @@ class _NetworkTurn:
     deferred: bool = False  # a chain was busy when it arrived; its turn is the next
     skipped: bool = False  # no turn will come for it (acknowledgement, duplicate)
     started: bool = False  # the model has been called since it arrived
-    idle_since: Optional[float] = None
+    ended: bool = False  # the queue processor finished the chain that handled it
+    failed: bool = False  # ... and that chain errored
     replies: int = 0  # hub_msgs already sent on its thread
     answer: str = ""  # text of the model's last response, if it ended the chain
 
@@ -2750,45 +2751,45 @@ class HubPlugin(BasePlugin):
         )
         turn.answer = (text or "") if ends_chain else ""
 
-    async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
-        """End the open request once the turn that handled it is over.
+    def network_chain_ended(self, failed: bool = False) -> None:
+        """The queue processor finished a whole chain: nothing pending, nothing queued.
 
-        Called on every relay tick. The turn is over when the model has run
-        since the request arrived and has been idle for a settle interval (a
-        hand-off between a hub chain and the user queue is not an end). The
-        requester is then sent the end-of-turn frame: how many replies went on
-        its thread and whether the turn failed. The runtime sends it, never the
-        model.
+        That is the end of the open request's turn, provided the model was
+        called for it. A chain that was already running when the request arrived
+        is not its turn. The end frame goes out on the relay's next tick, after
+        every hub_msg reply and the forwarded plain-text answer.
+        """
+        turn = getattr(self, "_net_turn", None)
+        if turn is not None and turn.started and not turn.deferred and not turn.skipped:
+            turn.ended = True
+            turn.failed = turn.failed or failed
+
+    async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
+        """Relay tick: send the end-of-turn frame of a request whose turn is over.
+
+        The frame says how many replies went on the request's thread and whether
+        the turn failed. The runtime sends it, never the model. The turn is over
+        when the queue processor says so (`network_chain_ended`), never because
+        the model looks idle: it reads idle for a moment between a tool result
+        and the next model call. An acknowledgement or no-model request has no
+        turn and ends at once; a request that found the model busy waits for
+        that chain to finish first.
         """
         turn = getattr(self, "_net_turn", None)
         if turn is None:
             return
-        now = time.monotonic() if now is None else now
-        busy = bool(getattr(llm, "is_processing", False))
-        if turn.skipped:
-            pass
-        elif turn.deferred:
+        if turn.deferred:
             # A chain already running when the request arrived is not the
             # request's turn; the next one is.
-            turn.deferred = busy
+            turn.deferred = bool(getattr(llm, "is_processing", False))
             return
-        elif busy:
-            turn.idle_since = None
-            return
-        elif not turn.started:
-            if now - turn.opened_at > _NET_TURN_MAX_SECONDS:
+        if not (turn.skipped or turn.ended):
+            now = time.monotonic() if now is None else now
+            if not turn.started and now - turn.opened_at > _NET_TURN_MAX_SECONDS:
                 # No turn ever came for it and the shell has stopped waiting.
                 self._net_turn = None
             return
-        elif turn.idle_since is None:
-            turn.idle_since = now
-            return
-        elif now - turn.idle_since < _NET_TURN_SETTLE_SECONDS:
-            return
-        # The queue processor keeps the last provider/turn error until the
-        # next model call clears it, so the one from this chain is still here.
-        error = getattr(getattr(llm, "_queue_processor", None), "last_turn_error", None)
-        await self._end_network_turn(turn, failed=bool(error) and not turn.skipped)
+        await self._end_network_turn(turn, failed=turn.failed)
 
     async def _end_network_turn(self, turn: "_NetworkTurn", *, failed: bool) -> None:
         """Close ``turn`` and tell its requester, on the request's thread."""

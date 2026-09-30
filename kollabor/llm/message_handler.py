@@ -530,6 +530,7 @@ class MessageHandler:
                             lambda: coord._process_queue(),
                             name="process_queue_drain_after_hub_continue",
                         )
+                    qp.note_chain_end()
 
             if coord.is_processing:
                 # Coalesce: only one pending retry at a time. Peer messages
