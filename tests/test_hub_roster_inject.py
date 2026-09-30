@@ -2,7 +2,7 @@
 
 import asyncio
 import re
-import unittest
+import unittest.mock
 from types import SimpleNamespace
 
 from kollabor_events.data_models import ConversationMessage

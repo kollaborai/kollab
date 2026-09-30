@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `hub_msg` that starts a request to an `agent@device` now says in its result that the reply arrives by itself as a hub message and that the agent should end its turn unless it has other local work, with no status check, capture or second message. An answer on a request the agent received still reports `sent to <agent@device>`. The asking agent no longer polls and resends, which made the answering device run the task twice.
 - `kollab --hub msg agent@device "text"` prints the answer to its own request. The request's thread id travels in the relay payload and the answering agent echoes it, so an older or duplicate answer from the same agent is never printed as the reply to a newer request.
 - The `ContactReviewAltView: missing 3 required positional arguments` error at every launch is gone; the knock review builds without callbacks like the Connect screen does.
+- Hub XML tags take their attributes in any order and either quote style: `<hub_msg wait="true" to="lapis">` runs and is hidden instead of staying on screen as raw text, and `<hub_broadcast scope="network">` parses.
+- `wait="true"` on `hub_msg` / `hub_reply` (and the idle phrases that set it) ends the sender's turn once the send succeeds; a rejected send, a send to nobody, or a failed tool in the same reply keeps the turn going.
 
 ## [0.10.7] - 2026-09-28
 
