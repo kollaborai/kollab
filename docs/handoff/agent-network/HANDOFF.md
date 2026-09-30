@@ -55,7 +55,7 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip e44ab6d.
 | Manual trust: short numbers instead of 32-hex ids, no `relay:` sender label on screen | done on branch `worktree-agent-a6deca3db4a406544`, not merged, not live-proven. Numbers for the six commands, the tool-result line and the question hint; the incoming event box names `agent@device`. Still open: the outgoing box when the model addresses a `relay:` address instead of `agent@device`, see the report | `.claude/worktrees/agent-a6deca3db4a406544`, report `agent-reports/manual-trust-numbers.md` |
 | `kollab --hub msg` replies bound to their own request | merged dee43fc, not live-proven. Both devices need this build | `.claude/worktrees/agent-a5e0891092630d9af`, report `agent-reports/cli-reply-threads.md` |
 | `hub_cron_add to="agent@device"` | merged 6b22c51, not live-proven | report `agent-reports/cron-to-device.md` |
-| M2 sealed config sync (section 9, Story 8) | merged 9d059bf, not live-proven (engine, `/config` managed-by, Connect row, OAuth cleanup). Still not done: docs, `tests/live/m2/` | `.claude/worktrees/agent-ae763b064388e596b`, report `agent-reports/m2-config-sync.md` |
+| M2 sealed config sync (section 9, Story 8) | merged 9d059bf; docs and `tests/live/m2/` written on `worktree-agent-a5cc4061fe4f00ca6` (cherry-pick 047dd18, 1244070, then the report commit); not live-proven (engine, `/config` managed-by, Connect row, OAuth cleanup) | `.claude/worktrees/agent-ae763b064388e596b`, reports `agent-reports/m2-config-sync.md`, `agent-reports/m2-finish.md` |
 | M3 mesh (section 10) | merged feac607, not live-proven (port, relay-less devices, limits, defaults on). Still not done: missing tests, `tests/live/m3/`, docs | `.claude/worktrees/agent-a3d23b9ebdefd78d5`, report `agent-reports/m3-mesh.md` |
 | M4 `kollab relay serve --domain` (section 11, Story 6) | merged 04bb354, not live-proven | `.claude/worktrees/agent-a19e7801aee487817`, report `agent-reports/m4-self-host.md` |
 | Story 5 delivery across rooms | merged 880ec82, not live-proven. Relay redeploy needed before the live run | `.claude/worktrees/agent-a1f25fd83138c4f68`, report `agent-reports/story5-stranger-delivery.md` |
@@ -87,11 +87,10 @@ Brief rules for any sub-agent: exact file:line targets in the brief; iterate on 
 touched test files and run the full suite once at the end; no fuzzing or mutation
 runs; pipe output through `tail`; read functions, not whole files.
 
-1. **M2 finish.** Docs: constitution section 9, Story 1 lines, Story 8, section 12
-   item 2, a section 15 item for the join-time API-key profile copy;
-   `docs/guides/connect.md` "What accepting copies"; the CHANGELOG pair. Write
-   `tests/live/m2/` from the Story 8 steps in `agent-reports/m2-config-sync.md`.
-   Done: docs match the code, `bash -n` passes on the scripts, full suite green.
+1. **M2 finish.** DONE on `worktree-agent-a5cc4061fe4f00ca6` (cherry-pick 047dd18 docs,
+   1244070 `tests/live/m2/`, then the report commit). Docs match the code, `bash -n` and
+   shellcheck pass, a stubbed dry run passes (and fails on a leaked key), suite 5186
+   passed, 9 skipped. Not run live: that is task 5. Report: `agent-reports/m2-finish.md`.
 2. **M3 finish.** The missing tests listed under "Not done" in
    `agent-reports/m3-mesh.md`; `tests/live/m3/` using the live setup facts in that
    report (the proof seeds B<->C approvals until Marco decides the open M3 item);
@@ -105,7 +104,7 @@ runs; pipe output through `tail`; read functions, not whole files.
    Then: M1 re-proof (`tests/live/m1/proof.sh`, now with `s3-overlap`); Story 5
    (redeploy the relay first with `scripts/relay/deploy_relay_tarball.sh`, which
    health-checks and rolls back; rollback command in `M1-HANDOFF.md`), then
-   `tests/live/story5/`; M2 `tests/live/m2/`; M3 `tests/live/m3/`; M4 in the order
+   `tests/live/story5/`; M2 `tests/live/m2/` (after `m1/proof.sh`, before `m1/teardown.sh`); M3 `tests/live/m3/`; M4 in the order
    of `tests/live/m4/README.md`. Tell Marco before and after any production change
    (relay redeploy, edge vhost).
 6. **Reviews.** One capped review agent per milestone, then fixes, then re-run the
@@ -135,7 +134,8 @@ runs; pipe output through `tail`; read functions, not whole files.
   when it revokes.
 - M2: these stay machine-local: `kollabor.updates`, `kollabor.permissions`, `plugins.hub`,
   `plugins.voice`, version stamps. A join still copies the issuer's API-key profile once,
-  so a duplicate loadout can show.
+  so a duplicate loadout can show. Both are written down: constitution section 9 (the
+  machine-local list) and section 15 (the join copy).
 - Story 5: a knock the other side rejects or ignores leaves the knocker's approval, link
   and reply grant in place (inert, no UI to clear it).
 - Reply threads: a reply to a shell request no longer wakes the asking agent's model
