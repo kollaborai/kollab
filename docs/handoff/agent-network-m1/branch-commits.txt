@@ -1,0 +1,34 @@
+afa383d 2026-09-29 Run one hub XML tag once, tell the asker a remote request's reply comes by itself, refs #121
+55cca30 2026-09-29 Merge the Connect screen attach fixes, refs #121
+7b652aa 2026-09-29 Open the Connect screen in an attached window, show the join wait, retire used codes, refs #121
+d881b51 2026-09-29 Report what the network did for agent@device sends, answer CLI requests on their own thread, build ContactReviewAltView bare, refs #121
+a4fcab8 2026-09-29 Keep keys out of /connect status: drop the provisioned networks block, refs #121
+27c1908 2026-09-29 Fix the remaining review findings: names, rollback, reprs, row widths, manual commands by handle, refs #121
+8e40d83 2026-09-29 Fix the review findings on the network branch, refs #121
+b284678 2026-09-29 Add the Connect screen: code, requests and roster on one page, refs #121
+9fe266f 2026-09-28 Add the knock route, named knocks and accept binding on the network branch, refs #121
+d20e4e3 2026-09-28 Merge branch 'worktree-agent-a91f40e4b71bab8be' into issue-121-network-simple-flow
+d5bf8dd 2026-09-28 Roll back an orphaned device binding, render offline devices from approvals, guard peer-trust setters, refs #121
+2afdb36 2026-09-28 Remove the K1 join code; the short code is the only code, refs #121
+f0ffa3a 2026-09-28 Merge branch 'worktree-agent-a750b82566f9df881' into issue-121-network-simple-flow
+9e56f7e 2026-09-28 Bind device names to peer keys at accept and add per-peer trust, refs #121
+9e140f6 2026-09-28 Relabel the remaining ledger links as the agent network contract, refs #121
+2f191d6 2026-09-28 Isolate the enrollment issuer decision test from wall-clock drift, refs #121
+03817fb 2026-09-28 Delete Codex's narrative network specs and trim the rest to wire contracts, refs #121
+98e3e2c 2026-09-28 Ship device_names.py with the packaged relay and guard the allowlist with an import test, refs #121
+e8ca826 2026-09-28 Mark Codex's network specs as superseded by the agent network contract, refs #121
+b647096 2026-09-28 Rewrite the connect guide, README and changelog for the agent network surface, refs #121
+66c54d0 2026-09-28 Drop the K1 upgrade window, widen the contact route to 16 hex, record the stranger delivery gap, refs #121
+f1773e9 2026-09-28 Adjust the connect palette spec to the menu's visible rows, refs #121
+1b0c797 2026-09-28 Await the async relay bridge, gate manual-trust commands, drop removed /connect branches, refs #121
+120ab3c 2026-09-28 Merge branch 'worktree-agent-a9a673d7f57d81a5d' into issue-121-network-simple-flow
+e619261 2026-09-28 Add the agent network CLI: kollab --hub status/msg reach agent@device, refs #121
+a9aabcb 2026-09-28 Recognize the short join code everywhere a K1 code was refused or validated, refs #121
+6d98419 2026-09-28 Merge branch 'worktree-agent-ad9f4d4d51e59237b' into issue-121-network-simple-flow
+793cb6e 2026-09-28 Let hub_broadcast carry scope="network", refs #121
+f29ba39 2026-09-28 Shorten the join code to 8 chars with a relay lookup step, refs #121
+cf9a379 2026-09-28 Merge branch 'worktree-agent-afa50de55f5e558f4' into issue-121-network-simple-flow
+5734498 2026-09-28 Rebuild /connect as the agent network surface, refs #121
+124ec60 2026-09-28 Relay core: device identity, network trust, and open-trust hub delivery
+18fcbee 2026-09-28 Add device names and agent@device handles, refs #121
+2d8c853 2026-09-28 Add the agent network constitution, refs #121

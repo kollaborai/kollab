@@ -1,0 +1,7 @@
+size=323979
+code=0
+hex64=0
+relay=0
+errhits=0
+envhits=0
+shell_ok=0

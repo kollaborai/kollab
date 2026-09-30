@@ -1,0 +1,10 @@
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+ Connect                                                                                                                
+
+ network      kollabor.ai   trust: open
+ this device  synthyo-kollab-m1-mac7
+ join code    [join code]   one device, expires in 4:24
+ requests     alzan-prod-kollab-m… wants to join   fingerprint b7e8…fa66   [a]ccept [r]eject
+ online       koordinator (this device)
+
+ a accept  r reject  c new code  esc close
