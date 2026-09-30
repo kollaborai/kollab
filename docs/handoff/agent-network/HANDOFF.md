@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30, branch tip 532d4e7.
+network. Updated at every merge. Last update: 2026-09-30, branch tip e44ab6d.
 
 ## Read first, in this order
 
@@ -36,7 +36,7 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip 532d4e7.
 
 - Branch `issue-121-network-simple-flow` in `/Users/malmazan/dev/kollab`. Not
   pushed, no PR.
-- Unit suite at 0fdb73f: 4907 passed, 7 skipped
+- Unit suite at e44ab6d: 5186 passed, 9 skipped
   (`KOLLAB_NO_KEYRING=1 .venv/bin/python -m pytest tests/unit/ -q`, ~80 s).
 - Relay on kollabor.ai: release 20260929-a4fcab8. Rollback and deploy scripts:
   `M1-HANDOFF.md` and `scripts/relay/deploy_relay*.sh`.
@@ -75,22 +75,42 @@ mid-task, its work is in its worktree: `git -C <worktree> log` for commits,
    `tests/tmux/lib/test_runner.sh tests/tmux/specs/connect_*.json` for UI changes.
 5. Update the board above and commit this file.
 
-## Next, in order
+## Next: the task queue
 
-All agents stopped at 2026-09-30 ~22:50 when the usage limit ran low. Do NOT resume them
-(each transcript is 500K-865K tokens). Fresh agents, each under the 250K cap, continue
-from the worktrees and reports above.
+Take the first task that is not done. One agent per task, on a worktree fast-forwarded
+to `issue-121-network-simple-flow`, under the 250K cap. The finished-in-part work is
+already on the branch; the old worktrees are reference only. When the task is done
+(or the cap is reached), write the report to `agent-reports/<task>.md`, update the
+board and this queue, and commit.
 
-1. In each built worktree, run `tests/unit/ -q` once and fix what fails.
-2. Cherry-pick onto the branch in this order: reply threads, M2, Story 5, M4, M3.
-   Expect conflicts in CHANGELOG [Unreleased] (both copies), constitution sections
-   4, 5 and 9-12, `docs/guides/connect.md` and `plugins/hub/plugin.py`.
-3. Fresh capped agents for what is unfinished: M2 docs + `tests/live/m2/`; M3 tests +
-   `tests/live/m3/` + docs; manual-trust short numbers.
-4. Live runs one at a time: M1 re-proof (it now includes an `s3-overlap` step), Story 5
-   (redeploy the relay first), M2, M3, M4.
-5. One capped review agent per milestone, then fixes.
-6. Ask Marco how to release. Default: one release after everything is proven.
+Brief rules for any sub-agent: exact file:line targets in the brief; iterate on the
+touched test files and run the full suite once at the end; no fuzzing or mutation
+runs; pipe output through `tail`; read functions, not whole files.
+
+1. **M2 finish.** Docs: constitution section 9, Story 1 lines, Story 8, section 12
+   item 2, a section 15 item for the join-time API-key profile copy;
+   `docs/guides/connect.md` "What accepting copies"; the CHANGELOG pair. Write
+   `tests/live/m2/` from the Story 8 steps in `agent-reports/m2-config-sync.md`.
+   Done: docs match the code, `bash -n` passes on the scripts, full suite green.
+2. **M3 finish.** The missing tests listed under "Not done" in
+   `agent-reports/m3-mesh.md`; `tests/live/m3/` using the live setup facts in that
+   report (the proof seeds B<->C approvals until Marco decides the open M3 item);
+   constitution section 10, `docs/guides/connect.md`, the CHANGELOG pair.
+3. **Manual-trust short numbers**, plus no `relay:` sender label on screen. Exact
+   next step: `agent-reports/connect-polish-2.md`. Start from the branch; the
+   partial edit in `.claude/worktrees/agent-a4715d24e2e745ccf` is broken, read it only.
+4. **Small follow-ups** (section below).
+5. **Live runs, one at a time.** Build and install first:
+   `bash tests/live/m1/build_wheels.sh <ref> <dir>` then `install_both.sh <dir>`.
+   Then: M1 re-proof (`tests/live/m1/proof.sh`, now with `s3-overlap`); Story 5
+   (redeploy the relay first with `scripts/relay/deploy_relay_tarball.sh`, which
+   health-checks and rolls back; rollback command in `M1-HANDOFF.md`), then
+   `tests/live/story5/`; M2 `tests/live/m2/`; M3 `tests/live/m3/`; M4 in the order
+   of `tests/live/m4/README.md`. Tell Marco before and after any production change
+   (relay redeploy, edge vhost).
+6. **Reviews.** One capped review agent per milestone, then fixes, then re-run the
+   affected live proof.
+7. **Ask Marco how to release.** Default: one release after everything is proven.
 
 ## Decisions taken 2026-09-30 (Marco can veto)
 
