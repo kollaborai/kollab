@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30 09:15 MST, branch tip 71798d1 = build 0.11.0.dev3 (5284 unit tests pass).
+network. Updated at every merge. Last update: 2026-09-30 10:30 MST, branch tip 23610aa; last build 0.11.0.dev4 (f0dec4c).
 
 ## Read first, in this order
 
@@ -38,8 +38,8 @@ network. Updated at every merge. Last update: 2026-09-30 09:15 MST, branch tip 7
   pushed, no PR.
 - Unit suite at 432ad68: 5242 passed, 9 skipped
   (`KOLLAB_NO_KEYRING=1 .venv/bin/python -m pytest tests/unit/ -q`, ~80 s).
-- Relay on kollabor.ai: release 20260930-71798d1, deployed 2026-09-30 08:48 MST, all routes live.
-  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-084806
+- Relay on kollabor.ai: release 20260930-f0dec4c, deployed 2026-09-30 09:53 MST, all routes live.
+  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-095320
   /etc/systemd/system/kollab-relay.service.d/source-v2.conf && sudo systemctl daemon-reload &&
   sudo systemctl restart kollab-relay.service`. Deploy from a clean worktree: the script refuses a
   dirty tree, and the main checkout has the three foreign files.
@@ -118,6 +118,21 @@ runs; pipe output through `tail`; read functions, not whole files.
 6. **Reviews.** One capped review agent per milestone, then fixes, then re-run the
    affected live proof.
 7. **Ask Marco how to release.** Default: one release after everything is proven.
+
+## Round on build 0.11.0.dev4 (f0dec4c), 2026-09-30 09:47-10:24
+
+Summaries: `evidence-dev3/final-round-dev4-summary.txt`, `evidence-dev3/m1-m3-rerun-dev4-summary.txt`.
+
+- PASS, clean transcript: M2 11/11 (sealed config sync live, after the stale managed-record fix),
+  Story 5 20/20, M4 27/27, and M1 20/20 in the first run.
+- M3 c3 had failed only because the proof's status parser reset on `koordinator (this device)`; fixed
+  in 23610aa (B and C did list each other). The mesh link lifecycle fix (d0e80cf) is in dev4.
+- M1 rerun: Story 3 failed 3 times with `finished without a reply` although the server's hub_msg answers
+  succeeded 4-5 s after its shell ran: the end-of-turn frame goes out on a 1 s idle debounce between the
+  tool and the next model call. Fix in progress (end on the queue's real chain-complete signal). Then
+  rebuild dev5 and run the full round again.
+- Config sync copies the Mac's MCP server entries with Mac-only paths to Linux, where they WARN at every
+  launch. Open question for Marco: skip MCP servers whose command is not found, or stop syncing them.
 
 ## Final round on build 0.11.0.dev3 (71798d1), 2026-09-30 08:43-09:09
 

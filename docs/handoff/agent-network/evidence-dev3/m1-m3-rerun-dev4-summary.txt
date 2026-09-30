@@ -1,0 +1,27 @@
+[10:24:07] M1 exit=1
+pre-installed-build                PASS   -
+pre-relay-lookup                   PASS   -
+pre-fresh-workspaces               PASS   -
+pre-llm-login                      PASS   -
+s0-launch                          PASS   s0-01-mac-launch.txt
+s1-01-mac-connect-code             PASS   s1-01-mac-connect-screen.txt
+s1-02-srv-submits-code             PASS   s1-04-srv-after-enter.txt
+s1-03-mac-sees-request             PASS   s1-05-mac-wants-to-join.txt
+s1-04-mac-accepts                  PASS   s1-06-mac-accepted.txt
+s1-05-srv-joined                   PASS   s1-07-srv-joined.txt
+s1-06-status-both-sides            PASS   s1-08-mac-status.txt
+s2-agent-to-agent                  PASS   s2-01-mac-reply.txt
+s3-shell-msg                       FAIL   s3-01-shell-msg.txt
+    -> the printed reply is not a disk report (a stale or unrelated reply?): koordinator@alzan-prod-kollab-m1-server-r11 finished without a reply 
+s3-cron-env-msg                    FAIL   s3-02-cron-env-msg.txt
+    -> the printed reply is not a disk report (a stale or unrelated reply?): koordinator@alzan-prod-kollab-m1-server-r11 finished without a reply 
+s3-server-ran-its-shell            PASS   s3-04-srv-pane.txt
+s3-overlap                         FAIL   s3-06-overlap-disk.txt
+    -> the disk shell did not print its own answer (crossed with the hostname request?): koordinator@alzan-prod-kollab-m1-server-r11 finished without a reply 
+s5-width-80                        PASS   s5-connect-mac-80.txt
+z1-panes-clean                     PASS   -
+z2-log-mac                         PASS   logscan-mac.txt
+z2-log-srv                         PASS   logscan-srv.txt
+FAIL: 3 step(s) failed. Not a pass.
+[10:24:17] selfhost: public health 200
+[10:24:17] done
