@@ -53,12 +53,12 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip 532d4e7.
 | second window opens the Connect screen read-only, full device names | merged 7fba955 | report `agent-reports/fix-connect-leftovers.md` |
 | Connect polish 2: attached-window read-only screen, `/connect code` docs, default network name `<device>-net` | merged 532d4e7 | report `agent-reports/connect-polish-2.md` |
 | Manual trust: short numbers instead of 32-hex ids, no `relay:` sender label on screen | NOT DONE. A partial, uncommitted, broken edit sits in `.claude/worktrees/agent-a4715d24e2e745ccf` (`plugins/hub/relay_conversations.py`); do not commit it as is | next step in `agent-reports/connect-polish-2.md` |
-| `kollab --hub msg` replies bound to their own request | DONE, not merged: d53a8a1 (suite 4944 passed in its worktree). Both devices need this build | `.claude/worktrees/agent-a5e0891092630d9af`, report `agent-reports/cli-reply-threads.md` |
+| `kollab --hub msg` replies bound to their own request | merged dee43fc, not live-proven. Both devices need this build | `.claude/worktrees/agent-a5e0891092630d9af`, report `agent-reports/cli-reply-threads.md` |
 | `hub_cron_add to="agent@device"` | merged 6b22c51, not live-proven | report `agent-reports/cron-to-device.md` |
-| M2 sealed config sync (section 9, Story 8) | PARTIAL, not merged: 2319b6f cacfe5b c12454d 61958bd (engine, `/config` managed-by, Connect row, OAuth cleanup). NOT done: full unit run, docs, `tests/live/m2/` | `.claude/worktrees/agent-ae763b064388e596b`, report `agent-reports/m2-config-sync.md` |
-| M3 mesh (section 10) | PARTIAL, not merged: e7ce3a9 (port) 0e7dc42 (relay-less devices, limits) 61ea79b (defaults on). NOT done: full unit run, missing tests, `tests/live/m3/`, docs | `.claude/worktrees/agent-a3d23b9ebdefd78d5`, report `agent-reports/m3-mesh.md` |
-| M4 `kollab relay serve --domain` (section 11, Story 6) | BUILT, not merged: tip fd1c0ea. Full suite ran once early (4764 passed), not after the last edits. Live proof not run | `.claude/worktrees/agent-a19e7801aee487817`, report `agent-reports/m4-self-host.md` |
-| Story 5 delivery across rooms | BUILT, not merged: 260af09 (relay) f80246b (client, docs) 75b11db (`tests/live/story5/`). Full suite not confirmed after the last edits. Relay redeploy needed before the live run | `.claude/worktrees/agent-a1f25fd83138c4f68`, report `agent-reports/story5-stranger-delivery.md` |
+| M2 sealed config sync (section 9, Story 8) | merged 9d059bf, not live-proven (engine, `/config` managed-by, Connect row, OAuth cleanup). Still not done: docs, `tests/live/m2/` | `.claude/worktrees/agent-ae763b064388e596b`, report `agent-reports/m2-config-sync.md` |
+| M3 mesh (section 10) | merged feac607, not live-proven (port, relay-less devices, limits, defaults on). Still not done: missing tests, `tests/live/m3/`, docs | `.claude/worktrees/agent-a3d23b9ebdefd78d5`, report `agent-reports/m3-mesh.md` |
+| M4 `kollab relay serve --domain` (section 11, Story 6) | merged 04bb354, not live-proven | `.claude/worktrees/agent-a19e7801aee487817`, report `agent-reports/m4-self-host.md` |
+| Story 5 delivery across rooms | merged 880ec82, not live-proven. Relay redeploy needed before the live run | `.claude/worktrees/agent-a1f25fd83138c4f68`, report `agent-reports/story5-stranger-delivery.md` |
 
 Agent reports land in
 `/private/tmp/claude-501/-Users-malmazan-dev-kollab/be0c993a-92c8-42c7-b0d3-3b92d1aa903c/scratchpad/reports/`
