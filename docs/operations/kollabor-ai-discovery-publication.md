@@ -10,13 +10,13 @@ Kollab 0.9.0 installed with plain `pip install kollab` includes the relay client
 
 ## Self-host a directory in one command
 
-For one host, `kollab relay serve --domain <domain>` replaces the next two sections: no config file, no Docker, no Redis, no separate publisher or static server.
+For one host, `kollab relay serve --domain <domain>` replaces the supervised relay, the standalone publisher and the static file server described further down: no config file, no Docker, no Redis.
 
 ```sh
 kollab relay serve --domain agents.example.com
 ```
 
-One process runs the relay (one worker on the in-memory backend), signs the discovery document and renews it every 60 seconds while the relay is ready, and serves it at `/.well-known/agent-keys.json` on the same port. It listens on plain HTTP at `127.0.0.1:9078` (`--bind`, `--port`); a TLS proxy in front is the only public endpoint. On start it creates or loads its state, prints what is left to do, and prints `ready` once the relay answers and the document is published. What is left is always the same three things:
+One process runs the relay (one worker on the in-memory backend), signs the discovery document and renews it every 60 seconds (it names the relay only while the relay is ready), and serves it at `/.well-known/agent-keys.json` on the same port. It listens on plain HTTP at `127.0.0.1:9078` (`--bind`, `--port`); a TLS proxy in front is the only public endpoint. On start it creates or loads its state, prints what is left to do, and prints `ready` once the relay answers and the document is published. What is left is always the same three things:
 
 1. **DNS.** One TXT record: `_agent.agents.example.com  TXT  "v=aid1;u=https://agents.example.com/.well-known/agent-keys.json"`.
 2. **The TLS proxy.** Terminate TLS for `agents.example.com` and forward these five routes to the port, nothing else: `GET /.well-known/agent-keys.json`, `GET /relay/v1/health`, the WebSocket at `/relay/v1/ws`, `POST /relay/v1/enrollment/*` and `POST /relay/v1/contact/*`. Never forward `/relay/v1/metrics`. `--print nginx` and `--print caddy` print that config for your settings; both set `X-Real-IP` from the connecting client.
@@ -52,7 +52,7 @@ Then `/connect agents.example.com` on a device: it runs the same DNS, TLS and si
 
 ## Run the relay service (several workers or hosts)
 
-This is the form kollabor.ai runs: `kollab relay run --config` supervises several workers around a shared backend. The rest of this guide, up to signed discovery, applies to it. Use a stable HTTPS origin with a valid certificate and an operator-controlled service host. Create a private runtime directory owned by the service account with mode `0700`; keep the config file at mode `0600`. The runtime directory and config parent must not be shared writable or symbolic-link paths. The sample selects Kollab's managed, single-host Valkey sidecar, which requires Docker:
+This is the form kollabor.ai runs: `kollab relay run --config` supervises several workers around a shared backend, and the standalone publisher (below) signs the discovery document. Use a stable HTTPS origin with a valid certificate and an operator-controlled service host. Create a private runtime directory owned by the service account with mode `0700`; keep the config file at mode `0600`. The runtime directory and config parent must not be shared writable or symbolic-link paths. The sample selects Kollab's managed, single-host Valkey sidecar, which requires Docker:
 
 ```json
 {
