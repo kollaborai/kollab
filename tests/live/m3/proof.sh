@@ -207,7 +207,7 @@ for _ in $(seq 1 30); do
 done
 [ "$found" = 1 ] || abort c2-c-joins "no join code appeared on the Mac after /connect code"
 key mac Escape; sleep 1
-b_wants=$(count_pat mac 'wants to join'); b_acc=$(count_pat mac 'accepted|trusted device')
+b_acc=$(count_pat mac 'accepted|trusted device')
 cmd c "/connect"; sleep 5
 snap=$(screen c)
 grep -Eqi '> *domain' <<<"$snap" && { key c Tab; sleep 1; }
@@ -216,7 +216,14 @@ sleep 1
 capscreen c c2-01-c-code-typed        # must show the masked field, never the code
 key c Enter
 sleep 4
-wait_for mac 'wants to join' 120 "$b_wants" || { cap mac c2-02-mac-no-request; abort c2-c-joins "the Mac never showed '<device> wants to join' for C" c2-02-mac-no-request.txt; }
+# /connect code is a code-only screen (no request rows, no accept key) and closing it prints nothing later: a request
+# only shows up in `/connect status` (or the full Connect screen). Ask for it, the way m1's fallback does, for 2 minutes.
+got=0
+for _ in $(seq 1 12); do
+  b_wants=$(count_pat mac 'wants to join'); cmd mac "/connect status"
+  wait_for mac 'wants to join' 10 "$b_wants" && { got=1; break; }
+done
+[ "$got" = 1 ] || { cap mac c2-02-mac-no-request; abort c2-c-joins "no 'wants to join' in the Mac's /connect status 2 minutes after C submitted the code" c2-02-mac-no-request.txt; }
 C_REQ=$(newest_with mac '[^[:space:]]+[[:space:]]+wants to join' | sed -E 's/.*[[:space:]]([^[:space:]]+)[[:space:]]+wants to join.*/\1/')
 [ -n "$C_REQ" ] || abort c2-c-joins "could not read C's device name from the Mac's 'wants to join' line"
 cmd mac "/connect accept $C_REQ"
