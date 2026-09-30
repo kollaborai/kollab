@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30, branch tip 0fdb73f.
+network. Updated at every merge. Last update: 2026-09-30, branch tip 6b22c51.
 
 ## Read first, in this order
 
@@ -49,7 +49,7 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip 0fdb73f.
 | second window opens the Connect screen read-only, full device names | merged 7fba955 | report `agent-reports/fix-connect-leftovers.md` |
 | Connect polish 2: attached-window sibling, short numbers instead of hex ids under manual trust, `/connect code` docs, default network name | agent running | `.claude/worktrees/agent-a4715d24e2e745ccf`, branch `connect-polish-2` |
 | `kollab --hub msg` replies bound to their own request (no crossed answers) | agent running | `.claude/worktrees/agent-a5e0891092630d9af` |
-| `hub_cron_add to="agent@device"` | agent running | `.claude/worktrees/agent-add4be445207fcd35` |
+| `hub_cron_add to="agent@device"` | merged 6b22c51, not live-proven | report `agent-reports/cron-to-device.md` |
 | M2 sealed config sync (section 9, Story 8) | agent running | `.claude/worktrees/agent-ae763b064388e596b` |
 | M3 mesh: port e02e761, direct first, forwarding on (section 10) | agent running | `.claude/worktrees/agent-a3d23b9ebdefd78d5` |
 | M4 `kollab relay serve --domain` (section 11, Story 6) | agent running | `.claude/worktrees/agent-a19e7801aee487817` |
@@ -106,6 +106,12 @@ mid-task, its work is in its worktree: `git -C <worktree> log` for commits,
 - `scripts/relay/verify_agent_conversation.py` targets the old command
   surface; it is the only live verifier for manual trust (Story 7). Keep,
   rewrite or delete.
+
+## Small follow-ups (not started)
+
+- `_handle_hub_cron_add_tool` reports success for `bad interval:` and `usage:` text.
+- The `hub_msg` tool definition still describes the Codex model ("authorized remote relay agent").
+- A remote cron fire draws one `agent -> agent@device` box per fire; a 30 s job draws one every 30 s. Not seen on a real screen yet.
 
 ## Gotchas
 
