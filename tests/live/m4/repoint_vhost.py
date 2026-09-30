@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""repoint_vhost.py HOST:PORT < old.conf > new.conf
+"""repoint_vhost.py HOST:PORT [DOMAIN] < old.conf > new.conf
 
 Rewrite an nginx vhost that fronts the manual selfhost stack (relay workers, a health port and a static
 key file server) so that every route reaches the one process `kollab relay serve` runs on HOST:PORT.
@@ -10,7 +10,9 @@ key file server) so that every route reaches the one process `kollab relay serve
   proxy_pass to an upstream name is left alone (the upstream now points at HOST:PORT)
 
 Anything else that proxies to a literal address makes it stop with exit 3 and change nothing, and so does
-a result that still names another address. The diff is the review: edge_vhost.sh shows it before applying.
+a result that still names another address. With DOMAIN (edge_vhost.sh always passes it) the file must serve that
+name and no other: every upstream and health route in it is rewritten, so a file that also served another site
+(kollabor.ai) would have that site repointed too. The diff is the review: edge_vhost.sh shows it before applying.
 """
 
 import re
@@ -22,13 +24,25 @@ def fail(message):
     sys.exit(3)
 
 
-target = sys.argv[1] if len(sys.argv) == 2 else ""
-if not re.fullmatch(r"[0-9.]+:[0-9]{2,5}", target):
-    fail("usage: repoint_vhost.py HOST:PORT < old.conf > new.conf")
+args = sys.argv[1:]
+target = args[0] if args else ""
+domain = args[1] if len(args) == 2 else ""
+if len(args) not in (1, 2) or not re.fullmatch(r"[0-9.]+:[0-9]{2,5}", target):
+    fail("usage: repoint_vhost.py HOST:PORT [DOMAIN] < old.conf > new.conf")
+
+text = sys.stdin.read()
+if domain:
+    names = {name for found in re.findall(r"^[ \t]*server_name[ \t]+([^;]*);", text, re.M) for name in found.split()}
+    if names != {domain}:
+        shown = " ".join(sorted(names)) or "none"
+        fail(
+            f"server_name in this file is {shown}, not only {domain}: every upstream and health route in it "
+            "would be repointed, so another site's traffic would move too. Split the vhost or edit it by hand"
+        )
 
 ADDRESS = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}\b")
 out, in_upstream, seen_server, location = [], False, False, ""
-for line in sys.stdin.read().splitlines(keepends=True):
+for line in text.splitlines(keepends=True):
     stripped = line.strip()
     if re.match(r"upstream\s+\S+\s*\{", stripped):
         in_upstream, seen_server = True, False

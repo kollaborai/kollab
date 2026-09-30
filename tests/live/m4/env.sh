@@ -27,6 +27,11 @@ m4_srv_paths() {
 
 say() { printf '[m4 %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '[m4 FATAL] %s\n' "$*" >&2; exit 1; }
+# Hard pin. These scripts stop processes and rewrite an nginx vhost for this one name; an exported M4_DOMAIN must never
+# aim them at kollabor.ai (its vhost, kollab-relay.service, its release dirs).
+[ "$M4_DOMAIN" = selfhost.kollabor.ai ] || die "M4_DOMAIN must be selfhost.kollabor.ai, got '$M4_DOMAIN'. These scripts never touch kollabor.ai."
+# stdin -> stdout for anything printed to a terminal: a 64-hex key keeps 8 characters, relay: addresses are hidden.
+scrub() { sed -E 's/([0-9a-f]{8})[0-9a-f]{56}/\1.../g; s/relay:[^[:space:]|]+/relay:<addr>/g'; }
 
 # One multiplexed ssh connection to the edge; teardown closes it.
 M4_EDGE_SSH_OPTS=(-o BatchMode=yes -o ControlMaster=auto -o "ControlPath=/tmp/kollab-m4-edge-%C" -o ControlPersist=300)

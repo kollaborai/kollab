@@ -19,8 +19,8 @@ code_of() { curl -sS -o /dev/null -m 15 -w '%{http_code}' "$@" 2>/dev/null || ec
 
 # 1. DNS: the one TXT record
 txt=$(dig +short TXT "_agent.$M4_DOMAIN" 2>/dev/null | tr -d '"' || true)
-printf '%s\n' "$txt" >"$EVID/verify-dns.txt"
-if grep -Eq "v=aid1;u=$URL/\.well-known/agent-keys(\.json)?" <<<"$txt"; then ok "dns: _agent.$M4_DOMAIN TXT selects $URL ($txt)"; else bad "dns: _agent.$M4_DOMAIN TXT is '$txt'"; fi
+printf '%s\n' "$txt" | scrub >"$EVID/verify-dns.txt"
+if grep -Eq "v=aid1;u=$URL/\.well-known/agent-keys(\.json)?" <<<"$txt"; then ok "dns: _agent.$M4_DOMAIN TXT selects $URL ($(scrub <<<"$txt"))"; else bad "dns: _agent.$M4_DOMAIN TXT is '$(scrub <<<"$txt")'"; fi
 
 # 2. discovery exactly as a client does it (DNS, TLS, signature), and the identity did not change
 disc=$(cd "$HOME" && "$M1_MAC_VENV/bin/python" - "$M4_DOMAIN" <<'PY' 2>&1
@@ -34,7 +34,7 @@ print(json.dumps({"key": m["coordinator"]["public_key"], "revision": m["revision
                   "control": m["endpoints"].get("control"), "summary": result.summary().replace("\n", " | ")}))
 PY
 ) || true
-printf '%s\n' "$disc" >"$EVID/verify-discovery.txt"
+printf '%s\n' "$disc" | scrub >"$EVID/verify-discovery.txt"
 if python3 - "$URL" "$disc" <<'PY'
 import json, sys
 
@@ -42,7 +42,7 @@ d = json.loads(sys.argv[2].splitlines()[-1])
 assert d["control"] == sys.argv[1] + "/relay/v1", d
 assert "relay" in d["roles"] and "rendezvous" in d["roles"], d
 PY
-then ok "discovery: verified by the client code, relay advertised at $URL/relay/v1"; else bad "discovery: $disc"; fi
+then ok "discovery: verified by the client code, relay advertised at $URL/relay/v1"; else bad "discovery: $(scrub <<<"$disc")"; fi
 if [ -f "$EVID/pre.env" ]; then
   # shellcheck disable=SC1091
   . "$EVID/pre.env"
@@ -53,7 +53,7 @@ d = json.loads(sys.argv[3].splitlines()[-1])
 assert d["key"] == sys.argv[1], "publisher key changed"
 assert d["revision"] > int(sys.argv[2]), "revision did not advance"
 PY
-  then ok "identity: same publisher key as before the change, revision advanced past $PRE_REVISION"; else bad "identity: the publisher key or revision differs from evidence/pre.env: $disc"; fi
+  then ok "identity: same publisher key as before the change, revision advanced past $PRE_REVISION"; else bad "identity: the publisher key or revision differs from evidence/pre.env: $(scrub <<<"$disc")"; fi
 else
   echo "SKIP  identity: no evidence/pre.env (serve_up.sh up has not run from this checkout)"
 fi
@@ -88,6 +88,6 @@ asyncio.run(main())
 PY
 ) || true
 printf '%s\n' "$ws" >"$EVID/verify-ws.txt"
-if [ "$ws" = "challenge $URL" ]; then ok "websocket upgrades and the relay sends its challenge for $URL"; else bad "websocket: $ws"; fi
+if [ "$ws" = "challenge $URL" ]; then ok "websocket upgrades and the relay sends its challenge for $URL"; else bad "websocket: $(scrub <<<"$ws")"; fi
 
 if [ "$FAILS" -eq 0 ]; then say "all checks passed"; else say "$FAILS check(s) failed"; exit 1; fi

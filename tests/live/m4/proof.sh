@@ -19,6 +19,7 @@ set -euo pipefail
 # shellcheck source=env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 EVID=$M4_DIR/evidence
+case $- in *x*) die "do not run proof.sh with bash -x or SHELLOPTS=xtrace: it would print the join code" ;; esac
 mkdir -p "$EVID"
 : >"$EVID/pane-findings.txt"
 POLL=3
@@ -120,6 +121,7 @@ record() {
 }
 cap() { LAST=$(raw "$1" "${4:-500}"); record "$1" "$2" "$LAST" "${3:-0}"; }   # cap <host> <name> [allow-code] [history]
 capscreen() { LAST=$(screen "$1"); record "$1" "$2" "$LAST" "${3:-0}"; }
+red() { python3 "$SCAN" redact 3< <(printf %s "$CODE"); }   # stdin -> stdout with the join code, 64-hex and relay: addresses hidden
 
 log_path() { # <mac|srv>: kollab.log for that workspace
   local ws home
@@ -380,7 +382,7 @@ exchange() { # exchange <step> <evidence-name> <ask>: shell -> the server agent,
     rec "$step" FAIL "$name.txt" "no reply printed"
     return 1
   elif ! grep -Eqi 'avail|free|disk|used' <<<"$out" || ! grep -Eq '[0-9]' <<<"$out"; then
-    rec "$step" FAIL "$name.txt" "the printed reply is not a disk report: $(head -c 160 <<<"$out" | tr '\n' ' ')"
+    rec "$step" FAIL "$name.txt" "the printed reply is not a disk report: $(printf '%s' "$out" | red | head -c 160 | tr '\n' ' ')"
     return 1
   fi
   rec "$step" PASS "$name.txt" "exit 0, disk report printed"
@@ -441,7 +443,7 @@ KEYS_AFTER=$(manifest_key || true)
 if [ "$up" = 1 ] && [ -n "$KEYS_AFTER" ] && [ "${KEYS_AFTER%% *}" = "${KEYS_BEFORE%% *}" ] && [ "${KEYS_AFTER##* }" -gt "${KEYS_BEFORE##* }" ]; then
   rec s6-13-same-identity-after-restart PASS s6-13-serve-after-restart.txt "publisher key unchanged, revision ${KEYS_BEFORE##* } -> ${KEYS_AFTER##* }"
 else
-  rec s6-13-same-identity-after-restart FAIL s6-13-serve-after-restart.txt "ready=$up, before='${KEYS_BEFORE:-?}', after='${KEYS_AFTER:-?}' (same key, higher revision expected)"
+  rec s6-13-same-identity-after-restart FAIL s6-13-serve-after-restart.txt "ready=$up, before='$(printf '%s' "${KEYS_BEFORE:-?}" | scrub)', after='$(printf '%s' "${KEYS_AFTER:-?}" | scrub)' (same key, higher revision expected)"
 fi
 
 say "waiting for both devices to come back and answer (their reconnect backs off, up to a minute)"
@@ -455,7 +457,7 @@ for attempt in $(seq 1 "$attempts"); do
     back=1
     break
   fi
-  say "attempt $attempt: no answer yet (exit $rc): $(head -c 100 <<<"$out" | tr '\n' ' ')"
+  say "attempt $attempt: no answer yet (exit $rc): $(printf '%s' "$out" | red | head -c 100 | tr '\n' ' ')"
   sleep 15
 done
 record mac s6-14-message-after-restart "$(printf 'attempt=%s exit=%s\n%s' "$attempt" "$rc" "$out")"   # the last attempt
