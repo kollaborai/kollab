@@ -2997,11 +2997,10 @@ class HubPlugin(BasePlugin):
 
         # A message to the agent whose request this turn is handling is a reply
         # on that request's thread, whatever else that agent asked meanwhile.
-        answering = (
-            self._network_answering(target)
-            if handle and not thread_id and not reply_to
-            else None
-        )
+        # The wake header shows the model a short `[thread:xxxxxxxx]` tag and it
+        # echoes that back as thread_id. A prefix is not the thread, so for the
+        # agent whose request this turn handles the runtime's ids always win.
+        answering = self._network_answering(target) if handle else None
 
         # Dedup. The same words on another request's thread are another reply.
         dedup_window = 120

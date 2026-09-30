@@ -1290,7 +1290,12 @@ class RelayAgentBridge:
             if identity is None and parsed.agent_id != address.agent_id:
                 continue
             matches.append(row)
-        if len(matches) != 1:
+        if not matches:
+            # Gone from the roster (denied, left): say what the roster says.
+            raise RelayError(
+                "unknown agent@device: run /connect status to see who is online"
+            )
+        if len(matches) > 1:
             raise RelayError("remote conversation participant is not uniquely online")
         return matches[0]
 
