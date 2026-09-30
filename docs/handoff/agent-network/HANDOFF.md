@@ -98,7 +98,7 @@ runs; pipe output through `tail`; read functions, not whole files.
 3. **Manual-trust short numbers**, plus no `relay:` sender label on screen. DONE on
    branch `worktree-agent-a6deca3db4a406544` (merge it with the M2/M3 finishes);
    what is left is in `agent-reports/manual-trust-numbers.md`.
-4. **Small follow-ups** (section below).
+4. **Small follow-ups**. DONE on branch `worktree-agent-af4249fd94ef7790b` (merge it with the others): the `hub_cron_add` failure text, the `hub_msg` tool definition, the `relay:` address in the outgoing box, the `authorize` expiry time and the `relay serve` stop republish. The two follow-ups still in the section below are not done; notes in `agent-reports/small-fixes.md`.
 5. **Live runs, one at a time.** Build and install first:
    `bash tests/live/m1/build_wheels.sh <ref> <dir>` then `install_both.sh <dir>`.
    Then: M1 re-proof (`tests/live/m1/proof.sh`, now with `s3-overlap`); Story 5
@@ -156,10 +156,6 @@ runs; pipe output through `tail`; read functions, not whole files.
 ## Small follow-ups (not started)
 
 - `scripts/relay/verify_agent_conversation.py` and its live checks still parse the old manual-trust output (`remote receipt: {json}`, `remote task <hex>: ...`, hex `withdraw`/`answer` ids). Update them to the numbers.
-- A hub_msg addressed to a `relay:` address (not `agent@device`) still draws `sapphire -> relay:...` (`_display_outgoing_message(target, ...)` in `_handle_hub_msg_tool`). The documented manual-trust form uses `agent@device` and is clean.
-
-- `_handle_hub_cron_add_tool` reports success for `bad interval:` and `usage:` text.
-- The `hub_msg` tool definition still describes the Codex model ("authorized remote relay agent").
 - A remote cron fire draws one `agent -> agent@device` box per fire; a 30 s job draws one every 30 s. Not seen on a real screen yet.
 
 ## Gotchas

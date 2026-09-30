@@ -378,7 +378,7 @@ From then on, on that network, a first message to a remote agent needs:
 
 ```
 /connect authorize infra@alzan-prod-home "check the tunnel"
-communication authorized: request 1; expires at 1780000600; recipient infra@alzan-prod-home
+communication authorized: request 1; expires at 14:05; recipient infra@alzan-prod-home
 ```
 
 then "send the authorized request" to the agent, or `/connect send …` to send
