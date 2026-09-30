@@ -3028,7 +3028,9 @@ class HubPlugin(BasePlugin):
 
         # Bridge forward
         my_name = self._identity.identity if self._identity else "?"
-        await self._bridge_forward(f"[{my_name} -> {target}] {content}")
+        await self._bridge_forward(
+            f"[{my_name} -> {self._outgoing_label(target)}] {content}"
+        )
 
         # The relay address the router recorded is routing state. The tool
         # result is published to attached clients, so it must not carry it.
@@ -7583,10 +7585,19 @@ class HubPlugin(BasePlugin):
         else:
             self._render_hub_box(sender, message.to, content, observing=True)
 
+    def _outgoing_label(self, target: str) -> str:
+        """What a screen calls `target`: a relay: address is routing state, never shown."""
+        if not target.startswith("relay:"):
+            return target
+        for row in self._remote_agent_rows():
+            if row.get("address") == target and row.get("name") and row.get("device"):
+                return format_handle(row["name"], row["device"])
+        return "a remote agent"
+
     def _display_outgoing_message(self, to_name: str, content: str) -> None:
         """Display an outgoing hub message with agent-colored TagBox."""
         my_name = self._identity.identity if self._identity else "?"
-        self._render_hub_box(my_name, to_name, content)
+        self._render_hub_box(my_name, self._outgoing_label(to_name), content)
 
     async def _inject_roster_context(self, context, event=None):
         """Inject hub roster into conversation history before LLM calls.

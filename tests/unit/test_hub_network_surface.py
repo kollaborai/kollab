@@ -11,6 +11,7 @@ remote_agents, resolve_handle) rather than importing it.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -721,3 +722,31 @@ async def test_refresh_remote_agent_rows_awaits_and_snapshots():
     rows = await hub._refresh_remote_agent_rows()
     assert [r["handle"] for r in rows] == ["infra@alzan-prod-home", "ops@alzan-prod-home"]
     assert hub._remote_agent_rows() == rows
+
+
+def _outgoing_box(target, rows):
+    """The text the outgoing box draws for a send to `target`."""
+    shown = []
+    renderer = SimpleNamespace(
+        message_coordinator=SimpleNamespace(
+            display_message_sequence=lambda items: shown.append(items[0][1])
+        )
+    )
+    bus = MagicMock()
+    bus.get_service.return_value = renderer
+    plugin = HubPlugin(event_bus=bus)
+    plugin._identity = SimpleNamespace(identity="sapphire")
+    plugin._remote_rows_snapshot = rows
+    plugin._display_outgoing_message(target, "check the tunnel")
+    return shown[0]
+
+
+def test_an_outgoing_box_never_draws_a_relay_address():
+    address = "relay:" + "a" * 64 + ":" + "9" * 32 + ":infra-1"
+    row = {"name": "infra", "device": "alzan-prod-home", "address": address}
+
+    assert _outgoing_box(address, [row]).startswith(
+        "sapphire -> infra@alzan-prod-home\n"
+    )
+    assert _outgoing_box(address, []).startswith("sapphire -> a remote agent\n")
+    assert _outgoing_box("lapis", [row]).startswith("sapphire -> lapis\n")
