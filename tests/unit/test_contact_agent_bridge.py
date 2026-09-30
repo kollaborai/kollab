@@ -222,9 +222,10 @@ async def test_a_failed_approval_rolls_back_the_binding_and_raises(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_failed_relay_decision_keeps_an_approval_that_existed_before(tmp_path):
-    """Only what this accept added is undone: a key approved earlier keeps its approval."""
+    """Only what this accept added is undone: a stranger accepted earlier keeps its approval."""
     _plugin, bridge = _bridge(tmp_path)
     bridge.commands.client.approve(_SENDER)
+    bridge.set_peer_link(_SENDER)  # a member that joined by code is refused instead
     bridge.commands.decision_error = RelayError("relay is down")
 
     decided = await bridge._rpc_contact_decide(_decision("accept"))
@@ -520,4 +521,21 @@ async def test_contact_rpc_rejects_a_route_that_is_not_16_hex(tmp_path):
             }
         )
     assert bridge.commands.resolved_routes == []
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_a_knock_from_a_device_already_on_the_network_by_code_is_refused(tmp_path):
+    _plugin, bridge = _bridge(tmp_path)
+    bridge.bind_peer_device(_SENDER, "ana-laptop")  # joined with a code: named,
+    bridge.commands.client.approve(_SENDER)  # approved, never linked
+    before = _state_of(tmp_path)
+
+    decided = await bridge._rpc_contact_decide(_decision("accept", "ana-laptop"))
+
+    assert decided == {"error": "already_named"}
+    assert bridge.commands.decisions == []  # the relay was not asked
+    assert _state_of(tmp_path) == before and _disk(tmp_path).links == []
+    with pytest.raises(RelayError, match="already on your network as ana-laptop"):
+        bridge._bind_knock_peer(_SENDER, "ana-laptop")
     await bridge.close()

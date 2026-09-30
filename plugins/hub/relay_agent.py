@@ -215,6 +215,13 @@ class RelayAgentBridge:
         name = state.peer_devices.get(sender_key)
         trust = state.peer_trust.get(sender_key)
         was_linked = sender_key in state.links
+        if was_approved and not was_linked:
+            # A member that joined by code: a stranger's link and `agents` trust
+            # would bind its envelopes to the pair room while it sits in this one.
+            raise RelayError(
+                f"this device is already on your network as {self._peer_name(sender_key)}",
+                "already_named",
+            )
 
         def undo() -> None:
             try:
