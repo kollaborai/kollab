@@ -26,7 +26,11 @@ from plugins.hub import plugin as plugin_module
 from plugins.hub.device_names import default_device_name, format_handle
 from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
-from plugins.hub.relay_conversations import MAX_TURN_REPLIES, validate_message
+from plugins.hub.relay_conversations import (
+    MAX_CONTENT,
+    MAX_TURN_REPLIES,
+    validate_message,
+)
 from plugins.hub.relay_state import RelayError
 from tests.unit.test_relay_network_trust import set_trust, warm_directory
 
@@ -63,6 +67,8 @@ def _responder(sent: list, *, llm=None, receipts=None):
         defer_local=AsyncMock(return_value=False),
         resolve_handle=lambda handle: f"relay:resolved:{handle}",
         send=send,
+        active=None,
+        finish_response=AsyncMock(),
     )
     llm = llm if llm is not None else _idle_llm()
     bus = MagicMock()
@@ -82,6 +88,7 @@ def _responder(sent: list, *, llm=None, receipts=None):
     plugin._display_outgoing_message = MagicMock()
     plugin._display_hub_message = MagicMock()
     plugin._bridge_forward = AsyncMock()
+    plugin._maybe_route_to_coordinator = AsyncMock()
     return plugin, llm
 
 
@@ -665,3 +672,168 @@ async def test_an_agent_that_asked_gets_the_reply_and_no_end_frame_reaches_its_m
     assert DONE not in net.left_model.conversation_history[0].content
     assert net.hub_left._display_hub_message.call_count == 1
     assert net.left.store.queued(net.left.identity.agent_id) == []
+
+
+# --------------------------------------------------------------------- #
+# A plain-text answer is the reply when the turn sent none
+# --------------------------------------------------------------------- #
+
+
+def _response(text: str, **extra) -> dict:
+    """The LLM_RESPONSE_POST data of one model response."""
+    return {"response_text": text, "clean_response": text, "turn_completed": True, **extra}
+
+
+async def _plain_answer(plugin, llm, text: str):
+    """The model is called once and answers in plain text (no hub_msg), goes idle."""
+    await plugin._set_working({"messages": []})  # LLM_REQUEST_PRE
+    llm.is_processing = True
+    await plugin._parse_hub_messages(_response(text))  # LLM_RESPONSE_POST
+    llm.is_processing = False
+
+
+@pytest.mark.asyncio
+async def test_a_plain_text_answer_is_sent_as_the_reply_before_the_end_frame():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1, "report free disk space"))
+    await _plain_answer(plugin, llm, "412 GB free on /.")
+    assert sent == []  # not before the turn is over
+
+    await _settle(plugin, llm)
+
+    [reply] = _replies(sent)
+    [end] = _ends(sent)
+    assert (reply["content"], reply["thread_id"], reply["reply_to"]) == (
+        "412 GB free on /.",
+        T1,
+        W1,
+    )
+    assert reply["address"] == f"relay:resolved:{ASKER}"
+    assert end["turn_end"] == {"replies": 1, "failed": False}
+    assert sent.index(reply) < sent.index(end)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_sent_with_hub_msg_is_not_sent_again_as_plain_text():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await _model_turn(plugin, llm, "the answer")
+    await plugin._parse_hub_messages(_response("Sent it."))
+
+    await _settle(plugin, llm)
+
+    assert [r["content"] for r in _replies(sent)] == ["the answer"]
+    assert _ends(sent)[0]["turn_end"] == {"replies": 1, "failed": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ["", "  \n ", "<think>hmm</think>", "<hub_status/> <scratchpad>n</scratchpad>"],
+)
+async def test_an_answer_with_no_text_left_sends_no_reply(text):
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await _plain_answer(plugin, llm, text)
+
+    await _settle(plugin, llm)
+
+    assert _replies(sent) == []
+    assert _ends(sent)[0]["turn_end"] == {"replies": 0, "failed": False}
+
+
+@pytest.mark.asyncio
+async def test_only_the_response_that_ends_the_chain_is_the_answer():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await plugin._set_working({"messages": []})
+    llm.is_processing = True
+    await plugin._parse_hub_messages(
+        _response("Checking the disk.", all_tools=[{"type": "terminal"}], turn_completed=False)
+    )
+    await plugin._set_working({"messages": []})  # the tool result goes back
+    await plugin._parse_hub_messages(_response(""))
+    llm.is_processing = False
+
+    await _settle(plugin, llm)
+
+    assert _replies(sent) == []  # the interim is not the answer
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_sends_no_text_only_the_failed_frame():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await _plain_answer(plugin, llm, "half an answer")
+    llm._queue_processor.last_turn_error = "401 from api.example.com"
+
+    await _settle(plugin, llm)
+
+    assert _replies(sent) == []
+    [end] = _ends(sent)
+    assert end["turn_end"] == {"replies": 0, "failed": True} and end["content"] == FAILED
+
+
+@pytest.mark.asyncio
+async def test_hub_xml_thinking_and_control_characters_are_stripped_from_the_answer():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await _plain_answer(
+        plugin,
+        llm,
+        "<think>they want the disk</think>412 GB free. <hub_status/>"
+        '<hub_msg to="ops">side note</hub_msg><scratchpad>n</scratchpad>Done.\x07',
+    )
+
+    await _settle(plugin, llm)
+
+    [reply] = _replies(sent)
+    assert reply["content"] == "412 GB free. Done."
+
+
+@pytest.mark.asyncio
+async def test_a_long_answer_is_cut_to_the_wire_limit_on_a_character_boundary():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    await _plain_answer(plugin, llm, "\u00e9" * 20_000)  # 40000 bytes
+
+    await _settle(plugin, llm)
+
+    [reply] = _replies(sent)
+    assert len(reply["content"].encode("utf-8")) <= MAX_CONTENT
+    assert reply["content"].endswith("\u00e9...")
+
+
+async def _far_plain_turn(net, text: str):
+    """The right agent's model runs its turn and answers in plain text, no hub_msg."""
+    net.hub_right._maybe_route_to_coordinator = AsyncMock()
+    await net.hub_right._set_working({"messages": []})
+    net.right_model.is_processing = True
+    await net.hub_right._parse_hub_messages(_response(text))
+    net.right_model.is_processing = False
+    await net.hub_right.settle_network_turn(net.right_model)  # idle starts
+    await net.hub_right.settle_network_turn(net.right_model)  # settled: reply, end
+
+
+@pytest.mark.asyncio
+async def test_a_shell_gets_a_plain_text_answer_over_the_real_relay(bridges, instant_settle):
+    net = await _network(bridges)
+    shell = await _shell_request(net, "report free disk space")
+    await net.right._tick()
+    await _far_plain_turn(net, "412 GB free on /.")
+
+    await _drain_left(net)
+    frames = await asyncio.wait_for(shell, timeout=5)
+
+    # network_done is what makes `kollab --hub msg` print the reply and exit 0.
+    assert frames == [
+        {"type": "network_reply", "from": net.to_right, "content": "412 GB free on /."},
+        {"type": "network_done", "replies": 1},
+    ]

@@ -568,6 +568,7 @@ thread (the model never sees or types a thread id). The request stays open until
 the turn ends, so an interim message ("on it") and the answer both land on its
 thread. The relay hands the model one request at a time, in arrival order, so a
 turn never holds two and two overlapping requests from one requester never cross.
+A turn that ends without failing and sent nothing on the thread has its final assistant text sent as the reply first (hub XML and thinking stripped, at most 16000 bytes), so a plain-text answer is never lost and the frame counts it.
 When the turn ends the runtime, never the model, sends the requester an
 end-of-turn frame on the thread: how many replies the turn sent and whether it
 failed. No screen shows the frame and no model receives it. `kollab --hub msg`

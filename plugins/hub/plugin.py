@@ -116,6 +116,30 @@ _NET_TURN_DONE = "The receiving agent finished this request."
 _NET_TURN_FAILED = "The receiving agent could not complete this request."
 
 
+# A plain-text answer is sent as the reply when the turn sent none. No hub XML,
+# thinking or control characters go with it (the far side refuses the last).
+_NET_MARKUP_NAMES = (
+    r"think(?:ing)?|hub_\w+|scratchpad\w*|state_update|task_\w+|lane_\w+"
+    r"|file_\w+|feed_\w+|claims|vault_write|crystal_\w+|wait_for_user"
+)
+_NET_MARKUP = re.compile(
+    rf"<({_NET_MARKUP_NAMES})\b[^>]*?/>"  # self-closing
+    rf"|<({_NET_MARKUP_NAMES})\b[^>]*>.*?</\2\s*>"  # an element and its content
+    rf"|</?(?:{_NET_MARKUP_NAMES})\b[^>]*>",  # a stray opener or closer
+    re.DOTALL | re.IGNORECASE,
+)
+_NET_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _network_answer_text(text: Optional[str], limit: int) -> str:
+    """``text`` as a reply: no hub XML, thinking or control characters, <= ``limit`` bytes."""
+    text = _NET_CONTROL.sub("", _NET_MARKUP.sub("", text or "")).strip()
+    raw = text.encode("utf-8")
+    if len(raw) > limit:
+        text = raw[: limit - 3].decode("utf-8", "ignore") + "..."
+    return text
+
+
 @dataclass
 class _NetworkTurn:
     """The remote request whose turn this agent is running."""
@@ -129,6 +153,7 @@ class _NetworkTurn:
     started: bool = False  # the model has been called since it arrived
     idle_since: Optional[float] = None
     replies: int = 0  # hub_msgs already sent on its thread
+    answer: str = ""  # text of the model's last response, if it ended the chain
 
 # Three lists per the agent network constitution (docs/specs/agent-network-
 # simple-flow.md, section 6): the shown palette, the advanced (help all,
@@ -2709,6 +2734,22 @@ class HubPlugin(BasePlugin):
         """True while a delivered remote request's turn has not ended."""
         return getattr(self, "_net_turn", None) is not None
 
+    def _note_network_answer(self, data: dict, text: Optional[str]) -> None:
+        """Keep the model's plain-text answer while it handles a remote request.
+
+        Called on every model response. Only the response that ends the chain
+        counts (`_end_network_turn` sends it when the turn sent no reply); one
+        with tool calls, or one a plugin continues past, is an interim.
+        """
+        turn = getattr(self, "_net_turn", None)
+        if turn is None or turn.skipped or turn.deferred or not turn.started:
+            return
+        ends_chain = (
+            not (data.get("all_tools") or data.get("has_native_tools"))
+            and data.get("turn_completed") is not False
+        )
+        turn.answer = (text or "") if ends_chain else ""
+
     async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
         """End the open request once the turn that handled it is over.
 
@@ -2751,32 +2792,45 @@ class HubPlugin(BasePlugin):
 
     async def _end_network_turn(self, turn: "_NetworkTurn", *, failed: bool) -> None:
         """Close ``turn`` and tell its requester, on the request's thread."""
-        from .relay_conversations import MAX_TURN_REPLIES
+        from .relay_conversations import MAX_CONTENT, MAX_TURN_REPLIES
 
         self._net_turn = None
-        end = HubMessage(
+        # The model answered in plain text and sent nothing on the thread: that
+        # text is the reply, or a shell or cron job would get nothing back.
+        answer = _network_answer_text(turn.answer, MAX_CONTENT)
+        if answer and not turn.replies and not failed:
+            if await self._send_on_thread(turn, answer, "reply"):
+                turn.replies += 1
+        await self._send_on_thread(
+            turn,
+            _NET_TURN_FAILED if failed else _NET_TURN_DONE,
+            "turn end",
+            turn_end={"replies": min(turn.replies, MAX_TURN_REPLIES), "failed": failed},
+        )
+
+    async def _send_on_thread(
+        self, turn: "_NetworkTurn", content: str, what: str, **metadata
+    ) -> bool:
+        """Send ``content`` to the requester on the request's thread; True once taken."""
+        message = HubMessage(
             action="message",
             from_agent=(self._identity.agent_id if self._identity else ""),
             from_identity=(self._identity.identity if self._identity else ""),
             to=turn.handle,
-            content=_NET_TURN_FAILED if failed else _NET_TURN_DONE,
+            content=content,
             scope=MessageScope.DIRECT.value,
             thread_id=turn.thread_id,
             reply_to=turn.message_id,
-            metadata={
-                "turn_end": {
-                    "replies": min(turn.replies, MAX_TURN_REPLIES),
-                    "failed": failed,
-                }
-            },
+            metadata=metadata,
         )
         try:
-            rejections = await self._route_message(end)
+            rejections = await self._route_message(message)
         except Exception as exc:
-            logger.debug("network turn end for %s was not sent: %s", turn.handle, exc)
-            return
+            logger.debug("network %s for %s was not sent: %s", what, turn.handle, exc)
+            return False
         if rejections:
-            logger.debug("network turn end for %s refused: %s", turn.handle, rejections)
+            logger.debug("network %s for %s refused: %s", what, turn.handle, rejections)
+        return not rejections
 
     def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:
         """The far agent's turn on our request ended: settle whoever waits on it.
@@ -8152,6 +8206,7 @@ class HubPlugin(BasePlugin):
         """
         # Use raw response_text for PARSING (finding tags)
         response = data.get("response_text", "") or data.get("clean_response", "")
+        self._note_network_answer(data, data.get("clean_response", response))
         if not response:
             return data
 
