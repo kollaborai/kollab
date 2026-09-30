@@ -184,10 +184,10 @@ Shown in the palette and in `/connect help`:
 ```text
 /connect                           the screen: network, this device, join code, requests, online agents
 /connect <domain>                  join another directory, e.g. kollabor.ai
-/connect code                      print a join code without the screen (scripts, small terminals)
+/connect code                      a private screen with just the join code (small terminals)
 /connect accept <device>           accept a join or knock request by name
 /connect reject <device>           reject a join or knock request by name
-/connect status [keys]             network, this device, contact route, online agents; add keys for the technical block
+/connect status                    network, this device, contact route, online agents
 /connect name <name>               name this device
 /connect trust open|agents|manual  trust level for this network
 /connect knock <route> "text"      introduce yourself to a stranger's contact route
@@ -308,8 +308,8 @@ cannot message an agent yet (constitution section 15).
 only names.
 
 Join codes are 8 characters from `0-9A-Z` (without `I L O U`), shown as
-`XXXX-XXXX`, one device, five minutes, single use. `/connect code` prints one
-to the screen only — never paste a code into a command, into chat, or into a
+`XXXX-XXXX`, one device, five minutes, single use. `/connect code` shows one on
+a private screen only — never paste a code into a command, into chat, or into a
 log. See [the agent network constitution](../specs/agent-network-simple-flow.md)
 section 8 for how it stays secure at that length.
 

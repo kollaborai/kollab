@@ -112,7 +112,7 @@ REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 # redirect message. A documented subcommand can't be listed without being
 # routable (or the reverse).
 CONNECT_SUBCOMMANDS = [
-    SubcommandInfo("code", "[domain]", "Print a join code without the screen"),
+    SubcommandInfo("code", "[domain]", "Show a join code on a private screen"),
     SubcommandInfo("accept", "<device>", "Accept a join request by name"),
     SubcommandInfo("reject", "<device>", "Reject a join request by name"),
     SubcommandInfo(

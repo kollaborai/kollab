@@ -122,7 +122,7 @@ access.
 
 If the verified descriptor advertises a compatible relay, the commands open an
 outbound WSS connection. Bare `/connect` is the private code entry and
-`/connect code` prints a join code; after the code/device-key proof the issuer
+`/connect code` shows a join code on a private screen; after the code/device-key proof the issuer
 records a pending request that the local human accepts by device name (see
 [agent-network-simple-flow.md](agent-network-simple-flow.md)).
 Acceptance issues only a `conversation:send` credential and room invitation,

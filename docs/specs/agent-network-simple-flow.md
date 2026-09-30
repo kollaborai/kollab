@@ -347,7 +347,7 @@ Shown in the palette and in `/connect help`:
 |---|---|---|
 | `/connect` | The screen: network, this device, join code, requests, online agents. With no network, joins kollabor.ai. | fold of bare `/connect`, `enroll`, `offer`, `requests`, `status`, `peers`, `agents`, `networks` |
 | `/connect <domain>` | Join another directory | kept |
-| `/connect code` | Print a join code without the screen (scripts, small terminals) | renamed from `offer` |
+| `/connect code` | Show a join code alone on a private screen (small terminals); it never reaches scrollback or logs | renamed from `offer` |
 | `/connect accept <device>`, `reject <device>` | Decide a join request by name | kept; argument was a 32-hex receipt |
 | `/connect status` | Text: networks, this device, contact route, online `agent@device`, trust | kept, output redesigned |
 | `/connect name <name>` | Name this device | new |
@@ -479,7 +479,7 @@ How it stays secure with 40 bits:
 - The issuing human sees the joining device's fingerprint on the accept line
   and accepts by hand. A guessed code still needs a human to press `a`.
 - The code never enters a command, chat, or a log; the private form keeps
-  that guarantee. `/connect code` prints it once, to the screen only. The
+  that guarantee. `/connect code` shows it on a private screen only. The
   command guard and the log redaction recognize the code as shown,
   `XXXX-XXXX` in upper case; the private form also accepts lower case and no
   dash.

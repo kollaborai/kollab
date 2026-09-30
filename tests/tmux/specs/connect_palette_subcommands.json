@@ -22,7 +22,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Print a join code without the screen",
+      "pattern": "Show a join code on a private screen",
       "timeout": 6
     },
     {
@@ -72,7 +72,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Print a join code without the screen",
+      "pattern": "Show a join code on a private screen",
       "timeout": 6
     },
     {
