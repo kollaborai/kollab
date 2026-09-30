@@ -252,6 +252,20 @@ async def test_without_to_the_job_targets_the_agent_itself():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields, wording",
+    [({"interval": "soon"}, "bad interval:"), ({"message": ""}, "usage:")],
+)
+async def test_a_job_the_scheduler_refuses_is_reported_as_a_failure(fields, wording):
+    plugin, _ = _plugin()
+
+    result = await _add(plugin, to="lapis", **fields)
+
+    assert not result.success and result.error.startswith(wording)
+    assert plugin._hub_cron_jobs == []
+
+
+@pytest.mark.asyncio
 async def test_a_tag_without_an_interval_is_answered_by_the_handler_not_left_on_screen():
     plugin, _ = _plugin()
     match = CRON_PATTERN.search('<hub_cron_add to="lapis">tick</hub_cron_add>')

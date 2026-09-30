@@ -4109,6 +4109,8 @@ class HubPlugin(BasePlugin):
             pass  # let _cron_add handle the error
 
         result = self._cron_add(f"{target} {interval} {msg}")
+        if not result.startswith("cron job "):  # "bad interval: ...", "usage: ..."
+            return refuse(result)
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_cron_add",
