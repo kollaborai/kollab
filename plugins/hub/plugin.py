@@ -615,10 +615,13 @@ class HubPlugin(BasePlugin):
                     "endpoint_advertise_host": "",
                     "endpoint_allow_insecure": False,
                     "discovery_private_origins": {},
-                    # Peer mesh data paths are separately opt-in. LAN
-                    # discovery never grants contact or tool authority.
-                    "peer_direct_enabled": False,
-                    "peer_forward_enabled": False,
+                    # Devices on one network reach each other directly when they
+                    # can and forward for each other when they cannot; both stay
+                    # off switches. Neither opens a socket by itself: the TLS
+                    # endpoint and LAN discovery below are still opt-in, and
+                    # none of it grants contact or tool authority.
+                    "peer_direct_enabled": True,
+                    "peer_forward_enabled": True,
                     "peer_allow_private_network": False,
                     "peer_discovery_scan_enabled": False,
                     "peer_discovery_advertise_enabled": False,
