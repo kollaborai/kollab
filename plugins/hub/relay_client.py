@@ -30,6 +30,12 @@ from nacl.exceptions import CryptoError
 from nacl.public import Box
 from nacl.signing import VerifyKey
 
+from kollabor_config.managed_config import (
+    clear_managed_config,
+    managed_config_path,
+    read_managed_config,
+)
+
 from .device_names import NAME_RE, default_device_name, default_network_name, key_label
 from .dns.discovery import _PublicResolver
 from .relay_state import (
@@ -250,7 +256,21 @@ class RelayClient:
         if self._task is not None and not self._task.done():
             raise RelayError("disconnect before joining another invitation")
         self._adopt_bridge_fields()
-        return self._store.join(token)
+        origin = self._store.join(token)
+        self._forget_stale_primary()
+        return origin
+
+    def _forget_stale_primary(self) -> None:
+        """A join names this device's primary; a managed-config record left by
+        another one (a wiped workspace, an earlier network) would refuse every
+        bundle from the new primary as other_primary, for good. The record is
+        machine-global, so only a state living in this machine's own
+        ``~/.kollab/network`` may touch it."""
+        if self.state_dir.parent != managed_config_path().parent.parent / "network":
+            return
+        stale = read_managed_config()
+        if stale is not None and stale.primary_key != self.state.inviter:
+            clear_managed_config(primary_key=stale.primary_key)
 
     def rotate_room(self):
         if self._task is not None and not self._task.done():
