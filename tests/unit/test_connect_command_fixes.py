@@ -156,7 +156,7 @@ async def test_allow_and_deny_say_so_instead_of_reporting_success_under_open_tru
 
 
 @pytest.mark.asyncio
-async def test_allow_under_agents_trust_prints_the_device_name_never_the_key(bridges):  # noqa: F811
+async def test_allow_under_agents_trust_prints_the_device_name_never_the_key(bridges):
     members, _ = bridges
     (left, *_), (right, *_) = members
     right_key = right.commands.client.public_key
@@ -288,7 +288,7 @@ def test_an_unbound_offline_peer_shows_a_hash_label_never_its_key():
 
 
 @pytest.mark.asyncio
-async def test_a_cached_directory_read_keeps_a_peer_a_few_seconds_past_the_ttl(bridges):  # noqa: F811
+async def test_a_cached_directory_read_keeps_a_peer_a_few_seconds_past_the_ttl(bridges):
     members, _ = bridges
     (left, *_), (right, *_) = members
     await left._owner_call("relay.directory", {"peer": "", "cached": False})
