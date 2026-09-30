@@ -28,6 +28,10 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip 6b22c51.
   `packages/kollabor-tui/src/kollabor_tui/status/layout_manager.py`,
   `tests/unit/test_voice_plugin_lifecycle.py`.
 
+- No single agent goes over 250,000 tokens (about 80 tool calls). At the cap it
+  writes what it found, what is done and the next step to its report, and a
+  fresh agent takes over. Never resume a big agent: its whole transcript replays.
+
 ## Branch state
 
 - Branch `issue-121-network-simple-flow` in `/Users/malmazan/dev/kollab`. Not
