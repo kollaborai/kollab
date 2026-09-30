@@ -62,6 +62,8 @@ from .secure_conversation import SecureConversationTransport
 logger = logging.getLogger(__name__)
 MAX_DIRECTORY = 64
 MAX_REMOTE_PEERS = 8
+# A peer whose directory has not been read for this long is gone (the refresh beat is 15 s).
+DIRECTORY_STALE_SECONDS = 45
 TASK_TIMEOUT = 600
 ARRIVAL_POLL_SECONDS = 3.0
 # The directory forgets a device's consent after a day; repeating it well inside that.
@@ -2462,6 +2464,10 @@ class RelayAgentBridge:
                     self._cache[cache_key] = cached
                 rows.extend(cached[1])
             except (RelayError, TimeoutError) as exc:
+                # Cached reads never refresh, so a device that stopped answering
+                # would be listed for as long as the mesh remembers its key.
+                if cached and time.monotonic() - cached[0] > DIRECTORY_STALE_SECONDS:
+                    self._cache.pop(cache_key, None)
                 logger.warning(
                     "remote directory for peer %s unavailable: %s",
                     peer_key[:12],

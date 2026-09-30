@@ -31,7 +31,7 @@ from plugins.hub.models import HubMessage
 from plugins.hub.peer_records import PEER_RECORD_TTL_MAX, PeerRecord
 from plugins.hub.peer_router import PeerLink
 from plugins.hub.plugin import HubPlugin
-from plugins.hub.relay_agent import RelayAgentBridge
+from plugins.hub.relay_agent import DIRECTORY_STALE_SECONDS, RelayAgentBridge
 from plugins.hub.relay_commands import RelayCommands
 from plugins.hub.relay_conversations import ConversationStore, RelayAddress
 from plugins.hub.relay_state import RelayError
@@ -1931,6 +1931,32 @@ async def test_directory_keeps_relay_peers_when_peer_mesh_knows_none(bridges):
     finally:
         left.peer_mesh = previous
     assert [row["address"] for row in result["agents"]] == [address(right)]
+
+
+@pytest.mark.asyncio
+async def test_directory_drops_a_peer_that_stopped_answering(bridges):
+    """A stopped device must leave the cached listing, not stay while the mesh remembers its key."""
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    listed = {"peer": "", "cached": True}
+    assert [r["address"] for r in (await left._rpc_directory(listed))["agents"]] == []
+    first = await left._rpc_directory({"peer": ""})
+    assert [r["address"] for r in first["agents"]] == [address(right)]
+
+    async def unreachable(peer_key, method, payload, *, timeout=10):
+        raise RelayError("secure conversation transport failed")
+
+    def age(seconds):
+        for key, (stamp, rows) in list(left._cache.items()):
+            left._cache[key] = (stamp - seconds, rows)
+
+    left.secure_transport.request = unreachable
+    age(16)  # one late refresh inside the grace keeps the row: no flash offline
+    await left._rpc_directory({"peer": ""})
+    assert [r["address"] for r in (await left._rpc_directory(listed))["agents"]] == [address(right)]
+    age(DIRECTORY_STALE_SECONDS)  # still in the roster, never answering: gone
+    await left._rpc_directory({"peer": ""})
+    assert (await left._rpc_directory(listed))["agents"] == []
 
 
 @pytest.mark.asyncio
