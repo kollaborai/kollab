@@ -54,7 +54,11 @@ hub_msg = ToolDefinition(
         ToolParameter(
             name="wait",
             type="string",
-            description="Set 'true' to stop after sending (no re-invocation)",
+            description=(
+                "Set 'true' to end your turn once the message is sent (no "
+                "re-invocation). A send that fails or reaches nobody is still "
+                "returned to you."
+            ),
             required=False,
         ),
         ToolParameter(
@@ -108,7 +112,8 @@ hub_msg = ToolDefinition(
     key_rules=[
         "use identity names from the roster (lapis, sapphire, etc), not agent type names",
         "local Hub mesh messages are visible to peers; remote relay messages use the exact authorized address",
-        "wait='true' means you are done talking after this message — use when you have nothing else to do",
+        "wait='true' means you are done talking after this message — your turn "
+        "ends once it is sent; use when you have nothing else to do",
         "without wait='true' the system will re-invoke you after delivery — "
         "correct when you have more work to do but causes loops when you're just chatting",
         "be concise — other agents have limited context too",

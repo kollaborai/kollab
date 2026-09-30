@@ -197,6 +197,7 @@ Peer-to-peer agent mesh with persistent identity.
 - `models.py` - GemDesignation, HubMessage, WorkSlot, designation pool
 - `presence.py` - Heartbeat files, agent discovery, socket liveness checks
 - `coordinator.py` - flock election, work queue, designation assignment
+- `xml_tags.py` - Hub XML tag matching: attributes in any order, either quote style (`tag_pattern`, `tag_attrs`)
 - `messenger.py` - Unix socket server/client + off-box TCP/TLS endpoint, message delivery
 - `dns/` - Agent DNS: discovery, Ed25519 identity, trust, capabilities (AID/ARDP/ANS-aligned)
 - `dns/endpoint.py` - Off-box A2A endpoint: TLS listener + federation bootstrap (well-known fetch/import)
@@ -290,8 +291,9 @@ kollab --hub status                              # verify
 
 **Hub message attributes:**
 - `<hub_msg to="lapis">msg</hub_msg>` -- send, continue working (default)
-- `<hub_msg to="lapis" wait="true">msg</hub_msg>` -- send, then STOP
-- Auto-wait: messages with "standing by", "going quiet", etc auto-set wait
+- `<hub_msg to="lapis" wait="true">msg</hub_msg>` -- send, then STOP: the sender's turn ends once the send succeeds (the result's `metadata["end_turn"]`, read by `_tool_results_requiring_followup` in `queue_processor.py`, for XML tags and native calls alike). Other tools in the reply still run; a rejected send, a "not online" warning or any failed tool keeps the turn going so the model sees the error
+- Auto-wait: messages with "standing by", "waiting for", "going quiet", "staying quiet" auto-set wait
+- Attributes come in any order and either quote style; tags with two or more attributes are built with `tag_pattern` / read with `tag_attrs` (`plugins/hub/xml_tags.py`), never a fixed-order regex
 
 **LLM response processing (unified pipeline):**
 - Single code path in queue_processor.py handles both native and XML tools

@@ -424,6 +424,11 @@ run first (batch), then plugin/XML tools run incrementally.
 - Register tags in initialize(), not __init__() -- services aren't available yet
 - Tag patterns should be specific enough to avoid false positives
 - Keep handler logic fast -- it blocks the tool execution pipeline
+- After tools run, the model is called again with their results. A handler ends
+  the turn instead by returning `metadata={"end_turn": True}` on a successful
+  result (hub_msg `wait="true"` does: send, then stop). Every other tool in the
+  reply still runs, and one failed result in the batch keeps the turn going so
+  the model sees the error
 
 ## Shutdown
 

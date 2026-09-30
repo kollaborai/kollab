@@ -166,12 +166,16 @@ threading:
   remote grants use thread="<grant-id>" as described above; the native tool schema
   does not currently expose that field.
 
-wait="true" tells the system you are done talking after this message.
-use it when you have nothing else to do -- greeting, status update,
-acknowledging a task. WITHOUT wait="true" the system will re-invoke
-you after delivery, which is correct when you have more work to do
-but causes loops when you're just chatting. when in doubt, add
-wait="true" unless you have tool calls to execute after the message.
+wait="true" tells the system you are done talking after this message: once
+the send goes out your turn ends, and the reply, if one comes, starts your
+next turn. use it when you have nothing else to do -- greeting, status
+update, acknowledging a task. wording such as "standing by" or "waiting
+for" counts as wait="true". a send that fails or reaches nobody does not
+end your turn, so you see why. WITHOUT wait="true" the system will
+re-invoke you after delivery, which is correct when you have more work to
+do but causes loops when you're just chatting. when in doubt, add
+wait="true" unless you have more tool calls to make: other tools in the
+same reply still run, but you only see their results on your next turn.
 
 commands:
   <hub_broadcast>message</hub_broadcast>         broadcast announcement

@@ -85,7 +85,18 @@ def _should_ingest(result: ToolExecutionResult) -> bool:
 def _tool_results_requiring_followup(
     results: List[ToolExecutionResult],
 ) -> List[ToolExecutionResult]:
-    """Return tool results that need another LLM turn."""
+    """Return tool results that need another LLM turn.
+
+    Every result does, so the model sees what came back. The exception is a
+    tool that ends the turn on purpose: hub_msg / hub_reply with wait="true"
+    means "send, then stop", and its result says so with metadata["end_turn"].
+    That releases the whole batch, provided nothing in it failed: an error is
+    something the model has to see.
+    """
+    if all(r.success for r in results) and any(
+        r.metadata.get("end_turn") is True for r in results
+    ):
+        return []
     return list(results)
 
 
@@ -1638,9 +1649,13 @@ class QueueProcessor:
 
             # Step 10: Determine continuation
             # If tools executed, the LLM MUST see their results back. Natural
-            # turn completion happens when the model returns no tool calls.
+            # turn completion happens when the model returns no tool calls, or
+            # when a tool ended the turn on purpose (hub_msg wait="true"): the
+            # results wait in history and the reply starts the next turn.
             if _tool_results_requiring_followup(all_results):
                 self.turn_completed = False
+            elif all_results:
+                self.turn_completed = True
 
         except asyncio.CancelledError:
             logger.info("Message processing cancelled by user")

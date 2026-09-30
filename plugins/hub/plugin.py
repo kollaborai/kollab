@@ -70,6 +70,7 @@ from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .task_ledger import TaskLedger
 from .vault import AgentVault, sanitize_rebirth_text
+from .xml_tags import embedded_attrs, tag_attrs, tag_pattern
 
 # Agent DNS (discovery, identity, trust) — guarded: PyNaCl is optional
 try:
@@ -248,13 +249,6 @@ _TASK_CRON_ID_RE = re.compile(
 _TASK_CRON_REPORT_TO_RE = re.compile(
     r"^\s*report\s+to\s*:\s*([^\s]+)",
     re.IGNORECASE | re.MULTILINE,
-)
-_HUB_MSG_EMBEDDED_ATTRS_RE = re.compile(
-    r'^\s*(?:<hub_msg\s+)?to\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))'
-    r'(?:\s+wait\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
-    r'(?:\s+force\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
-    r"(?:\s*>\s*(.*?)(?:</hub_msg>)?)?\s*$",
-    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -959,6 +953,11 @@ class HubPlugin(BasePlugin):
 
         import re as _re
 
+        # Every tag that takes two or more attributes is matched with tag_pattern
+        # and read with tag_attrs (xml_tags.py): the attributes may come in any
+        # order and in either quote style. A pattern that spells them out in one
+        # order leaves every other order on screen as raw text, never run.
+
         # --- hub_msg ---
         # Matches: <hub_msg to="x">msg</hub_msg>
         #          <hub_msg to="x" wait="true">msg</hub_msg>
@@ -966,27 +965,21 @@ class HubPlugin(BasePlugin):
         #          <hub_msg to="x" thread="tid">msg</hub_msg>
         #          <hub_msg to="x" thread_id="tid">msg</hub_msg>
         #          <hub_msg to="x" reply_to="mid">msg</hub_msg>
+        #          <hub_msg to="x" kind="answer">msg</hub_msg>
         #          <hub_msg to="x">msg  (unclosed)
-        hub_msg_pat = _re.compile(
-            r'<hub_msg\s+to="([^"]+)"'
-            r'(?:\s+wait="([^"]*)")?'
-            r'(?:\s+force="([^"]*)")?'
-            r'(?:\s+thread(?:_id)?="([^"]*)")?'
-            r'(?:\s+reply_to="([^"]*)")?'
-            r'(?:\s+kind="([^"]*)")?'
-            r"\s*>(.*?)(?:</hub_msg>|$)",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        # `to` is required; the rest are optional and may come in any order.
+        hub_msg_pat = tag_pattern("hub_msg", required={"to": "some"}, end="body?")
 
         def _extract_hub_msg(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "target": m.group(1),
-                "wait_attr": (m.group(2) or "").lower(),
-                "force_attr": (m.group(3) or "").lower(),
-                "thread_id": (m.group(4) or "").strip(),
-                "reply_to": (m.group(5) or "").strip(),
-                "kind": (m.group(6) or "").strip().lower(),
-                "content": m.group(7).strip(),
+                "target": attrs.get("to", ""),
+                "wait_attr": attrs.get("wait", "").lower(),
+                "force_attr": attrs.get("force", "").lower(),
+                "thread_id": (attrs.get("thread_id") or attrs.get("thread") or "").strip(),
+                "reply_to": attrs.get("reply_to", "").strip(),
+                "kind": attrs.get("kind", "").strip().lower(),
+                "content": m.group(2).strip(),
             }
 
         response_parser.register_plugin_tag(
@@ -1002,18 +995,14 @@ class HubPlugin(BasePlugin):
         # thread_id manually — the hub injects it from the incoming message context.
         # <hub_reply to="x">msg</hub_reply>
         # <hub_reply to="x" wait="true">msg</hub_reply>
-        hub_reply_pat = _re.compile(
-            r'<hub_reply\s+to="([^"]+)"'
-            r'(?:\s+wait="([^"]*)")?'
-            r"\s*>(.*?)(?:</hub_reply>|$)",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        hub_reply_pat = tag_pattern("hub_reply", required={"to": "some"}, end="body?")
 
         def _extract_hub_reply(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "target": m.group(1),
-                "wait_attr": (m.group(2) or "").lower(),
-                "content": m.group(3).strip(),
+                "target": attrs.get("to", ""),
+                "wait_attr": attrs.get("wait", "").lower(),
+                "content": m.group(2).strip(),
                 "_is_reply": True,  # flag: use active thread context
             }
 
@@ -1028,16 +1017,18 @@ class HubPlugin(BasePlugin):
         # --- hub_broadcast ---
         # Matches: <hub_broadcast>msg</hub_broadcast>
         #          <hub_broadcast force="true">msg</hub_broadcast>
-        bc_pat = _re.compile(
-            r'<hub_broadcast(?:\s+force="([^"]*)")?\s*>(.*?)</hub_broadcast>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        #          <hub_broadcast scope="network">msg</hub_broadcast>
+        bc_pat = tag_pattern("hub_broadcast")
 
         def _extract_hub_broadcast(m):
-            return {
+            attrs = tag_attrs(m.group(1))
+            tool_data = {
                 "content": m.group(2).strip(),
-                "force_attr": (m.group(1) or "").lower(),
+                "force_attr": attrs.get("force", "").lower(),
             }
+            if "scope" in attrs:  # the handler reads it; no key without the attribute
+                tool_data["scope"] = attrs["scope"]
+            return tool_data
 
         response_parser.register_plugin_tag(
             "hub_broadcast", bc_pat, "hub_broadcast", _extract_hub_broadcast
@@ -1197,15 +1188,18 @@ class HubPlugin(BasePlugin):
         # --- task_snooze ---
         # Self-closing: <task_snooze id="abc" minutes="30"/>. Lets an agent
         # silence reminders for a while without lying about progress.
-        tsnz_pat = _re.compile(
-            r'<task_snooze\s+id="([^"]+)"(?:\s+minutes="([0-9.]+)")?\s*/?>',
-            _re.IGNORECASE,
+        tsnz_pat = tag_pattern(
+            "task_snooze",
+            required={"id": "some"},
+            valid={"minutes": r"[0-9.]+"},
+            end="/?>",
         )
 
         def _extract_task_snooze(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "task_id": m.group(1).strip(),
-                "minutes": m.group(2) or "30",
+                "task_id": attrs.get("id", "").strip(),
+                "minutes": attrs.get("minutes") or "30",
             }
 
         response_parser.register_plugin_tag(
@@ -1408,18 +1402,14 @@ class HubPlugin(BasePlugin):
         #   <hub_spawn name="lapis" type="research">task</hub_spawn>
         #     → explicit identity + type override
         def _extract_hub_spawn(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "name": m.group(1).strip(),
-                "agent_type_override": (m.group(2) or "").strip(),
-                "task": m.group(3).strip(),
+                "name": attrs.get("name", "").strip(),
+                "agent_type_override": attrs.get("type", "").strip(),
+                "task": m.group(2).strip(),
             }
 
-        spawn_pat = _re.compile(
-            r'<hub_spawn\s+name="([^"]+)"'
-            r'(?:\s+type="([^"]*)")?'
-            r">(.*?)</hub_spawn>",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        spawn_pat = tag_pattern("hub_spawn", required={"name": "some"})
         response_parser.register_plugin_tag(
             "hub_spawn", spawn_pat, "hub_spawn", _extract_hub_spawn
         )
@@ -1545,11 +1535,17 @@ class HubPlugin(BasePlugin):
 
         # hub_capture (self-closing, optional lines attribute)
         def _extract_hub_capture(m):
-            return {"cap_name": m.group(1).strip(), "cap_lines": m.group(2) or "50"}
+            attrs = tag_attrs(m.group(1))
+            return {
+                "cap_name": attrs.get("name", "").strip(),
+                "cap_lines": attrs.get("lines") or "50",
+            }
 
-        cap_pat = _re.compile(
-            r'<hub_capture\s+name="([^"]+)"(?:\s+lines="(\d+)")?\s*/>',
-            _re.IGNORECASE,
+        cap_pat = tag_pattern(
+            "hub_capture",
+            required={"name": "some"},
+            valid={"lines": r"\d+"},
+            end="/>",
         )
         response_parser.register_plugin_tag(
             "hub_capture", cap_pat, "hub_capture", _extract_hub_capture
@@ -1619,14 +1615,18 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_search ---
-        cs_pat = _re.compile(
-            r'<crystal_search\s+query="([^"]*)"(?:\s+limit="(\d+)")?\s*/>'
+        cs_pat = tag_pattern(
+            "crystal_search",
+            required={"query": "any"},
+            valid={"limit": r"\d+"},
+            end="/>",
         )
 
         def _extract_crystal_search(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "query": m.group(1),
-                "limit": int(m.group(2)) if m.group(2) else 5,
+                "query": attrs.get("query", ""),
+                "limit": int(attrs["limit"]) if attrs.get("limit") else 5,
             }
 
         response_parser.register_plugin_tag(
@@ -1650,14 +1650,15 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_list ---
-        cl_pat = _re.compile(
-            r'<crystal_list(?:\s+limit="(\d+)")?(?:\s+offset="(\d+)")?\s*/>'
+        cl_pat = tag_pattern(
+            "crystal_list", valid={"limit": r"\d+", "offset": r"\d+"}, end="/>"
         )
 
         def _extract_crystal_list(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "limit": int(m.group(1)) if m.group(1) else 20,
-                "offset": int(m.group(2)) if m.group(2) else 0,
+                "limit": int(attrs["limit"]) if attrs.get("limit") else 20,
+                "offset": int(attrs["offset"]) if attrs.get("offset") else 0,
             }
 
         response_parser.register_plugin_tag(
@@ -1668,22 +1669,13 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_edit ---
-        # Attributes may appear in any order; extract them with secondary regexes
-        # rather than positional groups so reversed attrs don't cause a miss.
-        ce_pat = _re.compile(
-            r"<crystal_edit\b([^>]*?)>(.*?)</crystal_edit>",
-            _re.DOTALL | _re.IGNORECASE,
-        )
-        _ce_id_re = _re.compile(r'(?:entry_)?id="([^"]+)"', _re.IGNORECASE)
-        _ce_summary_re = _re.compile(r'summary="([^"]*)"', _re.IGNORECASE)
-        _ce_keywords_re = _re.compile(r'keywords="([^"]*)"', _re.IGNORECASE)
+        # No attribute is required here: a missing id reaches the handler, which
+        # says so, instead of leaving the tag on screen.
+        ce_pat = tag_pattern("crystal_edit")
 
         def _extract_crystal_edit(m):
-            attrs = m.group(1)
-            id_match = _ce_id_re.search(attrs)
-            summary_match = _ce_summary_re.search(attrs)
-            keywords_match = _ce_keywords_re.search(attrs)
-            keywords_raw = keywords_match.group(1) if keywords_match else None
+            attrs = tag_attrs(m.group(1))
+            keywords_raw = attrs.get("keywords")
             if keywords_raw is None:
                 keywords = None
             elif keywords_raw == "":
@@ -1691,9 +1683,9 @@ class HubPlugin(BasePlugin):
             else:
                 keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()]
             return {
-                "entry_id": id_match.group(1) if id_match else "",
+                "entry_id": attrs.get("id") or attrs.get("entry_id") or "",
                 "content": m.group(2).strip(),
-                "summary": summary_match.group(1) if summary_match else None,
+                "summary": attrs.get("summary"),
                 "keywords": keywords,
             }
 
@@ -1705,23 +1697,14 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_delete ---
-        # Attributes may appear in any order (id/entry_id, reason are both optional
-        # positionally). Use a lookahead-based approach to match the tag regardless
-        # of attribute order so the regex fires even when the LLM writes reason first.
-        cd_pat = _re.compile(
-            r"<crystal_delete\b([^>]*?)/>",
-            _re.DOTALL,
-        )
-        _cd_id_re = _re.compile(r'(?:entry_)?id="([^"]+)"')
-        _cd_reason_re = _re.compile(r'reason="([^"]*)"')
+        # As crystal_edit: no attribute is required, the handler reports a missing id.
+        cd_pat = tag_pattern("crystal_delete", end="/>")
 
         def _extract_crystal_delete(m):
-            attrs = m.group(1)
-            id_match = _cd_id_re.search(attrs)
-            reason_match = _cd_reason_re.search(attrs)
+            attrs = tag_attrs(m.group(1))
             return {
-                "entry_id": id_match.group(1) if id_match else "",
-                "reason": reason_match.group(1) if reason_match else "",
+                "entry_id": attrs.get("id") or attrs.get("entry_id") or "",
+                "reason": attrs.get("reason", ""),
             }
 
         response_parser.register_plugin_tag(
@@ -1732,16 +1715,16 @@ class HubPlugin(BasePlugin):
         )
 
         # --- Context service: curate ---
-        curate_pat = _re.compile(
-            r'<curate\s+id="([^"]+)"\s+decision="(keep|summary)"\s*>' r"(.*?)</curate>",
-            _re.DOTALL | _re.IGNORECASE,
+        curate_pat = tag_pattern(
+            "curate", required={"id": "some", "decision": "keep|summary"}
         )
 
         def _extract_curate(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "ctx_id": m.group(1).strip(),
-                "decision": m.group(2),
-                "body": m.group(3).strip(),
+                "ctx_id": attrs.get("id", "").strip(),
+                "decision": attrs.get("decision", ""),
+                "body": m.group(2).strip(),
             }
 
         response_parser.register_plugin_tag(
@@ -1787,15 +1770,13 @@ class HubPlugin(BasePlugin):
         # --- hub_ask_ctx ---
         # <hub_ask_ctx peer="lapis" />
         # <hub_ask_ctx peer="lapis" filter="file:kollabor/" />
-        ask_ctx_pat = _re.compile(
-            r'<hub_ask_ctx\s+peer="([^"]+)"' r'(?:\s+filter="([^"]*)")?' r"\s*/>",
-            _re.IGNORECASE,
-        )
+        ask_ctx_pat = tag_pattern("hub_ask_ctx", required={"peer": "some"}, end="/>")
 
         def _extract_hub_ask_ctx(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "peer": m.group(1),
-                "filter": (m.group(2) or "").strip(),
+                "peer": attrs.get("peer", ""),
+                "filter": attrs.get("filter", "").strip(),
             }
 
         response_parser.register_plugin_tag(
@@ -2657,22 +2638,13 @@ class HubPlugin(BasePlugin):
         # identities such as ``to=\"sapphire\"`` or silently lose ``wait``.
         target = str(target or "").strip()
         content = str(content or "").strip()
-        embedded_attrs = _HUB_MSG_EMBEDDED_ATTRS_RE.match(target)
-        if embedded_attrs:
-            target = next(
-                value for value in embedded_attrs.groups()[0:3] if value is not None
-            ).strip()
-            embedded_wait = next(
-                (value for value in embedded_attrs.groups()[3:6] if value is not None),
-                "",
-            )
-            embedded_force = next(
-                (value for value in embedded_attrs.groups()[6:9] if value is not None),
-                "",
-            )
-            embedded_content = embedded_attrs.group(10)
-            wait_attr = str(wait_attr or embedded_wait or "").lower()
-            force_attr = str(force_attr or embedded_force or "").lower()
+        attrs, embedded_content = embedded_attrs("hub_msg", target) or ({}, "")
+        # Only the attributes this recovery has always understood; anything else
+        # (kind, thread_id) stays a literal target and fails loudly.
+        if "to" in attrs and set(attrs) <= {"to", "wait", "force"}:
+            target = attrs["to"].strip()
+            wait_attr = str(wait_attr or attrs.get("wait", "")).lower()
+            force_attr = str(force_attr or attrs.get("force", "")).lower()
             if not content and embedded_content:
                 content = embedded_content.strip()
 
@@ -2757,9 +2729,12 @@ class HubPlugin(BasePlugin):
                 error=error,
             )
 
-        # Auto-detect idle chatter
-        any_wait = wait_attr in ("true", "yes", "1")
+        # wait="true" means "send, then stop": once the send succeeds, this turn
+        # ends (the result's end_turn flag below, honoured by the queue
+        # processor). A native call may pass a JSON true instead of "true".
+        any_wait = str(wait_attr).strip().lower() in ("true", "yes", "1")
         if not any_wait:
+            # Auto-detect idle chatter
             content_lower = content.lower().strip().rstrip(".")
             idle_phrases = (
                 "standing by",
@@ -2821,6 +2796,7 @@ class HubPlugin(BasePlugin):
                     if handle
                     else ""
                 ),
+                metadata={"end_turn": True} if any_wait else None,
             )
         if not target.startswith("relay:") and not handle:
             self._recent_hub_msgs[msg_hash] = now
@@ -2923,6 +2899,7 @@ class HubPlugin(BasePlugin):
 
         # Build output — check rejections first
         queued_for = list((msg.metadata or {}).get("_queued_for", []))
+        warned = False  # the send went nowhere; the model has to read that
         if rejections:
             parts = []
             for ident, reason in rejections:
@@ -2972,6 +2949,7 @@ class HubPlugin(BasePlugin):
             known = self._presence.scan_all_presence()
             known_ids = {a.identity for a in known}
             if target not in known_ids and target not in ("all", "*", "everyone"):
+                warned = True
                 output = (
                     f"warning: '{target}' is not online. "
                     f"message broadcast but no matching agent. "
@@ -2982,6 +2960,8 @@ class HubPlugin(BasePlugin):
         else:
             output = f"delivered to {target}"
 
+        if any_wait and not warned:
+            metadata["end_turn"] = True
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_msg",
