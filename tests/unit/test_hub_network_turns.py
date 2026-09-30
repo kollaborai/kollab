@@ -593,13 +593,13 @@ async def _shell_request(net, text: str) -> asyncio.Task:
     return task
 
 
-async def _far_turn(net, *texts):
+async def _far_turn(net, *texts, **tool_args):
     """The right agent's model runs its turn: sends each text to the left, ends."""
     await net.hub_right._set_working({"messages": []})
     net.right_model.is_processing = True
     for i, text in enumerate(texts):
         result = await net.hub_right._handle_hub_msg_tool(
-            {"id": f"t{i}", "to": net.to_left, "content": text}
+            {"id": f"t{i}", "to": net.to_left, "content": text, **tool_args}
         )
         assert result.success, result.output
     net.right_model.is_processing = False
@@ -637,6 +637,33 @@ async def test_a_shell_gets_the_interim_the_answer_and_the_end_over_the_real_rel
             "content": "rotated 3 files, freed 412 MB.",
         },
         {"type": "network_done", "replies": 2},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_sent_with_the_wake_headers_thread_tag_still_reaches_the_shell(
+    bridges
+):
+    net = await _network(bridges)
+    shell = await _shell_request(net, "rotate the nginx logs")
+
+    await net.right._tick()  # the request reaches the model
+    # The wake header shows the model only the first 8 characters of the thread
+    # ("[thread:8b4d6c7f]") and the model echoes that tag back as hub_msg
+    # thread_id. A prefix is not the thread: the runtime's ids must still win,
+    # or the reply leaves on a thread the shell does not wait on.
+    tag = net.hub_right._net_turn.thread_id[:8]
+    await _far_turn(net, "rotated 3 files, freed 412 MB.", thread_id=tag)
+
+    await _drain_left(net)
+    frames = await asyncio.wait_for(shell, timeout=5)
+    assert frames == [
+        {
+            "type": "network_reply",
+            "from": net.to_right,
+            "content": "rotated 3 files, freed 412 MB.",
+        },
+        {"type": "network_done", "replies": 1},
     ]
 
 

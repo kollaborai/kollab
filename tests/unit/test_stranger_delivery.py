@@ -390,6 +390,27 @@ async def test_deny_stops_delivery_to_the_agent_at_once(people):
 
 
 @pytest.mark.asyncio
+async def test_a_send_to_a_denied_agent_gone_from_the_roster_says_unknown_agent(people):
+    ana, marco = people
+    await open_path(ana, marco)
+    await allow(marco, ana)
+    assert await roster(ana) == ["sapphire@mac-kollab"]
+    await marco.bridge.application_command(
+        "deny", f"{ana.key} sapphire", source_agent=marco.bridge.identity.agent_id
+    )
+
+    # Ana's cached roster aged past fifteen seconds: the send refetches it, finds
+    # no match, and must say the agent is unknown, not that the match is ambiguous.
+    ana.bridge._cache = {
+        key: (stamp - 60, rows) for key, (stamp, rows) in ana.bridge._cache.items()
+    }
+    with pytest.raises(RelayError) as gone:
+        await ana.bridge.send(marco.agent_address(), "after the deny")
+    assert "unknown agent@device" in str(gone.value)
+    assert "not uniquely online" not in str(gone.value)
+
+
+@pytest.mark.asyncio
 async def test_revoke_removes_the_link_at_the_relay_and_nothing_is_delivered(people, relay):
     ana, marco = people
     await open_path(ana, marco)
