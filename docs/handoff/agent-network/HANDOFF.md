@@ -164,8 +164,7 @@ runs; pipe output through `tail`; read functions, not whole files.
 - Story 5: a knock the other side rejects or ignores leaves the knocker's approval, link
   and reply grant in place (inert, no UI to clear it).
 - Reply threads: a reply to a shell request no longer wakes the asking agent's model
-  (one `if` in `_decide_hub_wake`). A model that answers in plain text sends nothing, and
-  the shell prints `<handle> finished without a reply`.
+  (one `if` in `_decide_hub_wake`). A plain-text answer is now forwarded as the reply.
 - No command edits the network name yet (default `<first device name>-net`).
 - Release cadence (per milestone or one at the end).
 - The status widget count (`◈ name* +N`) counts local agents only; its
