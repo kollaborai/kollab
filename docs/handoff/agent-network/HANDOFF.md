@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30, branch tip 6b22c51.
+network. Updated at every merge. Last update: 2026-09-30, branch tip 532d4e7.
 
 ## Read first, in this order
 
@@ -51,7 +51,8 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip 6b22c51.
 | M1 simple flow | done, proven at afa383d | on branch |
 | hub tags in any order, `wait="true"` ends the turn | merged b0f59bc | report `agent-reports/fix-hub-tags.md` |
 | second window opens the Connect screen read-only, full device names | merged 7fba955 | report `agent-reports/fix-connect-leftovers.md` |
-| Connect polish 2: attached-window sibling, short numbers instead of hex ids under manual trust, `/connect code` docs, default network name | agent running | `.claude/worktrees/agent-a4715d24e2e745ccf`, branch `connect-polish-2` |
+| Connect polish 2: attached-window read-only screen, `/connect code` docs, default network name `<device>-net` | merged 532d4e7 | report `agent-reports/connect-polish-2.md` |
+| Manual trust: short numbers instead of 32-hex ids, no `relay:` sender label on screen | NOT DONE. A partial, uncommitted, broken edit sits in `.claude/worktrees/agent-a4715d24e2e745ccf` (`plugins/hub/relay_conversations.py`); do not commit it as is | next step in `agent-reports/connect-polish-2.md` |
 | `kollab --hub msg` replies bound to their own request (no crossed answers) | agent running | `.claude/worktrees/agent-a5e0891092630d9af` |
 | `hub_cron_add to="agent@device"` | merged 6b22c51, not live-proven | report `agent-reports/cron-to-device.md` |
 | M2 sealed config sync (section 9, Story 8) | agent running | `.claude/worktrees/agent-ae763b064388e596b` |
@@ -100,6 +101,7 @@ mid-task, its work is in its worktree: `git -C <worktree> log` for commits,
 
 ## Open, ask Marco
 
+- No command edits the network name yet (default `<first device name>-net`).
 - Release cadence (per milestone or one at the end).
 - The status widget count (`◈ name* +N`) counts local agents only; its
   producer is in the foreign uncommitted status/ files.
