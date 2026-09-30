@@ -76,6 +76,10 @@ MAX_PEER_LOCATORS = 256
 MAX_PEER_FORWARD_RESPONSE_BYTES = MAX_APPLICATION_PAYLOAD - 256
 MAX_DIRECT_PEER_CONNECT_ADDRESSES = 8
 DIRECT_PEER_CONNECT_TIMEOUT = 5.0
+# A direct attempt that ends this way leaves the relay path open. PeerRouteError is a ValueError:
+# a handshake the peer refused (a timeout counts), a locator that no longer resolves and a garbled
+# reply all land here.
+_DIRECT_FAILED = (ValueError, TransientPeerDeliveryError, OSError, asyncio.TimeoutError)
 _PEER_ID = re.compile(r"kollab-peer:ed25519:[0-9a-f]{64}\Z")
 _SIGNATURE = re.compile(r"[0-9a-f]{128}\Z")
 _HEX_32 = re.compile(r"[0-9a-f]{64}\Z")
@@ -1604,7 +1608,7 @@ class PeerMeshRuntime:
                 return await self._send_direct_peer_forward(
                     peer_key, frame, timeout=timeout
                 )
-            except (TransientPeerDeliveryError, OSError, asyncio.TimeoutError):
+            except _DIRECT_FAILED:
                 # The envelope's destination replay key makes relay fallback
                 # safe if the direct peer committed but its receipt was lost.
                 pass
@@ -1989,7 +1993,7 @@ class PeerMeshRuntime:
                 return await self._send_direct_secure(
                     peer_key, method, payload, timeout=timeout
                 )
-            except (TransientPeerDeliveryError, OSError, asyncio.TimeoutError):
+            except _DIRECT_FAILED:
                 pass
         if direct is None:
             record = self.record_store.get(remote_id, scope=router.scope)

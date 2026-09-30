@@ -924,3 +924,59 @@ async def test_an_auto_approved_local_agent_is_a_carrier_peer_not_a_message_send
             writer.close()
     finally:
         await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_direct_endpoint_falls_back_to_the_relay(mesh_network):
+    # do_remote_client_handshake answers False for a refusal and for a timeout, and the
+    # direct attempt turns that into PeerRouteError: delivery must still take the relay.
+    import time
+
+    from plugins.hub.peer_router import PeerRouteError
+
+    clients, states, *_ = mesh_network
+    mesh = states["origin"]["mesh"]
+    peer_key = clients["relay"].public_key
+    mesh.direct_enabled = True
+    mesh._locators[peer_key] = {"expires_at": int(time.time()) + 60}
+
+    async def refused(*_args, **_kwargs):
+        raise PeerRouteError("direct peer endpoint identity was rejected")
+
+    relayed = []
+
+    async def relay_request(key, method, payload, *, timeout):
+        relayed.append((key, method))
+        return {"v": 1}
+
+    mesh._send_direct_peer_forward = refused
+    clients["origin"].request = relay_request
+    assert await mesh._send_forward_to_peer(peer_key, {}, timeout=3) == {"v": 1}
+    assert relayed == [(peer_key, "peer.forward")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_direct_secure_record_still_takes_the_routed_path(mesh_network):
+    import time
+
+    from plugins.hub.peer_router import PeerRouteError, TransientPeerDeliveryError
+
+    clients, states, *_ = mesh_network
+    mesh = states["origin"]["mesh"]
+    destination = clients["destination"].public_key
+    mesh.direct_enabled = True
+    mesh._locators[destination] = {"expires_at": int(time.time()) + 60}
+    attempts = []
+
+    async def refused(*_args, **_kwargs):
+        raise PeerRouteError("direct peer endpoint identity was rejected")
+
+    async def routed(peer_key, frame, *, timeout):
+        attempts.append(peer_key)
+        raise TransientPeerDeliveryError("stop here")
+
+    mesh._send_direct_secure = refused
+    mesh._send_forward_to_peer = routed
+    with pytest.raises(Exception):
+        await mesh.request(destination, "secure_identity", {"x": 1}, timeout=3)
+    assert attempts, "the direct refusal ended the request before the routed path was tried"
