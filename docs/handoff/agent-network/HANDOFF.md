@@ -53,12 +53,12 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip 532d4e7.
 | second window opens the Connect screen read-only, full device names | merged 7fba955 | report `agent-reports/fix-connect-leftovers.md` |
 | Connect polish 2: attached-window read-only screen, `/connect code` docs, default network name `<device>-net` | merged 532d4e7 | report `agent-reports/connect-polish-2.md` |
 | Manual trust: short numbers instead of 32-hex ids, no `relay:` sender label on screen | NOT DONE. A partial, uncommitted, broken edit sits in `.claude/worktrees/agent-a4715d24e2e745ccf` (`plugins/hub/relay_conversations.py`); do not commit it as is | next step in `agent-reports/connect-polish-2.md` |
-| `kollab --hub msg` replies bound to their own request (no crossed answers) | agent running | `.claude/worktrees/agent-a5e0891092630d9af` |
+| `kollab --hub msg` replies bound to their own request | DONE, not merged: d53a8a1 (suite 4944 passed in its worktree). Both devices need this build | `.claude/worktrees/agent-a5e0891092630d9af`, report `agent-reports/cli-reply-threads.md` |
 | `hub_cron_add to="agent@device"` | merged 6b22c51, not live-proven | report `agent-reports/cron-to-device.md` |
-| M2 sealed config sync (section 9, Story 8) | agent running | `.claude/worktrees/agent-ae763b064388e596b` |
-| M3 mesh: port e02e761, direct first, forwarding on (section 10) | agent running | `.claude/worktrees/agent-a3d23b9ebdefd78d5` |
-| M4 `kollab relay serve --domain` (section 11, Story 6) | agent running | `.claude/worktrees/agent-a19e7801aee487817` |
-| Story 5 delivery across rooms after a knock is accepted | agent running | `.claude/worktrees/agent-a1f25fd83138c4f68` |
+| M2 sealed config sync (section 9, Story 8) | PARTIAL, not merged: 2319b6f cacfe5b c12454d 61958bd (engine, `/config` managed-by, Connect row, OAuth cleanup). NOT done: full unit run, docs, `tests/live/m2/` | `.claude/worktrees/agent-ae763b064388e596b`, report `agent-reports/m2-config-sync.md` |
+| M3 mesh (section 10) | PARTIAL, not merged: e7ce3a9 (port) 0e7dc42 (relay-less devices, limits) 61ea79b (defaults on). NOT done: full unit run, missing tests, `tests/live/m3/`, docs | `.claude/worktrees/agent-a3d23b9ebdefd78d5`, report `agent-reports/m3-mesh.md` |
+| M4 `kollab relay serve --domain` (section 11, Story 6) | BUILT, not merged: tip fd1c0ea. Full suite ran once early (4764 passed), not after the last edits. Live proof not run | `.claude/worktrees/agent-a19e7801aee487817`, report `agent-reports/m4-self-host.md` |
+| Story 5 delivery across rooms | BUILT, not merged: 260af09 (relay) f80246b (client, docs) 75b11db (`tests/live/story5/`). Full suite not confirmed after the last edits. Relay redeploy needed before the live run | `.claude/worktrees/agent-a1f25fd83138c4f68`, report `agent-reports/story5-stranger-delivery.md` |
 
 Agent reports land in
 `/private/tmp/claude-501/-Users-malmazan-dev-kollab/be0c993a-92c8-42c7-b0d3-3b92d1aa903c/scratchpad/reports/`
@@ -77,12 +77,20 @@ mid-task, its work is in its worktree: `git -C <worktree> log` for commits,
 
 ## Next, in order
 
-1. Merge the running items as they finish.
-2. Live runs, one at a time on the shared hosts: M1 re-proof with the merged
-   fixes, Story 5 (needs a relay redeploy with rollback ready), M2, M3, M4.
-   Each agent added its steps under `tests/live/`.
-3. A review pass per milestone (the milestone 1 reviews found 28 real bugs).
-4. Ask Marco how to release. Default: one release after everything is proven.
+All agents stopped at 2026-09-30 ~22:50 when the usage limit ran low. Do NOT resume them
+(each transcript is 500K-865K tokens). Fresh agents, each under the 250K cap, continue
+from the worktrees and reports above.
+
+1. In each built worktree, run `tests/unit/ -q` once and fix what fails.
+2. Cherry-pick onto the branch in this order: reply threads, M2, Story 5, M4, M3.
+   Expect conflicts in CHANGELOG [Unreleased] (both copies), constitution sections
+   4, 5 and 9-12, `docs/guides/connect.md` and `plugins/hub/plugin.py`.
+3. Fresh capped agents for what is unfinished: M2 docs + `tests/live/m2/`; M3 tests +
+   `tests/live/m3/` + docs; manual-trust short numbers.
+4. Live runs one at a time: M1 re-proof (it now includes an `s3-overlap` step), Story 5
+   (redeploy the relay first), M2, M3, M4.
+5. One capped review agent per milestone, then fixes.
+6. Ask Marco how to release. Default: one release after everything is proven.
 
 ## Decisions taken 2026-09-30 (Marco can veto)
 
@@ -101,6 +109,18 @@ mid-task, its work is in its worktree: `git -C <worktree> log` for commits,
 
 ## Open, ask Marco
 
+- M3: after a join by code, B and C do not approve each other (each joiner approves only
+  its inviter), so a three-device network cannot route over the mesh. Agent's
+  recommendation: an inviter vouches for the members it accepted (one hop) and revokes
+  when it revokes.
+- M2: these stay machine-local: `kollabor.updates`, `kollabor.permissions`, `plugins.hub`,
+  `plugins.voice`, version stamps. A join still copies the issuer's API-key profile once,
+  so a duplicate loadout can show.
+- Story 5: a knock the other side rejects or ignores leaves the knocker's approval, link
+  and reply grant in place (inert, no UI to clear it).
+- Reply threads: a reply to a shell request no longer wakes the asking agent's model
+  (one `if` in `_decide_hub_wake`). A model that answers in plain text sends nothing, and
+  the shell prints `<handle> finished without a reply`.
 - No command edits the network name yet (default `<first device name>-net`).
 - Release cadence (per milestone or one at the end).
 - The status widget count (`◈ name* +N`) counts local agents only; its
