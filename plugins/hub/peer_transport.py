@@ -12,6 +12,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import socket
@@ -56,7 +57,7 @@ from .peer_router import (
     verify_trace,
 )
 from .relay_client import MAX_APPLICATION_PAYLOAD, PeerSessionEvent, RelayClient
-from .relay_state import RelayError, validate_key
+from .relay_state import RelayError, failure_text, validate_key
 from .secure_conversation import SecureConversationTransport
 
 MAX_PEER_FORWARD_CONCURRENCY = 16
@@ -106,6 +107,8 @@ _FORWARD_FIELDS = frozenset(
     {"v", "envelope", "route", "records", "links", "trace"}
 )
 _RECEIPT_FIELDS = frozenset({"v", "message_id", "ciphertext"})
+
+logger = logging.getLogger(__name__)
 
 ApplicationHandler = Callable[[str, str, dict], Awaitable[dict]]
 
@@ -1879,6 +1882,7 @@ class PeerMeshRuntime:
         except Exception as exc:
             if isinstance(exc, RelayError):
                 raise
+            logger.warning("peer forwarding request was rejected: %s", failure_text(exc))
             raise RelayError("peer forwarding request was rejected") from None
 
     async def _deliver_envelope(
@@ -2011,11 +2015,14 @@ class PeerMeshRuntime:
             record = self.record_store.get(remote_id, scope=router.scope)
             link = router.link_between(self.local_peer_id, remote_id)
             tls_id = self.secure_transport.link_session_id(peer_key)
-            if method == "secure_packet" and (
-                record is None or link is None or tls_id != link.session_id
+            # A link rides the TLS session it names. The handshake that opens a
+            # session cannot depend on one, or a link that outlived its sessions
+            # would refuse the very handshake that replaces it, on the relay too.
+            if (
+                link is None
+                or tls_id != link.session_id
+                or (method == "secure_packet" and record is None)
             ):
-                return await self.client.request(peer_key, method, payload, timeout=timeout)
-            if method == "secure_identity" and link is None:
                 return await self.client.request(peer_key, method, payload, timeout=timeout)
         inner = {"v": 1, "method": method, "payload": payload}
         if not isinstance(payload, dict) or _encoded_size(inner) > PEER_ENVELOPE_MAX_BYTES:

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
 
 from .relay_client import PeerSessionEvent, RelayClient
-from .relay_state import RelayError, strict_json, validate_key
+from .relay_state import RelayError, failure_text, strict_json, validate_key
 from .secure_session import (
     MAX_PLAINTEXT_BYTES,
     MAX_SEQUENCE,
@@ -354,7 +354,8 @@ class SecureConversationTransport:
         except asyncio.CancelledError:
             self._discard_inbound(peer_key, payload)
             raise
-        except Exception:
+        except Exception as exc:
+            logger.warning("secure conversation packet was rejected: %s", failure_text(exc))
             self._discard_inbound(peer_key, payload)
             raise RelayError("secure conversation packet was rejected") from None
 

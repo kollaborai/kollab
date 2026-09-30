@@ -40,6 +40,16 @@ class RelayError(ValueError):
             self.code = code
 
 
+# Errors whose message is a fixed string this transport wrote; any other type logs its name only.
+_FIXED_MESSAGE_ERRORS = frozenset({"RelayError", "PeerRouteError", "SecureSessionError"})
+
+
+def failure_text(exc: BaseException) -> str:
+    """What a log line may say about a failure: the class, plus the message only when fixed."""
+    name = type(exc).__name__
+    return f"{name}: {exc}" if name in _FIXED_MESSAGE_ERRORS else name
+
+
 def strict_json(raw: str | bytes, *, limit: int = 65536) -> dict:
     if len(raw) > limit:
         raise RelayError("JSON size limit exceeded")

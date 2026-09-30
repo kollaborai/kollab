@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .models import HubMessage
 from .presence import _atomic_write, get_messages_dir, get_socket_dir
+from .relay_state import failure_text
 
 # --- Durable inbox bounds ---
 # Max ordinary messages kept on disk per inbox. Durable task controls are
@@ -1307,10 +1308,13 @@ class AgentSocketServer:
                             raise ValueError("peer forward response too large")
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
+                    except Exception as exc:
                         # Never expose payloads, callback text, or exception
-                        # messages through a remote protocol reply or log.
-                        logger.warning("authenticated peer forwarding failed")
+                        # messages through a remote protocol reply; the log
+                        # gets the class, and the text only when it is fixed.
+                        logger.warning(
+                            "authenticated peer forwarding failed: %s", failure_text(exc)
+                        )
                         writer.write(
                             b'{"type":"error","msg":"peer forwarding failed"}\n'
                         )

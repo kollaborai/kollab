@@ -41,6 +41,7 @@ from .relay_state import (
     RelayError,
     RelayStateStore,
     canonical_origin,
+    failure_text,
     parse_invite,
     strict_json,
     validate_key,
@@ -981,9 +982,10 @@ class RelayClient:
         except asyncio.CancelledError:
             # A cancelled request must never produce a successful response.
             raise
-        except Exception:
+        except Exception as exc:
             # Handler details can contain credentials, filesystem paths, or
             # prompt content; only fixed transport errors cross this boundary.
+            _LOGGER.warning("peer application request failed: %s", failure_text(exc))
             error = "failed"
         await self._application_response(
             key,
