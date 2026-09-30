@@ -78,8 +78,10 @@ wakes, the others observe. Tags: `hub_msg`, `hub_broadcast`, `hub_status`,
 dedup. `wait="true"` to stop after a message.
 
 **Network.** The same thing across machines. A network has a name, a
-directory (kollabor.ai or your own), a trust level, and devices. A device is a
-workspace identity with a human name. Its agents appear in every other
+directory (kollabor.ai or your own), a trust level, and devices. The name is
+`<first device name>-net`, for example `mac-kollab-net`: the device that starts
+the network gives it once, and each device that joins takes it from the signed
+decision that admits it. A device is a workspace identity with a human name. Its agents appear in every other
 device's roster as `agent@device`. A hub message to `agent@device` is
 delivered to that device, wakes that agent, and is observed by the rest of the
 network exactly as a local message is observed by the rest of the hub.
@@ -105,7 +107,8 @@ discovery publisher and one DNS TXT record. See section 11.
 
 Every screen below is **target output**. It is what the finished build shows,
 not what 0.10.7 shows today. Device names in the stories: Marco's Mac
-workspace is `mac-kollab`, the server's home workspace is `alzan-prod-home`.
+workspace is `mac-kollab`, the server's home workspace is `alzan-prod-home`,
+and the network, named by the Mac, is `mac-kollab-net`.
 
 ### Story 1: Marco joins the server to his network
 
@@ -120,7 +123,7 @@ Mac, in kollab:
 
 ```
  Connect
- network      marco-home  via kollabor.ai   trust: open
+ network      mac-kollab-net  via kollabor.ai   trust: open
  this device  mac-kollab
  join code    7QK4-M2XP   one device, expires in 4:58
  requests     none
@@ -140,7 +143,7 @@ Server, over SSH, in kollab:
 ```
 
 ```
- request sent to marco-home; waiting for approval on another device
+ request sent to kollabor.ai; waiting for approval on another device
 ```
 
 Mac, five seconds later, same screen refreshes:
@@ -152,7 +155,7 @@ Mac, five seconds later, same screen refreshes:
 Marco presses `a`.
 
 ```
- accepted alzan-prod-home. it is now a trusted device on marco-home.
+ accepted alzan-prod-home. it is now a trusted device on mac-kollab-net.
  sealed config sent (settings, agents, skills, mcp, api keys; not oauth logins)
  online       koordinator (this device)
               koordinator@alzan-prod-home
@@ -161,7 +164,7 @@ Marco presses `a`.
 Server:
 
 ```
- joined marco-home as alzan-prod-home. trust: open
+ joined mac-kollab-net as alzan-prod-home. trust: open
  config received from mac-kollab (managed by mac-kollab in /config)
 ```
 
@@ -396,7 +399,7 @@ list:
 ```
 --- hub context ---
 you are "lapis" on the kollabor hub.
-network: marco-home via kollabor.ai (trust: open)
+network: mac-kollab-net via kollabor.ai (trust: open)
 this device: mac-kollab
 active agents:
   koordinator (coordinator) - idle
@@ -588,8 +591,10 @@ document before it merges.
   kollabor.ai on its own" true for a first device, an empty code plus Enter
   starts a network on that domain. Marco confirms, or wants it automatic.
 
-- The exact name of the default network for a person's first join (proposed:
-  `<first device name>-net`, editable).
+- Editing the network's name. The first device gives it `<first device name>-net`
+  (section 4) and no command changes it: none of the thirteen does, and a
+  fourteenth needs Marco's word. Options: `/connect name` takes a network form,
+  or the name stays as the first device chose it.
 - Whether observed remote messages should be shown dimmed on every device in
   large networks, or only on the two devices involved. Hub behaviour says
   everyone; kept until it hurts.

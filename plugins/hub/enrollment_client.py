@@ -1111,15 +1111,18 @@ def _decode_destination_decision(
             "provisioning_bundle",
             "owner_signature",
         }
-        # The issuer's own device name rides along so both sides record names.
-        | ({"issuer_device_name"} if "issuer_device_name" in decision else set()),
+        # The issuer's own device name rides along so both sides record names,
+        # and so does the network's name so the new device calls it the same.
+        | ({"issuer_device_name"} if "issuer_device_name" in decision else set())
+        | ({"network_name"} if "network_name" in decision else set()),
     )
     verify_enrollment_payload(owner_key, decision)
-    if "issuer_device_name" in decision and (
-        not isinstance(decision["issuer_device_name"], str)
-        or not NAME_RE.fullmatch(decision["issuer_device_name"])
-    ):
-        raise EnrollmentProtocolError("invalid_response")
+    for optional_name in ("issuer_device_name", "network_name"):
+        if optional_name in decision and (
+            not isinstance(decision[optional_name], str)
+            or not NAME_RE.fullmatch(decision[optional_name])
+        ):
+            raise EnrollmentProtocolError("invalid_response")
     if (
         decision["status"] != "approved"
         or decision["origin"] != record["origin"]
@@ -1174,6 +1177,21 @@ def _destination_state_matches_invite(client, invite: dict[str, str]) -> bool:
         and state.inviter == invite["key"]
         and invite["key"] in state.approvals
     )
+
+
+def _bind_network_name(commands, name: str | None) -> None:
+    """Take the network's name on the joining device (the first name wins).
+
+    Like the issuer's device name, a refusal never fails a join that already
+    committed: the network then shows under its directory's name.
+    """
+    binder = getattr(getattr(commands, "agent_bridge", None), "bind_network_name", None)
+    if not name or not callable(binder):
+        return
+    try:
+        binder(name)
+    except Exception:
+        logging.getLogger(__name__).warning("could not record the network's name")
 
 
 def _bind_issuer_name(commands, issuer_key: str, name: str | None) -> None:
@@ -1341,6 +1359,7 @@ async def _finish_destination_enrollment(
         if not _destination_state_matches_invite(client, invite):
             raise EnrollmentProtocolError("invalid_response")
         _bind_issuer_name(commands, invite["key"], decision.get("issuer_device_name"))
+        _bind_network_name(commands, decision.get("network_name"))
         _store_destination_recovery(journal, record, "invite_joined")
 
     status = client.status()
@@ -1896,6 +1915,15 @@ class EnrollmentIssuer:
         except Exception:
             name = ""
         return {"issuer_device_name": name} if isinstance(name, str) and NAME_RE.fullmatch(name) else {}
+
+    def _network_name_field(self) -> dict[str, str]:
+        """`{"network_name": name}` when this network has a valid name."""
+        getter = getattr(self.bridge, "network_name", None)
+        try:
+            name = getter() if callable(getter) else ""
+        except Exception:
+            name = ""
+        return {"network_name": name} if isinstance(name, str) and NAME_RE.fullmatch(name) else {}
 
     def _recovery_journal(self, client) -> EnrollmentRecoveryJournal:
         return EnrollmentRecoveryJournal(
@@ -3604,6 +3632,7 @@ class EnrollmentIssuer:
                                 "invite": client.invite(),
                                 "provisioning_bundle": base64.urlsafe_b64encode(bundle).rstrip(b"=").decode("ascii"),
                                 **self._issuer_device_name_field(),
+                                **self._network_name_field(),
                             },
                         )
                         envelope = encrypt_enrollment_envelope(offer.envelope_key, payload)

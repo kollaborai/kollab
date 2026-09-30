@@ -32,6 +32,26 @@ def validate_device_name(name: str) -> str:
     return name
 
 
+def validate_network_name(name: str) -> str:
+    """Return the name if valid, else raise ValueError with the rule.
+
+    A network name follows the device-name rule, so it fits anywhere one does.
+    """
+    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+        raise ValueError("network name: 1-63 chars, a-z 0-9 and dashes, starting with a letter or digit")
+    return name
+
+
+def default_network_name(first_device: str) -> str:
+    """`<first device name>-net`: what a network is called until someone names it.
+
+    The first device names it once, when it starts the network; every device
+    that joins takes the name it is given. The device part is cut so the whole
+    name stays within the 63 characters a name may have.
+    """
+    return f"{first_device[:59].rstrip('-') or 'device'}-net"
+
+
 def default_device_name(workspace: Path | str | None) -> str:
     """`<hostname>-<workspace folder>`; the home folder is `<hostname>-home`."""
     host = slug(socket.gethostname().split(".")[0]) or "device"

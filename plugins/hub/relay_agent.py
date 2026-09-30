@@ -29,6 +29,7 @@ from .device_names import (
     key_label,
     parse_handle,
     validate_device_name,
+    validate_network_name,
     validate_trust,
 )
 from .local_directory import LocalAgentDirectory
@@ -270,6 +271,27 @@ class RelayAgentBridge:
         store.state.device_name = name
         store.save()
         return store.state.device_name
+
+    def network_name(self) -> str:
+        """The network's name, or "" for a network started before names existed."""
+        return self._state().state.network_name
+
+    def bind_network_name(self, name: str) -> bool:
+        """Take the network's name from the device that admitted this one.
+
+        The first name wins and repeating it is harmless. Returns whether the
+        device now has that name.
+        """
+        self._require_human_network_context("remote model turns cannot name the network")
+        try:
+            name = validate_network_name(name)
+        except ValueError:
+            return False
+        store = self._state()
+        if not store.state.network_name:
+            store.state.network_name = name
+            store.save()
+        return store.state.network_name == name
 
     def trust_level(self) -> str:
         return self._state().state.trust

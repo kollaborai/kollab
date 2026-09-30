@@ -16,7 +16,7 @@ from pathlib import Path
 from nacl.exceptions import CryptoError
 from nacl.signing import SigningKey, VerifyKey
 
-from .device_names import validate_device_name, validate_trust
+from .device_names import validate_device_name, validate_network_name, validate_trust
 from .dns.discovery import normalize_target
 
 KEY = re.compile(r"[0-9a-f]{64}\Z")
@@ -134,6 +134,7 @@ class RelayState:
     approvals: list[str] = field(default_factory=list)
     inviter: str = ""
     device_name: str = ""
+    network_name: str = ""  # `<first device>-net`, set by the first device or taken at join
     trust: str = "open"
     peer_devices: dict[str, str] = field(default_factory=dict)
     peer_trust: dict[str, str] = field(default_factory=dict)
@@ -225,6 +226,8 @@ class RelayStateStore:
         try:
             if value.device_name:
                 validate_device_name(value.device_name)
+            if value.network_name:
+                validate_network_name(value.network_name)
             validate_trust(value.trust)
             for name in value.peer_devices.values():
                 validate_device_name(name)

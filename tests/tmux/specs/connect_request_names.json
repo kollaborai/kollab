@@ -1,6 +1,6 @@
 {
   "name": "connect-request-names",
-  "description": "Join requests with the longest allowed device name (63 characters) on the Connect screen: at 120 columns the name shows in full, at 80 it ends in an ellipsis and 'wants to join' stays, and the accept notice follows the same rule; no row wraps (issue #121, Story 1). The requests are canned by tests/tmux/lib/connect_canned_requests.py because a spec has no second device or relay.",
+  "description": "Join requests with the longest allowed device name (63 characters) on the Connect screen: at 120 columns the name shows in full, at 80 it ends in an ellipsis and 'wants to join' stays, and the accept notice follows the same rule and names the network (mac-kollab-net); no row wraps (issue #121, Story 1). The requests are canned by tests/tmux/lib/connect_canned_requests.py because a spec has no second device or relay.",
   "config": {
     "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-request-names\"; cd \"$H/ws\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/connect_canned_requests.py\" lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab ana-laptop lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab-lab'",
     "app_init_sleep": 10,
@@ -12,7 +12,7 @@
     {
       "action": "shell",
       "description": "throwaway HOME with a workspace on an offline network",
-      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-request-names\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'mac-kollab'; s.save()\""
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-request-names\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'mac-kollab'; s.state.network_name = 'mac-kollab-net'; s.save()\""
     }
   ],
   "steps": [
@@ -38,6 +38,11 @@
     },
     {
       "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ network +mac-kollab-net +via relay\\.invalid +trust: open *$",
+      "description": "the network shows under its own name, with the directory after it"
     },
     {
       "action": "assert_contains",
@@ -172,7 +177,7 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "^ accepted (lab-){15}lab\\. it is now a trusted device on relay\\.invalid\\. *$",
+      "pattern": "^ accepted (lab-){15}lab\\. it is now a trusted device on mac-kollab-net\\. *$",
       "description": "the whole notice fits at 120"
     },
     {

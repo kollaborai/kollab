@@ -30,6 +30,7 @@ from nacl.exceptions import CryptoError
 from nacl.public import Box
 from nacl.signing import VerifyKey
 
+from .device_names import default_device_name, default_network_name
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
@@ -257,6 +258,8 @@ class RelayClient:
         await self.close(disable=True)
         self.state.origin = ""
         self.rotate_room()
+        self.state.network_name = ""  # rotate keeps the name; leaving forgets it
+        self._store.save()
 
     def _adopt_bridge_fields(self) -> None:
         """Take the fields the agent bridge writes through its own state store.
@@ -266,7 +269,7 @@ class RelayClient:
         name, trust and peer bindings back over the bridge's newer ones.
         """
         disk = RelayStateStore(self.workspace, self.state_dir).state
-        for name in ("device_name", "trust", "peer_devices", "peer_trust"):
+        for name in ("device_name", "network_name", "trust", "peer_devices", "peer_trust"):
             setattr(self.state, name, getattr(disk, name))
 
     def approve(self, key: str):
@@ -359,6 +362,11 @@ class RelayClient:
         ssl.create_default_context(cafile=ca or None)
         self._adopt_bridge_fields()
         self.state.origin, self.state.enabled = origin, True
+        if not self.state.network_name and not self.state.inviter:
+            # No one invited this device, so it is the first: it names the network.
+            self.state.network_name = default_network_name(
+                self.state.device_name or default_device_name(self.workspace)
+            )
         self._store.save()
         self._closed, self._error = False, ""
         self._state = "connecting"

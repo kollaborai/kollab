@@ -229,7 +229,7 @@ Removed. Each prints its redirect for one release instead of running:
 
 ```text
  Connect
- network      marco-home  via kollabor.ai   trust: open
+ network      mac-kollab-net  via kollabor.ai   trust: open
  this device  mac-kollab
  join code    7QK4-M2XP   one device, expires in 4:58
  requests     alzan-prod-home wants to join   fingerprint 4d04…9f2e   [a]ccept [r]eject
@@ -238,6 +238,9 @@ Removed. Each prints its redirect for one release instead of running:
               koordinator@alzan-prod-home
 ```
 
+- The network is named `<first device name>-net` by the device that starts it
+  (`mac-kollab-net`); a device that joins takes that name. `/connect leave`
+  forgets it.
 - The join code is created when the screen opens and counts down. A code works
   for one device: once you accept or reject a request the line reads
   `used   press c for a new code`, and when it expires it reads

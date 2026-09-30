@@ -399,6 +399,7 @@ async def _run_enrollment(
     publisher_key=None,
     claim_other_owner=False,
     issuer_device_name=None,
+    network_name=None,
     submitted_probe=None,
 ):
     origin = "https://kollabor.ai"
@@ -450,7 +451,10 @@ async def _run_enrollment(
         _discover=AsyncMock(return_value=(discovery, "", (), False)),
         _relay_url=lambda _discovery: "wss://kollabor.ai/relay/v1/ws",
         agent_bridge=SimpleNamespace(
-            bound=[], bind_peer_device=lambda key, name: commands.agent_bridge.bound.append((key, name))
+            bound=[],
+            bind_peer_device=lambda key, name: commands.agent_bridge.bound.append((key, name)),
+            named=[],
+            bind_network_name=lambda name: commands.agent_bridge.named.append(name),
         ),
     )
 
@@ -596,6 +600,7 @@ async def _run_enrollment(
                         .rstrip(b"=")
                         .decode("ascii"),
                         **({"issuer_device_name": issuer_device_name} if issuer_device_name else {}),
+                        **({"network_name": network_name} if network_name else {}),
                     },
                 )
                 self.decision_envelope = encrypt_enrollment_envelope(self.envelope_key, decision)
@@ -731,6 +736,51 @@ async def test_joining_device_records_the_issuers_device_name(tmp_path, monkeypa
 
     assert result == {"status": "approved"}
     assert commands.agent_bridge.bound == [(destination.state.inviter, "mac-kollab")]
+
+
+@pytest.mark.asyncio
+async def test_joining_device_takes_the_networks_name_from_the_signed_decision(tmp_path, monkeypatch):
+    result, commands, _destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="mac-kollab", network_name="mac-kollab-net"
+    )
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.named == ["mac-kollab-net"]
+
+
+@pytest.mark.asyncio
+async def test_joining_an_issuer_that_sends_no_network_name_still_completes(tmp_path, monkeypatch):
+    result, commands, _destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="mac-kollab"
+    )
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.named == []
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_network_name_is_rejected_before_any_state_change(tmp_path, monkeypatch):
+    result, commands, destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, network_name="Not A Name"
+    )
+
+    assert result == {"error": "invalid_response"}
+    assert commands.agent_bridge.named == []
+    assert not destination.state.approvals
+
+
+def test_a_refused_network_name_never_fails_a_join_that_already_committed(caplog):
+    def refuse(_name):
+        raise RuntimeError("no")
+
+    commands = SimpleNamespace(agent_bridge=SimpleNamespace(bind_network_name=refuse))
+
+    with caplog.at_level("WARNING"):
+        enrollment_client._bind_network_name(commands, "mac-kollab-net")
+
+    assert "could not record the network's name" in caplog.text
+    enrollment_client._bind_network_name(SimpleNamespace(), "mac-kollab-net")  # no bridge
+    enrollment_client._bind_network_name(commands, None)  # an issuer without a name
 
 
 @pytest.mark.asyncio
@@ -1221,6 +1271,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
         ),
         _closed=False,
         device_name=lambda: "mac-kollab",
+        network_name=lambda: "mac-kollab-net",
     )
     issuer = EnrollmentIssuer(bridge)
     provisioning_plan = await issuer._make_provisioning_plan(offer_id)
@@ -1358,6 +1409,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
                 if self.decision["status"] == "approved":
                     # the joiner learns the issuer's device name from the signed decision
                     assert self.decision["issuer_device_name"] == "mac-kollab"
+                    assert self.decision["network_name"] == "mac-kollab-net"
                     bundle = base64.urlsafe_b64decode(
                         self.decision["provisioning_bundle"] + "=" * (-len(self.decision["provisioning_bundle"]) % 4)
                     )
