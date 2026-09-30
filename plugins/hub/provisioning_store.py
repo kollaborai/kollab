@@ -16,7 +16,6 @@ from kollabor_config.provisioned_state import ProvisionedStateFile
 
 from .provisioning import (
     InstalledRevision,
-    OpenAIOAuthCredential,
     ProfilePreferences,
     ProvisioningError,
     ProvisioningPayload,
@@ -196,26 +195,14 @@ def _payload_to_record(payload: ProvisioningPayload) -> dict[str, Any]:
             for item in fields(ProfilePreferences)
         }
 
-    credentials: list[dict[str, Any]] = []
-    for credential in payload.credentials:
-        secret: str | dict[str, Any]
-        if isinstance(credential.secret, OpenAIOAuthCredential):
-            secret = {
-                "access_token": credential.secret.access_token,
-                "refresh_token": credential.secret.refresh_token,
-                "expires_at": credential.secret.expires_at,
-            }
-            if credential.secret.account_id:
-                secret["account_id"] = credential.secret.account_id
-        else:
-            secret = credential.secret
-        credentials.append(
-            {
-                "category": credential.category,
-                "profile_name": credential.profile_name,
-                "secret": secret,
-            }
-        )
+    credentials: list[dict[str, Any]] = [
+        {
+            "category": credential.category,
+            "profile_name": credential.profile_name,
+            "secret": credential.secret,
+        }
+        for credential in payload.credentials
+    ]
 
     return {
         "profile": profile,

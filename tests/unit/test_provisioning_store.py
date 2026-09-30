@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -18,7 +19,6 @@ from kollabor_config.provisioned_state import (
 from plugins.hub import provisioning_store as store_module
 from plugins.hub.provisioning import (
     NetworkPreferences,
-    OpenAIOAuthCredential,
     ProfilePreferences,
     ProvisioningCredential,
     ProvisioningError,
@@ -43,7 +43,6 @@ def _bundle(
     model: str = "gpt-4o-mini",
     network_id: str = "net-alpha",
     domain: str = "kollabor.ai",
-    oauth: bool = False,
 ):
     enrollment = enrollment_id or f"enrollment-{uuid.uuid4().hex}"
     profile = profile_name or f"provisioned-{uuid.uuid4().hex[:16]}"
@@ -54,48 +53,19 @@ def _bundle(
         network_ids=(network_id,),
         audience="kollab-device",
         profile_name=profile,
-        allowed_credential_categories=frozenset(
-            {
-                "provider:openai:oauth_tokens"
-                if oauth
-                else "provider:openai:api_key"
-            }
-        ),
+        allowed_credential_categories=frozenset({"provider:openai:api_key"}),
     )
-    profile_preferences = (
-        ProfilePreferences(
-            name=profile,
-            provider="openai_responses",
-            model="gpt-5.6-luna",
-            auth_type="oauth",
-            base_url="https://chatgpt.com/backend-api/codex",
-        )
-        if oauth
-        else ProfilePreferences(
-            name=profile,
-            provider="openai",
-            model=model,
-            context_window=65536,
-            organization="synthetic-org",
-        )
+    profile_preferences = ProfilePreferences(
+        name=profile,
+        provider="openai",
+        model=model,
+        context_window=65536,
+        organization="synthetic-org",
     )
-    credential = (
-        ProvisioningCredential(
-            category="provider:openai:oauth_tokens",
-            profile_name=profile,
-            secret=OpenAIOAuthCredential(
-                access_token="synthetic-scoped-access-DO-NOT-LOG",
-                refresh_token="synthetic-scoped-refresh-DO-NOT-LOG",
-                expires_at=1.0,
-                account_id="synthetic-scoped-account",
-            ),
-        )
-        if oauth
-        else ProvisioningCredential(
-            category="provider:openai:api_key",
-            profile_name=profile,
-            secret=_API_KEY,
-        )
+    credential = ProvisioningCredential(
+        category="provider:openai:api_key",
+        profile_name=profile,
+        secret=_API_KEY,
     )
     payload = ProvisioningPayload(
         profile=profile_preferences,
@@ -397,13 +367,54 @@ def test_state_file_rejects_symlink_parent_without_chmodding_target(tmp_path):
     assert not (target / "state.json").exists()
 
 
+def _seed_oauth_record(state_file: ProvisionedStateFile):
+    """A provisioned oauth profile, written directly: no bundle can carry a login."""
+    _, enrollment, profile = _install(state_file)
+    with state_file.edit() as state:
+        record = state["installs"][enrollment]
+        record["profile"].update(
+            provider="openai_responses",
+            model="gpt-5.6-luna",
+            auth_type="oauth",
+            base_url="https://chatgpt.com/backend-api/codex",
+            organization=None,
+            context_window=200000,
+        )
+        record["credentials"] = [
+            {
+                "category": "provider:openai:oauth_tokens",
+                "profile_name": profile,
+                "secret": {
+                    "access_token": "synthetic-scoped-access-DO-NOT-LOG",
+                    "refresh_token": "synthetic-scoped-refresh-DO-NOT-LOG",
+                    "expires_at": 1.0,
+                    "account_id": "synthetic-scoped-account",
+                },
+            }
+        ]
+        record["api_key_override"] = None
+        content = {
+            key: record[key] for key in ("profile", "networks", "settings", "credentials")
+        }
+        record["digest"] = hashlib.sha256(
+            json.dumps(
+                content,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest()
+    return enrollment, profile
+
+
 @pytest.mark.asyncio
 async def test_profile_scoped_oauth_refresh_stays_bound_and_never_uses_global_tokens(
     tmp_path, monkeypatch
 ):
     state_path = tmp_path / "private" / "state.json"
     state_file = ProvisionedStateFile(state_path)
-    _, enrollment, profile = _install(state_file, oauth=True)
+    enrollment, profile = _seed_oauth_record(state_file)
     monkeypatch.setattr(
         "kollabor_config.provisioned_state.default_provisioned_state_path",
         lambda: state_path,

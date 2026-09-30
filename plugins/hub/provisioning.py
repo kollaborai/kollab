@@ -66,9 +66,12 @@ _API_KEY_PROVIDERS = frozenset(
         "gemini",
     }
 )
+# An OAuth login is never a credential a device receives: two devices sharing
+# one refresh token sign each other out, so each runs its own /login
+# (docs/specs/agent-network-simple-flow.md sections 3 and 9).
 _ALLOWED_CREDENTIAL_CATEGORIES = frozenset(
-    {f"provider:{name}:api_key" for name in _API_KEY_PROVIDERS}
-) | {"provider:openai:oauth_tokens"}
+    f"provider:{name}:api_key" for name in _API_KEY_PROVIDERS
+)
 
 
 class ProvisioningError(ValueError):
@@ -140,30 +143,12 @@ class SafeAgentSettings:
 
 
 @dataclass(frozen=True, slots=True, repr=False)
-class OpenAIOAuthCredential:
-    """Existing OpenAI OAuth shape; these are reusable account credentials.
-
-    Copying this refresh token does not make it per-device revocable. Removing
-    network membership cannot revoke the provider privilege; the provider
-    account must rotate or revoke the token.
-    """
-
-    access_token: str = field(repr=False)
-    refresh_token: str = field(repr=False)
-    expires_at: float = field(repr=False)
-    account_id: str | None = field(default=None, repr=False)
-
-    def __repr__(self) -> str:
-        return "OpenAIOAuthCredential(<redacted>)"
-
-
-@dataclass(frozen=True, slots=True, repr=False)
 class ProvisioningCredential:
     """A single profile-bound credential; ``secret`` never appears in repr."""
 
     category: str
     profile_name: str
-    secret: str | OpenAIOAuthCredential = field(repr=False)
+    secret: str = field(repr=False)
 
     def __repr__(self) -> str:
         return (
@@ -350,10 +335,8 @@ def _validate_profile(profile: ProfilePreferences) -> dict[str, Any]:
         or not isinstance(profile.provider, str)
         or profile.provider not in _API_KEY_PROVIDERS
         or not _text(profile.model, 128, pattern=_MODEL_NAME)
-        or profile.auth_type not in {"api_key", "oauth"}
+        or profile.auth_type != "api_key"
     ):
-        raise ProvisioningError("invalid_bundle")
-    if profile.auth_type == "oauth" and profile.provider != "openai_responses":
         raise ProvisioningError("invalid_bundle")
     if profile.provider == "custom" and profile.base_url is None:
         raise ProvisioningError("invalid_bundle")
@@ -471,13 +454,6 @@ def _validate_profile(profile: ProfilePreferences) -> dict[str, Any]:
         or not isinstance(profile.store_responses, bool)
     ):
         raise ProvisioningError("invalid_bundle")
-    if (
-        profile.auth_type == "oauth"
-        and profile.base_url != "https://chatgpt.com/backend-api/codex"
-    ):
-        # This OAuth token shape is a ChatGPT account token, not a generic
-        # bearer credential that may be sent to an issuer-chosen endpoint.
-        raise ProvisioningError("invalid_bundle")
     return {
         "name": profile.name,
         "provider": profile.provider,
@@ -516,48 +492,15 @@ def _credential_to_dict(
     if (
         not isinstance(credential, ProvisioningCredential)
         or credential.profile_name != profile.name
-        or credential.category not in _ALLOWED_CREDENTIAL_CATEGORIES
+        or credential.category != f"provider:{profile.provider}:api_key"
+        or profile.auth_type != "api_key"
+        or not _validate_secret_text(credential.secret)
     ):
         raise ProvisioningError("unauthorized_credential")
-    if credential.category.endswith(":api_key"):
-        expected_category = f"provider:{profile.provider}:api_key"
-        if (
-            credential.category != expected_category
-            or profile.auth_type != "api_key"
-            or not _validate_secret_text(credential.secret)
-        ):
-            raise ProvisioningError("unauthorized_credential")
-        secret: Any = credential.secret
-    else:
-        token_set = credential.secret
-        if (
-            credential.category != "provider:openai:oauth_tokens"
-            or profile.provider != "openai_responses"
-            or profile.auth_type != "oauth"
-            or not isinstance(token_set, OpenAIOAuthCredential)
-            or not _validate_secret_text(token_set.access_token)
-            or not _validate_secret_text(token_set.refresh_token)
-            or isinstance(token_set.expires_at, bool)
-            or not isinstance(token_set.expires_at, (int, float))
-            or not math.isfinite(token_set.expires_at)
-            or token_set.expires_at <= 0
-            or (
-                token_set.account_id is not None
-                and not _text(token_set.account_id, 256)
-            )
-        ):
-            raise ProvisioningError("unauthorized_credential")
-        secret = {
-            "access_token": token_set.access_token,
-            "refresh_token": token_set.refresh_token,
-            "expires_at": token_set.expires_at,
-        }
-        if token_set.account_id:
-            secret["account_id"] = token_set.account_id
     return {
         "category": credential.category,
         "profile_name": credential.profile_name,
-        "secret": secret,
+        "secret": credential.secret,
     }
 
 
@@ -647,10 +590,7 @@ def _validate_payload(
     if profile_data is None and payload.credentials:
         raise ProvisioningError("unauthorized_credential")
     if profile_data is not None:
-        if payload.profile.auth_type == "api_key":
-            required_category = f"provider:{payload.profile.provider}:api_key"
-        else:
-            required_category = "provider:openai:oauth_tokens"
+        required_category = f"provider:{payload.profile.provider}:api_key"
         if len(credentials) != 1 or credentials[0]["category"] != required_category:
             raise ProvisioningError("unauthorized_credential")
         if required_category not in scope.allowed_credential_categories:
@@ -822,27 +762,13 @@ def _content_from_dict(content: Any, scope: ProvisioningScope) -> ProvisioningPa
             raise ProvisioningError("invalid_bundle")
         category = credential["category"]
         secret = credential["secret"]
-        if category == "provider:openai:oauth_tokens":
-            if not isinstance(secret, dict) or set(secret) not in (
-                {"access_token", "refresh_token", "expires_at"},
-                {"access_token", "refresh_token", "expires_at", "account_id"},
-            ):
-                raise ProvisioningError("invalid_bundle")
-            secret_value: str | OpenAIOAuthCredential = OpenAIOAuthCredential(
-                access_token=secret["access_token"],
-                refresh_token=secret["refresh_token"],
-                expires_at=secret["expires_at"],
-                account_id=secret.get("account_id"),
-            )
-        else:
-            if not isinstance(secret, str):
-                raise ProvisioningError("invalid_bundle")
-            secret_value = secret
+        if not isinstance(secret, str):
+            raise ProvisioningError("invalid_bundle")
         credentials.append(
             ProvisioningCredential(
                 category=category,
                 profile_name=credential["profile_name"],
-                secret=secret_value,
+                secret=secret,
             )
         )
     result = ProvisioningPayload(
@@ -1038,7 +964,6 @@ __all__ = [
     "InstallReceipt",
     "InstalledRevision",
     "NetworkPreferences",
-    "OpenAIOAuthCredential",
     "ProfilePreferences",
     "ProvisioningCredential",
     "ProvisioningError",
