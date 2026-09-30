@@ -86,7 +86,9 @@ wait_screen() { # wait_screen <host> <ERE> <timeout-s>: until the visible screen
 wait_ready() { wait_screen "$1" '[[:alnum:]]' 90 && sleep 15; }      # a TUI is up when its pane has content
 newest_with() { raw "$1" 500 | grep -E -- "$2" | tail -1 || true; }
 latest_status() { # the lines of the newest /connect status output on <host>
-  raw "$1" 300 | awk '/this device/ {buf=""} {buf = buf $0 "\n"} END {printf "%s", buf}'
+  # Anchor on the "this device <name>" header: the online list also marks the local
+  # agent as "<agent> (this device)", which must not restart the buffer.
+  raw "$1" 300 | awk '/^[[:space:]]*this device[[:space:]]/ {buf=""} {buf = buf $0 "\n"} END {printf "%s", buf}'
 }
 run_limited() { local secs=$1; shift; perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$secs" "$@"; }
 kv() { sed -n "s/^$2=//p" <<<"$1" | head -1; }
