@@ -56,7 +56,7 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip e44ab6d.
 | `kollab --hub msg` replies bound to their own request | merged dee43fc, not live-proven. Both devices need this build | `.claude/worktrees/agent-a5e0891092630d9af`, report `agent-reports/cli-reply-threads.md` |
 | `hub_cron_add to="agent@device"` | merged 6b22c51, not live-proven | report `agent-reports/cron-to-device.md` |
 | M2 sealed config sync (section 9, Story 8) | merged 9d059bf; docs and `tests/live/m2/` written on `worktree-agent-a5cc4061fe4f00ca6` (cherry-pick 047dd18, 1244070, then the report commit); not live-proven (engine, `/config` managed-by, Connect row, OAuth cleanup) | `.claude/worktrees/agent-ae763b064388e596b`, reports `agent-reports/m2-config-sync.md`, `agent-reports/m2-finish.md` |
-| M3 mesh (section 10) | merged feac607, not live-proven (port, relay-less devices, limits, defaults on). Membership spreading done, see `agent-reports/m3-membership.md`. Still not done: missing tests, `tests/live/m3/`, docs | `.claude/worktrees/agent-a3d23b9ebdefd78d5`, report `agent-reports/m3-mesh.md` |
+| M3 mesh (section 10) | merged: port, relay-less devices, transit limits, defaults on, membership spreading, 28 mesh tests, `tests/live/m3/`, docs. Not live-proven | reports `agent-reports/m3-mesh.md`, `m3-membership.md`, `m3-finish.md` |
 | M4 `kollab relay serve --domain` (section 11, Story 6) | merged 04bb354, not live-proven | `.claude/worktrees/agent-a19e7801aee487817`, report `agent-reports/m4-self-host.md` |
 | Story 5 delivery across rooms | merged 880ec82, not live-proven. Relay redeploy needed before the live run | `.claude/worktrees/agent-a1f25fd83138c4f68`, report `agent-reports/story5-stranger-delivery.md` |
 
@@ -91,10 +91,13 @@ runs; pipe output through `tail`; read functions, not whole files.
    1244070 `tests/live/m2/`, then the report commit). Docs match the code, `bash -n` and
    shellcheck pass, a stubbed dry run passes (and fails on a leaked key), suite 5186
    passed, 9 skipped. Not run live: that is task 5. Report: `agent-reports/m2-finish.md`.
-2. **M3 finish.** The missing tests listed under "Not done" in
-   `agent-reports/m3-mesh.md`; `tests/live/m3/` using the live setup facts in that
-   report (approvals now spread by themselves; nothing to seed);
-   constitution section 10, `docs/guides/connect.md`, the CHANGELOG pair.
+2. **M3 finish.** DONE and merged: 22 new tests in
+   `tests/unit/test_mesh_network.py` (session invariant, transit limits, defaults and the two
+   switches, session and discovery sources, locator pin), `tests/live/m3/` (A -> B -> C with C
+   on no relay; it does not seed approvals, step `c3-members` needs the build where every
+   member approves every other member), constitution section 10, `docs/guides/connect.md`,
+   the CHANGELOG pair. `bash -n` and shellcheck clean. Not run live: that is task 5. Report:
+   `agent-reports/m3-finish.md`.
 3. **Manual-trust short numbers**, plus no `relay:` sender label on screen. DONE on
    branch `worktree-agent-a6deca3db4a406544` (merge it with the M2/M3 finishes);
    what is left is in `agent-reports/manual-trust-numbers.md`.

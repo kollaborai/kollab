@@ -39,6 +39,15 @@ Nothing to approve first. On the default trust level, every agent on every devic
 
 Your agent's hub context lists the remote agents it can reach, so "who is online" is `/connect status` for you and a glance at the roster for it.
 
+## Direct links and forwarding
+
+Devices of one network reach each other directly when they can and through the directory when they cannot. A device that runs a TLS endpoint (`plugins.hub.endpoint_enabled`) advertises where it listens; approved devices dial that first and fall back to the directory if the dial fails. A device with no relay connection at all is still reachable this way, and a network member that can reach both sides forwards for them. The message stays sealed end to end, so the forwarding device carries it without reading it, up to 120 frames a minute per peer, 600 in total and 16 at once.
+
+Both are on by default and neither opens a socket by itself. Two off switches, in `~/.kollab/config.json`:
+
+- `plugins.hub.peer_direct_enabled: false` keeps every message on the directory.
+- `plugins.hub.peer_forward_enabled: false` stops this device forwarding for others. A route needs forwarding on at every device on it, the two ends included, so nothing routes through or from a device that has it off. Messages to and from that device over the directory are unaffected.
+
 ## Trust
 
 Trust is one setting per network, `/connect trust <level>`:

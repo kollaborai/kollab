@@ -656,26 +656,54 @@ How it stays secure with 40 bits:
   updates, so they join again. Revoking never revokes a key at the provider.
 - A network joined before this milestone has no recipients: join once more.
 
-## 10. The mesh branch (#99)
+## 10. The mesh (#99)
 
-Commit `e02e761`, branch `mesh-direct-bootstrap`, in the Codex worktree at
-`~/.codex/worktrees/kollab-release/kollab`, not pushed. It lets two agents that
-can reach each other directly (same LAN, or an open port) talk without the
-directory, and lets B forward for C. Unit tests pass. Never run live.
+Shipped in milestone 3 (`feac607`, from `e02e761` on branch `mesh-direct-bootstrap`).
+Devices of one network that can reach each other directly talk without the
+directory, and a device forwards for the ones that cannot. The roster shows the same
+names either way and no command changed.
 
-Disposition:
+- **Direct first, relay second.** A device with a TLS endpoint signs a short-lived
+  locator: its endpoint address, the session it runs under, both keys. Approved
+  devices learn it from LAN discovery (a multicast datagram, when scanning is on). A
+  message goes over the direct endpoint while the locator is live, and takes the relay
+  path when the direct dial is refused, times out or answers garbage. Signed records
+  and links spread by gossip through the peer exchange.
+- **Forwarding.** B carries opaque frames for A and C. A seals to C end to end, so B
+  never reads the text, and C applies its own trust to A exactly as through the
+  directory. B forwards only along a signed route whose links allow it, only while its
+  own switch is on, and it bounds what it carries for others: 120 frames a minute per
+  peer, 600 in total, 16 at once. A frame delivered to B itself is not counted.
+- **A device with no relay.** A device that is not registered with the relay runs under
+  a per-process direct session that its locator or its signed record names. Two devices
+  on one host work the same way: a discovery datagram from this host's own interface
+  address is accepted (a cloud host's address is public); any other public source is not.
+- **Endpoint names.** A locator vouches for its endpoint name only when an approved
+  device's relay key signed it. The local registry can only deny: a name it holds under
+  another key, or rejected, is never admitted. A name two approved devices claim with
+  different keys admits neither. A device admitted this way reaches the peer carrier
+  (`peer_forward`, `peer_secure`) and nothing else: no Hub message, no ping.
+- **Strangers** (Story 5) get no mesh records, links or forwarding, on the relay path
+  and on the direct endpoint.
+- **On by default, two off switches.** `plugins.hub.peer_direct_enabled` and
+  `plugins.hub.peer_forward_enabled` both default to `true`. Neither opens a socket: the
+  TLS endpoint (`endpoint_enabled`), LAN discovery (`peer_discovery_scan_enabled`,
+  `peer_discovery_advertise_enabled`) and private addresses
+  (`peer_allow_private_network`) stay off until set. A device without an endpoint
+  identity keeps direct links off. A route needs forwarding on at every device on it,
+  the two ends included, which is why every device defaults on.
 
-1. Push the branch as-is, no PR, so it cannot be lost.
-2. Do not merge it before milestone 3.
-3. Milestone 3 proves it live: A (Mac) -> B (alzan-prod) -> C (a second agent
-   on alzan-prod that only B can reach), on installed packages, clean
-   transcript. Then it merges with no command changes.
-4. Until then the directory path is the only supported path, and the roster
-   shows the same names either way.
-5. The mesh needs every device on a route to approve every other, so devices
-   spread approval (section 4, Members): a network of three or more routes once
-   the signed member lists have crossed. The proof no longer seeds approvals by
-   hand. A designation two members claim goes to the one approved first.
+Members: the mesh needs every device on a route to approve every other, so devices
+spread approval (section 4, Members). A network of three or more routes once the
+signed member lists have crossed. A designation two members claim goes to the one
+approved first.
+
+Proof: `tests/unit/test_mesh_network.py` (three real bridges, A and B on one wire, C on
+none) covers the route, the sealing, C's own trust, the session invariant, the limits,
+the defaults, both switches and the locator pin. `tests/live/m3/` proves it on installed
+packages: A (Mac) -> B (alzan-prod) -> C (a second device on alzan-prod with no relay,
+reachable only through B), clean transcript. Written, not yet run live; the run order
+and how C is made relay-less are in `tests/live/m3/README.md`.
 
 ## 11. Self-hosting a directory
 
