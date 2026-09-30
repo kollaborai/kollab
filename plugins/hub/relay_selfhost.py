@@ -345,7 +345,7 @@ async def keep_published(app: web.Application, advertised: bool) -> None:
         await asyncio.sleep(PUBLISH_SECONDS)
         try:
             payload = await publish_once(app)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except Exception as exc:  # a renewal that fails must not end the loop; the next minute tries again
             say(f"publishing failed, the key file will expire in five minutes: {exc}")
             continue
         now = bool(payload["discovery"]["roles"])

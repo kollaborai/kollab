@@ -102,7 +102,7 @@ class PeerRecord:
 
 
 class InMemoryBackend:
-    """Single-process backend, available only with explicit development mode."""
+    """Single-process backend: explicit development mode, and `kollab relay serve --domain` (one worker)."""
 
     def __init__(self, node_id: str, limits: RelayLimits):
         self.node_id = node_id
