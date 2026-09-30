@@ -96,6 +96,16 @@ network exactly as a local message is observed by the rest of the hub.
   `/connect send`; replies go through the task envelope; questions wait for a
   human answer. This is the Codex model, kept for people who want it.
 
+**Members.** Every device on a network approves every other. A join by code
+approves only the pair, so devices tell each other: each sends the members it
+approved a signed list of the devices a person on it accepted (by code, or by
+joining through them) and of the ones it revoked. A member approves a device
+that a member it already approved names, on the same network; the relay path
+and the mesh path use that one set. Revoking a device drops it on every member,
+and drops devices only it named. A revoked device stays out until a person on a
+member accepts it again. Approval is not a grant: `agents` and `manual` trust
+work exactly as before. Accepted strangers, below, are not members.
+
 **Strangers.** A device outside your network can send a sealed introduction to
 your contact route. Accepting makes it a peer with `agents` trust and nothing
 allowed until you `/connect allow`. Never `open`. The stranger stays in its own
@@ -662,6 +672,10 @@ Disposition:
    transcript. Then it merges with no command changes.
 4. Until then the directory path is the only supported path, and the roster
    shows the same names either way.
+5. The mesh needs every device on a route to approve every other, so devices
+   spread approval (section 4, Members): a network of three or more routes once
+   the signed member lists have crossed. The proof no longer seeds approvals by
+   hand. A designation two members claim goes to the one approved first.
 
 ## 11. Self-hosting a directory
 
