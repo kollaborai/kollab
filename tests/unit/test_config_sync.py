@@ -151,7 +151,7 @@ def send_files(snapshot, revision, receiver, primary, secondary, use, primary_ho
     answer = {}
     for _ in range(3):
         sealed = cs.seal(
-            "sync", {"digest": snapshot.digest}, cs.pack_json({"manifest": manifest}),
+            "sync", cs.sync_body(snapshot), cs.pack_json({"manifest": manifest}),
             issuer_key=primary, recipient_public_key=recipient, revision=revision,
         )  # fmt: skip
         with use("server"):
@@ -683,6 +683,31 @@ def test_files_arrive_by_need_keep_the_exec_bit_and_deletions_follow(homes, keys
         assert (
             server / "skills" / "mine" / "SKILL.md"
         ).read_text() == "only on the server\n"
+
+
+def test_a_file_the_primary_skips_is_not_deleted_from_a_secondary(homes, keys):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        note = kollab / "skills" / "grow" / "notes.md"
+        note.parent.mkdir(parents=True)
+        note.write_text("small\n")
+        build = builder()
+        first = build.build()
+        mac_home = kollab
+    receiver = cs.Receiver(secondary)
+    push_core(first, 1, receiver, primary, secondary, homes)
+    assert send_files(first, 1, receiver, primary, secondary, homes, mac_home)["applied"]
+
+    with homes("mac"):
+        note.write_bytes(os.urandom(100_000))  # too big to travel any more
+        second = build.build()
+    assert second.skipped == 1 and not second.files
+    push_core(second, 2, receiver, primary, secondary, homes)
+    assert send_files(second, 2, receiver, primary, secondary, homes, mac_home)["applied"]
+
+    with homes("server") as server:
+        assert (server / "skills" / "grow" / "notes.md").read_text() == "small\n"
+        assert "skills/grow/notes.md" in read_managed_config().files
 
 
 def make_sync(primary, secondary, manifest, revision=1):

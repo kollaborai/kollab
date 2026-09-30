@@ -192,6 +192,12 @@ class Snapshot:
         )
 
 
+def sync_body(snapshot: Snapshot) -> dict:
+    """The signed header of a manifest. ``partial`` means some files did not fit,
+    so a file missing from the manifest is not one the primary dropped."""
+    return {"digest": snapshot.digest, "partial": snapshot.skipped > 0}
+
+
 def _read_object(path: Path) -> dict:
     """A JSON object from ``path``; {} when the file does not exist."""
     try:
@@ -804,12 +810,13 @@ class Receiver:
     def sync(self, sealed: bytes, *, primary_key: str) -> dict:
         """Compare the primary's manifest with disk; finish when nothing is missing."""
         try:
-            _body, blob, revision = open_sealed(
+            body, blob, revision = open_sealed(
                 sealed,
                 recipient_key=self._key,
                 issuer_public_key=bytes.fromhex(primary_key),
                 kind="sync",
             )
+            prune = body.get("partial") is not True
             manifest = parse_manifest(
                 unpack_json(blob, limit=MAX_MANIFEST_BYTES).get("manifest")
             )
@@ -831,7 +838,7 @@ class Receiver:
                 }
                 self._pending_revision = revision
                 return {"need": encode_need(need), "n": sum(need), "applied": False}
-            self._finish(record, manifest)
+            self._finish(record, manifest, prune=prune)
             self._pending, self._pending_revision = {}, -1
             return {"need": encode_need(need), "n": 0, "applied": True}
         except ConfigSyncError as error:
@@ -865,11 +872,18 @@ class Receiver:
             return {"error": error.code, **error.extra}
 
     def _finish(
-        self, record: ManagedConfig, manifest: list[tuple[str, str, int, bool]]
+        self,
+        record: ManagedConfig,
+        manifest: list[tuple[str, str, int, bool]],
+        prune: bool = True,
     ) -> None:
-        """Every file is in place: remove what the primary dropped, remember the set."""
+        """Every file is in place: remove what the primary dropped, remember the set.
+
+        A partial manifest (``prune`` False) proves nothing about absent files:
+        they stay, and stay remembered, until a complete manifest names them.
+        """
         keep = {rel for rel, *_ in manifest}
-        for rel in set(record.files) - keep:
+        for rel in (set(record.files) - keep) if prune else ():
             parts = safe_parts(rel)
             if parts is None:
                 continue
@@ -891,7 +905,10 @@ class Receiver:
                 digest=record.digest,
                 keys=record.keys,
                 mcp_servers=record.mcp_servers,
-                files={rel: sha for rel, sha, _size, _x in manifest},
+                files={
+                    **({} if prune else record.files),
+                    **{rel: sha for rel, sha, _size, _x in manifest},
+                },
             ),
             record_path(self._root),
         )

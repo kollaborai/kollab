@@ -48,6 +48,7 @@ from .config_sync import (
     pack_files,
     pack_json,
     seal,
+    sync_body,
 )
 
 logger = logging.getLogger(__name__)
@@ -229,7 +230,7 @@ class ConfigSyncService:
     async def _push_files(self, key: str, snapshot: Snapshot, revision: int) -> None:
         entries = list(snapshot.files)
         manifest = [[e.path, e.sha256, e.size, int(e.executable)] for e in entries]
-        body = {"digest": snapshot.digest}
+        body = sync_body(snapshot)
         for _round in range(3):
             reply = await self._call(
                 key, "sync", body, pack_json({"manifest": manifest}), revision, 60
