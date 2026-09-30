@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # teardown.sh: undo what m3/proof.sh added, then leave the m1 sessions to m1/teardown.sh.
 # Stops C (its window and any process whose cwd is C's workspace), removes C's workspace and the
-# loopback certificate, puts B's workspace config back, and restarts nothing.
-# B keeps running with the endpoint keys it was started with until m1/teardown.sh (or a restart).
+# loopback certificate, puts B's workspace config back and restarts B on it (B would otherwise keep
+# its loopback endpoint bound and proof.sh could not run again: its preflight wants those ports free).
 # C's device stays on A's network like B does; leaving is not part of this proof.
 set -uo pipefail
 M3_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -32,5 +32,8 @@ REMOTE
 say "srv: removing $M3_C_WS and $M3_TLS, restoring B's workspace config"
 m1_ssh "python3 '$M1_SRV_ROOT/bin/m3probe.py' unconfig '$M1_SRV_WS' 2>&1 || true"
 m1_ssh "rm -rf -- '$M3_C_WS' '$M3_TLS'"
+say "srv: restarting B ($M1_SRV_SESSION) on its restored config"
+stop_ws "$M1_SRV_SESSION" "$M1_SRV_WS" >/dev/null
+launch_srv "$M1_SRV_SESSION" "$M1_SRV_WS"
 say "left in place on purpose: m3/evidence/, C's ~/.kollab/network/<digest> and ~/.kollab/projects/*kollab-m3-c* state, C's hub vault"
 say "teardown done; run m1/teardown.sh next"
