@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30, branch tip e44ab6d.
+network. Updated at every merge. Last update: 2026-09-30, branch tip 432ad68 (code complete for milestones 1-4 and Story 5).
 
 ## Read first, in this order
 
@@ -36,10 +36,13 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip e44ab6d.
 
 - Branch `issue-121-network-simple-flow` in `/Users/malmazan/dev/kollab`. Not
   pushed, no PR.
-- Unit suite at e44ab6d: 5186 passed, 9 skipped
+- Unit suite at 432ad68: 5242 passed, 9 skipped
   (`KOLLAB_NO_KEYRING=1 .venv/bin/python -m pytest tests/unit/ -q`, ~80 s).
-- Relay on kollabor.ai: release 20260929-a4fcab8. Rollback and deploy scripts:
-  `M1-HANDOFF.md` and `scripts/relay/deploy_relay*.sh`.
+- Relay on kollabor.ai: release 20260930-432ad68, deployed 2026-09-30 07:04 MST, all routes live.
+  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-070408
+  /etc/systemd/system/kollab-relay.service.d/source-v2.conf && sudo systemctl daemon-reload &&
+  sudo systemctl restart kollab-relay.service`. Deploy from a clean worktree: the script refuses a
+  dirty tree, and the main checkout has the three foreign files.
 - Last live proof: run 7, Stories 1-3 PASS at afa383d (`evidence-run7/`,
   runbook `tests/live/m1/README.md`). Everything merged after afa383d still
   needs its live run.
@@ -102,7 +105,9 @@ runs; pipe output through `tail`; read functions, not whole files.
    branch `worktree-agent-a6deca3db4a406544` (merge it with the M2/M3 finishes);
    what is left is in `agent-reports/manual-trust-numbers.md`.
 4. **Small follow-ups**. DONE on branch `worktree-agent-af4249fd94ef7790b` (merge it with the others): the `hub_cron_add` failure text, the `hub_msg` tool definition, the `relay:` address in the outgoing box, the `authorize` expiry time and the `relay serve` stop republish. The two follow-ups still in the section below are not done; notes in `agent-reports/small-fixes.md`.
-5. **Live runs, one at a time.** Build and install first:
+5. **Live runs, one at a time.** IN PROGRESS: wheels 0.11.0.dev2 from 432ad68 installed; the M1
+   re-proof runs in workspaces `~/kollab-m1-mac-r8` / `~/kollab-m1-server-r8`
+   (`M1_VERSION=0.11.0.dev2 M1_MAC_WS=$HOME/kollab-m1-mac-r8 M1_SRV_WS_NAME=kollab-m1-server-r8`). Build and install first:
    `bash tests/live/m1/build_wheels.sh <ref> <dir>` then `install_both.sh <dir>`.
    Then: M1 re-proof (`tests/live/m1/proof.sh`, now with `s3-overlap`); Story 5
    (redeploy the relay first with `scripts/relay/deploy_relay_tarball.sh`, which
