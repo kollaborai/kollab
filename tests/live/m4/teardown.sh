@@ -114,6 +114,6 @@ REMOTE
 fi
 
 ssh "${M1_SSH_OPTS[@]}" -O exit "$M1_HOST" 2>/dev/null || true
-ssh "${M4_EDGE_SSH_OPTS[@]}" -O exit "$M4_EDGE_HOST" 2>/dev/null || true
+ssh "${M4_EDGE_SSH_OPTS[@]}" -O exit "$M4_EDGE_VIA" 2>/dev/null || true
 say "teardown done"
 [ -z "$problems" ] || die "NOT fully restored:$problems"

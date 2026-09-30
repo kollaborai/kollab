@@ -33,6 +33,11 @@ die() { printf '[m4 FATAL] %s\n' "$*" >&2; exit 1; }
 # stdin -> stdout for anything printed to a terminal: a 64-hex key keeps 8 characters, relay: addresses are hidden.
 scrub() { sed -E 's/([0-9a-f]{8})[0-9a-f]{56}/\1.../g; s/relay:[^[:space:]|]+/relay:<addr>/g'; }
 
-# One multiplexed ssh connection to the edge; teardown closes it.
+# alzan-edge takes ssh only from alzan-prod (WireGuard, port 2222, alzan-prod's own key; see
+# the alzan-edge entry in ~/.ssh/config), so every edge command hops through alzan-prod. The
+# callers pass one command string; %q carries it through alzan-prod's shell unchanged, and
+# stdin passes through both hops. One multiplexed connection to alzan-prod; teardown closes it.
+M4_EDGE_VIA=${M4_EDGE_VIA:-alzan-prod}
+M4_EDGE_TARGET=${M4_EDGE_TARGET:-deploy@10.0.0.1}
 M4_EDGE_SSH_OPTS=(-o BatchMode=yes -o ControlMaster=auto -o "ControlPath=/tmp/kollab-m4-edge-%C" -o ControlPersist=300)
-m4_edge() { ssh "${M4_EDGE_SSH_OPTS[@]}" "$M4_EDGE_HOST" "$@"; }
+m4_edge() { ssh "${M4_EDGE_SSH_OPTS[@]}" "$M4_EDGE_VIA" "ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=10 $M4_EDGE_TARGET $(printf '%q' "$*")"; }
