@@ -50,9 +50,10 @@ for attempt in range(1, 4):
         break
     time.sleep(0.4)
     got = input_line()
-    if got is None or text in got:
+    # A long command can be cut to the box: its visible head or tail is a match too.
+    if got is None or text in got or (len(got) >= 8 and (text.startswith(got) or text.endswith(got))):
         break
-    for _ in range(len(got) + 2):  # clear what did arrive, then type it all again
+    for _ in range(len(text) + 5):  # clear the whole input, seen or not, then type it all again
         send("BSpace")
         time.sleep(0.02)
     time.sleep(0.3)
