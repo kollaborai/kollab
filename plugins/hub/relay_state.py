@@ -22,6 +22,8 @@ from .dns.discovery import normalize_target
 KEY = re.compile(r"[0-9a-f]{64}\Z")
 ID = re.compile(r"[0-9a-f]{32}\Z")
 MAX_APPROVALS = 256
+MAX_VOUCHERS = 8  # members remembered per vouched device
+MAX_REVOKED = 64  # revocations remembered
 INVITE_PREFIX = "kollab-invite-v1:"
 
 
@@ -144,6 +146,13 @@ class RelayState:
     # Accepted strangers: devices in their own room, reached through the
     # directory only while both sides consent to the link.
     links: list[str] = field(default_factory=list)
+    # Members approved because a member this device already approved vouched
+    # for them (key -> the members that did). A device accepted first-hand, by
+    # join code or as the inviter, has no entry. plugins/hub/network_members.py.
+    vouched_by: dict[str, list[str]] = field(default_factory=dict)
+    # Devices revoked on this network, by this device or announced by a member:
+    # a vouch for one of them counts for nothing until a member accepts it anew.
+    revoked: list[str] = field(default_factory=list)
 
 
 class RelayStateStore:
@@ -244,6 +253,27 @@ class RelayStateStore:
         ):
             raise RelayError("invalid stranger links")
         for key in value.links:
+            validate_public_key(key)
+        if (
+            not isinstance(value.vouched_by, dict)
+            or len(value.vouched_by) > MAX_APPROVALS
+            or not isinstance(value.revoked, list)
+            or len(value.revoked) > MAX_REVOKED
+            or len(set(value.revoked)) != len(value.revoked)
+        ):
+            raise RelayError("invalid network membership")
+        for key, vouchers in value.vouched_by.items():
+            validate_public_key(key)
+            if (
+                not isinstance(vouchers, list)
+                or not vouchers
+                or len(vouchers) > MAX_VOUCHERS
+                or len(set(vouchers)) != len(vouchers)
+            ):
+                raise RelayError("invalid network membership")
+            for voucher in vouchers:
+                validate_public_key(voucher)
+        for key in value.revoked:
             validate_public_key(key)
         try:
             if value.device_name:

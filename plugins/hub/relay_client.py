@@ -30,12 +30,14 @@ from nacl.exceptions import CryptoError
 from nacl.public import Box
 from nacl.signing import VerifyKey
 
-from .device_names import default_device_name, default_network_name
+from .device_names import NAME_RE, default_device_name, default_network_name, key_label
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
     KEY,
     MAX_APPROVALS,
+    MAX_REVOKED,
+    MAX_VOUCHERS,
     RelayError,
     RelayStateStore,
     canonical_origin,
@@ -262,6 +264,8 @@ class RelayClient:
         self.state.peer_trust = {}
         self.state.config_recipients = []
         self.state.links = []
+        self.state.vouched_by = {}
+        self.state.revoked = []
         self._store.save()
 
     async def leave(self) -> None:
@@ -325,25 +329,132 @@ class RelayClient:
         """
         validate_public_key(key)
         self._adopt_bridge_fields()
-        recipient = key not in self.state.config_recipients
-        if recipient and len(self.state.config_recipients) >= MAX_APPROVALS:
-            raise RelayError("config recipient capacity reached", "capacity")
-        was_stranger = key in self.state.links
-        if was_stranger:
+        changed = False
+        if key not in self.state.config_recipients:
+            if len(self.state.config_recipients) >= MAX_APPROVALS:
+                raise RelayError("config recipient capacity reached", "capacity")
+            self.state.config_recipients.append(key)
+            changed = True
+        # A stranger that joins by code stops being a stranger.
+        if key in self.state.links:
             self.state.links.remove(key)
             self.state.peer_trust.pop(key, None)
-        if recipient:
-            self.state.config_recipients.append(key)
-        if recipient or was_stranger:
+            changed = True
+        # A human just accepted this device: first-hand, and no longer revoked.
+        if self.state.vouched_by.pop(key, None) is not None:
+            changed = True
+        if key in self.state.revoked:
+            self.state.revoked.remove(key)
+            changed = True
+        if changed:
             self._store.save()
 
-    def revoke(self, key: str):
+    def network_id(self) -> str:
+        """What every envelope and membership list of this network is bound to."""
+        return hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
+
+    def members(self) -> list[str]:
+        """The devices on this network: approved, and not an accepted stranger.
+
+        The relay path and the mesh path both ask this one question.
+        """
+        self._adopt_bridge_fields()  # the bridge records accepted strangers
+        strangers = set(self.state.links)
+        return [key for key in self.state.approvals if key not in strangers]
+
+    def membership(self) -> tuple[list[tuple[str, str]], list[str]]:
+        """What this device tells its members: (key, name) and its revocations.
+
+        Only first-hand members are listed: devices a human here accepted, by
+        join code or by joining through them. A device this one merely heard
+        about is never passed on, so every vouch traces back to a human's accept.
+        """
+        self._adopt_bridge_fields()
+        listed = [
+            (key, self.state.peer_devices.get(key, ""))
+            for key in self.members()
+            if key not in self.state.vouched_by
+        ]
+        return listed, list(self.state.revoked)
+
+    def accept_membership(
+        self, voucher: str, members: list[tuple[str, str]], revoked: list[str]
+    ) -> None:
+        """Take a member's word on who else is on this network.
+
+        Only a member this device already approved is heard. A device it names
+        is approved, and remembered as vouched for by that member. A device it
+        stops naming loses that vouch; one left with none is dropped. A
+        revocation is applied at once and remembered: no vouch brings that
+        device back until a human here accepts it again with a join code.
+        Accepted strangers never enter or leave this way.
+        """
+        self._adopt_bridge_fields()
+        if voucher not in self.members():
+            raise RelayError("peer is not part of this network")
+        for key in revoked:
+            if key not in (self.public_key, voucher) and key not in self.state.links:
+                self.revoke(key, announce=True)
+        named = set()
+        for key, name in members:
+            named.add(key)
+            if key == self.public_key or key in self.state.links or key in self.state.revoked:
+                continue
+            first_hand = key in self.state.approvals and key not in self.state.vouched_by
+            if key not in self.state.approvals:
+                try:
+                    self.approve(key)
+                except RelayError:
+                    continue  # at capacity: this device stays out
+                taken = {
+                    self.state.device_name or default_device_name(self.workspace),
+                    *self.state.peer_devices.values(),
+                }
+                if not NAME_RE.fullmatch(name) or name in taken:
+                    name = key_label(key)  # a name is never reused or renamed
+                self.state.peer_devices[key] = name
+                self._store.save()  # the next approval re-reads bridge fields from disk
+            if not first_hand:
+                vouchers = self.state.vouched_by.setdefault(key, [])
+                if voucher not in vouchers and len(vouchers) < MAX_VOUCHERS:
+                    vouchers.append(voucher)
+        orphans = []
+        for member, vouchers in tuple(self.state.vouched_by.items()):
+            if voucher in vouchers and member not in named:
+                vouchers.remove(voucher)
+                if not vouchers:
+                    del self.state.vouched_by[member]
+                    orphans.append(member)
+        self._store.save()
+        for orphan in orphans:
+            self.revoke(orphan)
+
+    def revoke(self, key: str, *, announce: bool = False):
+        """Drop a device. `announce` also tells the members, at their next list.
+
+        Devices whose only vouch came from `key` go with it.
+        """
         validate_key(key)
         was_approved = key in self.state.approvals
         previous_session = self._peers.get(key) if was_approved else None
+        orphans: list[str] = []
         try:
             self._adopt_bridge_fields()
             changed = False
+            if announce and key not in self.state.links and key not in self.state.revoked:
+                if key != self.public_key:
+                    self.state.revoked.append(key)
+                    del self.state.revoked[:-MAX_REVOKED]
+                    changed = True
+            if self.state.vouched_by.pop(key, None) is not None:
+                changed = True
+            for member, vouchers in tuple(self.state.vouched_by.items()):
+                if key in vouchers:
+                    vouchers.remove(key)
+                    changed = True
+                    if not vouchers:
+                        del self.state.vouched_by[member]
+                        orphans.append(member)
             if key in self.state.config_recipients:
                 self.state.config_recipients.remove(key)
                 changed = True
@@ -372,6 +483,8 @@ class RelayClient:
                 self._notify_peer_session_listeners(
                     PeerSessionEvent("peer_revoked", key, previous_session, None)
                 )
+        for orphan in orphans:
+            self.revoke(orphan)
 
     def _binding(self, peer_key: str) -> str:
         """What an envelope's `room` must say for this peer.
@@ -381,7 +494,7 @@ class RelayClient:
         """
         if peer_key in self.state.links:
             return link_binding(self.public_key, peer_key)
-        return hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
+        return self.network_id()
 
     def _settle_application_peer(self, key: str, reason: str) -> None:
         for request_id, pending in tuple(self._application_pending.items()):

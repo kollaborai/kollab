@@ -820,7 +820,7 @@ class RelayCommands:
             if key == self.client.state.inviter:
                 # Revoking the primary ends its say over this device's settings.
                 clear_managed_config(primary_key=key)
-            self.client.revoke(key)
+            self.client.revoke(key, announce=True)  # every member drops it too
             if self.agent_bridge is not None:
                 self.agent_bridge._state()
                 self.agent_bridge.store.revoke(self.client.state.room, key)

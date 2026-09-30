@@ -36,6 +36,8 @@ from .device_names import (
 )
 from .local_directory import LocalAgentDirectory
 from .models import HubMessage, MessageScope
+from .network_members import METHOD as MEMBERS_METHOD
+from .network_members import MembershipSync
 from .relay_commands import RelayCommands, directory_origin
 from .relay_conversations import (
     CONVERSATION_REJECTION_REASONS,
@@ -191,6 +193,7 @@ class RelayAgentBridge:
         self._enrollment_issuer = None
         self.secure_transport: SecureConversationTransport | None = None
         self.config_sync: ConfigSyncService | None = None
+        self.membership_sync: MembershipSync | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
         self._links_lock = asyncio.Lock()
@@ -611,6 +614,7 @@ class RelayAgentBridge:
             )
             self.commands.client.set_request_handler(self._receive)
             self.make_config_sync().start()
+            self.make_membership_sync().start()
             try:
                 from .peer_transport import PeerMeshRuntime
 
@@ -727,6 +731,9 @@ class RelayAgentBridge:
         if self.config_sync is not None:
             await self.config_sync.close()
             self.config_sync = None
+        if self.membership_sync is not None:
+            await self.membership_sync.close()
+            self.membership_sync = None
         if self.secure_transport is not None:
             self.secure_transport.close()
             self.secure_transport = None
@@ -1635,8 +1642,8 @@ class RelayAgentBridge:
         if peer not in client.state.approvals:
             raise RelayError("peer is not approved")
         stranger = peer in self._state().state.links
-        if stranger and method in {"peer.forward", "peer.exchange"}:
-            # A stranger reaches allowed agents only; it is not a mesh member.
+        if stranger and method in {"peer.forward", "peer.exchange", MEMBERS_METHOD}:
+            # A stranger reaches allowed agents only; it is not a network member.
             raise RelayError("peer is not part of this network")
         if method == "peer.forward" and not _secure:
             if self.peer_mesh is None:
@@ -1682,6 +1689,10 @@ class RelayAgentBridge:
             if self.config_sync is None:
                 raise RelayError("config sync is unavailable")
             return await self.config_sync.receive(peer, payload)
+        if method == MEMBERS_METHOD:
+            if self.membership_sync is None:
+                raise RelayError("network membership is unavailable")
+            return await self.membership_sync.receive(peer, payload)
         if method == "message":
             message = validate_message(
                 payload,
@@ -1816,7 +1827,9 @@ class RelayAgentBridge:
         raise RelayError("unsupported relay operation")
 
     async def _receive_secure_application(self, peer, method, payload):
-        if method not in {"message", "status", "cancel", "directory", "peer.exchange", "config_sync"}:
+        if method not in {
+            "message", "status", "cancel", "directory", "peer.exchange", "config_sync", MEMBERS_METHOD
+        }:
             raise RelayError("unsupported secure conversation operation")
         try:
             return await self._receive(peer, method, payload, _secure=True)
@@ -2454,6 +2467,22 @@ class RelayAgentBridge:
             root=root,
         )
         return self.config_sync
+
+    def make_membership_sync(self) -> MembershipSync:
+        """Tells every member who this device approves, and hears theirs."""
+        self.membership_sync = MembershipSync(
+            client=self.commands.client,
+            transport=self.secure_transport,
+            online=self._members_online,
+        )
+        return self.membership_sync
+
+    def _members_online(self) -> dict[str, str]:
+        """Members reachable now: on the relay roster, or by a signed locator."""
+        online = self._config_online_peers()
+        if self.peer_mesh is not None:
+            online = {**self.peer_mesh._live_peers(), **online}
+        return online
 
     def _config_online_peers(self) -> dict[str, str]:
         """Approved peers on the relay right now: key -> their relay session."""

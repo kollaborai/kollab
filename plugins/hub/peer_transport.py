@@ -1743,19 +1743,21 @@ class PeerMeshRuntime:
         return envelope, route, trace, records, links, expected_local_index
 
     def endpoint_key_for(self, designation: str) -> str:
-        """The endpoint key an approved device's live locator gives a designation.
+        """The endpoint key a network member's live locator gives a designation.
 
-        Empty when no approved device names it, or when two name it with
-        different keys: an ambiguous name admits nobody.
+        A claim belongs to the relay key that signed it, and `_direct_caller`
+        maps a caller back to that key alone. When two members claim one name
+        with different keys, the member approved first keeps it, so a later
+        claim cannot block the first device. An accepted stranger is not a
+        member and never claims a name.
         """
         if not self.direct_enabled:
             return ""
-        keys = set()
-        for peer_key in tuple(self.client.state.approvals):
+        for peer_key in self.client.members():
             locator = self._locator_for_peer(peer_key)
             if locator is not None and locator.get("endpoint_designation") == designation:
-                keys.add(str(locator.get("endpoint_public_key", "")).lower())
-        return keys.pop() if len(keys) == 1 else ""
+                return str(locator.get("endpoint_public_key", "")).lower()
+        return ""
 
     def _direct_caller(self, designation: str, endpoint_public_key: str) -> str:
         """Map a current endpoint-authenticated caller to its approved relay key."""
