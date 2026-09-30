@@ -180,9 +180,7 @@ def send_files(snapshot, revision, receiver, primary, secondary, use, primary_ho
 def push_core(
     snapshot, revision, receiver, primary, secondary, use, *, name="mac-kollab"
 ):
-    blob = cs.pack_json(
-        {"config": snapshot.config, "mcp": snapshot.mcp, "primary_name": name}
-    )
+    blob = cs.core_blob(snapshot, name)
     body = {"digest": snapshot.digest, "files_digest": snapshot.files_digest}
     sealed = cs.seal(
         "core", body, blob, issuer_key=primary,
@@ -863,3 +861,27 @@ def test_a_keyring_key_the_primary_cannot_read_stays_on_the_secondary(homes, key
     reply, config, managed = push(locked, 2)
     assert reply == {"ok": True}
     assert config[path] == KEYRING_KEY_TEXT and path in managed
+
+
+def test_a_file_whose_only_change_is_the_exec_bit_reaches_the_secondary(homes, keys):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        build = builder()
+        first = build.build()
+        mac_home = kollab
+    receiver = cs.Receiver(secondary)
+    push_core(first, 10, receiver, primary, secondary, homes)
+    send_files(first, 10, receiver, primary, secondary, homes, mac_home)
+    with homes("server") as server:
+        assert (server / "skills" / "tdd" / "run.sh").stat().st_mode & 0o111
+
+    with homes("mac") as kollab:
+        (kollab / "skills" / "tdd" / "run.sh").chmod(0o644)  # same bytes, no exec bit
+        second = build.build()
+    push_core(second, 11, receiver, primary, secondary, homes)
+    done = send_files(second, 11, receiver, primary, secondary, homes, mac_home)
+
+    assert done["applied"] is True
+    with homes("server") as server:
+        assert not (server / "skills" / "tdd" / "run.sh").stat().st_mode & 0o111

@@ -700,6 +700,13 @@ def _local_sha(parts: tuple[str, ...], root: Path | None = None) -> str | None:
         return None
 
 
+def _local_executable(parts: tuple[str, ...], root: Path | None = None) -> bool:
+    try:
+        return bool(_file_path(parts, root).stat().st_mode & 0o111)
+    except (OSError, ConfigSyncError):
+        return False
+
+
 def parse_manifest(value: Any) -> list[tuple[str, str, int, bool]]:
     if not isinstance(value, list) or len(value) > MAX_FILES:
         raise ConfigSyncError("invalid")
@@ -871,9 +878,10 @@ class Receiver:
             self._check(record, primary_key, revision, record.digest)
             if revision != record.revision:
                 raise ConfigSyncError("stale", revision=record.revision)
-            need = [
+            need = [  # a mode-only change counts: the bytes alone would never move it
                 _local_sha(safe_parts(rel), self._root) != sha
-                for rel, sha, _size, _x in manifest
+                or _local_executable(safe_parts(rel), self._root) != x
+                for rel, sha, _size, x in manifest
             ]
             if any(need):
                 self._pending = {
