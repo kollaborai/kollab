@@ -195,14 +195,15 @@ key c Enter
 sleep 4
 # /connect code is a code-only screen (no request rows, no accept key) and closing it prints nothing later: a request
 # only shows up in `/connect status` (or the full Connect screen). Ask for it, the way m1's fallback does, for 2 minutes.
+# Match C's own request by name (<host>-<workspace>, the default device name): an older
+# request still pending on the Mac must never be the one accepted.
+C_REQ="$(m1_ssh uname -n)-$M3_C_WS_NAME"
 got=0
 for _ in $(seq 1 12); do
-  b_wants=$(count_pat mac 'wants to join'); cmd mac "/connect status"
-  wait_for mac 'wants to join' 10 "$b_wants" && { got=1; break; }
+  b_wants=$(count_pat mac "$C_REQ[[:space:]]+wants to join"); cmd mac "/connect status"
+  wait_for mac "$C_REQ[[:space:]]+wants to join" 10 "$b_wants" && { got=1; break; }
 done
-[ "$got" = 1 ] || { cap mac c2-02-mac-no-request; abort c2-c-joins "no 'wants to join' in the Mac's /connect status 2 minutes after C submitted the code" c2-02-mac-no-request.txt; }
-C_REQ=$(newest_with mac '[^[:space:]]+[[:space:]]+wants to join' | sed -E 's/.*[[:space:]]([^[:space:]]+)[[:space:]]+wants to join.*/\1/')
-[ -n "$C_REQ" ] || abort c2-c-joins "could not read C's device name from the Mac's 'wants to join' line"
+[ "$got" = 1 ] || { cap mac c2-02-mac-no-request; abort c2-c-joins "no '$C_REQ wants to join' in the Mac's /connect status 2 minutes after C submitted the code" c2-02-mac-no-request.txt; }
 cmd mac "/connect accept $C_REQ"
 wait_for mac 'accepted|trusted device' 60 "$b_acc" || { cap mac c2-03-mac-accept-failed; abort c2-c-joins "no 'accepted' after /connect accept $C_REQ" c2-03-mac-accept-failed.txt; }
 wait_for c 'joined ' 90 || { cap c c2-04-c-not-joined; abort c2-c-joins "C never printed a 'joined ...' line" c2-04-c-not-joined.txt; }
