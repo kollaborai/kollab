@@ -1,0 +1,234 @@
+diff --git a/plugins/hub/peer_transport.py b/plugins/hub/peer_transport.py
+index dfdd485..7749c86 100644
+--- a/plugins/hub/peer_transport.py
++++ b/plugins/hub/peer_transport.py
+@@ -463,6 +463,17 @@ def _candidate_dict(candidate: object) -> dict[str, Any]:
+     }
+ 
+ 
++def _restates(link: PeerLink | None, payload: dict) -> bool:
++    """A proposal that repeats the live link's own signed statement exactly."""
++    return (
++        link is not None
++        and link.session_id == payload["session_id"]
++        and link.revision == payload["revision"]
++        and link.issued_at == payload["issued_at"]
++        and link.expires_at == payload["expires_at"]
++    )
++
++
+ class PeerMeshRuntime:
+     """Connect signed PeerRouter state to the existing TLS and RelayClient paths."""
+ 
+@@ -1110,7 +1121,7 @@ class PeerMeshRuntime:
+             peer_id = peer_id_for_key(peer_key)
+             record = self.record_store.get(peer_id, scope=router.scope)
+             link = router.link_between(self.local_peer_id, peer_id)
+-            tls_id = self.secure_transport.link_session_id(peer_key)
++            tls_id = self._live_link_session(peer_key, link)
+             if (
+                 record is not None
+                 and record.session_id == session
+@@ -1224,9 +1235,14 @@ class PeerMeshRuntime:
+             # proposes is the one the peer computes when the proposal arrives.
+             await self.secure_transport.ensure_session(peer_key, timeout=3)
+             for _attempt in range(2):
++                # One node of a pair writes its link: two nodes proposing at
++                # once each name their own session and revision, and the
++                # pair ends up holding two different links it can never
++                # reconcile. The node with the lower peer id proposes; the
++                # other learns the link when the proposal reaches it.
+                 proposal = (
+                     self._make_link_signature(local_record, remote_record, peer_key)
+-                    if remote_record is not None
++                    if remote_record is not None and local_record.peer_id < remote_record.peer_id
+                     else None
+                 )
+                 request = self._exchange_request(peer_key, local_record, proposal)
+@@ -1239,11 +1255,13 @@ class PeerMeshRuntime:
+                 if link is not None:
+                     self._mark_neighbor(peer_key, link)
+                     return
++                if remote_record is not None and local_record.peer_id > remote_record.peer_id:
++                    return
+         except (RelayError, PeerRouteError, PeerRecordError, OSError, TimeoutError):
+             return
+ 
+     def _make_link_signature(self, local: PeerRecord, remote: PeerRecord, peer_key: str) -> dict:
+-        tls_id = self.secure_transport.link_session_id(peer_key)
++        tls_id = self.secure_transport.outbound_link_session_id(peer_key)
+         if tls_id is None:
+             raise PeerRouteError("peer exchange has no authenticated TLS session")
+         current_link = self._ensure_router().link_between(
+@@ -1417,16 +1435,23 @@ class PeerMeshRuntime:
+         payload, signature = value["payload"], value["signature"]
+         if not isinstance(payload, dict) or not isinstance(signature, str) or not _SIGNATURE.fullmatch(signature):
+             raise PeerRouteError("invalid peer link signature proposal")
+-        expected_session = self.secure_transport.link_session_id(peer_key)
++        expected_session = self.secure_transport.carrying_link_session_id()
+         if expected_session is None:
+             raise PeerRouteError("peer link has no authenticated TLS session")
++        current = self._ensure_router().link_between(local.peer_id, remote.peer_id)
++        revision = self._expected_link_revision(local, remote, expected_session)
++        renewal = self.link_store.next_revision(local.scope, local.peer_id, remote.peer_id)
++        if type(payload.get("revision")) is int and payload["revision"] == renewal:
++            # A new session, or a link renewed past half its lifetime on the
++            # same session, proposes the next revision.
++            revision = renewal
+         expected = {
+             "v": 1,
+             "scope": local.scope,
+             "left": min(local.peer_id, remote.peer_id),
+             "right": max(local.peer_id, remote.peer_id),
+             "session_id": expected_session,
+-            "revision": self._expected_link_revision(local, remote, expected_session),
++            "revision": revision,
+             "issued_at": payload.get("issued_at"),
+             "expires_at": payload.get("expires_at"),
+             "forwarding_allowed": bool("forwarder" in local.roles and "forwarder" in remote.roles),
+@@ -1440,7 +1465,7 @@ class PeerMeshRuntime:
+             or isinstance(expires_at, bool)
+             or not isinstance(expires_at, int)
+             or issued_at > now + 30
+-            or issued_at < now - 60
++            or (issued_at < now - 60 and not _restates(current, payload))
+             or not issued_at < expires_at <= min(issued_at + PEER_RECORD_TTL_MAX, local.expires_at, remote.expires_at)
+             or expires_at <= now
+         ):
+@@ -1495,7 +1520,7 @@ class PeerMeshRuntime:
+             raise PeerRouteError("local peer record is unavailable")
+         if {link.left, link.right} != {self.local_peer_id, remote.peer_id}:
+             raise PeerRouteError("peer exchange returned an unrelated link")
+-        tls_id = self.secure_transport.link_session_id(remote.public_key)
++        tls_id = self.secure_transport.outbound_link_session_id(remote.public_key)
+         if link.session_id != tls_id:
+             raise PeerRouteError("peer exchange link is bound to another TLS session")
+         if link.revision != expected_revision:
+@@ -1550,11 +1575,19 @@ class PeerMeshRuntime:
+                 continue
+             router.add_link(link, now=now)
+ 
++    def _live_link_session(self, peer_key: str, link: PeerLink | None) -> str | None:
++        """The link's session id when it names a live TLS session with the peer."""
++        if link is None:
++            return None
++        if link.session_id in self.secure_transport.live_link_session_ids(peer_key):
++            return link.session_id
++        return None
++
+     def _mark_neighbor(self, peer_key: str, link: PeerLink) -> None:
+         router = self._ensure_router()
+         peer_id = peer_id_for_key(peer_key)
+-        tls_id = self.secure_transport.link_session_id(peer_key)
+-        if tls_id is None or link.session_id != tls_id:
++        tls_id = self._live_link_session(peer_key, link)
++        if tls_id is None:
+             raise PeerRouteError("peer link does not match the current TLS session")
+         router.set_authenticated_neighbor(peer_id, True, session_id=tls_id)
+ 
+@@ -1730,7 +1763,7 @@ class PeerMeshRuntime:
+         )
+         if incoming_link is None:
+             raise PeerRouteError("peer forwarding ingress link is unavailable")
+-        current_session = self.secure_transport.link_session_id(ingress_peer_key)
++        current_session = self._live_link_session(ingress_peer_key, incoming_link)
+         if (
+             current_session != incoming_link.session_id
+             or incoming_link.expires_at <= now
+@@ -1850,7 +1883,7 @@ class PeerMeshRuntime:
+                 link for link in links.values()
+                 if {link.left, link.right} == {self.local_peer_id, next_id}
+             )
+-            current_session = self.secure_transport.link_session_id(next_record.public_key)
++            current_session = self._live_link_session(next_record.public_key, egress_link)
+             if (
+                 current_session != egress_link.session_id
+                 or egress_link.expires_at <= int(time.time())
+@@ -2014,7 +2047,7 @@ class PeerMeshRuntime:
+                 return await self.client.request(peer_key, method, payload, timeout=timeout)
+             record = self.record_store.get(remote_id, scope=router.scope)
+             link = router.link_between(self.local_peer_id, remote_id)
+-            tls_id = self.secure_transport.link_session_id(peer_key)
++            tls_id = self._live_link_session(peer_key, link)
+             # A link rides the TLS session it names. The handshake that opens a
+             # session cannot depend on one, or a link that outlived its sessions
+             # would refuse the very handshake that replaces it, on the relay too.
+diff --git a/plugins/hub/secure_conversation.py b/plugins/hub/secure_conversation.py
+index 575a88b..021efcf 100644
+--- a/plugins/hub/secure_conversation.py
++++ b/plugins/hub/secure_conversation.py
+@@ -11,6 +11,7 @@ from __future__ import annotations
+ 
+ import asyncio
+ import base64
++import contextvars
+ import hashlib
+ import json
+ import logging
+@@ -80,6 +81,10 @@ class SecureConversationTransport:
+         self._certificate = identity_certificate(bytes(self._identity_seed))
+         self._outbound: dict[tuple[str, str, str], _SessionState] = {}
+         self._inbound: dict[tuple[str, str, str, str], _SessionState] = {}
++        # The id of the session carrying the request being dispatched right now.
++        self._carrying: contextvars.ContextVar[str | None] = contextvars.ContextVar(
++            f"secure-carrying-session-{id(self)}", default=None
++        )
+         self._request_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+         self._remove_listener = client.add_peer_session_listener(
+             self._on_peer_session_event
+@@ -128,6 +133,38 @@ class SecureConversationTransport:
+         )
+         return min(candidates) if candidates else None
+ 
++    def live_link_session_ids(self, peer_key: str) -> set[str]:
++        """Ids of every established session with the peer, in either direction.
++
++        A node's half of a session can outlive the peer's half (the peer drops
++        its side after a failed request), so two nodes never agree on "the"
++        session by looking at their own tables; a link is checked by asking
++        whether the session it names is among these.
++        """
++        binding = self._current_binding(peer_key)
++        ids = {
++            state.link_session_id
++            for key, state in self._outbound.items()
++            if key == binding and state.tls.established and state.link_session_id
++        }
++        ids.update(
++            state.link_session_id
++            for key, state in self._inbound.items()
++            if key[:3] == binding and state.tls.established and state.link_session_id
++        )
++        return ids
++
++    def outbound_link_session_id(self, peer_key: str) -> str | None:
++        """The id of this node's own established session to the peer, if any."""
++        state = self._outbound.get(self._current_binding(peer_key))
++        if state is None or not state.tls.established or not state.link_session_id:
++            return None
++        return state.link_session_id
++
++    def carrying_link_session_id(self) -> str | None:
++        """The id of the inbound session that carried the request being handled."""
++        return self._carrying.get()
++
+     def identity_response(self, peer_key: str, payload: dict) -> dict:
+         self._current_binding(peer_key)
+         if payload != {}:
+@@ -329,9 +366,13 @@ class SecureConversationTransport:
+                         if update.packet is not None:
+                             # Keep TLS control output ordered before the response.
+                             packets = [update.packet]
+-                        result = await self._dispatch_secure_request(
+-                            peer_key, request, dispatch
+-                        )
++                        carrying = self._carrying.set(state.link_session_id or None)
++                        try:
++                            result = await self._dispatch_secure_request(
++                                peer_key, request, dispatch
++                            )
++                        finally:
++                            self._carrying.reset(carrying)
+                         response_raw = _encode_frame({"v": 1, "result": result})
+                         if len(response_raw) > MAX_SECURE_CHUNK_BYTES:
+                             raise SecureSessionError(
