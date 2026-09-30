@@ -72,6 +72,12 @@ class _Aiohttp:
         return getattr(aiohttp, name)
 
 
+@pytest.fixture(autouse=True)
+def _home_in_tmp(tmp_path, monkeypatch):
+    # `/connect leave` deletes the managed-config record under ~/.kollab.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
 @pytest_asyncio.fixture
 async def relay(monkeypatch):
     monkeypatch.setattr(service, "ENROLLMENT_RATE_LIMIT", 1000)

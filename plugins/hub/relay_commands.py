@@ -841,14 +841,13 @@ class RelayCommands:
                 origin.removeprefix("https://")
             ):
                 return f"connect: this device is not on {rest}"
-            inviter = self.client.state.inviter
             sync_links = getattr(self.agent_bridge, "sync_links", None)
             if callable(sync_links):
                 await sync_links(force=True, keys=[])  # while still connected
             await self.client.leave()
-            if inviter:
-                # The synced settings stay, as this device's own from now on.
-                clear_managed_config(primary_key=inviter)
+            # The synced settings stay, as this device's own from now on. Rotate
+            # blanks the inviter, so clear the record whoever set it.
+            clear_managed_config()
             return "left the network; this device can join another with a code"
         if head == "rotate":
             origin = self.client.state.origin

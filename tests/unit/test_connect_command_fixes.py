@@ -14,6 +14,11 @@ from unittest.mock import AsyncMock
 import pytest
 from nacl.signing import SigningKey
 
+from kollabor_config.managed_config import (
+    ManagedConfig,
+    read_managed_config,
+    write_managed_config,
+)
 from plugins.hub.device_names import key_label
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_commands import NO_NETWORK, offline_device_names
@@ -21,6 +26,13 @@ from plugins.hub.relay_state import RelayStateStore
 from tests.unit.test_hub_network_surface import _relay_commands
 
 KEY = SigningKey.generate().verify_key.encode().hex()
+
+
+@pytest.fixture(autouse=True)
+def _home_in_tmp(tmp_path, monkeypatch):
+    # `/connect leave` and `revoke` delete the managed-config record under
+    # ~/.kollab; no test here may reach the real one.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 def _row(name, fingerprint, receipt):
@@ -211,6 +223,20 @@ async def test_leave_with_a_domain_only_leaves_that_network(tmp_path):
 
     assert left.startswith("left the network")
     assert commands.client.state.origin == ""
+
+
+@pytest.mark.asyncio
+async def test_leave_after_a_rotate_still_ends_the_old_primarys_say_over_settings(tmp_path):
+    bridge = SimpleNamespace(remote_agents=lambda: [], trust_level=lambda: "open")
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    commands.client.state.inviter = KEY
+    write_managed_config(ManagedConfig(primary_key=KEY, primary_name="mac-kollab"))
+    commands.client.rotate_room()  # blanks the inviter
+    assert commands.client.state.inviter == ""
+
+    await commands._run("leave", source_agent=None)
+
+    assert read_managed_config() is None
 
 
 # ------------------------------------------------------------ status labels
