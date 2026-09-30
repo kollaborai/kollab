@@ -372,6 +372,7 @@ class AgentSocketServer:
         # is an opaque, authenticated peer carrier frame. No Hub message or
         # model hook is involved in this callback.
         self._peer_forward_handler: Optional[Callable[..., Any]] = None
+        self._peer_secure_handler: Optional[Callable[..., Any]] = None
         self._peer_forward_semaphore = asyncio.Semaphore(
             REMOTE_PEER_FORWARD_MAX_CONCURRENCY
         )
@@ -889,6 +890,19 @@ class AgentSocketServer:
             raise TypeError("peer forward handler must be callable")
         self._peer_forward_handler = handler
 
+    def set_peer_secure_handler(
+        self, handler: Optional[Callable[[str, str, str, dict], Any]]
+    ) -> None:
+        """Install the direct secure-record handler for authenticated TLS peers.
+
+        Same boundary as ``set_peer_forward_handler``: called only for a peer
+        verified by the remote Ed25519 handshake, with the record method and
+        payload, and never for Unix/local operator requests.
+        """
+        if handler is not None and not callable(handler):
+            raise TypeError("peer secure handler must be callable")
+        self._peer_secure_handler = handler
+
     def _allow_peer_forward_rate(self, public_key: str) -> bool:
         minute = int(time.monotonic() // 60)
         if minute != self._peer_forward_rate_minute:
@@ -1132,6 +1146,7 @@ class AgentSocketServer:
                     "message",
                     "ping",
                     "peer_forward",
+                    "peer_secure",
                 )
                 local_admin = not require_auth and action not in ("message", "ping")
                 if remote_admin or (local_admin and not local_operator):
@@ -1202,18 +1217,31 @@ class AgentSocketServer:
                     writer.write(ack.encode())
                     await writer.drain()
 
-                elif action == "peer_forward":
-                    # This route is only for a TLS-authenticated peer. It
-                    # bypasses Hub message hooks, task admission and RPC.
-                    handler = self._peer_forward_handler
+                elif action in ("peer_forward", "peer_secure"):
+                    # These routes are only for a TLS-authenticated peer. They
+                    # bypass Hub message hooks, task admission and RPC.
+                    # peer_forward carries a routed frame; peer_secure carries
+                    # the end-to-end TLS records that bootstrap a direct link.
+                    if action == "peer_forward":
+                        handler = self._peer_forward_handler
+                        fields = {"action", "frame"}
+                        carried = (msg_data.get("frame"),)
+                        well_formed = isinstance(carried[0], dict)
+                    else:
+                        handler = self._peer_secure_handler
+                        fields = {"action", "method", "payload"}
+                        carried = (msg_data.get("method"), msg_data.get("payload"))
+                        well_formed = carried[0] in (
+                            "secure_identity",
+                            "secure_packet",
+                        ) and isinstance(carried[1], dict)
                     ssl_object = writer.get_extra_info("ssl_object")
-                    frame = msg_data.get("frame")
                     if (
                         not require_auth
                         or ssl_object is None
                         or handler is None
-                        or set(msg_data) != {"action", "frame"}
-                        or not isinstance(frame, dict)
+                        or set(msg_data) != fields
+                        or not well_formed
                         or not self._allow_peer_forward_rate(authenticated_public_key)
                     ):
                         writer.write(
@@ -1227,14 +1255,14 @@ class AgentSocketServer:
                                 result = handler(
                                     authenticated_as,
                                     authenticated_public_key,
-                                    frame,
+                                    *carried,
                                 )
                                 if inspect.isawaitable(result):
                                     result = await result
                         if not isinstance(result, dict):
                             raise ValueError("invalid peer forward response")
                         response_line = json.dumps(
-                            {"type": "peer_forward_result", "response": result},
+                            {"type": f"{action}_result", "response": result},
                             separators=(",", ":"),
                         ).encode("utf-8") + b"\n"
                         if len(response_line) > REMOTE_PEER_FORWARD_MAX_FRAME_BYTES:

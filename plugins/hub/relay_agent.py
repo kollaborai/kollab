@@ -665,6 +665,9 @@ class RelayAgentBridge:
                     socket_server.set_peer_forward_handler(
                         self.peer_mesh.handle_direct_forward
                     )
+                    socket_server.set_peer_secure_handler(
+                        self.peer_mesh.handle_direct_secure
+                    )
             except Exception:
                 # Peer routing is opt-in and may not prevent existing relay
                 # messaging from starting if its local endpoint is unavailable.
@@ -696,6 +699,7 @@ class RelayAgentBridge:
         socket_server = getattr(self.plugin, "_socket_server", None)
         if socket_server is not None:
             socket_server.set_peer_forward_handler(None)
+            socket_server.set_peer_secure_handler(None)
         if self.peer_mesh is not None:
             await self.peer_mesh.close()
             self.peer_mesh = None

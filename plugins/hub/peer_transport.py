@@ -785,6 +785,46 @@ class PeerMeshRuntime:
             raise TransientPeerDeliveryError("direct peer transport is disabled")
         if self._direct_sender is not None:
             return await self._direct_sender(peer_key, frame, timeout=timeout)
+        return await self._direct_request(
+            peer_key,
+            {"action": "peer_forward", "frame": frame},
+            "peer_forward_result",
+            timeout=timeout,
+        )
+
+    async def _send_direct_secure(
+        self,
+        peer_key: str,
+        method: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Carry one end-to-end TLS record to a locator-authenticated peer.
+
+        This bootstraps a link with a peer outside the relay room: the
+        endpoint handshake authenticates the peer, its signed locator binds
+        that endpoint to the approved relay key, and the payload stays the
+        opaque TLS record the secure transport would send over the relay.
+        """
+        if not self.direct_enabled or self.endpoint_identity_manager is None:
+            raise TransientPeerDeliveryError("direct peer transport is disabled")
+        return await self._direct_request(
+            peer_key,
+            {"action": "peer_secure", "method": method, "payload": payload},
+            "peer_secure_result",
+            timeout=timeout,
+        )
+
+    async def _direct_request(
+        self,
+        peer_key: str,
+        request: dict[str, Any],
+        result_type: str,
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """One authenticated request/response line over the peer's direct endpoint."""
         locator = self._locator_for_peer(peer_key)
         if locator is None:
             raise TransientPeerDeliveryError("direct peer locator is unavailable")
@@ -800,7 +840,7 @@ class PeerMeshRuntime:
             raise TransientPeerDeliveryError("direct peer transport is unavailable") from exc
         host, port, addresses = await self._resolve_direct_endpoint(locator["endpoint"])
         ssl_context = build_client_ssl_context(self.endpoint_tls_ca)
-        request_line = rfc8785.dumps({"action": "peer_forward", "frame": frame}) + b"\n"
+        request_line = rfc8785.dumps(request) + b"\n"
         if len(request_line) > REMOTE_PEER_FORWARD_MAX_FRAME_BYTES:
             raise PeerRouteError("direct peer frame exceeds its transport bound")
         last_error: Exception | None = None
@@ -844,7 +884,7 @@ class PeerMeshRuntime:
                 if (
                     not isinstance(response, dict)
                     or set(response) != {"type", "response"}
-                    or response.get("type") != "peer_forward_result"
+                    or response.get("type") != result_type
                     or not isinstance(response.get("response"), dict)
                 ):
                     raise TransientPeerDeliveryError("direct peer returned an invalid response")
@@ -1035,7 +1075,16 @@ class PeerMeshRuntime:
                 peer["key"]
                 for peer in self.client.peers()
                 if peer.get("approved") and peer["key"] not in strangers
-            ][:MAX_PEER_EXCHANGE_RECORDS]
+            ]
+            if self.direct_enabled:
+                peers += [
+                    key
+                    for key in sorted(self.client.state.approvals)
+                    if key not in peers
+                    and key not in strangers
+                    and self._locator_for_peer(key) is not None
+                ]
+            peers = peers[:MAX_PEER_EXCHANGE_RECORDS]
             if peers:
                 await asyncio.gather(
                     *(self.exchange_peer(peer) for peer in peers),
@@ -1586,9 +1635,7 @@ class PeerMeshRuntime:
             router.add_link(link, now=now)
         return envelope, route, trace, records, links, expected_local_index
 
-    async def handle_direct_forward(
-        self, designation: str, endpoint_public_key: str, frame: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _direct_caller(self, designation: str, endpoint_public_key: str) -> str:
         """Map a current endpoint-authenticated caller to its approved relay key."""
         candidates = [
             self._locator_for_peer(peer_key)
@@ -1603,7 +1650,32 @@ class PeerMeshRuntime:
         ]
         if len(matches) != 1:
             raise PeerRouteError("direct peer identity is not bound to one approved relay")
-        return await self.handle_forward(matches[0]["relay_public_key"], frame)
+        return matches[0]["relay_public_key"]
+
+    async def handle_direct_forward(
+        self, designation: str, endpoint_public_key: str, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self.handle_forward(
+            self._direct_caller(designation, endpoint_public_key), frame
+        )
+
+    async def handle_direct_secure(
+        self,
+        designation: str,
+        endpoint_public_key: str,
+        method: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Deliver a direct TLS record exactly as a relay-carried one."""
+        if self._closed or not self.direct_enabled:
+            raise PeerRouteError("direct peer transport is disabled")
+        if method not in {"secure_identity", "secure_packet"} or not isinstance(payload, dict):
+            raise PeerRouteError("direct carrier accepts only secure conversation records")
+        peer_key = self._direct_caller(designation, endpoint_public_key)
+        result = await self.application_handler(peer_key, method, payload)
+        if not isinstance(result, dict):
+            raise PeerRouteError("secure record handler returned an invalid response")
+        return result
 
     async def handle_forward(
         self, ingress_peer_key: str, frame: dict[str, Any]
@@ -1790,6 +1862,16 @@ class PeerMeshRuntime:
         direct = next((item for item in self.client.peers() if item["key"] == peer_key), None)
         router = self._ensure_router()
         remote_id = peer_id_for_key(peer_key)
+        if direct is None and self.direct_enabled and self._locator_for_peer(peer_key):
+            # A peer outside the relay room but reachable on its signed
+            # locator (LAN or configured endpoint) needs no route or link:
+            # this is how the first link to it is bootstrapped.
+            try:
+                return await self._send_direct_secure(
+                    peer_key, method, payload, timeout=timeout
+                )
+            except (TransientPeerDeliveryError, OSError, asyncio.TimeoutError):
+                pass
         if direct is None:
             record = self.record_store.get(remote_id, scope=router.scope)
             if record is None or not router.route_candidates(remote_id):
