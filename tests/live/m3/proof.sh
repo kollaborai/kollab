@@ -242,13 +242,21 @@ C_HANDLE=$B_SEES
 
 # ==================================================== c4: C runs without the relay ====
 say "c4: take C off the relay"
-stop_ws "$M3_C_SESSION" "$M3_C_WS" >/dev/null
-gone=0
-for _ in $(seq 1 12); do
+STOP_OUT=$(stop_ws "$M3_C_SESSION" "$M3_C_WS")
+record srv c4-00-after-stop "$(printf 'stop_ws said: %s\nkollab processes on the server right after:\n%s' "$STOP_OUT" "$(m1_ssh "ps -eo pid,etime,args | grep '[k]ollab'" | sed -E 's/[0-9a-f]{32,}/<hex>/g' | cut -c1-110)")"
+# A must stop listing C before C comes back without a relay, or a later listing proves nothing. With the stale-row drop
+# (DIRECTORY_STALE_SECONDS 45 + one 15 s beat) that takes about a minute; a build without it keeps the row until the
+# peer record's 300 s TTL ends, so M3_C4_WAIT=420 measures that. Default 150 s.
+gone=0; T_STOP=$(date +%s)
+while [ $(( $(date +%s) - T_STOP )) -lt "${M3_C4_WAIT:-150}" ]; do
   cmd mac "/connect status"; sleep 7
   if ! grep -qF "$C_HANDLE" <<<"$(latest_status mac)"; then gone=1; break; fi
 done
-[ "$gone" = 1 ] || abort c4-c-relayless "A still listed $C_HANDLE 84s after C was stopped, so a later listing would prove nothing"
+if [ "$gone" != 1 ]; then
+  record mac c4-00-still-listed "$(printf 'A status:\n%s' "$(latest_status mac)")"
+  abort c4-c-relayless "A still listed $C_HANDLE $(( $(date +%s) - T_STOP ))s after C was stopped, so a later listing would prove nothing" c4-00-still-listed.txt
+fi
+say "c4: A dropped $C_HANDLE $(( $(date +%s) - T_STOP ))s after C was stopped (stop_ws: $STOP_OUT)"
 srv_probe relayless "$M1_SRV_HOME/.kollab/network/$C_STATE_DIR" > "$EVID/c4-01-relayless.txt"
 launch_srv "$M3_C_SESSION" "$M3_C_WS" "--as $M3_C_AS"
 wait_ready c || abort c4-c-relayless "C's TUI showed nothing 90s after the restart"
