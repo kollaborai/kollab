@@ -2541,6 +2541,29 @@ async def test_conversation_numbers_are_stable_per_network_and_never_reused(
 
 
 @pytest.mark.asyncio
+async def test_authorize_says_when_the_request_expires_as_a_local_time(bridges):
+    import re
+
+    from plugins.hub.relay_agent import TASK_TIMEOUT
+
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    allow(left, right)
+    target = await handle(left, right)
+
+    before = time.time()
+    line = await left.command(f"authorize {target} Create proof.txt")
+    after = time.time()
+
+    shown = re.search(r"expires at (\d\d:\d\d);", line).group(1)
+    expected = {
+        time.strftime("%H:%M", time.localtime(moment + TASK_TIMEOUT))
+        for moment in (before, after)
+    }
+    assert shown in expected
+
+
+@pytest.mark.asyncio
 async def test_manual_commands_print_and_take_short_numbers(bridges):
     members, _ = bridges
     (left, *_), (right, *_) = members

@@ -2577,9 +2577,10 @@ class RelayAgentBridge:
             )
             number = self.number("request", grant["id"])
             if head == "authorize":
+                until = time.strftime("%H:%M", time.localtime(int(grant["expires"])))
                 return (
                     f"communication authorized: request {number}; "
-                    f"expires at {grant['expires']}; recipient {handle}"
+                    f"expires at {until}; recipient {handle}"
                 )
             receipt = await self.send(
                 target,
