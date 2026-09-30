@@ -438,6 +438,24 @@ def test_the_real_command_serves_and_a_restart_keeps_the_identity(tmp_path):
     assert (tmp_path / ".kollab" / "relay" / domain.replace(":", "-") / "service.key").exists()
 
 
+def test_stopping_the_command_takes_the_relay_out_of_the_key_file(tmp_path, monkeypatch):
+    domain, port = f"localhost:{_free_port()}", _free_port()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    key_file = parse("--domain", domain, "--port", str(port)).key_file
+    env = {**os.environ, "HOME": str(tmp_path), "KOLLAB_NO_KEYRING": "1", "PYTHONUNBUFFERED": "1"}
+    command = [sys.executable, "kollabor_cli_main.py", "relay", "serve", "--domain", domain, "--port", str(port)]
+    process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+    try:
+        _read_until(process, "ready: relay up")
+        assert json.loads(key_file.read_text())["discovery"]["roles"] == ["rendezvous", "relay"]
+    finally:
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=30) == 0
+    stopped = json.loads(key_file.read_text())
+    assert stopped["discovery"]["roles"] == [] and "control" not in stopped["endpoints"]
+    verify_manifest(stopped, normalize_target(domain))
+
+
 def test_the_command_refuses_to_start_on_a_port_in_use(tmp_path):
     env = {**os.environ, "HOME": str(tmp_path), "KOLLAB_NO_KEYRING": "1"}
     command = [sys.executable, "kollabor_cli_main.py", "relay", "serve", "--domain", "localhost:9443"]

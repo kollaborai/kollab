@@ -299,10 +299,10 @@ def relay_ready(app: web.Application) -> bool:
     return state.ready and state.backend.is_ready and not state.shutting_down
 
 
-async def publish_once(app: web.Application) -> dict:
-    """Sign and write the document; it advertises the relay only while the relay is ready."""
+async def publish_once(app: web.Application, *, stopping: bool = False) -> dict:
+    """Sign and write the document; it advertises the relay only while the relay is ready and not stopping."""
     settings: Settings = app["settings"]
-    control = settings.origin + "/relay/v1" if relay_ready(app) else None
+    control = settings.origin + "/relay/v1" if relay_ready(app) and not stopping else None
     return await asyncio.to_thread(
         publish, settings.origin, settings.state_dir, settings.key_file, relay_control=control
     )
@@ -382,6 +382,10 @@ async def serve(settings: Settings, *, created: bool) -> None:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            try:  # a stopped relay must not stay named in the key file until it expires
+                await publish_once(app, stopping=True)
+            except Exception as exc:
+                say(f"publishing failed, the key file will name this relay for up to five minutes: {exc}")
         await runner.cleanup()
 
 
