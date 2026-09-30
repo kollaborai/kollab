@@ -26,6 +26,7 @@ from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
 from plugins.hub.device_names import key_label
 from plugins.hub.dns.discovery import DiscoveryResult
 from plugins.hub.plugin import CONNECT_OWNED_ELSEWHERE, HubPlugin, format_connect_help
+from plugins.hub.relay_agent import RelayAgentBridge
 from plugins.hub.relay_commands import RelayCommands
 
 from .test_relay_agent_bridge import (  # noqa: F401 - bridges is a fixture
@@ -361,3 +362,96 @@ async def test_manual_trust_events_show_name_and_number_never_ids_or_relay_addre
     assert surfaces["answer"].startswith(f"question {number} answered: ")
     leaks = {name: text for name, text in surfaces.items() if LEAK.search(text)}
     assert leaks == {}
+
+
+def _joins(commands) -> list:
+    return commands.agent_bridge.pending_enrollment_requests(source_agent="k1")
+
+
+@pytest.mark.asyncio
+async def test_arrivals_print_one_named_line_each_and_never_again(tmp_path):
+    commands = _commands(tmp_path)
+    lines = await commands.new_arrivals()
+    assert len(lines) == 3
+    assert set(lines) == {
+        "ana-laptop wants to join kollabor.ai. /connect to review",
+        "an unknown device wants to join kollabor.ai. /connect to review",
+        "stranger knocked. /connect knocks to review",
+    }
+    for line in lines:
+        assert not LEAK.search(line)
+        assert not re.search(r"4d04|9f2e|7a7a|1b1b", line)
+    assert await commands.new_arrivals() == []
+    assert await commands.new_arrivals() == []
+
+
+@pytest.mark.asyncio
+async def test_no_notice_while_the_connect_screen_polls_and_none_after_it_closes(
+    tmp_path, monkeypatch
+):
+    commands = _commands(tmp_path)
+    await commands.connect_snapshot()  # the Connect screen's poll
+    assert await commands.new_arrivals() == []
+    monkeypatch.setattr("plugins.hub.relay_commands.SCREEN_OPEN_SECONDS", 0.0)
+    assert await commands.new_arrivals() == []  # seen on screen, never announced later
+    _joins(commands).append(
+        SimpleNamespace(
+            enrollment_id="9" * 32,
+            device_name="ben-desktop",
+            device_key_fingerprint="9" * 64,
+            credential_categories=(),
+        )
+    )
+    assert await commands.new_arrivals() == [
+        "ben-desktop wants to join kollabor.ai. /connect to review"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_can_no_longer_be_decided_is_not_announced(tmp_path):
+    commands = _commands(tmp_path)
+    for row in _joins(commands):
+        row.decision_available = False
+    assert [line for line in await commands.new_arrivals() if "join" in line] == []
+
+
+@pytest.mark.asyncio
+async def test_a_knock_without_a_sealed_name_is_an_unknown_device_never_its_hex(tmp_path):
+    commands = _commands(tmp_path)
+    key = "d" * 64
+    stand_in = key_label(key)
+
+    async def unnamed(_domain):
+        return [PendingContactRequest("c" * 32, key, 0, PrivateMessage("hi"), stand_in)]
+
+    commands.pending_contact_requests = unnamed
+    lines = await commands.new_arrivals()
+    assert "an unknown device knocked. /connect knocks to review" in lines
+    assert not any(stand_in in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_the_relay_agent_shows_each_arrival_once_through_the_plugin(tmp_path):
+    shown = []
+    agent = SimpleNamespace(
+        commands=_commands(tmp_path),
+        plugin=SimpleNamespace(show_network_notice=shown.append),
+    )
+    await RelayAgentBridge._announce_arrivals(agent)
+    await RelayAgentBridge._announce_arrivals(agent)
+    assert len(shown) == 3
+
+
+def test_show_network_notice_is_one_system_line_on_the_message_coordinator():
+    shown = []
+    renderer = SimpleNamespace(
+        message_coordinator=SimpleNamespace(display_message_sequence=shown.append)
+    )
+    hub = HubPlugin.__new__(HubPlugin)
+    hub.event_bus = SimpleNamespace(
+        get_service=lambda name: renderer if name == "renderer" else None
+    )
+    hub.show_network_notice("ana-laptop knocked. /connect knocks to review")
+    assert shown == [
+        [("system", "ana-laptop knocked. /connect knocks to review", {"display_type": "info"})]
+    ]

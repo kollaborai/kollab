@@ -5026,6 +5026,19 @@ class HubPlugin(BasePlugin):
         finally:
             self._starting = False
 
+    def show_network_notice(self, text: str) -> None:
+        """One system line in the main pane; attached windows get it from the renderer."""
+        renderer = self.event_bus.get_service("renderer") if self.event_bus else None
+        coordinator = getattr(renderer, "message_coordinator", None)
+        if coordinator is None:
+            return
+        try:
+            coordinator.display_message_sequence(
+                [("system", text, {"display_type": "info"})]
+            )
+        except Exception:
+            logger.warning("network notice display failed")
+
     def _display_startup_status(
         self, renderer: Any, role: str, peers: List[AgentRuntime]
     ) -> None:

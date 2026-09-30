@@ -15,6 +15,7 @@ from kollabor_config.managed_config import clear_managed_config, read_managed_co
 
 from .device_names import (
     DEFAULT_TRUST,
+    NAME_RE,
     contact_route_hex,
     format_handle,
     key_label,
@@ -28,6 +29,8 @@ from .relay_state import RelayError
 
 KNOCK_COUNT_TTL_SECONDS = 15.0
 KNOCK_COUNT_TIMEOUT_SECONDS = 5.0
+# The Connect screen polls every 2s: a poll this recent means a human is looking.
+SCREEN_OPEN_SECONDS = 6.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +256,14 @@ def offline_device_names(agent_bridge, remote_rows: list, client) -> list[str]:
     return sorted(offline)
 
 
+
+def _arrival_name(name: str, key: str = "") -> str:
+    """A device name fit for the main pane: a valid one, never its hex stand-in."""
+    if not NAME_RE.fullmatch(name or "") or (key and name == key_label(key)):
+        return "an unknown device"
+    return name
+
+
 class RelayCommands:
     def __init__(
         self,
@@ -271,6 +282,11 @@ class RelayCommands:
         self._closed = False
         self._contact_manager = None
         self._knock_count_cache = (float("-inf"), 0)
+        self._knock_rows: tuple[tuple[str, str], ...] = ()
+        self._screen_polled = float("-inf")
+        # ponytail: ids of announced requests and knocks live for the process;
+        # human-scale volume, so no pruning.
+        self._announced: set[str] = set()
         # Public discovery pins remain separate from transport invitations.
         if state_dir is None:
             from .dns.storage import get_dns_dir
@@ -373,15 +389,57 @@ class RelayCommands:
             return count
         for row in rows:
             row.introduction.clear()
+        self._knock_rows = tuple(
+            (row.receipt_id, _arrival_name(row.device_name, row.sender_key))
+            for row in rows
+        )
         self._knock_count_cache = (now, len(rows))
         return len(rows)
 
-    async def connect_snapshot(self) -> ConnectSnapshot:
-        """The Connect screen's data: names and short fingerprints, never keys."""
+    def _domain_online(self) -> tuple[str, bool]:
         state = self.client.status()
         origin = state["origin"] or ""
         domain = origin[len("https://") :] if origin.startswith("https://") else origin
-        online = state.get("state") == "online"
+        return domain, state.get("state") == "online"
+
+    def screen_polled(self) -> None:
+        """A Connect or knock screen just loaded, so it shows what is pending."""
+        self._screen_polled = time.monotonic()
+
+    async def new_arrivals(self) -> list[str]:
+        """Main-pane lines for join requests and knocks not announced yet.
+
+        Names only. A request or knock is announced once, however often this
+        runs. While a Connect or knock screen is showing them live they are
+        marked seen and nothing is printed.
+        """
+        domain, online = self._domain_online()
+        network = self._network_name(domain) or "this network"
+        found = [
+            (
+                f"join:{getattr(row, 'enrollment_id', '')}",
+                f"{_arrival_name(getattr(row, 'device_name', ''))} wants to join "
+                f"{network}. /connect to review",
+            )
+            for row in self._pending_rows()
+            if getattr(row, "decision_available", True)
+        ]
+        if online and domain:
+            await self._knock_count(domain)
+            found += [
+                (f"knock:{receipt}", f"{name} knocked. /connect knocks to review")
+                for receipt, name in self._knock_rows
+            ]
+        fresh = [(key, line) for key, line in found if key not in self._announced]
+        self._announced.update(key for key, _ in fresh)
+        if time.monotonic() - self._screen_polled < SCREEN_OPEN_SECONDS:
+            return []
+        return [line for _, line in fresh]
+
+    async def connect_snapshot(self) -> ConnectSnapshot:
+        """The Connect screen's data: names and short fingerprints, never keys."""
+        self.screen_polled()
+        domain, online = self._domain_online()
         remote_rows = await self._remote_rows()
         requests = tuple(
             JoinRequestRow(

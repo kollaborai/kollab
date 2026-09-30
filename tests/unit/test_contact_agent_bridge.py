@@ -41,6 +41,9 @@ class _Commands:
         self.submissions.append((domain, recipient_key, introduction, device_name))
         return "a" * 32
 
+    def screen_polled(self) -> None:
+        pass
+
     async def pending_contact_requests(self, _domain):
         return [
             PendingContactRequest(

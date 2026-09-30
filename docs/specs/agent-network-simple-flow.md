@@ -201,6 +201,8 @@ code, a request and a decision all live in the window that runs the network.
 An attached window whose daemon lost the workspace to such a window gets the
 same screen, read from the daemon.
 
+The request also shows in the main pane, once, as `<device> wants to join <network>. /connect to review`, even when the Connect screen is closed (for example after `/connect code`'s private screen was closed). It names the device only, never a code, key, fingerprint or `relay:` address.
+
 ### Story 2: Marco asks his agent to have the server agent check the tunnel
 
 Mac, in chat with his agent lapis:
@@ -332,6 +334,8 @@ A stranger is not on the network: it gets no mesh records, is left out of
 with `trust agents`. A directory older than 0.11.0 has no link route: the
 knock and the accept still work and nothing is delivered between the two
 networks.
+
+A knock shows in the main pane, once, as `<device> knocked. /connect knocks to review`, even when neither the Connect screen nor the knock screen is open, and never while one of them is. It names the device only.
 
 ### Story 6: a company runs its own directory
 

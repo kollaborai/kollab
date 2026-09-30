@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 MAX_DIRECTORY = 64
 MAX_REMOTE_PEERS = 8
 TASK_TIMEOUT = 600
+ARRIVAL_POLL_SECONDS = 3.0
 # The directory forgets a device's consent after a day; repeating it well inside that.
 LINK_REFRESH_SECONDS = 6 * 60 * 60
 LINK_RETRY_SECONDS = 60
@@ -178,6 +179,8 @@ class RelayAgentBridge:
         self._cache = {}
         self._loop_task = None
         self._resume_task = None
+        self._arrivals_task = None
+        self._next_arrivals = 0.0
         self._closed = False
         self._human_until = 0.0
         self._pending_remote_cancellation: tuple[str, int] | None = None
@@ -706,17 +709,16 @@ class RelayAgentBridge:
         self._closed = True
         if self.active and not self.active.finished:
             await self._stop_active("interrupted", "receiving agent stopped")
-        for task in (self._loop_task, self._resume_task, self._directory_task):
+        tasks = (
+            self._loop_task,
+            self._resume_task,
+            self._directory_task,
+            self._arrivals_task,
+        )
+        for task in tasks:
             if task:
                 task.cancel()
-        await asyncio.gather(
-            *(
-                t
-                for t in (self._loop_task, self._resume_task, self._directory_task)
-                if t
-            ),
-            return_exceptions=True,
-        )
+        await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
         if self._enrollment_issuer is not None:
             await self._enrollment_issuer.close()
             self._enrollment_issuer = None
@@ -754,6 +756,12 @@ class RelayAgentBridge:
                             self._refresh_directory()
                         )
                         self._next_directory = time.monotonic() + 15
+                if self.commands and time.monotonic() >= self._next_arrivals:
+                    if self._arrivals_task is None or self._arrivals_task.done():
+                        self._arrivals_task = asyncio.create_task(
+                            self._announce_arrivals()
+                        )
+                        self._next_arrivals = time.monotonic() + ARRIVAL_POLL_SECONDS
                 if self.peer_mesh and time.monotonic() >= self._next_peer_refresh:
                     await self.peer_mesh.refresh()
                     self._next_peer_refresh = time.monotonic() + 15
@@ -767,6 +775,19 @@ class RelayAgentBridge:
                 # No content, state paths, tokens, or remote exception text.
                 logger.warning("relay agent processing temporarily unavailable")
             await asyncio.sleep(0.2)
+
+    async def _announce_arrivals(self):
+        """Tell the human in the main pane about a new join request or knock."""
+        commands = self.commands
+        show = getattr(self.plugin, "show_network_notice", None)
+        if commands is None or show is None:
+            return
+        try:
+            lines = await commands.new_arrivals()
+        except Exception:
+            return
+        for line in lines:
+            show(line)
 
     async def _refresh_directory(self):
         try:
@@ -1049,6 +1070,7 @@ class RelayAgentBridge:
             raise RelayError("invalid local contact inbox request")
         self._local_agent(params["agent_id"])
         try:
+            self.commands.screen_polled()
             requests = await self.commands.pending_contact_requests(params["domain"])
             if not isinstance(requests, list) or len(requests) > 32:
                 raise RelayError("contact inbox unavailable")

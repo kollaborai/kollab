@@ -198,7 +198,13 @@ async def test_connect_snapshot_counts_knocks_at_most_every_few_seconds(tmp_path
 
     async def pending(domain):
         calls.append(domain)
-        return [SimpleNamespace(introduction=_Introduction())] * 2
+        row = SimpleNamespace(
+            introduction=_Introduction(),
+            receipt_id="r",
+            sender_key="d" * 64,
+            device_name="ana",
+        )
+        return [row] * 2
 
     commands.pending_contact_requests = pending
 
