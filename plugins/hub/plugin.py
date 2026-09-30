@@ -19,7 +19,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env
 from kollabor.user_input_source import UserInputSource
@@ -105,6 +105,30 @@ STOP_GRACE_SECONDS = 1.5
 STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
+
+# A remote request's turn has ended once the model has been idle this long
+# (docs/specs/agent-network-simple-flow.md section 7). One request is dropped
+# when no turn came for it within the shell's own wait ceiling.
+_NET_TURN_SETTLE_SECONDS = 1.0
+_NET_TURN_MAX_SECONDS = 600.0
+# Carried by the end-of-turn frame; only the failed text is ever printed.
+_NET_TURN_DONE = "The receiving agent finished this request."
+_NET_TURN_FAILED = "The receiving agent could not complete this request."
+
+
+@dataclass
+class _NetworkTurn:
+    """The remote request whose turn this agent is running."""
+
+    handle: str  # agent@device that asked
+    thread_id: str
+    message_id: str
+    opened_at: float  # time.monotonic()
+    deferred: bool = False  # a chain was busy when it arrived; its turn is the next
+    skipped: bool = False  # no turn will come for it (acknowledgement, duplicate)
+    started: bool = False  # the model has been called since it arrived
+    idle_since: Optional[float] = None
+    replies: int = 0  # hub_msgs already sent on its thread
 
 # Three lists per the agent network constitution (docs/specs/agent-network-
 # simple-flow.md, section 6): the shown palette, the advanced (help all,
@@ -434,13 +458,14 @@ class HubPlugin(BasePlugin):
         self._connect_joins: Dict[str, "asyncio.Task"] = {}
         # CLI `kollab --hub msg agent@device` waiters (docs/specs/
         # agent-network-simple-flow.md, CLI bullet), keyed by the outbound
-        # HubMessage's thread_id. The thread id crosses the wire in the relay
-        # payload and the answering agent echoes it (see _network_requests),
-        # so a waiter resolves only on the reply to its own request.
-        self._cli_waiters: Dict[str, "asyncio.Future"] = {}
-        # Inbound network requests still owed an answer, per sender handle:
-        # [(received_at, thread_id, message_id)] oldest first.
-        self._network_requests: Dict[str, list] = {}
+        # HubMessage's thread_id, each an event queue: ("reply", from,
+        # content) for every message on that thread and ("end", replies,
+        # failed, text) when the far agent's turn ends. The thread id crosses
+        # the wire in the relay payload and the answering turn echoes it (see
+        # _net_turn), so a waiter sees only the replies to its own request.
+        self._cli_waiters: Dict[str, "asyncio.Queue"] = {}
+        # The inbound remote request whose turn this agent is running.
+        self._net_turn: Optional[_NetworkTurn] = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
@@ -2608,30 +2633,115 @@ class HubPlugin(BasePlugin):
                 output=f"crystal_delete error: {e}",
             )
 
-    def _note_network_request(self, message: HubMessage) -> None:
-        """Record a remote request so this agent's answer can carry its thread."""
-        # __dict__: some tests build HubPlugin via __new__ without __init__.
-        owed = self.__dict__.setdefault("_network_requests", {})
-        queue = owed.setdefault(message.from_identity, [])
-        queue.append((time.time(), message.thread_id, message.id))
-        del queue[:-32]
+    def _open_network_turn(self, message: HubMessage, mode: str) -> None:
+        """Bind a delivered remote request to the turn that will handle it.
 
-    def _take_network_request(self, handle: str) -> Tuple[str, str]:
-        """(thread_id, message_id) of the oldest request from ``handle`` still
-        owed an answer, or ("", "") when this message answers nothing.
-
-        Agents answer in the order they were asked, so the oldest request is the
-        one being answered; each request is answered once, and one older than
-        the CLI wait ceiling (600 s) is dropped rather than matched.
+        Every hub_msg from that turn to the requester goes on this request's
+        thread (the model never sees thread ids), and the request stays open
+        until the turn ends: `settle_network_turn` then sends the requester the
+        end-of-turn frame. ``mode`` is the wake decision: a request that starts
+        no turn (an acknowledgement, a duplicate) ends at once, and one that
+        found the model busy waits for that chain to finish first. The relay
+        delivers one request at a time (`network_turn_open`), so a second
+        request never finds one open.
         """
-        queue = self.__dict__.setdefault("_network_requests", {}).get(handle) or []
-        cutoff = time.time() - 600
-        while queue and queue[0][0] < cutoff:
-            queue.pop(0)
-        if not queue:
-            return "", ""
-        _, thread_id, message_id = queue.pop(0)
-        return thread_id, message_id
+        self._net_turn = _NetworkTurn(
+            handle=message.from_identity,
+            thread_id=message.thread_id,
+            message_id=message.id,
+            opened_at=time.monotonic(),
+            deferred=mode == "buffer",
+            skipped=mode not in ("wake", "buffer"),
+        )
+
+    def _network_answering(self, handle: str) -> Optional["_NetworkTurn"]:
+        """The open request from ``handle`` this turn is handling, if any."""
+        # getattr: some tests build HubPlugin via __new__ without __init__.
+        turn = getattr(self, "_net_turn", None)
+        return turn if turn is not None and turn.handle == handle else None
+
+    def network_turn_open(self) -> bool:
+        """True while a delivered remote request's turn has not ended."""
+        return getattr(self, "_net_turn", None) is not None
+
+    async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
+        """End the open request once the turn that handled it is over.
+
+        Called on every relay tick. The turn is over when the model has run
+        since the request arrived and has been idle for a settle interval (a
+        hand-off between a hub chain and the user queue is not an end). The
+        requester is then sent the end-of-turn frame: how many replies went on
+        its thread and whether the turn failed. The runtime sends it, never the
+        model.
+        """
+        turn = getattr(self, "_net_turn", None)
+        if turn is None:
+            return
+        now = time.monotonic() if now is None else now
+        busy = bool(getattr(llm, "is_processing", False))
+        if turn.skipped:
+            pass
+        elif turn.deferred:
+            # A chain already running when the request arrived is not the
+            # request's turn; the next one is.
+            turn.deferred = busy
+            return
+        elif busy:
+            turn.idle_since = None
+            return
+        elif not turn.started:
+            if now - turn.opened_at > _NET_TURN_MAX_SECONDS:
+                # No turn ever came for it and the shell has stopped waiting.
+                self._net_turn = None
+            return
+        elif turn.idle_since is None:
+            turn.idle_since = now
+            return
+        elif now - turn.idle_since < _NET_TURN_SETTLE_SECONDS:
+            return
+        # The queue processor keeps the last provider/turn error until the
+        # next model call clears it, so the one from this chain is still here.
+        error = getattr(getattr(llm, "_queue_processor", None), "last_turn_error", None)
+        await self._end_network_turn(turn, failed=bool(error) and not turn.skipped)
+
+    async def _end_network_turn(self, turn: "_NetworkTurn", *, failed: bool) -> None:
+        """Close ``turn`` and tell its requester, on the request's thread."""
+        from .relay_conversations import MAX_TURN_REPLIES
+
+        self._net_turn = None
+        end = HubMessage(
+            action="message",
+            from_agent=(self._identity.agent_id if self._identity else ""),
+            from_identity=(self._identity.identity if self._identity else ""),
+            to=turn.handle,
+            content=_NET_TURN_FAILED if failed else _NET_TURN_DONE,
+            scope=MessageScope.DIRECT.value,
+            thread_id=turn.thread_id,
+            reply_to=turn.message_id,
+            metadata={
+                "turn_end": {
+                    "replies": min(turn.replies, MAX_TURN_REPLIES),
+                    "failed": failed,
+                }
+            },
+        )
+        try:
+            rejections = await self._route_message(end)
+        except Exception as exc:
+            logger.debug("network turn end for %s was not sent: %s", turn.handle, exc)
+            return
+        if rejections:
+            logger.debug("network turn end for %s refused: %s", turn.handle, rejections)
+
+    def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:
+        """The far agent's turn on our request ended: settle whoever waits on it.
+
+        Only a shell (`kollab --hub msg`) waits; an agent that asked simply
+        gets no end frame on its screen or in its model.
+        """
+        waiter = (getattr(self, "_cli_waiters", None) or {}).get(thread_id)
+        if waiter is not None:
+            waiter.put_nowait(("end", end["replies"], end["failed"], text))
 
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
@@ -2785,9 +2895,20 @@ class HubPlugin(BasePlugin):
         if handle:
             target = format_handle(*handle)
 
-        # Dedup
+        # A message to the agent whose request this turn is handling is a reply
+        # on that request's thread, whatever else that agent asked meanwhile.
+        answering = (
+            self._network_answering(target)
+            if handle and not thread_id and not reply_to
+            else None
+        )
+
+        # Dedup. The same words on another request's thread are another reply.
         dedup_window = 120
-        msg_hash = hashlib.md5(f"{target}:{content}".encode()).hexdigest()
+        msg_hash = hashlib.md5(
+            f"{target}:{content}"
+            f"{':' + answering.thread_id if answering else ''}".encode()
+        ).hexdigest()
         now = time.time()
         self._recent_hub_msgs = {
             k: v for k, v in self._recent_hub_msgs.items() if now - v < dedup_window
@@ -2817,12 +2938,12 @@ class HubPlugin(BasePlugin):
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
         if handle:
-            # A remote agent answers on the thread of the request it received,
-            # so the asker (a CLI waiter, another agent) can tell whose answer
-            # this is. The model never sees thread ids, so the runtime supplies
-            # them.
-            if not thread_id and not reply_to:
-                thread_id, reply_to = self._take_network_request(target)
+            # A remote agent answers on the thread of the request its turn is
+            # handling, so the asker (a CLI waiter, another agent) can tell
+            # whose answer this is. The model never sees thread ids, so the
+            # runtime supplies them.
+            if answering is not None:
+                thread_id, reply_to = answering.thread_id, answering.message_id
         elif is_reply and self._active_thread_id:
             # <hub_reply> — inherit active thread from last received message
             thread_id = thread_id or self._active_thread_id
@@ -2944,6 +3065,8 @@ class HubPlugin(BasePlugin):
             # presence knows nothing of agent@device, so it cannot say the peer
             # is offline; the roster answers that.
             self._recent_hub_msgs[msg_hash] = now
+            if answering is not None:
+                answering.replies += 1
             output = f"sent to {target}"
             if not (thread_id or reply_to):
                 # A new request, not an answer on a received thread. The model
@@ -6533,6 +6656,12 @@ class HubPlugin(BasePlugin):
             # recipient's grant. Content heuristics must not strand an admitted
             # request merely because it says "thanks" or resembles old text.
             return HubWakeDecision("wake", True, "authorized remote conversation")
+        if message.thread_id in (getattr(self, "_cli_waiters", None) or {}):
+            # A reply to `kollab --hub msg` belongs to that shell, which has
+            # it. Waking the model to react would spend a turn on it, and the
+            # next reply would wait behind that turn (the relay delivers only
+            # while the model is idle).
+            return HubWakeDecision("observe", False, "answer to a shell request")
         if not is_intended:
             return HubWakeDecision("observe", False, "not intended")
         if is_human_elsewhere:
@@ -6783,29 +6912,27 @@ class HubPlugin(BasePlugin):
             while len(self._seen_messages) > 1000:
                 self._seen_messages.popitem(last=False)
 
-        # A request from a remote agent@device is owed an answer on its own
-        # thread; remember it so the reply carries that thread back.
-        if (
+        # A request from a remote agent@device (not a reply to ours) is handled
+        # by one turn, and that turn's replies go on this request's thread.
+        network_request = bool(
             message.action == "message"
             and not message.reply_to
             and (message.metadata or {}).get("network")
             and parse_handle(message.from_identity or "") is not None
-        ):
-            self._note_network_request(message)
+        )
 
-        # `kollab --hub msg agent@device` waiter: fulfil a pending CLI wait
-        # when the reply to that exact request arrives (same thread_id, echoed
-        # by the answering agent). Any other message from that agent -- an
-        # older answer, a late duplicate, unrelated chatter -- is not the
-        # answer. This never blocks or consumes the message: it still goes
-        # through the normal display and model path below. getattr: some tests
-        # construct HubPlugin via __new__ without running __init__, the same
-        # reason _relay_agent above is read with getattr.
+        # `kollab --hub msg agent@device` waiter: hand it every message on its
+        # own request's thread, in order (the answering turn echoes the thread
+        # id). Any other message from that agent -- an older answer, a late
+        # duplicate, unrelated chatter -- is on another thread and is not for
+        # it. This never blocks or consumes the message: it is still shown
+        # below, though it does not wake the model (see _decide_hub_wake).
+        # getattr: some tests construct HubPlugin via __new__ without running
+        # __init__, the same reason _relay_agent above is read with getattr.
         cli_waiters = getattr(self, "_cli_waiters", None)
-        if cli_waiters:
-            waiter = cli_waiters.pop(message.thread_id, None)
-            if waiter is not None and not waiter.done():
-                waiter.set_result((message.from_identity, message.content))
+        waiter = cli_waiters.get(message.thread_id) if cli_waiters else None
+        if waiter is not None:
+            waiter.put_nowait(("reply", message.from_identity, message.content))
 
         # Context control-plane traffic — dispatch without vault/display
         if message.action == "context_ledger_update":
@@ -7096,6 +7223,9 @@ class HubPlugin(BasePlugin):
                 is_human_elsewhere=is_human_elsewhere,
                 llm_service=llm_service,
             )
+            if network_request:
+                # Before the model can start: its turn is this request's turn.
+                self._open_network_turn(message, wake_decision.mode)
             if self._task_ledger and wake_decision.mode == "wake":
                 try:
                     self._task_ledger.resolve_reply(
@@ -7309,6 +7439,9 @@ class HubPlugin(BasePlugin):
                     )
             except Exception as e:
                 logger.error(f"Hub message trigger failed: {e}")
+        elif network_request:
+            # No model to run: nothing will handle it, so the shell must not wait.
+            self._open_network_turn(message, "observe")
 
     # Fallback colors when identity isn't in the gem pool
     _FALLBACK_COLORS = [
@@ -7722,6 +7855,9 @@ class HubPlugin(BasePlugin):
         """
         from .presence_states import PresenceState
 
+        turn = getattr(self, "_net_turn", None)
+        if turn is not None and not turn.deferred:
+            turn.started = True  # the model runs the open remote request's turn
         if self._identity:
             if self._identity.state != PresenceState.WAITING.value:
                 self._identity.state = AgentState.WORKING.value
@@ -8244,7 +8380,9 @@ class HubPlugin(BasePlugin):
                 if inspect.isawaitable(address):
                     address = await address
                 # The thread and reply ids travel in the relay payload so the
-                # receiver's answer can name the request it answers.
+                # receiver's answer can name the request it answers. The
+                # runtime's end-of-turn frame rides the same path.
+                turn_end = (message.metadata or {}).get("turn_end")
                 receipt = await send(
                     address,
                     message.content,
@@ -8257,6 +8395,7 @@ class HubPlugin(BasePlugin):
                     reply_to=(
                         message.reply_to if ID.fullmatch(message.reply_to or "") else ""
                     ),
+                    **({"turn_end": turn_end} if turn_end else {}),
                 )
             except RelayError as exc:
                 return [(message.to, str(exc))]
@@ -12290,19 +12429,22 @@ class HubPlugin(BasePlugin):
 
     async def _handle_network_send_request(
         self, to: str, content: str, wait_seconds: int
-    ) -> Dict[str, Any]:
-        """Answer the CLI's `network_send` socket request.
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Answer the CLI's `network_send` socket request, one frame at a time.
 
         docs/specs/agent-network-simple-flow.md, CLI bullet: deliver
         ``content`` to the ``agent@device`` handle ``to`` as an ordinary hub
         message (so it shows on this daemon's screen and the receiving
-        agent runs it with its own tools), then wait up to ``wait_seconds``
-        for that handle's first reply. ``wait_seconds <= 0`` returns right
-        after sending (``--no-wait``).
+        agent runs it with its own tools), then stream every reply on that
+        request's thread (`network_reply`, in order) until the far agent's
+        turn ends (`network_done`, or `error` when that turn failed) or
+        ``wait_seconds`` pass (`network_timeout`). ``wait_seconds <= 0``
+        returns right after sending (``--no-wait``).
         """
         handle = parse_handle(to)
         if handle is None:
-            return {"type": "error", "msg": f"not an agent@device handle: {to!r}"}
+            yield {"type": "error", "msg": f"not an agent@device handle: {to!r}"}
+            return
         handle_str = format_handle(*handle)
 
         relay = getattr(self, "_relay_agent", None)
@@ -12314,7 +12456,11 @@ class HubPlugin(BasePlugin):
             relay = getattr(self, "_relay_agent", None)
         resolve = getattr(relay, "resolve_handle", None)
         if relay is None or resolve is None:
-            return {"type": "error", "msg": "network messaging is not available on this build"}
+            yield {
+                "type": "error",
+                "msg": "network messaging is not available on this build",
+            }
+            return
 
         from .relay_state import RelayError
 
@@ -12323,7 +12469,8 @@ class HubPlugin(BasePlugin):
             if asyncio.iscoroutine(result):
                 await result
         except RelayError as exc:
-            return {"type": "error", "msg": str(exc)}
+            yield {"type": "error", "msg": str(exc)}
+            return
 
         msg = HubMessage(
             action="message",
@@ -12333,26 +12480,40 @@ class HubPlugin(BasePlugin):
             content=content,
             scope=MessageScope.DIRECT.value,
         )
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._cli_waiters[msg.thread_id] = future
+        events: asyncio.Queue = asyncio.Queue()
+        self._cli_waiters[msg.thread_id] = events
         try:
             rejections = await self._route_message(msg)
             self._display_outgoing_message(handle_str, content)
             if rejections:
-                return {"type": "error", "msg": rejections[0][1]}
+                yield {"type": "error", "msg": rejections[0][1]}
+                return
             if wait_seconds <= 0:
-                return {"type": "network_sent", "to": handle_str}
-            try:
-                from_identity, reply_content = await asyncio.wait_for(
-                    future, timeout=wait_seconds
-                )
-                return {
-                    "type": "network_reply",
-                    "from": from_identity,
-                    "content": reply_content,
-                }
-            except asyncio.TimeoutError:
-                return {"type": "network_timeout"}
+                yield {"type": "network_sent", "to": handle_str}
+                return
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + wait_seconds
+            replies = 0
+            end = None  # (replies the far turn sent, failed, text)
+            # Done only when the far turn has ended AND every reply it sent has
+            # come: an end frame can overtake a reply that had to be retried.
+            while end is None or replies < end[0]:
+                try:
+                    event = await asyncio.wait_for(
+                        events.get(), timeout=max(0.0, deadline - loop.time())
+                    )
+                except asyncio.TimeoutError:
+                    yield {"type": "network_timeout", "replies": replies}
+                    return
+                if event[0] == "reply":
+                    replies += 1
+                    yield {"type": "network_reply", "from": event[1], "content": event[2]}
+                else:
+                    end = event[1:]
+            if end[1]:
+                yield {"type": "error", "msg": end[2]}
+            else:
+                yield {"type": "network_done", "replies": replies}
         finally:
             self._cli_waiters.pop(msg.thread_id, None)
 

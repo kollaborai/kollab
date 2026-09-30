@@ -453,13 +453,29 @@ and the agent should end its turn unless it has other local work (no status chec
 no capture, no second message); an answer on a request the agent received stays
 plain `sent to <agent@device>`; `unknown agent@device: run /connect status to see who is online` when
 the roster does not list it; the receiving device's own reason when it refuses;
-`not sent again: ...` for an identical resend within two minutes. It never says
-a rostered peer is offline, so the model has no reason to resend. The message's
-thread id travels in the relay payload and the answering agent's `hub_msg` to
-that handle carries it back (oldest unanswered request first, each answered
-once). `kollab --hub msg` resolves only on the message on its own request's
-thread, so an older or duplicate answer from the same agent is never printed as
-the answer to a newer request.
+`not sent again: ...` for an identical resend within two minutes on the same
+thread. It never says a rostered peer is offline, so the model has no reason to
+resend.
+
+Which request a reply answers. The message's thread id travels in the relay
+payload. A reply belongs to the request that woke the turn that sends it: when a
+delivered request starts an agent turn, the runtime binds that request to the
+turn, and every `hub_msg` from the turn to the requester goes on that request's
+thread (the model never sees or types a thread id). The request stays open until
+the turn ends, so an interim message ("on it") and the answer both land on its
+thread. The relay hands the model one request at a time, in arrival order, so a
+turn never holds two and two overlapping requests from one requester never cross.
+When the turn ends the runtime, never the model, sends the requester an
+end-of-turn frame on the thread: how many replies the turn sent and whether it
+failed. No screen shows the frame and no model receives it. `kollab --hub msg`
+prints every message on its own request's thread as it arrives, in order, and
+exits 0 once the frame arrives and every reply it counts has come; it exits 1
+with the error when the turn failed, and after its 600 s wait with `no reply
+from <agent@device> within 600 s` (or `did not finish within 600 s` if replies
+had come). A request that starts no turn (an acknowledgement) ends at once
+with no reply. An older, later or duplicate answer from the same agent is never
+printed as the answer to a newer request, and a reply to a shell request does
+not wake the asking agent's model.
 
 ## 8. The join code
 

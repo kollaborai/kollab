@@ -46,6 +46,7 @@ already has state. For another run: `mkdir ~/kollab-m1-mac2`, then
 - `s1-*` Mac shows a join code, server takes it in the private form, Mac sees `<server-device> wants to join`, accepts, both `/connect status` list `agent@device` for the other side.
 - `s2-agent-to-agent` reply arrives from `agent@device`, carries `uname -n` / `uptime` content, and the server log shows a new shell tool run (`Tool execution completed: [SUCCESS] terminal:`).
 - `s3-*` `kollab --hub msg agent@device "..."` from a plain shell prints a reply and exits 0, again under `env -i`, and the server ran its shell twice.
+- `s3-overlap` two `kollab --hub msg` calls to the same server agent at once (a hostname ask and a disk ask): both exit 0 once the server's turn for their own request ends, the hostname shell prints the hostname and nothing that reads like a disk report, the disk shell prints a disk report, and the server ran its shell twice more. A crossed answer or a shell that never sees its turn end fails the row.
 - `s5-width-80` no line wider than 80 on the Connect screen and `/connect status`, both hosts.
 - `z1-panes-clean`, `z2-log-*`: on every captured pane and both kollab logs, no join code, no 64-hex string, no `relay:` address, no `receipt`, and no `Traceback`, `ERROR`, `Failed executing`, `refus`, `denied`, `cannot`, `unknown subcommand`.
 

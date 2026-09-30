@@ -1620,16 +1620,33 @@ async def _handle_cli_hub(hub_args: list) -> None:
             if not asker:
                 print("no local agent online to reach the network")
                 sys.exit(1)
+            # Every reply on this request's thread is printed as it arrives;
+            # the remote turn ending is what ends the wait.
+            printed = 0
+
+            def show_reply(frame: dict) -> None:
+                nonlocal printed
+                printed += 1
+                print(f"{frame.get('from', target)}: {frame.get('content', '')}", flush=True)
+
             result = await AgentMessenger.request_network_send(
-                asker["socket_path"], target, content, wait_seconds=wait_seconds
+                asker["socket_path"],
+                target,
+                content,
+                wait_seconds=wait_seconds,
+                on_reply=show_reply,
             )
             rtype = result.get("type") if isinstance(result, dict) else None
-            if rtype == "network_reply":
-                print(f"{result.get('from', target)}: {result.get('content', '')}")
+            if rtype == "network_done":
+                if not printed:
+                    print(f"{target} finished without a reply")
             elif rtype == "network_sent":
                 print(f"sent to {result.get('to', target)}")
             elif rtype == "network_timeout":
-                print(f"no reply from {target} within {wait_seconds} s")
+                if printed:
+                    print(f"{target} did not finish within {wait_seconds} s")
+                else:
+                    print(f"no reply from {target} within {wait_seconds} s")
                 sys.exit(1)
             else:
                 print((result or {}).get("msg") or "network message failed")

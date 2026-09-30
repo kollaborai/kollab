@@ -364,8 +364,9 @@ story3() { # story3 <step> <evidence-name> <ask> <env-prefix...>; runs in the Ma
   elif ! grep -Eqi 'avail|free|disk|used' <<<"$out" || ! grep -Eq '[0-9]' <<<"$out"; then rec "$step" FAIL "$name.txt" "the printed reply is not a disk report (a stale or unrelated reply?): $(head -c 160 <<<"$out" | tr '\n' ' ')"
   else rec "$step" PASS "$name.txt" "exit 0, disk report printed"; fi
 }
-# Let the Story 2 conversation finish first: the CLI prints the next reply from the agent, so an
-# overlapping earlier request would answer Story 3's message with the wrong text.
+# Let the Story 2 conversation finish first so the runs below start from a quiet pair of agents. (A
+# reply is matched to its own request by thread, so an overlapping earlier request can no longer
+# answer Story 3's message; the s3-overlap step below runs exactly that overlap on purpose.)
 say "waiting for both agents to go quiet before Story 3"
 q_end=$(( $(date +%s) + 300 )); q_last=-1; q_stable=0
 while [ "$(date +%s)" -lt "$q_end" ]; do
@@ -381,6 +382,41 @@ SHELL3=$(shell_ok srv "$SRV_LOG0")
 sleep 5; cap mac s3-03-mac-pane; cap srv s3-04-srv-pane
 if [ "${SHELL3:-0}" -ge $((${SHELL2:-0} + 2)) ]; then rec s3-server-ran-its-shell PASS s3-04-srv-pane.txt "server shell runs $SHELL2 -> $SHELL3"
 else rec s3-server-ran-its-shell FAIL s3-04-srv-pane.txt "expected 2 new server shell runs, saw $SHELL2 -> $SHELL3"; fi
+
+# Overlap: two shells at once to the same remote agent (two cron jobs, or a cron job and an agent).
+# The far agent takes one request at a time; each shell must print only its own request's replies
+# and exit 0 once that request's turn ends. The asks have different kinds of answer, so a crossed
+# reply shows: A must print the hostname and nothing that reads like a disk report, B the reverse.
+say "Story 3 overlap: two shells at once to $REMOTE"
+ASK_HOST="run uname -n and reply with only the hostname"
+ASK_DISK="report the free disk space on / in one line"
+OV_A=$(mktemp); OV_B=$(mktemp)
+overlap_shell() { # overlap_shell <outfile> <ask>; exit code lands in <outfile>.rc
+  local out=$1 ask=$2 rc=0
+  (cd "$M1_MAC_WS" && run_limited 300 env KOLLAB_NO_KEYRING=1 "$KOLLAB" --hub msg "$REMOTE" "$ask" >"$out" 2>&1) || rc=$?
+  printf '%s' "$rc" >"$out.rc"
+}
+overlap_shell "$OV_A" "$ASK_HOST" & OV_PID_A=$!
+overlap_shell "$OV_B" "$ASK_DISK" & OV_PID_B=$!
+wait "$OV_PID_A" "$OV_PID_B" || true
+OV_RC_A=$(cat "$OV_A.rc" 2>/dev/null || echo missing); OV_RC_B=$(cat "$OV_B.rc" 2>/dev/null || echo missing)
+OV_OUT_A=$(cat "$OV_A"); OV_OUT_B=$(cat "$OV_B")
+rm -f "$OV_A" "$OV_A.rc" "$OV_B" "$OV_B.rc"
+record mac s3-05-overlap-host "$(printf 'exit=%s\n%s' "$OV_RC_A" "$OV_OUT_A")"
+record mac s3-06-overlap-disk "$(printf 'exit=%s\n%s' "$OV_RC_B" "$OV_OUT_B")"
+SHELL4=$(shell_ok srv "$SRV_LOG0")
+DISKISH='avail|free|disk|used'
+if [ "$OV_RC_A" != 0 ] || [ "$OV_RC_B" != 0 ]; then
+  rec s3-overlap FAIL s3-05-overlap-host.txt "exit codes host=$OV_RC_A disk=$OV_RC_B (expected 0 and 0; a shell that never saw its turn end waits out its 300s limit)"
+elif ! grep -Fqi -- "$SRV_HOSTNAME" <<<"$OV_OUT_A" || grep -Eqi -- "$DISKISH" <<<"$OV_OUT_A"; then
+  rec s3-overlap FAIL s3-05-overlap-host.txt "the hostname shell did not print only its own answer (crossed with the disk request?): $(head -c 160 <<<"$OV_OUT_A" | tr '\n' ' ')"
+elif ! grep -Eqi -- "$DISKISH" <<<"$OV_OUT_B" || ! grep -Eq '[0-9]' <<<"$OV_OUT_B"; then
+  rec s3-overlap FAIL s3-06-overlap-disk.txt "the disk shell did not print its own answer (crossed with the hostname request?): $(head -c 160 <<<"$OV_OUT_B" | tr '\n' ' ')"
+elif [ "${SHELL4:-0}" -lt $((${SHELL3:-0} + 2)) ]; then
+  rec s3-overlap FAIL s3-06-overlap-disk.txt "both shells printed sane answers but the server ran its shell fewer than 2 more times ($SHELL3 -> $SHELL4)"
+else
+  rec s3-overlap PASS s3-06-overlap-disk.txt "both shells exit 0, each printed its own answer; server shell runs $SHELL3 -> $SHELL4"
+fi
 
 # ============================================================ 80 columns ====
 say "80-column check of the Connect screen and /connect status on both hosts"

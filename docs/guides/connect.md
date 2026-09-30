@@ -30,7 +30,7 @@ Codes go only in that private form. If you type a code into a command or into ch
 Nothing to approve first. On the default trust level, every agent on every device you accepted can message every other, under the hub's own rules.
 
 - **Through your agent.** Tell it: "ask ops@alzan-prod-home to check the tunnel." It sends `<hub_msg to="ops@alzan-prod-home">…</hub_msg>`. The reply comes back as a hub message from `ops@alzan-prod-home`, and your agent picks it up.
-- **From a shell or cron.** `kollab --hub msg ops@alzan-prod-home "check the tunnel"` sends the message, waits for the reply, and prints it. `kollab --hub status` shows the network section.
+- **From a shell or cron.** `kollab --hub msg ops@alzan-prod-home "check the tunnel"` sends the message, prints each reply as it arrives (an "on it" first, then the answer), and exits 0 when that agent finishes its turn on your request. Several at once to one agent each print only their own replies. `kollab --hub status` shows the network section.
 - **Everyone sees it.** The other agents on the network observe the exchange, dimmed, the way the local hub shows messages between two other agents.
 
 Your agent's hub context lists the remote agents it can reach, so "who is online" is `/connect status` for you and a glance at the roster for it.

@@ -31,6 +31,9 @@ MAX_EVENTS = 2048
 MAX_OUTBOX = 1024
 MAX_ACTIVE = 64
 MAX_AGENT_ACTIVE = 8
+# Most replies a turn-end frame can announce; more than the receiving agent's
+# queue holds is not a real turn.
+MAX_TURN_REPLIES = 64
 MAX_GRANTS = 1024
 MAX_EXPECTATIONS = 1024
 MAX_OUTBOUND_GRANTS = 1024
@@ -115,7 +118,9 @@ def validate_message(
     # from_device is optional on the wire: a sender on this version always
     # includes it (docs/specs/agent-network-simple-flow.md §4); a receiver on
     # an older build has none, and the caller falls back to key_label(peer_key).
-    optional_fields = {"from_device"}
+    # turn_end marks the runtime's end-of-turn frame (never the model's): the
+    # far agent finished the turn that handled the request on this thread.
+    optional_fields = {"from_device", "turn_end"}
     if (
         not isinstance(payload, dict)
         or not fields <= set(payload)
@@ -127,6 +132,17 @@ def validate_message(
         or not NAME_RE.fullmatch(payload["from_device"])
     ):
         raise RelayError("invalid sender device")
+    if "turn_end" in payload:
+        end = payload["turn_end"]
+        if (
+            payload.get("kind") != "message"
+            or not isinstance(end, dict)
+            or set(end) != {"replies", "failed"}
+            or type(end["replies"]) is not int
+            or not 0 <= end["replies"] <= MAX_TURN_REPLIES
+            or type(end["failed"]) is not bool
+        ):
+            raise RelayError("invalid turn end")
     for name in ("id", "thread_id"):
         if not isinstance(payload[name], str) or not ID.fullmatch(payload[name]):
             raise RelayError("invalid conversation identifier")

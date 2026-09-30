@@ -177,7 +177,7 @@ async def test_an_answer_on_a_received_request_thread_stays_plain_sent_to():
         content="run uname",
         metadata={"network": {"kind": "relay"}},
     )
-    plugin._note_network_request(request)
+    plugin._open_network_turn(request, "wake")
 
     result = await plugin._handle_hub_msg_tool(_call(PEER, "alzan-prod"))
 
@@ -187,18 +187,22 @@ async def test_an_answer_on_a_received_request_thread_stays_plain_sent_to():
 
 
 @pytest.mark.asyncio
-async def test_the_answer_is_owed_once_so_the_next_message_is_a_new_request():
+async def test_a_follow_up_in_the_same_turn_is_still_an_answer_on_the_request_thread():
+    """The request stays open until its turn ends (test_hub_network_turns.py
+    covers the end): an interim message and the answer are both replies."""
     from plugins.hub.models import HubMessage
 
-    plugin, _ = _plugin(on_roster=[PEER])
-    plugin._note_network_request(
-        HubMessage(action="message", from_identity=PEER, to="koordinator", content="q")
+    plugin, sent = _plugin(on_roster=[PEER])
+    plugin._open_network_turn(
+        HubMessage(action="message", from_identity=PEER, to="koordinator", content="q"),
+        "wake",
     )
     answer = await plugin._handle_hub_msg_tool(_call(PEER, "the answer"))
     followup = await plugin._handle_hub_msg_tool(_call(PEER, "one more thing"))
 
-    assert answer.output == f"sent to {PEER}"
-    assert followup.output.startswith(f"sent to {PEER}; its reply arrives by itself")
+    assert answer.output == followup.output == f"sent to {PEER}"
+    assert sent[0]["thread_id"] == sent[1]["thread_id"]
+    assert sent[0]["reply_to"] == sent[1]["reply_to"] != ""
 
 
 @pytest.mark.asyncio

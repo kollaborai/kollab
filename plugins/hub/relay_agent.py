@@ -1116,7 +1116,7 @@ class RelayAgentBridge:
     async def _rpc_send(self, params):
         if self.commands is None:
             raise RelayError("workspace relay owner changed; retry")
-        if set(params) != {
+        required = {
             "agent_id",
             "to",
             "content",
@@ -1125,7 +1125,8 @@ class RelayAgentBridge:
             "reply_to",
             "kind",
             "id",
-        }:
+        }
+        if not required <= set(params) <= required | {"turn_end"}:
             raise RelayError("invalid local relay send")
         if not isinstance(params["grant_id"], str) or (
             params["grant_id"] and not ID.fullmatch(params["grant_id"])
@@ -1254,6 +1255,8 @@ class RelayAgentBridge:
             "expires_at": expires_at,
             "from_device": self.device_name(),
         }
+        if params.get("turn_end") is not None:
+            payload["turn_end"] = params["turn_end"]
         if kind in EVENT_KINDS and kind != "answer":
             payload["reply_to"] = payload["thread_id"]
         validate_message(
@@ -1408,6 +1411,7 @@ class RelayAgentBridge:
         reply_to="",
         kind="message",
         source_agent=None,
+        turn_end=None,
     ):
         active = self.active if self._turn.get() is not None else None
         if self._turn.get() is not None:
@@ -1454,6 +1458,8 @@ class RelayAgentBridge:
             "kind": kind,
             "id": message_id,
         }
+        if turn_end is not None:
+            params["turn_end"] = turn_end
         receipt = await self._owner_call("relay.send", params)
         if (
             active
@@ -2431,6 +2437,9 @@ class RelayAgentBridge:
         llm = self.llm
         if llm is None:
             return
+        # The turn that handled a delivered request may have just ended: tell
+        # its requester before anything else reaches the model.
+        await self.plugin.settle_network_turn(llm)
         self._release_remote_cancellation_if_idle(llm)
         cleanup_ready = getattr(llm, "cancellation_cleanup_ready", None)
         if callable(cleanup_ready) and not cleanup_ready():
@@ -2495,6 +2504,11 @@ class RelayAgentBridge:
         if self.effective_trust(record["peer"]) != "manual":
             # Open and agents trust: an ordinary hub turn, no task envelope,
             # no active-task bookkeeping (docs/specs/agent-network-simple-flow.md §6).
+            # One request at a time: the next reaches the model only after the
+            # turn that handles this one has ended, so each turn answers one
+            # request and its replies go on that request's thread.
+            if self.plugin.network_turn_open():
+                return
             await self._deliver_open_message(record)
             return
         self.active = ActiveRelayTask(record, time.monotonic())
@@ -2537,6 +2551,20 @@ class RelayAgentBridge:
         """
         level = self.effective_trust(record["peer"])
         payload = record["payload"]
+        end = payload.get("turn_end")
+        if end is not None:
+            # The far runtime's end-of-turn frame: it settles whoever waits on
+            # this thread and is never shown or given to the model.
+            try:
+                self.plugin.on_network_turn_end(
+                    payload["thread_id"], end, payload["content"]
+                )
+                self.store.transition(record["id"], "delivered")
+            except Exception:
+                self.store.transition(
+                    record["id"], "failed", detail="could not settle the request"
+                )
+            return
         # The recorded binding wins over the sender's self-reported name.
         from_device = (
             self._state().state.peer_devices.get(record["peer"])

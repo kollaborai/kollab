@@ -1,6 +1,7 @@
 """Socket-based messaging between agents."""
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -1453,26 +1454,15 @@ class AgentSocketServer:
                     wait_seconds = _coerce_wait_seconds(
                         msg_data.get("wait_seconds"), 600
                     )
-                    if self._on_network_send:
-                        try:
-                            result = self._on_network_send(to, content, wait_seconds)
-                            if asyncio.iscoroutine(result):
-                                result = await result
-                            if not isinstance(result, dict):
-                                result = {
-                                    "type": "error",
-                                    "msg": "network send handler returned no result",
-                                }
-                        except Exception as exc:
-                            logger.debug(f"network_send callback error: {exc}")
-                            result = {"type": "error", "msg": "network send failed"}
-                    else:
-                        result = {
-                            "type": "error",
-                            "msg": "network messaging is not available on this build",
-                        }
-                    writer.write((json.dumps(result, default=str) + "\n").encode())
-                    await writer.drain()
+                    # One frame per reply on the request's thread, then a
+                    # terminal frame (network_done, network_timeout,
+                    # network_sent or error). aclosing: a CLI that hangs up
+                    # mid-wait ends the handler's wait now, not at its timeout.
+                    frames = self._network_send_frames(to, content, wait_seconds)
+                    async with contextlib.aclosing(frames):
+                        async for frame in frames:
+                            writer.write((json.dumps(frame, default=str) + "\n").encode())
+                            await writer.drain()
 
                 elif action == "rpc_request":
                     # Handshake-phase RPC: no concurrent writer, safe to write
@@ -1503,6 +1493,34 @@ class AgentSocketServer:
 
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
+
+    async def _network_send_frames(self, to: str, content: str, wait_seconds: int):
+        """The frames that answer one `network_send`: the handler's stream, or
+        one terminal frame when it has none (or fails)."""
+        if not self._on_network_send:
+            yield {
+                "type": "error",
+                "msg": "network messaging is not available on this build",
+            }
+            return
+        try:
+            frames = self._on_network_send(to, content, wait_seconds)
+            if asyncio.iscoroutine(frames):
+                frames = await frames
+            if isinstance(frames, dict):
+                yield frames
+            elif hasattr(frames, "__aiter__"):
+                async with contextlib.aclosing(frames):
+                    async for frame in frames:
+                        yield frame
+            else:
+                yield {
+                    "type": "error",
+                    "msg": "network send handler returned no result",
+                }
+        except Exception as exc:
+            logger.debug(f"network_send callback error: {exc}")
+            yield {"type": "error", "msg": "network send failed"}
 
     async def _get_context(self, lines: int) -> str:
         """Get recent context - override in plugin integration."""
@@ -2347,6 +2365,7 @@ class AgentMessenger:
         content: str,
         wait_seconds: int = 600,
         *,
+        on_reply: Optional[Callable[[dict], Any]] = None,
         connect_timeout: float = 5.0,
         auth: Optional[Dict[str, Any]] = None,
         ssl_ctx: Any = None,
@@ -2355,10 +2374,12 @@ class AgentMessenger:
 
         docs/specs/agent-network-simple-flow.md, CLI bullet: `kollab --hub
         msg agent@device text`. The daemon holds the connection open while
-        it waits for the reply, so the read timeout covers the full wait.
-        Returns the daemon's frame as-is (`network_reply`, `network_timeout`,
-        `network_sent`, or `error`); a transport failure is normalized to
-        `{"type": "error", "msg": ...}` so callers have one shape to check.
+        it waits, streaming a `network_reply` frame for every reply on the
+        request's thread; each is handed to ``on_reply`` as it arrives. The
+        wait ends with one terminal frame, returned as-is (`network_done` when
+        the far agent's turn ended, `network_timeout`, `network_sent`, or
+        `error`); a transport failure is normalized to `{"type": "error",
+        "msg": ...}` so callers have one shape to check.
         """
         wait_seconds = _coerce_wait_seconds(wait_seconds, 600)
         writer = None
@@ -2380,15 +2401,22 @@ class AgentMessenger:
             writer.write(req.encode())
             await writer.drain()
 
-            resp_line = await asyncio.wait_for(
-                reader.readline(), timeout=wait_seconds + connect_timeout + 5.0
-            )
-            if not resp_line:
-                return {"type": "error", "msg": "empty response"}
-            resp = json.loads(resp_line.decode().strip())
-            if not isinstance(resp, dict):
-                return {"type": "error", "msg": "invalid response envelope"}
-            return resp
+            # The daemon enforces wait_seconds; this deadline only covers a
+            # daemon that stops answering, with slack for the final frame.
+            deadline = time.monotonic() + wait_seconds + connect_timeout + 5.0
+            while True:
+                resp_line = await asyncio.wait_for(
+                    reader.readline(), timeout=max(0.0, deadline - time.monotonic())
+                )
+                if not resp_line:
+                    return {"type": "error", "msg": "empty response"}
+                resp = json.loads(resp_line.decode().strip())
+                if not isinstance(resp, dict):
+                    return {"type": "error", "msg": "invalid response envelope"}
+                if resp.get("type") != "network_reply":
+                    return resp
+                if on_reply is not None:
+                    on_reply(resp)
         except asyncio.TimeoutError:
             return {"type": "error", "msg": "timed out waiting for the daemon"}
         except Exception as exc:

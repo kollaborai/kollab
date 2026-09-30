@@ -4,11 +4,14 @@
 local agent's daemon over its socket (new `network_status`/`network_send`
 frames in plugins/hub/messenger.py). These tests exercise the daemon side
 directly -- the plugin handlers wired as AgentSocketServer.on_network_status
-/on_network_send -- and the CLI-waiter fulfillment hook in
-_on_message_received. Slice A owns the real relay bridge
-(plugins/hub/relay_agent.py); everything here mocks its documented
-interface (device_name, trust_level, remote_agents, resolve_handle) the
-same way test_hub_network_surface.py does, rather than importing it.
+/on_network_send -- and the CLI-waiter feed in _on_message_received.
+`network_send` streams: one `network_reply` frame per message on the request's
+thread, then a terminal frame once the far agent's turn ends. Slice A owns the
+real relay bridge (plugins/hub/relay_agent.py); everything here mocks its
+documented interface (device_name, trust_level, remote_agents, resolve_handle)
+the same way test_hub_network_surface.py does, rather than importing it. The
+answering side (turn binding, end-of-turn frame) is in
+test_hub_network_turns.py.
 """
 
 from __future__ import annotations
@@ -20,10 +23,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from kollabor_events import EventType
 from plugins.hub.messenger import AgentMessenger, AgentSocketServer
 from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_state import RelayError
+
+HANDLE = "infra@alzan-prod-home"
+DONE = "The receiving agent finished this request."
 
 
 def _make_plugin(*, relay_agent=None) -> HubPlugin:
@@ -43,6 +50,43 @@ def _make_plugin(*, relay_agent=None) -> HubPlugin:
     plugin._relay_agent = relay_agent
     plugin._start_relay_agent = AsyncMock()
     return plugin
+
+
+async def _frames(plugin: HubPlugin, to: str, content: str, wait: float) -> list:
+    return [f async for f in plugin._handle_network_send_request(to, content, wait)]
+
+
+def _bridge() -> SimpleNamespace:
+    """The parts of the relay bridge a message on its way through the plugin touches."""
+    return SimpleNamespace(
+        _turn=SimpleNamespace(get=lambda: None),
+        _injecting_message=None,
+        defer_local=AsyncMock(return_value=False),
+        resolve_handle=lambda handle: f"relay:resolved:{handle}",
+        send=None,
+    )
+
+
+def _reply(thread_id: str, content: str) -> HubMessage:
+    """A message from the far agent on a request's thread, as the relay delivers it."""
+    return HubMessage(
+        action="message",
+        from_agent="infra-1",
+        from_identity=HANDLE,
+        to="lapis",
+        content=content,
+        thread_id=thread_id,
+        reply_to="a" * 32,
+    )
+
+
+def _end(plugin: HubPlugin, thread_id: str, replies: int, *, failed: bool = False):
+    """The far runtime's end-of-turn frame, as the relay bridge hands it over."""
+    plugin.on_network_turn_end(
+        thread_id,
+        {"replies": replies, "failed": failed},
+        "The receiving agent could not complete this request." if failed else DONE,
+    )
 
 
 # --------------------------------------------------------------------- #
@@ -77,73 +121,153 @@ async def test_network_status_without_a_relay_agent_is_empty_not_an_error():
 
 
 # --------------------------------------------------------------------- #
-# network_send
+# network_send: a stream of frames
 # --------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
-async def test_network_send_resolves_routes_and_waits_for_the_reply():
-    relay = SimpleNamespace(
-        resolve_handle=lambda handle: f"relay:resolved:{handle}",
-    )
-    plugin = _make_plugin(relay_agent=relay)
+async def test_network_send_streams_every_reply_then_done_when_the_far_turn_ends():
+    plugin = _make_plugin(relay_agent=_bridge())
     plugin._route_message = AsyncMock(return_value=[])
     plugin._display_outgoing_message = MagicMock()
 
-    async def _reply_soon() -> None:
+    async def _far_side() -> None:
         await asyncio.sleep(0.01)
-        future = next(iter(plugin._cli_waiters.values()))
-        future.set_result(("infra@alzan-prod-home", "handshake ok"))
+        thread = next(iter(plugin._cli_waiters))
+        await plugin._on_message_received(_reply(thread, "on it"))
+        await plugin._on_message_received(_reply(thread, "handshake ok"))
+        _end(plugin, thread, 2)
 
-    asyncio.create_task(_reply_soon())
-    result = await plugin._handle_network_send_request(
-        "infra@alzan-prod-home", "check the tunnel", 5
-    )
+    far = asyncio.create_task(_far_side())
+    frames = await _frames(plugin, HANDLE, "check the tunnel", 5)
+    await far
 
-    assert result == {
-        "type": "network_reply",
-        "from": "infra@alzan-prod-home",
-        "content": "handshake ok",
-    }
+    assert frames == [
+        {"type": "network_reply", "from": HANDLE, "content": "on it"},
+        {"type": "network_reply", "from": HANDLE, "content": "handshake ok"},
+        {"type": "network_done", "replies": 2},
+    ]
     plugin._route_message.assert_awaited_once()
     sent_msg = plugin._route_message.await_args.args[0]
     assert isinstance(sent_msg, HubMessage)
-    assert sent_msg.to == "infra@alzan-prod-home"
+    assert sent_msg.to == HANDLE
     assert sent_msg.content == "check the tunnel"
-    plugin._display_outgoing_message.assert_called_once_with(
-        "infra@alzan-prod-home", "check the tunnel"
-    )
-    # Waiters are cleaned up once the reply lands -- nothing leaks.
+    plugin._display_outgoing_message.assert_called_once_with(HANDLE, "check the tunnel")
+    # Waiters are cleaned up once the turn ends -- nothing leaks.
     assert plugin._cli_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_a_far_turn_that_sent_nothing_is_done_with_no_replies():
+    plugin = _make_plugin(relay_agent=_bridge())
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._display_outgoing_message = MagicMock()
+
+    async def _far_side() -> None:
+        await asyncio.sleep(0.01)
+        _end(plugin, next(iter(plugin._cli_waiters)), 0)
+
+    far = asyncio.create_task(_far_side())
+    frames = await _frames(plugin, HANDLE, "thanks", 5)
+    await far
+
+    assert frames == [{"type": "network_done", "replies": 0}]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_far_turn_ends_the_wait_with_the_error_not_a_hang():
+    plugin = _make_plugin(relay_agent=_bridge())
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._display_outgoing_message = MagicMock()
+
+    async def _far_side() -> None:
+        await asyncio.sleep(0.01)
+        thread = next(iter(plugin._cli_waiters))
+        await plugin._on_message_received(_reply(thread, "on it"))
+        _end(plugin, thread, 1, failed=True)
+
+    far = asyncio.create_task(_far_side())
+    frames = await asyncio.wait_for(_frames(plugin, HANDLE, "run it", 30), timeout=2)
+    await far
+
+    assert frames == [
+        {"type": "network_reply", "from": HANDLE, "content": "on it"},
+        {
+            "type": "error",
+            "msg": "The receiving agent could not complete this request.",
+        },
+    ]
+    assert plugin._cli_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_the_wait_ends_only_after_every_announced_reply_has_come():
+    """A reply that had to be retried can arrive after the end frame."""
+    plugin = _make_plugin(relay_agent=_bridge())
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._display_outgoing_message = MagicMock()
+
+    async def _far_side() -> None:
+        await asyncio.sleep(0.01)
+        thread = next(iter(plugin._cli_waiters))
+        await plugin._on_message_received(_reply(thread, "on it"))
+        _end(plugin, thread, 2)  # announces two replies; only one has come
+        await asyncio.sleep(0.05)
+        await plugin._on_message_received(_reply(thread, "the answer"))
+
+    far = asyncio.create_task(_far_side())
+    frames = await _frames(plugin, HANDLE, "run it", 5)
+    await far
+
+    assert [f["type"] for f in frames] == [
+        "network_reply",
+        "network_reply",
+        "network_done",
+    ]
+    assert frames[1]["content"] == "the answer"
 
 
 @pytest.mark.asyncio
 async def test_network_send_times_out_and_cleans_up_waiters():
-    relay = SimpleNamespace(resolve_handle=lambda handle: f"relay:resolved:{handle}")
-    plugin = _make_plugin(relay_agent=relay)
+    plugin = _make_plugin(relay_agent=_bridge())
     plugin._route_message = AsyncMock(return_value=[])
     plugin._display_outgoing_message = MagicMock()
 
-    result = await plugin._handle_network_send_request(
-        "infra@alzan-prod-home", "ping", 0.05
-    )
+    frames = await _frames(plugin, HANDLE, "ping", 0.05)
 
-    assert result == {"type": "network_timeout"}
+    assert frames == [{"type": "network_timeout", "replies": 0}]
     assert plugin._cli_waiters == {}
 
 
 @pytest.mark.asyncio
-async def test_network_send_no_wait_returns_immediately_without_waiting():
-    relay = SimpleNamespace(resolve_handle=lambda handle: f"relay:resolved:{handle}")
-    plugin = _make_plugin(relay_agent=relay)
+async def test_a_timeout_after_replies_says_how_many_came():
+    plugin = _make_plugin(relay_agent=_bridge())
     plugin._route_message = AsyncMock(return_value=[])
     plugin._display_outgoing_message = MagicMock()
 
-    result = await plugin._handle_network_send_request(
-        "infra@alzan-prod-home", "ping", 0
-    )
+    async def _far_side() -> None:
+        await asyncio.sleep(0.01)
+        await plugin._on_message_received(
+            _reply(next(iter(plugin._cli_waiters)), "on it")
+        )
 
-    assert result == {"type": "network_sent", "to": "infra@alzan-prod-home"}
+    far = asyncio.create_task(_far_side())
+    frames = await _frames(plugin, HANDLE, "ping", 0.1)
+    await far
+
+    assert [f["type"] for f in frames] == ["network_reply", "network_timeout"]
+    assert frames[-1]["replies"] == 1
+
+
+@pytest.mark.asyncio
+async def test_network_send_no_wait_returns_immediately_without_waiting():
+    plugin = _make_plugin(relay_agent=_bridge())
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._display_outgoing_message = MagicMock()
+
+    frames = await _frames(plugin, HANDLE, "ping", 0)
+
+    assert frames == [{"type": "network_sent", "to": HANDLE}]
     assert plugin._cli_waiters == {}
 
 
@@ -160,12 +284,14 @@ async def test_network_send_reports_a_relay_error_from_resolve_handle():
         side_effect=AssertionError("must not route when resolve_handle fails")
     )
 
-    result = await plugin._handle_network_send_request("ghost@nowhere", "hi", 5)
+    frames = await _frames(plugin, "ghost@nowhere", "hi", 5)
 
-    assert result == {
-        "type": "error",
-        "msg": "unknown agent@device: run /connect status to see who is online",
-    }
+    assert frames == [
+        {
+            "type": "error",
+            "msg": "unknown agent@device: run /connect status to see who is online",
+        }
+    ]
     plugin._route_message.assert_not_awaited()
 
 
@@ -173,119 +299,133 @@ async def test_network_send_reports_a_relay_error_from_resolve_handle():
 async def test_network_send_rejects_a_target_that_is_not_a_handle():
     plugin = _make_plugin(relay_agent=SimpleNamespace(resolve_handle=lambda h: h))
 
-    result = await plugin._handle_network_send_request("lapis", "hi", 5)
+    [frame] = await _frames(plugin, "lapis", "hi", 5)
 
-    assert result["type"] == "error"
-    assert "agent@device" in result["msg"]
+    assert frame["type"] == "error"
+    assert "agent@device" in frame["msg"]
 
 
 @pytest.mark.asyncio
 async def test_network_send_without_a_relay_agent_is_a_clean_error():
     plugin = _make_plugin(relay_agent=None)
 
-    result = await plugin._handle_network_send_request("infra@alzan-prod-home", "hi", 5)
+    frames = await _frames(plugin, HANDLE, "hi", 5)
 
-    assert result == {
-        "type": "error",
-        "msg": "network messaging is not available on this build",
-    }
+    assert frames == [
+        {
+            "type": "error",
+            "msg": "network messaging is not available on this build",
+        }
+    ]
 
 
 @pytest.mark.asyncio
 async def test_network_send_surfaces_a_routing_rejection():
-    relay = SimpleNamespace(resolve_handle=lambda handle: f"relay:resolved:{handle}")
-    plugin = _make_plugin(relay_agent=relay)
-    plugin._route_message = AsyncMock(
-        return_value=[("infra@alzan-prod-home", "remote task rejected")]
-    )
+    plugin = _make_plugin(relay_agent=_bridge())
+    plugin._route_message = AsyncMock(return_value=[(HANDLE, "remote task rejected")])
     plugin._display_outgoing_message = MagicMock()
 
-    result = await plugin._handle_network_send_request(
-        "infra@alzan-prod-home", "ping", 5
-    )
+    frames = await _frames(plugin, HANDLE, "ping", 5)
 
-    assert result == {"type": "error", "msg": "remote task rejected"}
+    assert frames == [{"type": "error", "msg": "remote task rejected"}]
     assert plugin._cli_waiters == {}
 
 
 # --------------------------------------------------------------------- #
-# _on_message_received fulfils a pending CLI waiter (hook added right
-# after the msg_id dedup check)
+# _on_message_received feeds a pending CLI waiter (hook right after the
+# msg_id dedup check)
 # --------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
-async def test_on_message_received_fulfils_the_waiter_by_thread_id():
+async def test_on_message_received_hands_the_waiter_every_reply_on_its_thread():
     plugin = _make_plugin(relay_agent=None)
-    future = asyncio.get_running_loop().create_future()
-    plugin._cli_waiters["thread-xyz"] = future
+    events: asyncio.Queue = asyncio.Queue()
+    plugin._cli_waiters["thread-xyz"] = events
 
-    reply = HubMessage(
-        action="message",
-        from_agent="infra-1",
-        from_identity="infra@alzan-prod-home",
-        to="lapis",
-        content="handshake ok",
-        thread_id="thread-xyz",
-    )
-    await plugin._on_message_received(reply)
+    await plugin._on_message_received(_reply("thread-xyz", "on it"))
+    await plugin._on_message_received(_reply("thread-xyz", "handshake ok"))
 
-    assert future.result() == ("infra@alzan-prod-home", "handshake ok")
-    assert plugin._cli_waiters == {}
+    assert events.get_nowait() == ("reply", HANDLE, "on it")
+    assert events.get_nowait() == ("reply", HANDLE, "handshake ok")
+    # The waiter stays until the far turn ends; only the wait itself removes it.
+    assert plugin._cli_waiters == {"thread-xyz": events}
 
 
 @pytest.mark.asyncio
 async def test_a_message_from_the_agent_on_another_thread_is_not_the_reply():
     plugin = _make_plugin(relay_agent=None)
-    future = asyncio.get_running_loop().create_future()
-    plugin._cli_waiters["thread-xyz"] = future
+    events: asyncio.Queue = asyncio.Queue()
+    plugin._cli_waiters["thread-xyz"] = events
 
     other = HubMessage(
         action="message",
         from_agent="infra-1",
-        from_identity="infra@alzan-prod-home",
+        from_identity=HANDLE,
         to="lapis",
         content="an older answer",
     )
     await plugin._on_message_received(other)
 
-    assert not future.done()
-    assert plugin._cli_waiters == {"thread-xyz": future}
+    assert events.empty()
+    assert plugin._cli_waiters == {"thread-xyz": events}
+
+
+def _idle_llm() -> SimpleNamespace:
+    return SimpleNamespace(is_processing=False, conversation_history=[])
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_a_shell_request_does_not_wake_the_model():
+    """The shell has the reply. A model turn on it would spend a turn nobody
+    asked for, and the relay delivers the next frame only once the model is idle,
+    so the next reply (and the end of the wait) would sit behind that turn."""
+    plugin = _make_plugin(relay_agent=None)
+    plugin._display_hub_message = MagicMock()
+    llm = _idle_llm()
+    plugin.event_bus.get_service.side_effect = (
+        lambda name: llm if name == "llm_service" else None
+    )
+    plugin._cli_waiters["thread-xyz"] = asyncio.Queue()
+
+    await plugin._on_message_received(_reply("thread-xyz", "handshake ok"))
+
+    plugin._display_hub_message.assert_called_once()  # still shown on this screen
+    assert llm.conversation_history == []
+    triggers = [
+        c
+        for c in plugin.event_bus.emit_with_hooks.await_args_list
+        if c.args[0] is EventType.TRIGGER_LLM_CONTINUE
+    ]
+    assert triggers == []
+
+    # The same message on a thread nobody waits on still wakes the agent.
+    await plugin._on_message_received(_reply("thread-abc", "unrelated"))
+    assert len(llm.conversation_history) == 1
+    triggers = [
+        c
+        for c in plugin.event_bus.emit_with_hooks.await_args_list
+        if c.args[0] is EventType.TRIGGER_LLM_CONTINUE
+    ]
+    assert len(triggers) == 1
+
+
+def test_an_end_frame_with_no_waiter_is_ignored():
+    plugin = _make_plugin(relay_agent=None)
+
+    _end(plugin, "b" * 32, 3)  # an agent asked, not a shell: nothing waits
+
+    assert plugin._cli_waiters == {}
 
 
 # --------------------------------------------------------------------- #
-# Two overlapping requests to one agent: each waiter prints only its own
-# answer (the proof run printed request 1's answer for request 2).
+# Overlapping requests to one agent: each waiter gets only its own thread
+# (the proof run printed request 1's answer for request 2).
 # --------------------------------------------------------------------- #
 
-HANDLE = "infra@alzan-prod-home"
 
-
-def _bridge(send=None) -> SimpleNamespace:
-    """The parts of the relay bridge a message on its way through the plugin touches."""
-    return SimpleNamespace(
-        _turn=SimpleNamespace(get=lambda: None),
-        _injecting_message=None,
-        defer_local=AsyncMock(return_value=False),
-        resolve_handle=lambda handle: f"relay:resolved:{handle}",
-        send=send,
-    )
-
-
-def _answer(thread_id: str, content: str) -> HubMessage:
-    return HubMessage(
-        action="message",
-        from_agent="infra-1",
-        from_identity=HANDLE,
-        to="lapis",
-        content=content,
-        thread_id=thread_id,
-        reply_to="a" * 32,
-    )
-
-
-async def _two_pending_requests(plugin):
-    """Start two CLI waits on one handle; return (task1, task2, thread1, thread2)."""
+async def _start_requests(plugin, *texts):
+    """Start one CLI wait per text on HANDLE; return ([task...], [thread...])."""
     threads: list[str] = []
 
     async def route(msg):
@@ -294,30 +434,57 @@ async def _two_pending_requests(plugin):
 
     plugin._route_message = route
     plugin._display_outgoing_message = MagicMock()
-    first = asyncio.create_task(
-        plugin._handle_network_send_request(HANDLE, "first question", 5)
-    )
-    await asyncio.sleep(0.01)
-    second = asyncio.create_task(
-        plugin._handle_network_send_request(HANDLE, "second question", 5)
-    )
-    await asyncio.sleep(0.01)
-    assert len(threads) == 2 and threads[0] != threads[1]
-    return first, second, threads[0], threads[1]
+    tasks = []
+    for text in texts:
+        tasks.append(asyncio.create_task(_frames(plugin, HANDLE, text, 5)))
+        await asyncio.sleep(0.01)
+    assert len(set(threads)) == len(texts)
+    return tasks, threads
 
 
 @pytest.mark.asyncio
 async def test_overlapping_requests_each_get_their_own_answer_in_any_order():
     plugin = _make_plugin(relay_agent=_bridge())
-    first, second, thread1, thread2 = await _two_pending_requests(plugin)
+    (first, second), (thread1, thread2) = await _start_requests(
+        plugin, "first question", "second question"
+    )
 
-    # The answer to the newer request lands first.
-    await plugin._on_message_received(_answer(thread2, "answer two"))
+    # The answer to the newer request comes first, with its own end.
+    await plugin._on_message_received(_reply(thread2, "answer two"))
+    _end(plugin, thread2, 1)
     assert not first.done()
-    assert (await second)["content"] == "answer two"
+    assert [f.get("content") for f in await second] == ["answer two", None]
 
-    await plugin._on_message_received(_answer(thread1, "answer one"))
-    assert (await first)["content"] == "answer one"
+    await plugin._on_message_received(_reply(thread1, "answer one"))
+    _end(plugin, thread1, 1)
+    assert [f.get("content") for f in await first] == ["answer one", None]
+    assert plugin._cli_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_three_waiters_on_one_agent_each_get_their_own_answers_interleaved():
+    plugin = _make_plugin(relay_agent=_bridge())
+    tasks, threads = await _start_requests(plugin, "one", "two", "three")
+
+    # Frames from three turns arrive interleaved, out of request order.
+    await plugin._on_message_received(_reply(threads[2], "three: on it"))
+    await plugin._on_message_received(_reply(threads[0], "one: on it"))
+    await plugin._on_message_received(_reply(threads[1], "two: the answer"))
+    await plugin._on_message_received(_reply(threads[2], "three: the answer"))
+    _end(plugin, threads[1], 1)
+    await plugin._on_message_received(_reply(threads[0], "one: the answer"))
+    _end(plugin, threads[2], 2)
+    _end(plugin, threads[0], 2)
+
+    results = [
+        [f["content"] for f in await task if f["type"] == "network_reply"]
+        for task in tasks
+    ]
+    assert results == [
+        ["one: on it", "one: the answer"],
+        ["two: the answer"],
+        ["three: on it", "three: the answer"],
+    ]
     assert plugin._cli_waiters == {}
 
 
@@ -334,135 +501,23 @@ async def test_a_late_answer_to_an_older_request_never_answers_a_newer_one():
     plugin._display_outgoing_message = MagicMock()
 
     # Request 1 is answered and finished.
-    first = asyncio.create_task(plugin._handle_network_send_request(HANDLE, "one", 5))
+    first = asyncio.create_task(_frames(plugin, HANDLE, "one", 5))
     await asyncio.sleep(0.01)
-    await plugin._on_message_received(_answer(threads[0], "answer one"))
-    assert (await first)["content"] == "answer one"
+    await plugin._on_message_received(_reply(threads[0], "answer one"))
+    _end(plugin, threads[0], 1)
+    assert [f.get("content") for f in await first] == ["answer one", None]
 
     # Request 2 is waiting when a duplicate answer to request 1 arrives.
-    second = asyncio.create_task(plugin._handle_network_send_request(HANDLE, "two", 5))
+    second = asyncio.create_task(_frames(plugin, HANDLE, "two", 5))
     await asyncio.sleep(0.01)
-    await plugin._on_message_received(_answer(threads[0], "answer one again"))
+    await plugin._on_message_received(_reply(threads[0], "answer one again"))
+    _end(plugin, threads[0], 2)
     await asyncio.sleep(0.01)
     assert not second.done()
 
-    await plugin._on_message_received(_answer(threads[1], "answer two"))
-    assert (await second)["content"] == "answer two"
-
-
-# --------------------------------------------------------------------- #
-# The answering side echoes the request's thread (both ends of the loop).
-# --------------------------------------------------------------------- #
-
-
-def _answering_plugin(sent: list) -> HubPlugin:
-    """A plugin whose hub_msg goes through the real router to a fake bridge."""
-
-    async def send(address, content, **kwargs):
-        sent.append({"address": address, "content": content, **kwargs})
-        return {"id": "b" * 32, "state": "queued", "duplicate": False}
-
-    plugin = _make_plugin(relay_agent=_bridge(send))
-    plugin._presence = MagicMock()
-    plugin._presence.scan_all_presence.return_value = []
-    plugin._display_outgoing_message = MagicMock()
-    plugin._bridge_forward = AsyncMock()
-    return plugin
-
-
-def _request_from(handle: str, wire_id: str, thread_id: str) -> HubMessage:
-    return HubMessage(
-        id=wire_id,
-        action="message",
-        from_agent="relay:peer",
-        from_identity=handle,
-        to="lapis",
-        content="do the thing",
-        thread_id=thread_id,
-        metadata={"network": {"from_device": "mac-kollab", "trust": "open"}},
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_answer_carries_the_thread_and_id_of_the_request_it_answers():
-    sent: list = []
-    plugin = _answering_plugin(sent)
-    asker = "lapis@mac-kollab"
-    await plugin._on_message_received(_request_from(asker, "1" * 32, "a" * 32))
-    await plugin._on_message_received(_request_from(asker, "2" * 32, "b" * 32))
-
-    first = await plugin._handle_hub_msg_tool(
-        {"id": "t1", "to": asker, "content": "answer 1"}
-    )
-    second = await plugin._handle_hub_msg_tool(
-        {"id": "t2", "to": asker, "content": "answer 2"}
-    )
-
-    assert first.success and second.success
-    # Answered in the order asked; each request is answered once.
-    assert (sent[0]["thread_id"], sent[0]["reply_to"]) == ("a" * 32, "1" * 32)
-    assert (sent[1]["thread_id"], sent[1]["reply_to"]) == ("b" * 32, "2" * 32)
-
-    # Nothing is owed now: a further message is a new conversation, not an answer.
-    third = await plugin._handle_hub_msg_tool(
-        {"id": "t3", "to": asker, "content": "one more thing"}
-    )
-    assert third.success
-    assert sent[2]["reply_to"] == "" and sent[2]["thread_id"] not in {
-        "a" * 32,
-        "b" * 32,
-    }
-
-
-@pytest.mark.asyncio
-async def test_an_answer_received_is_not_recorded_as_a_request_owed_an_answer():
-    sent: list = []
-    plugin = _answering_plugin(sent)
-    asker = "lapis@mac-kollab"
-    answer = _request_from(asker, "3" * 32, "c" * 32)
-    answer.reply_to = "4" * 32  # this message answers something we sent
-
-    await plugin._on_message_received(answer)
-    await plugin._handle_hub_msg_tool({"id": "t1", "to": asker, "content": "thanks"})
-
-    assert sent[0]["reply_to"] == ""
-
-
-@pytest.mark.asyncio
-async def test_a_cli_request_is_answered_end_to_end_across_two_plugins():
-    """CLI request on the asker, answering agent's hub_msg, back to the waiter."""
-    asker = _make_plugin(relay_agent=_bridge())
-    wire: list = []
-
-    async def to_wire(msg):
-        wire.append(msg)
-        return []
-
-    asker._route_message = to_wire
-    asker._display_outgoing_message = MagicMock()
-    wait = asyncio.create_task(asker._handle_network_send_request(HANDLE, "ping", 5))
-    await asyncio.sleep(0.01)
-    request = wire[0]
-
-    # The answering plugin receives it (as the relay bridge delivers it) ...
-    answers: list = []
-    answerer = _answering_plugin(answers)
-    await answerer._on_message_received(
-        _request_from("lapis@mac-kollab", "d" * 32, request.thread_id)
-    )
-    await answerer._handle_hub_msg_tool(
-        {"id": "t1", "to": "lapis@mac-kollab", "content": "pong"}
-    )
-
-    # ... and its answer, as the bridge delivers it back, resolves the waiter.
-    await asker._on_message_received(
-        _answer(answers[0]["thread_id"], answers[0]["content"])
-    )
-    assert await wait == {
-        "type": "network_reply",
-        "from": HANDLE,
-        "content": "pong",
-    }
+    await plugin._on_message_received(_reply(threads[1], "answer two"))
+    _end(plugin, threads[1], 1)
+    assert [f.get("content") for f in await second] == ["answer two", None]
 
 
 # --------------------------------------------------------------------- #
@@ -523,15 +578,22 @@ def test_network_status_with_no_handler_is_not_connected():
     assert result == {"type": "network_status", "device": "", "trust": "", "agents": []}
 
 
-def test_network_send_frame_round_trips_over_a_real_socket():
+def test_network_send_streams_replies_to_the_client_then_returns_the_terminal_frame():
     async def run():
         seen = {}
+        closed = []
 
         async def on_send(to, content, wait_seconds):
-            seen["to"] = to
-            seen["content"] = content
-            seen["wait_seconds"] = wait_seconds
-            return {"type": "network_reply", "from": to, "content": "handshake ok"}
+            seen.update(to=to, content=content, wait_seconds=wait_seconds)
+            try:
+                yield {"type": "network_reply", "from": to, "content": "on it"}
+                # A pause between frames: the client must hand over the first
+                # one before the second exists, not batch them at the end.
+                await asyncio.sleep(0.05)
+                yield {"type": "network_reply", "from": to, "content": "handshake ok"}
+                yield {"type": "network_done", "replies": 2}
+            finally:
+                closed.append(True)
 
         server = AgentSocketServer(
             "send-id",
@@ -540,25 +602,89 @@ def test_network_send_frame_round_trips_over_a_real_socket():
             socket_name=f"net-send-{os.getpid()}",
         )
         sock_path = await server.start()
+        replies: list[dict] = []
+        stamps: list[float] = []
+        loop = asyncio.get_running_loop()
+
+        def on_reply(frame):
+            replies.append(frame)
+            stamps.append(loop.time())
+
         try:
             result = await AgentMessenger.request_network_send(
-                sock_path, "infra@alzan-prod-home", "check the tunnel", wait_seconds=5
+                sock_path,
+                "infra@alzan-prod-home",
+                "check the tunnel",
+                wait_seconds=5,
+                on_reply=on_reply,
             )
         finally:
             await server.stop()
 
-        assert result == {
-            "type": "network_reply",
-            "from": "infra@alzan-prod-home",
-            "content": "handshake ok",
-        }
+        assert result == {"type": "network_done", "replies": 2}
+        assert [r["content"] for r in replies] == ["on it", "handshake ok"]
+        assert stamps[1] - stamps[0] >= 0.04  # arrived as sent, not batched
         assert seen == {
             "to": "infra@alzan-prod-home",
             "content": "check the tunnel",
             "wait_seconds": 5,
         }
+        assert closed == [True]
 
     asyncio.run(run())
+
+
+def test_network_send_with_a_single_frame_handler_still_round_trips():
+    async def run():
+        async def on_send(to, content, wait_seconds):
+            return {"type": "network_sent", "to": to}
+
+        server = AgentSocketServer(
+            "send-one-id",
+            lambda _message: None,
+            on_network_send=on_send,
+            socket_name=f"net-send-one-{os.getpid()}",
+        )
+        sock_path = await server.start()
+        try:
+            return await AgentMessenger.request_network_send(
+                sock_path, "infra@alzan-prod-home", "hi", wait_seconds=0
+            )
+        finally:
+            await server.stop()
+
+    assert asyncio.run(run()) == {"type": "network_sent", "to": "infra@alzan-prod-home"}
+
+
+def test_a_handler_that_fails_midway_ends_the_stream_with_an_error_frame():
+    async def run():
+        async def on_send(to, content, wait_seconds):
+            yield {"type": "network_reply", "from": to, "content": "on it"}
+            raise RuntimeError("boom with /secret/path")
+
+        server = AgentSocketServer(
+            "send-fail-id",
+            lambda _message: None,
+            on_network_send=on_send,
+            socket_name=f"net-send-fail-{os.getpid()}",
+        )
+        sock_path = await server.start()
+        replies: list[dict] = []
+        try:
+            result = await AgentMessenger.request_network_send(
+                sock_path,
+                "infra@alzan-prod-home",
+                "hi",
+                wait_seconds=5,
+                on_reply=replies.append,
+            )
+        finally:
+            await server.stop()
+        return replies, result
+
+    replies, result = asyncio.run(run())
+    assert [r["content"] for r in replies] == ["on it"]
+    assert result == {"type": "error", "msg": "network send failed"}  # no exception text
 
 
 def test_network_send_with_no_handler_is_a_clean_error():

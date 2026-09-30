@@ -44,8 +44,9 @@ manage agents from CLI (no TUI needed):
   kollab --hub status                             list online agents, plus the network
                                                    section (agent@device, one per line)
   kollab --hub msg ruby "hello"                   send message to a local agent
-  kollab --hub msg infra@alzan-prod-home "hi"     send to a remote agent, wait up to
-                                                   600s for its reply
+  kollab --hub msg infra@alzan-prod-home "hi"     send to a remote agent, print each
+                                                   reply as it arrives, exit 0 when
+                                                   its turn ends (waits up to 600s)
   kollab --hub msg infra@alzan-prod-home "hi" --no-wait   send and return immediately
   kollab --hub capture ruby 50           read last 50 output lines
   kollab --hub stop ruby                 send shutdown signal
@@ -53,10 +54,15 @@ manage agents from CLI (no TUI needed):
   kollab --hub broadcast "stand down"    message all agents
 
   a remote target (agent@device) is delivered through one online local
-  agent's daemon (coordinator preferred) and answers with the reply to that
-  request (the remote agent answers on the request's thread; an older or late
-  answer is never printed as the reply) or "no reply from <handle> within N s"
-  on timeout.
+  agent's daemon (coordinator preferred). Every reply the remote agent sends
+  during the turn that handles the request (an interim "on it" and the answer)
+  is printed as it arrives, one "<handle>: <text>" line each; an older or late
+  answer to another request is never printed. The command exits 0 when that
+  turn ends, 1 with the error if the turn failed, and 1 on timeout ("no reply
+  from <handle> within N s", or "<handle> did not finish within N s" after
+  replies). A turn that ends without a reply prints "<handle> finished without
+  a reply". Several such commands at once to one agent each get only their own
+  request's replies.
   see docs/specs/agent-network-simple-flow.md.
 
 launch an organization:
