@@ -748,18 +748,19 @@ def test_the_hosts_own_addresses_are_ipv4_only_and_empty_when_interfaces_cannot_
 
 
 @pytest.mark.asyncio
-async def test_endpoint_key_for_names_one_approved_device_or_nobody(mesh3, monkeypatch):
+async def test_endpoint_key_for_gives_a_contested_name_to_the_member_approved_first(mesh3, monkeypatch):
     a, b, c = mesh3.a, mesh3.b, mesh3.c
     deliver_locator(b, c)
     c_key = c.mesh._local_locator_wire(c.mesh.local_session())["endpoint_public_key"]
     assert b.mesh.endpoint_key_for("peridot") == c_key
     assert b.mesh.endpoint_key_for("someone-else") == ""
 
-    # Two approved devices naming one endpoint with different keys admit nobody;
-    # naming it with the same key is one device's name, not a conflict.
+    # Two members naming one endpoint with different keys: the member B
+    # approved first (A, its inviter) keeps the name, so a later claim cannot
+    # block it. Naming it with the same key is one device's name.
     real = b.mesh._locator_for_peer
     other = SigningKey.generate().verify_key.encode().hex()
-    for claimed_key, expected in ((other, ""), (c_key, c_key)):
+    for claimed_key, expected in ((other, other), (c_key, c_key)):
         claim = {**real(c.key), "relay_public_key": a.key, "endpoint_public_key": claimed_key}
         with monkeypatch.context() as patch:
             patch.setattr(
