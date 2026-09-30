@@ -1,7 +1,7 @@
 # Agent network (#121): start here
 
 Living handoff for any agent (Claude, Codex, anyone) picking up the Kollab agent
-network. Updated at every merge. Last update: 2026-09-30 10:30 MST, branch tip 23610aa; last build 0.11.0.dev4 (f0dec4c).
+network. Updated at every merge. Last update: 2026-09-30 11:10 MST, branch tip 6751917 = build 0.11.0.dev5.
 
 ## Read first, in this order
 
@@ -38,8 +38,8 @@ network. Updated at every merge. Last update: 2026-09-30 10:30 MST, branch tip 2
   pushed, no PR.
 - Unit suite at 432ad68: 5242 passed, 9 skipped
   (`KOLLAB_NO_KEYRING=1 .venv/bin/python -m pytest tests/unit/ -q`, ~80 s).
-- Relay on kollabor.ai: release 20260930-f0dec4c, deployed 2026-09-30 09:53 MST, all routes live.
-  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-095320
+- Relay on kollabor.ai: release 20260930-6751917, deployed 2026-09-30 10:47 MST, all routes live.
+  Rollback on alzan-prod: `sudo cp ~/.local/share/kollab-relay/dropin-backup-20260930-104701
   /etc/systemd/system/kollab-relay.service.d/source-v2.conf && sudo systemctl daemon-reload &&
   sudo systemctl restart kollab-relay.service`. Deploy from a clean worktree: the script refuses a
   dirty tree, and the main checkout has the three foreign files.
@@ -118,6 +118,18 @@ runs; pipe output through `tail`; read functions, not whole files.
 6. **Reviews.** One capped review agent per milestone, then fixes, then re-run the
    affected live proof.
 7. **Ask Marco how to release.** Default: one release after everything is proven.
+
+## Round on build 0.11.0.dev5 (6751917), 2026-09-30 10:40-11:07
+
+Summary: `evidence-dev3/final-round-dev5-summary.txt`.
+
+- PASS, clean transcript: M1 20/20 (Story 3 and the overlap now pass: the turn-end fix works on the member
+  path), M2 11/11, M4 27/27.
+- M3: pre, c1, c2 and c3 PASS live for the first time; c4 FAIL (A still listed C 84 s after C was
+  stopped). Debug agent running (likely the daemon behind C's window survives `stop_ws`).
+- Story 5 regressed from 20/20 (dev3, dev4) to 3 failures: `finished without a reply` on the stranger
+  path and `remote conversation participant is not uniquely online` after deny. Only the turn-end fix
+  changed; debug agent running.
 
 ## Round on build 0.11.0.dev4 (f0dec4c), 2026-09-30 09:47-10:24
 

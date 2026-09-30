@@ -1,0 +1,110 @@
+[10:40:40] tip 6751917
+[10:46:32] unit: 5300 passed, 9 skipped, 203 subtests passed in 350.49s (0:05:50)
+[10:46:54] build: [m1 10:46:54] done: 11 wheels
+[10:47:08] relay: tag=20260930-6751917 sha256=4c6d9013764c578c585a5e19b34b8852 healthy after 5s 
+[10:47:08] relay rollback: rollback: sudo cp /home/almazan/.local/share/kollab-relay/dropin-backup-20260930-104701 /etc/systemd/system/kollab-relay.service.d/source-v2.conf && sudo systemctl daemon-reload && sudo systemctl restart kollab-relay.ser
+[10:47:29] route enrollment/lookup 400
+[10:47:29] route contact/lookup 400
+[10:47:29] route contact/links 400
+[10:47:54] dev2 sessions stopped: mac tmux: e2e-mac 
+[10:48:30] install: 0.11.0.dev5 on both hosts
+[10:48:34] selfhost: public health 200
+[10:54:07] M1 exit=0
+pre-installed-build                PASS   -
+pre-relay-lookup                   PASS   -
+pre-fresh-workspaces               PASS   -
+pre-llm-login                      PASS   -
+s0-launch                          PASS   s0-01-mac-launch.txt
+s1-01-mac-connect-code             PASS   s1-01-mac-connect-screen.txt
+s1-02-srv-submits-code             PASS   s1-04-srv-after-enter.txt
+s1-03-mac-sees-request             PASS   s1-05-mac-wants-to-join.txt
+s1-04-mac-accepts                  PASS   s1-06-mac-accepted.txt
+s1-05-srv-joined                   PASS   s1-07-srv-joined.txt
+s1-06-status-both-sides            PASS   s1-08-mac-status.txt
+s2-agent-to-agent                  PASS   s2-01-mac-reply.txt
+s3-shell-msg                       PASS   s3-01-shell-msg.txt
+s3-cron-env-msg                    PASS   s3-02-cron-env-msg.txt
+s3-server-ran-its-shell            PASS   s3-04-srv-pane.txt
+s3-overlap                         PASS   s3-06-overlap-disk.txt
+s5-width-80                        PASS   s5-connect-mac-80.txt
+z1-panes-clean                     PASS   -
+z2-log-mac                         PASS   logscan-mac.txt
+z2-log-srv                         PASS   logscan-srv.txt
+PASS: 20 steps, transcript clean.
+[10:58:29] M3 exit=1
+pre                      PASS   -
+c1-endpoints             PASS   c1-01-b-restarted.txt
+c2-c-joins               PASS   c2-04-c-joined.txt
+c3-members               PASS   c3-01-b-status.txt
+c4-c-relayless           FAIL   -
+    -> A still listed peridot@alzan-prod-kollab-m3-c8 84s after C was stopped, so a later listing would prove nothing
+FAIL: 1 step(s) failed. Not a pass. Run m3/teardown.sh before retrying.
+[10:59:34] M2 exit=0
+s8-pre                   PASS   s8-00-state-before.txt
+s8-loadout               PASS   s8-01-state-server-after-switch.txt
+s8-config-screen         PASS   s8-02-srv-config-loadout.txt
+s8-sealed                PASS   -
+s8-skill-add             PASS   -
+s8-skill-del             PASS   -
+s8-cleanup               PASS   s8-03-state-server-after-restore.txt
+s8-excluded              PASS   -
+z1-panes-clean           PASS   -
+z2-log-mac               PASS   logscan-mac.txt
+z2-log-srv               PASS   logscan-srv.txt
+PASS: 11 steps, transcript clean.
+[11:03:36] Story5 exit=1
+pre-installed-build                PASS   -
+pre-relay-links                    PASS   -
+pre-fresh-workspaces               PASS   -
+pre-llm-login                      PASS   -
+s0-launch                          PASS   s0-01-mac-launch.txt
+s1-two-networks                    PASS   s1-03-mac-hub-status.txt
+s1-mac-has-two-agents              PASS   s1-03-mac-hub-status.txt
+s2-mac-contact-route               PASS   s2-01-mac-status.txt
+s3-server-knocks                   PASS   s3-01-srv-knock.txt
+s4-mac-accepts-knock               PASS   s4-02-mac-accepted.txt
+s5-mac-allows-one-agent            PASS   s5-01-mac-allow.txt
+s6-link-and-visibility             PASS   s6-01-srv-hub-status.txt
+s7-delivered-and-answered          FAIL   s7-01-allowed-reply.txt
+    -> the reply does not carry the Mac's hostname 'synthyo.local': koordinator@synthyo-kollab-s5-mac5 finished without a reply 
+s8-other-agent-unreachable         PASS   s8-01-other-agent.txt
+s9-deny-refuses                    FAIL   s9-01-after-deny.txt
+    -> exit 1 but no refusal text: remote conversation participant is not uniquely online 
+s10-allow-again-works              FAIL   s10-01-reallowed-reply.txt
+    -> back=1 exit=0 shell runs 1 -> 2: koordinator@synthyo-kollab-s5-mac5 finished without a reply 
+s11-revoke-cuts-the-link           PASS   s11-01-after-revoke.txt
+z1-panes-clean                     PASS   -
+z2-log-mac                         PASS   logscan-mac.txt
+z2-log-srv                         PASS   logscan-srv.txt
+FAIL: 3 step(s) failed. Not a pass.
+[11:07:12] M4 exit=0
+pre-installed-build                PASS   -
+pre-one-command                    PASS   -
+pre-public-directory               PASS   pre-verify.log
+pre-fresh-workspaces               PASS   -
+pre-llm-login                      PASS   -
+s0-launch                          PASS   s0-01-mac-launch.txt
+s6-01-first-device                 PASS   s6-01-mac-first-device.txt
+s6-02-mac-join-code                PASS   s6-02-mac-connect-screen.txt
+s6-03-srv-domain-typed             PASS   s6-04-srv-form-filled.txt
+s6-04-srv-submits-code             PASS   s6-05-srv-after-enter.txt
+s6-05-mac-sees-request             PASS   s6-06-mac-wants-to-join.txt
+s6-06-mac-accepts                  PASS   s6-07-mac-accepted.txt
+s6-07-srv-joined                   PASS   s6-08-srv-joined.txt
+s6-08-status-both-sides            PASS   s6-09-mac-status.txt
+s6-09-message-exchange             PASS   s6-11-message-exchange.txt
+s6-10-server-ran-its-shell         PASS   s6-11-message-exchange.txt
+s6-11-nothing-touches-kollabor-ai  PASS   s6-09-mac-status.txt
+s6-12-serve-stops-cleanly          PASS   s6-12-serve-after-stop.txt
+s6-13-same-identity-after-restart  PASS   s6-13-serve-after-restart.txt
+s6-14-devices-back-and-answering   PASS   s6-14-message-after-restart.txt
+z0-serve-pane-clean                PASS   s9-serve-final.txt
+z1-panes-clean                     PASS   -
+z2-log-mac                         PASS   logscan-mac.txt
+z3-log-mac-restart                 PASS   logscan-mac-restart.txt
+z2-log-srv                         PASS   logscan-srv.txt
+z3-log-srv-restart                 PASS   logscan-srv-restart.txt
+z4-kollabor-ai-never-named         PASS   -
+PASS: 27 steps, transcript clean.
+[11:07:33] selfhost: public health 200
+[11:07:33] done
