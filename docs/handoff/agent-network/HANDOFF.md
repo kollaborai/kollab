@@ -52,7 +52,7 @@ network. Updated at every merge. Last update: 2026-09-30, branch tip e44ab6d.
 | hub tags in any order, `wait="true"` ends the turn | merged b0f59bc | report `agent-reports/fix-hub-tags.md` |
 | second window opens the Connect screen read-only, full device names | merged 7fba955 | report `agent-reports/fix-connect-leftovers.md` |
 | Connect polish 2: attached-window read-only screen, `/connect code` docs, default network name `<device>-net` | merged 532d4e7 | report `agent-reports/connect-polish-2.md` |
-| Manual trust: short numbers instead of 32-hex ids, no `relay:` sender label on screen | NOT DONE. A partial, uncommitted, broken edit sits in `.claude/worktrees/agent-a4715d24e2e745ccf` (`plugins/hub/relay_conversations.py`); do not commit it as is | next step in `agent-reports/connect-polish-2.md` |
+| Manual trust: short numbers instead of 32-hex ids, no `relay:` sender label on screen | done on branch `worktree-agent-a6deca3db4a406544`, not merged, not live-proven. Numbers for the six commands, the tool-result line and the question hint; the incoming event box names `agent@device`. Still open: the outgoing box when the model addresses a `relay:` address instead of `agent@device`, see the report | `.claude/worktrees/agent-a6deca3db4a406544`, report `agent-reports/manual-trust-numbers.md` |
 | `kollab --hub msg` replies bound to their own request | merged dee43fc, not live-proven. Both devices need this build | `.claude/worktrees/agent-a5e0891092630d9af`, report `agent-reports/cli-reply-threads.md` |
 | `hub_cron_add to="agent@device"` | merged 6b22c51, not live-proven | report `agent-reports/cron-to-device.md` |
 | M2 sealed config sync (section 9, Story 8) | merged 9d059bf, not live-proven (engine, `/config` managed-by, Connect row, OAuth cleanup). Still not done: docs, `tests/live/m2/` | `.claude/worktrees/agent-ae763b064388e596b`, report `agent-reports/m2-config-sync.md` |
@@ -96,9 +96,9 @@ runs; pipe output through `tail`; read functions, not whole files.
    `agent-reports/m3-mesh.md`; `tests/live/m3/` using the live setup facts in that
    report (the proof seeds B<->C approvals until Marco decides the open M3 item);
    constitution section 10, `docs/guides/connect.md`, the CHANGELOG pair.
-3. **Manual-trust short numbers**, plus no `relay:` sender label on screen. Exact
-   next step: `agent-reports/connect-polish-2.md`. Start from the branch; the
-   partial edit in `.claude/worktrees/agent-a4715d24e2e745ccf` is broken, read it only.
+3. **Manual-trust short numbers**, plus no `relay:` sender label on screen. DONE on
+   branch `worktree-agent-a6deca3db4a406544` (merge it with the M2/M3 finishes);
+   what is left is in `agent-reports/manual-trust-numbers.md`.
 4. **Small follow-ups** (section below).
 5. **Live runs, one at a time.** Build and install first:
    `bash tests/live/m1/build_wheels.sh <ref> <dir>` then `install_both.sh <dir>`.
@@ -154,6 +154,9 @@ runs; pipe output through `tail`; read functions, not whole files.
   rewrite or delete.
 
 ## Small follow-ups (not started)
+
+- `scripts/relay/verify_agent_conversation.py` and its live checks still parse the old manual-trust output (`remote receipt: {json}`, `remote task <hex>: ...`, hex `withdraw`/`answer` ids). Update them to the numbers.
+- A hub_msg addressed to a `relay:` address (not `agent@device`) still draws `sapphire -> relay:...` (`_display_outgoing_message(target, ...)` in `_handle_hub_msg_tool`). The documented manual-trust form uses `agent@device` and is clean.
 
 - `_handle_hub_cron_add_tool` reports success for `bad interval:` and `usage:` text.
 - The `hub_msg` tool definition still describes the Codex model ("authorized remote relay agent").

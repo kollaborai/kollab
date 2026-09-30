@@ -43,7 +43,7 @@ Trust is one setting per network, `/connect trust <level>`:
 |---|---|
 | `open` (default) | Every agent on every accepted device may message every other. Hub rules only. |
 | `agents` | Each device lists which of its agents are reachable: `/connect allow <device> <agent>`, `/connect deny <device> [agent]`. |
-| `manual` | Every first message needs a human `/connect authorize` or `/connect send`; replies come back through a task envelope; questions wait for a human answer. `/connect help all` lists these commands. |
+| `manual` | Every first message needs a human `/connect authorize` or `/connect send`; replies come back through a task envelope; questions wait for a human answer. `/connect help all` lists these commands; they print and take short numbers (`request 3`, `question 4`), never ids. |
 
 ## Strangers
 

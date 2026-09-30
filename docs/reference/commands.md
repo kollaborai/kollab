@@ -210,12 +210,17 @@ Shown in the palette and in `/connect help`:
 ```text
 /connect authorize <agent@device> <request>  authorize one exact request (trust manual)
 /connect send <agent@device> <request>       authorize and send one request (trust manual)
-/connect withdraw <grant-id>                 withdraw a sending grant (trust manual)
-/connect answer <event-id> <text>            answer a pending question (trust manual)
-/connect task <agent@device> <id>            inspect a remote task (trust manual)
-/connect cancel <agent@device> <id>          cancel a remote task (trust manual)
+/connect withdraw <number>                   withdraw a request you authorized (trust manual)
+/connect answer <number> <text>              answer a pending question (trust manual)
+/connect task <agent@device> <number>        inspect a remote request (trust manual)
+/connect cancel <agent@device> <number>      cancel a remote request (trust manual)
 /connect rotate                              replace the network secret after a lost device
 ```
+
+Under `trust manual`, `authorize` and `send` print `request 3` and a remote
+question ends with `(answer with /connect answer 4 <text>)`. Those short
+per-network numbers are what `withdraw`, `answer`, `task` and `cancel` take;
+ids never reach a screen, and a number the network never issued is refused.
 
 Removed. Each prints its redirect for one release instead of running:
 

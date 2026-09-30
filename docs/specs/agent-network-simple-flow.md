@@ -369,12 +369,18 @@ From then on, on that network, a first message to a remote agent needs:
 
 ```
 /connect authorize infra@alzan-prod-home "check the tunnel"
+communication authorized: request 1; expires at 1780000600; recipient infra@alzan-prod-home
 ```
 
 then "send the authorized request" to the agent, or `/connect send …` to send
-it yourself. Replies come back through the task envelope; a remote question
-waits for the human's `/connect answer`. This is the Codex model, unchanged,
-and it is only reachable through this setting.
+it yourself (`request 2 to infra@alzan-prod-home: queued`). Everything after
+that names the request by its number: `/connect task infra@alzan-prod-home 2`
+asks how it is going, `/connect cancel infra@alzan-prod-home 2` stops it,
+`/connect withdraw 1` takes back an authorization nobody used. Replies come
+back through the task envelope; a remote question waits for the human's
+`/connect answer`, shown as `infra@alzan-prod-home -> lapis` and ending
+`(answer with /connect answer 3 <text>)`. This is the Codex model, unchanged
+apart from the numbers, and it is only reachable through this setting.
 
 ### Story 8: the sealed config follows Marco
 
@@ -420,9 +426,21 @@ Shown in the palette and in `/connect help`:
 
 | Command | Only when | From Codex |
 |---|---|---|
-| `/connect authorize <agent@device> "text"`, `send`, `withdraw <id>`, `answer <id> "text"` | trust is `manual` | kept |
-| `/connect task <agent@device> <id>`, `cancel <agent@device> <id>` | trust is `manual` | kept |
+| `/connect authorize <agent@device> "text"`, `send`, `withdraw <number>`, `answer <number> "text"` | trust is `manual` | kept; argument was a 32-hex id |
+| `/connect task <agent@device> <number>`, `cancel <agent@device> <number>` | trust is `manual` | kept; argument was a 32-hex id |
 | `/connect rotate` | after a lost device | kept |
+
+Under `manual` trust a human never types or reads a 32-hex id. `authorize` and
+`send` print `request 3`; `withdraw 3`, `task <agent@device> 3` and `cancel
+<agent@device> 3` take it. A remote question shows its sender as `agent@device`
+and ends with `(answer with /connect answer 4 <text>)`; `answer 4 "text"` takes
+it. Numbers count up per network (one count for requests and questions), stay
+the same while the item lives and are never reused; the newest 2048 stay
+resolvable. A number the network never issued, or one of the other kind, is
+refused (`no request numbered 9 on this network`), as is anything that is not a
+number. The real ids stay inside: the model still gets them in its exact
+`hub_msg` arguments (section 7). A manual-trust relay event shows `agent@device`
+as its sender on a screen, never a `relay:` address.
 
 Removed, with the message the router prints for one release:
 
