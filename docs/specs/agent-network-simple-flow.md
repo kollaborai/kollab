@@ -713,6 +713,10 @@ How it stays secure with 40 bits:
   skipped: it is never written and a local server of the same name stays. The
   secondary shows one line, `Skipped MCP servers not installed here: a, b`, once
   per distinct set. URL servers have no command and always sync.
+- That skip is availability, not a sandbox: a synced server's command, args and
+  env run on the secondary as this user, the moment the bundle lands. Joining a
+  network means trusting its primary to run what it sends; `/connect revoke` is
+  the remedy, and in a chain (A issues to B, B issues to C) B is C's primary.
 - Several workspaces on one machine share the one managed-config record: the
   latest join takes it. A workspace whose primary is then refused shows one
   line, `Settings sync is off in this workspace: another workspace on this
