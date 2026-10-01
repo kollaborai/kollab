@@ -206,7 +206,8 @@ L. Old worktrees: remove those under `~/.codex/worktrees/` and
    `~/.config/superpowers/worktrees/kollab/`, plus `~/dev/kollab-release-v0.7.1`, but only
    where the HEAD is already in `origin/main` or a pushed branch. List any with unpushed
    commits here; do not delete them.
-M. Five small bugs, each with a test that fails before the fix:
+M. Five small bugs. Fix them together with A, before C, so they ship in 0.11.0. Each needs a test
+   that fails before the fix:
    - a knock that is rejected or never answered leaves the knocker's approval, link and reply
      grant: clear them on rejection, and expire them after 7 days without an answer;
    - a daemon restart re-announces join requests and knocks it already announced: keep the
