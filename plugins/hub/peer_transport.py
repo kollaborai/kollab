@@ -61,6 +61,8 @@ from .relay_state import RelayError, failure_text, validate_key
 from .secure_conversation import SecureConversationTransport
 
 MAX_PEER_FORWARD_CONCURRENCY = 16
+# Seconds for one link exchange round trip (session open, then the request).
+PEER_EXCHANGE_TIMEOUT = 3
 MAX_PEER_FORWARD_PER_PEER_PER_MINUTE = 120
 MAX_PEER_FORWARD_TOTAL_PER_MINUTE = 600
 MAX_PEER_EXCHANGE_BYTES = 3500
@@ -1231,11 +1233,13 @@ class PeerMeshRuntime:
                 if known and local_record.peer_id < remote_record.peer_id:
                     # The link names this node's own outbound session: open it
                     # first, so the id proposed is the one the peer sees arrive.
-                    await self.secure_transport.ensure_session(peer_key, timeout=3)
+                    await self.secure_transport.ensure_session(
+                        peer_key, timeout=PEER_EXCHANGE_TIMEOUT
+                    )
                     proposal = self._make_link_signature(local_record, remote_record, peer_key)
                 request = self._exchange_request(peer_key, local_record, proposal)
                 response = await self.secure_transport.request(
-                    peer_key, "peer.exchange", request, timeout=3
+                    peer_key, "peer.exchange", request, timeout=PEER_EXCHANGE_TIMEOUT
                 )
                 remote_record, link = self._accept_exchange_response(
                     peer_key, response, proposal=proposal

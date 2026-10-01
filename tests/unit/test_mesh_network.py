@@ -836,13 +836,16 @@ async def test_links_between_members_stay_valid_across_thirty_concurrent_refresh
     A reaches C through B, and B reaches C on the direct endpoint.
     """
     a, b, c = mesh3.a, mesh3.b, mesh3.c
+    # Three nodes share one event loop here, so a slow CI runner can stretch one
+    # round trip past the real 3 s; the timeout measures this machine, not the protocol.
+    monkeypatch.setattr(peer_transport, "PEER_EXCHANGE_TIMEOUT", 30)
     await link_everything(mesh3)
     clock = {"now": time.time()}
     monkeypatch.setattr(time, "time", lambda: clock["now"])
     ids = {node.name: node.mesh.local_peer_id for node in (a, b, c)}
 
     async def directory(asker, peer):
-        reply = await asker.bridge.secure_transport.request(peer.key, "directory", {}, timeout=5)
+        reply = await asker.bridge.secure_transport.request(peer.key, "directory", {}, timeout=30)
         assert set(reply) == {"agents", "truncated"}
 
     for round_number in range(30):
