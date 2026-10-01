@@ -112,6 +112,8 @@ class ConfigSyncService:
         self._failures: dict[str, int] = {}
         self._retry_at: dict[str, float] = {}
         self._pushes: dict[str, asyncio.Task] = {}
+        # (peer key, relay session) pairs the last tick saw online
+        self._seen: set[tuple[str, str]] = set()
         self._task: asyncio.Task | None = None
         self._closed = False
         self._told_skipped: tuple[str, ...] = ()
@@ -156,8 +158,15 @@ class ConfigSyncService:
     async def tick(self) -> None:
         peers = self._online()
         targets = [(key, peers[key]) for key in self._recipients() if key in peers]
+        # A reconnect is a (peer, session) pair the last tick did not see: a peer
+        # on a new relay session, or this device's own relay link coming back.
+        reconnected = not set(targets) <= self._seen
+        self._seen = set(targets)
         if not targets:
             return
+        if reconnected:
+            # A keyring that unlocked meanwhile is read again, once.
+            self._builder.retry_unresolved()
         try:
             snapshot = await asyncio.to_thread(self._builder.build)
         except ConfigSyncError:

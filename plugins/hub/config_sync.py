@@ -287,6 +287,20 @@ class SnapshotBuilder:
         self._resolved: dict[str, str] = {}
         self._core_signature: tuple | None = None
         self._core: tuple[dict, dict, tuple] = ({}, {}, ())
+        self._missing: set[str] = set()  # keyring names the last pass could not read
+        self._retry: set[str] | None = None  # the names the next pass reads again
+
+    def retry_unresolved(self) -> None:
+        """Read the keyring once more, for the names it could not give, on the next build.
+
+        Called once per reconnect (`ConfigSyncService.tick`), so a keyring that
+        unlocked after launch is picked up without waiting for config.json to
+        change, and a missing macOS Keychain entry prompts at most once per
+        reconnect, never on every poll. Names already read are not read again.
+        """
+        if self._missing:
+            self._retry = set(self._missing)
+            self._core_signature = None
 
     def build(self) -> Snapshot:
         config, mcp, keep = self._core_parts()
@@ -306,6 +320,9 @@ class SnapshotBuilder:
         if signature == self._core_signature:
             return self._core
         raw_config = _read_object(config_path)
+        retry, self._retry = self._retry, None
+        fetched: dict[str, str | None] = {}  # one keyring read per name per pass
+        missing: set[str] = set()
         leaves: dict[tuple[str, ...], Any] = {}
         unresolved: list[tuple[str, ...]] = []
         profiles = _dig(raw_config, "kollabor", "llm", "profiles")
@@ -317,12 +334,20 @@ class SnapshotBuilder:
                 # A locked or busy keyring must not look like a deleted key, or
                 # every device would lose it: fall back to the last value read.
                 name = value[len(SENTINEL) :]
-                value = self._keyring_get(name) or self._resolved.get(name)
+                if name not in fetched:
+                    # A retry reads only the names that failed; the rest keep
+                    # the value read before.
+                    fetched[name] = (
+                        self._keyring_get(name) if retry is None or name in retry else None
+                    )
+                value = fetched[name] or self._resolved.get(name)
                 if not value:
                     # Say so, or secondaries read the gap as a deleted key. Not
-                    # retried until config.json changes: a missing macOS Keychain
-                    # entry pops a dialog on every read.
+                    # retried until config.json changes or the device reconnects
+                    # (`retry_unresolved`): a missing macOS Keychain entry pops a
+                    # dialog on every read.
                     unresolved.append(path)
+                    missing.add(name)
                     continue
                 self._resolved[name] = value
             if path[-1] == "api_key" and _is_oauth_profile(profiles, path):
@@ -341,6 +366,7 @@ class SnapshotBuilder:
             if isinstance(servers, dict)
             else {}
         )
+        self._missing = missing
         self._core_signature, self._core = signature, (config, mcp, tuple(sorted(unresolved)))
         return self._core
 

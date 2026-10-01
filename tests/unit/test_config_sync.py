@@ -286,6 +286,88 @@ def test_a_locked_keyring_does_not_delete_a_synced_key(homes):
     assert dict(cs.walk_leaves(second.config))[path] == KEYRING_KEY_TEXT
 
 
+def test_a_keyring_that_unlocks_after_launch_is_read_again_once_per_reconnect(homes):
+    """Only the names it could not give are read again, and only when asked to."""
+    reads: list[str] = []
+    keyring = {"keyed": KEYRING_KEY_TEXT}  # "late" is locked at launch
+
+    def get(name):
+        reads.append(name)
+        return keyring.get(name)
+
+    late = ("kollabor", "llm", "profiles", "late", "api_key")
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        config = json.loads((kollab / "config.json").read_text())
+        config["kollabor"]["llm"]["profiles"]["late"] = {"api_key": f"{cs.SENTINEL}late"}
+        write_json(kollab / "config.json", config)
+        build = cs.SnapshotBuilder(keyring_get=get)
+
+        first = build.build()  # launch: the keyring is locked
+        assert sorted(reads) == ["keyed", "late"] and first.keep == (late,)
+
+        keyring["late"] = "sk-fake-late-key-0003"  # it unlocks, nobody knocks
+        reads.clear()
+        assert build.build().keep == (late,) and reads == []  # no retry before a reconnect
+
+        keyring.pop("late")  # a reconnect, the keyring is still locked
+        build.retry_unresolved()
+        assert build.build().keep == (late,) and reads == ["late"]  # the gap only
+        reads.clear()
+        assert build.build().keep == (late,) and reads == []  # once per reconnect
+
+        keyring["late"] = "sk-fake-late-key-0003"  # a later reconnect finds it unlocked
+        build.retry_unresolved()
+        snapshot = build.build()
+        assert reads == ["late"]  # "keyed" was read at launch and is not read again
+        assert snapshot.keep == ()
+        assert dict(cs.walk_leaves(snapshot.config))[late] == "sk-fake-late-key-0003"
+
+        reads.clear()
+        build.retry_unresolved()  # nothing unresolved: nothing to read
+        build.build()
+        assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_the_service_retries_the_keyring_once_per_reconnect(tmp_path):
+    from plugins.hub.config_sync_service import ConfigSyncService
+
+    class Builder:
+        retries = 0
+
+        def retry_unresolved(self):
+            self.retries += 1
+
+        def build(self):
+            raise cs.ConfigSyncError("unreadable")  # the tick stops here: nothing is pushed
+
+    builder, online = Builder(), {"peer": "s1"}
+    service = ConfigSyncService(
+        key=SigningKey.generate(),
+        transport=None,
+        online=lambda: online,
+        recipients=lambda: ["peer"],
+        primary=lambda: "",
+        device_name=lambda: "mac",
+        peer_name=lambda key: "peer",
+        builder=builder,
+        root=tmp_path,
+    )
+    await service.tick()
+    await service.tick()  # the same session: not a reconnect
+    assert builder.retries == 1
+    online["peer"] = "s2"  # the peer came back on a new relay session
+    await service.tick()
+    await service.tick()
+    assert builder.retries == 2
+    online.clear()  # this device lost the relay ...
+    await service.tick()
+    online["peer"] = "s2"  # ... and got it back
+    await service.tick()
+    assert builder.retries == 3
+
+
 def test_snapshot_repr_holds_no_secret(homes):
     with homes("mac") as kollab:
         fill_primary(kollab)
