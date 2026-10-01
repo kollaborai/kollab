@@ -510,7 +510,7 @@ class MessageHandler:
                             logger.error(f"Hub continue error (turn {turn_count}): {e}")
                             break
                 finally:
-                    qp.is_processing = False
+                    qp.is_processing = False  # ends the chain (note_chain_end)
                     # User messages arrive via process_user_input(), which
                     # enqueues them to processing_queue but SKIPS creating
                     # _process_queue() when is_processing is True.  After
@@ -530,7 +530,6 @@ class MessageHandler:
                             lambda: coord._process_queue(),
                             name="process_queue_drain_after_hub_continue",
                         )
-                    qp.note_chain_end()
 
             if coord.is_processing:
                 # Coalesce: only one pending retry at a time. Peer messages

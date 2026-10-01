@@ -474,18 +474,20 @@ async def test_a_request_that_finds_the_model_busy_waits_for_that_chain_to_finis
 
 
 @pytest.mark.asyncio
-async def test_a_request_no_turn_ever_handled_is_dropped_at_the_wait_ceiling():
+async def test_a_request_no_turn_ever_handled_ends_failed_at_the_wait_ceiling():
     sent: list = []
     plugin, llm = _responder(sent)
     await plugin._on_message_received(_request(T1, W1))
 
     await plugin.settle_network_turn(llm, now=time.monotonic() + 60)
     assert plugin.network_turn_open()  # the shell may still be waiting
+    assert _ends(sent) == []
     await plugin.settle_network_turn(llm, now=time.monotonic() + 601)
 
-    # The shell gave up long ago; the relay must not stay closed to requests.
+    # The relay does not stay closed to requests, and the requester is told.
     assert not plugin.network_turn_open()
-    assert _ends(sent) == []
+    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True}]
+    assert _replies(sent) == []
 
 
 # --------------------------------------------------------------------- #
@@ -985,7 +987,7 @@ def _processor(*, queued=0, completed=True, error=None, cancelled=False):
         ({}, {"failed": False}),  # the model's last response needed no follow-up
         ({"error": "503 from the provider"}, {"failed": True}),
         ({"completed": False, "cancelled": True}, {"failed": False}),  # ESC
-        ({"completed": False}, None),  # a tool result still has to go back to the model
+        ({"completed": False}, {"failed": True}),  # left with a tool result unsent: it died
         ({"queued": 1}, None),  # yielded to a queued message: its chain reports
     ],
 )
@@ -1007,3 +1009,114 @@ async def test_the_queue_processor_does_not_report_while_another_turn_is_mid_fli
     qp._turn_lock.release()
     qp.note_chain_end()
     hub.network_chain_ended.assert_called_once_with(failed=False)
+
+
+# --------------------------------------------------------------------- #
+# A chain that dies still ends its request, failed, at once
+# --------------------------------------------------------------------- #
+
+
+def _real_processor(hub) -> QueueProcessor:
+    """infra: a real QueueProcessor whose event bus hands out ``hub`` as the hub plugin."""
+    bus = MagicMock()
+    bus.get_service.side_effect = lambda name: hub if name == "hub_plugin" else None
+    bus.emit_with_hooks = AsyncMock(return_value={})
+    queue = SimpleNamespace(
+        overflow_strategy="drop_oldest",
+        log_queue_events=False,
+        enable_queue_metrics=False,
+        block_timeout=None,
+    )
+    return QueueProcessor(
+        conversation_history=[],
+        session_stats={},
+        stats={"total_thinking_time": 0},
+        pending_tools=[],
+        queue_metrics={},
+        task_config=SimpleNamespace(queue=queue),
+        api_service=AsyncMock(),
+        tool_executor=MagicMock(),
+        response_parser=MagicMock(),
+        message_display_service=MagicMock(),
+        renderer=MagicMock(),
+        config=MagicMock(),
+        event_bus=bus,
+        conversation_logger=AsyncMock(),
+        streaming_handler=MagicMock(),
+        native_tools_handler=MagicMock(),
+        add_message_fn=MagicMock(),
+        max_history=90,
+        question_gate_enabled=False,
+        max_queue_size=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_queue_drain_cancelled_before_it_completes_ends_the_request_failed():
+    """The pre-request hook denying a turn raises CancelledError out of the model call."""
+    sent: list = []
+    plugin, llm = _responder(sent)
+    qp = _real_processor(plugin)
+    await plugin._on_message_received(_request(T1, W1))
+    await plugin._set_working({"messages": []})  # LLM_REQUEST_PRE: the turn starts
+
+    async def denied(messages):
+        raise asyncio.CancelledError("Model request denied by pre-request hook")
+
+    qp.processing_queue.put_nowait("a message")
+    with pytest.raises(asyncio.CancelledError):
+        await qp.process_queue(None, denied, AsyncMock())
+    await plugin.settle_network_turn(llm, now=100.0)
+
+    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True}]
+    assert not plugin.network_turn_open()
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_turn_that_raises_ends_the_hub_continue_chain_failed():
+    """The hub-continue loop swallows a continuation error; the request still ends failed."""
+    from kollabor.llm.message_handler import MessageHandler
+
+    sent: list = []
+    plugin, llm = _responder(sent)
+    qp = _real_processor(plugin)
+    await plugin._on_message_received(_request(T1, W1))
+    calls: list = []
+
+    async def pre_request(event, data, source):
+        await plugin._set_working({"messages": []})  # the turn starts
+        raise RuntimeError("a pre-request hook crashed")
+
+    qp.event_bus.emit_with_hooks = pre_request
+
+    async def continue_conversation():
+        calls.append(1)
+        if len(calls) > 1:  # the first turn needed a tool follow-up; the second dies
+            await qp.continue_conversation("root")
+
+    tasks: list = []
+    coord = SimpleNamespace(
+        renderer=SimpleNamespace(),
+        is_processing=False,
+        _queue_processor=qp,
+        _continue_conversation=continue_conversation,
+        _process_queue=AsyncMock(),
+        create_background_task=lambda fn, name=None: tasks.append(asyncio.ensure_future(fn())),
+    )
+    await MessageHandler(coordinator=coord).handle_llm_continue({"source": "hub:lapis"}, None)
+    await asyncio.gather(*tasks)
+    await plugin.settle_network_turn(llm, now=100.0)
+
+    assert len(calls) == 2
+    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True}]
+    assert not plugin.network_turn_open()
+
+
+@pytest.mark.parametrize("completed, failed", [(True, False), (False, True)])
+def test_a_driver_that_only_lowers_is_processing_still_ends_the_chain(completed, failed):
+    """The goal driver and the watchdog end a chain this way, and call nothing else."""
+    qp, hub = _processor(completed=completed)
+    qp.is_processing = True
+    hub.network_chain_ended.assert_not_called()
+    qp.is_processing = False
+    hub.network_chain_ended.assert_called_once_with(failed=failed)

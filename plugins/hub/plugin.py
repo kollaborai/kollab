@@ -108,7 +108,7 @@ REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
 # A remote request's turn ends when the queue processor finishes the whole chain
 # that handled it (`HubPlugin.network_chain_ended`, docs/specs/agent-network-
-# simple-flow.md section 7). One request is dropped when no turn came for it
+# simple-flow.md section 7). One request ends failed when no turn came for it
 # within the shell's own wait ceiling.
 _NET_TURN_MAX_SECONDS = 600.0
 # Carried by the end-of-turn frame; only the failed text is ever printed.
@@ -2786,8 +2786,10 @@ class HubPlugin(BasePlugin):
         if not (turn.skipped or turn.ended):
             now = time.monotonic() if now is None else now
             if not turn.started and now - turn.opened_at > _NET_TURN_MAX_SECONDS:
-                # No turn ever came for it and the shell has stopped waiting.
-                self._net_turn = None
+                # No turn ever came for it and the shell has stopped waiting:
+                # the relay must not stay closed to requests, and the requester
+                # is told it failed instead of hearing nothing.
+                await self._end_network_turn(turn, failed=True)
             return
         await self._end_network_turn(turn, failed=turn.failed)
 

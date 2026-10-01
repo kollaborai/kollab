@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The stale Codex live-acceptance script under `scripts/relay/` and its unit test are gone; manual trust (Story 7) gets a short live proof instead, refs #121
 
 ### Fixed
+- A remote request whose chain dies no longer stays open: a queue drain, hub continuation or goal turn that raises, is cancelled or is healed by the watchdog now ends the request with a failed end frame at once, and a request no turn ever handled gets the failed frame at the 600 s ceiling instead of being dropped, so `kollab --hub msg` exits 1 instead of waiting for nothing, refs #121
 - A restart no longer announces every pending join request and knock again: the ids already announced are kept in the network state, pruned to what is still pending
 - A knock nobody answers no longer leaves its approval, trust, link and reply grant behind: the knocking device records when it knocked and drops them after seven days, unless the other device accepted (its link is live, or it already reached this device)
 - `kollab --hub msg` no longer exits with "finished without a reply" while the remote agent is still answering: a remote request's turn now ends when the queue processor finishes the whole chain (no tool result left to go back to the model, nothing queued, no other turn running) instead of after the model looked idle for a second, and the end frame still follows every reply and the forwarded plain-text answer, refs #121
