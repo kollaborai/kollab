@@ -1,7 +1,7 @@
 # Voice Mode — Cross-Spec Merge Agenda (aquamarine, merge-prep lane)
 
 Compared: v1-lapis.md (14197B, model pipeline) · v3-aquamarine.md (10580B, audio) ·
-v4-zircon.md (12021B, transcript + dispatch). Written 2026-09-25. One page, for malmazan.
+v4-zircon.md (12021B, transcript + dispatch). Written 2026-09-25. One page, for owner.
 
 ## A. AGREEMENTS — bless and lock (no discussion needed)
 
@@ -23,9 +23,9 @@ v4-zircon.md (12021B, transcript + dispatch). Written 2026-09-25. One page, for 
 | A14 | First-run HF download UX: progress line, offline-after-first, refuse-to-half-start | v1 only; unopposed → bless |
 | A15 | Ambient prompt as trender include so every bundle inherits it | v4 mechanism; consistent with v1 prompts |
 | A16 | VAD-empty segments never wake the gate at all | v1 finding, incorporated by v4 |
-| A17 | jev artifact NOT YET FOUND in ~/dev/synthyo (only MiniLM onnx cache there per v4; v1 search also failed) | factual consensus — lapis's JEV HUNT lane is the unblock |
+| A17 | jev artifact NOT YET FOUND in ~/dev/models (only MiniLM onnx cache there per v4; v1 search also failed) | factual consensus — lapis's JEV HUNT lane is the unblock |
 
-## B. CONFLICTS — malmazan must pick (each side stated)
+## B. CONFLICTS — owner must pick (each side stated)
 
 | # | Issue | v1-lapis | v3-aquamarine | v4-zircon |
 |---|-------|----------|---------------|-----------|
@@ -88,10 +88,10 @@ blessings. The 17 blessed items stand; one of them is now CHALLENGED (A12).
 
 | # | Issue | Positions now on the table |
 |---|-------|---------------------------|
-| C1 | STT engine | [a] lapis: parakeet v3 default (faster+more accurate) [b] canonical+zircon: faster-whisper [c] bismuth: faster-whisper, REJECTS parakeet — cc-by-4.0 license, no ONNX in repo, nemo-toolkit heavy. NOTE: sapphire's Transcriber interface LOWERS the stakes — engine becomes a config swap. malmazan arbitrates with license evidence now on the table |
+| C1 | STT engine | [a] lapis: parakeet v3 default (faster+more accurate) [b] canonical+zircon: faster-whisper [c] bismuth: faster-whisper, REJECTS parakeet — cc-by-4.0 license, no ONNX in repo, nemo-toolkit heavy. NOTE: sapphire's Transcriber interface LOWERS the stakes — engine becomes a config swap. owner arbitrates with license evidence now on the table |
 | C2 | Converse responder | [a] jev-local (zircon; bismuth: "gate model drafts the reply, LLM only if low confidence") [b] LLM one-shot (lapis; sapphire — since jev artifact missing). 2-2 split |
 | C4 | Interrupt | NEW third position — bismuth: queue normally, barge-in ONLY during TTS. lapis: full barge-in. v3/sapphire: queue + phase-2 barge-in. zircon: queue + explicit phrase. All barge-in variants still hit the C4×C5 interlock — capture must run during playback. Hard-duck v1 recommendation unchanged |
-| C7 | Retention | THREE positions now: bismuth 14d (conversations-dir convention) · lapis+sapphire 30d · v3 forever. needs malmazan |
+| C7 | Retention | THREE positions now: bismuth 14d (conversations-dir convention) · lapis+sapphire 30d · v3 forever. needs owner |
 | C8 | NEW — whisper size default | bismuth: BASE (145MB first download, 3.3x smaller, CPU-friendly; offers accommodation: base default on CPU/slow-link heuristic) vs lapis: SMALL (3.4% WER, quality-first). gate-is-a-classifier argument (transcript noise tolerable) is bismuth's strongest card |
 | C9 | NEW — first/demo surface | sapphire: WEB UI (dsk/Mentiko) demo first, TUI adapter same PR · v1/v3/v4/v5: terminal-first. CHALLENGES blessed A12. note: sapphire's core-package re-arch makes both cheap — the fight is over demo optics, not architecture |
 
@@ -109,7 +109,7 @@ blessings. The 17 blessed items stand; one of them is now CHALLENGED (A12).
 1. C9 (demo surface) — decides which adapter ships in the same PR
 2. C1+C8 together (engine + size — one config family, Transcriber interface)
 3. C4×C5 interlock (duck vs barge-in) — state machine shape
-4. C2 (converse responder — 2-2 split, malmazan breaks it)
+4. C2 (converse responder — 2-2 split, owner breaks it)
 5. C7, G2 (quick calls)
 6. G8 config unification into kollabor.voice.* (sapphire's step-1 vote honored here)
 7. Assembly: zircon state machine + schema skeleton; sapphire core-package layout (A18); v3 audio layer; v1 model/download sections; v5 packaging extra (A20); v1+v4 prompts + sapphire dual-layer enforcement (A19)
@@ -138,7 +138,7 @@ blessings. The 17 blessed items stand; one of them is now CHALLENGED (A12).
   path" seam is PARTIALLY FUTURE WORK — mark as build-not-wire in assembly;
   do not present as existing plumbing.
 
-## Δ G7/G10 update — jev RULED OUT by malmazan (22:49): "don't want to wait
+## Δ G7/G10 update — jev RULED OUT by owner (22:49): "don't want to wait
 for jev. would rather use a new local model."
 - jev hunt = CLOSED, artifact search moot, G10 ONNX+redistributable
   constraint transfers to the replacement model.
@@ -147,18 +147,18 @@ for jev. would rather use a new local model."
   newer local decision-model candidate must meet: ONNX, permissive license,
   ≤2s verdict budget on M-series CPU.
 - Bundling decision unchanged: gate model may still bundle OR first-run
-  download (bismuth's flow handles either; malmazan's "new local model"
+  download (bismuth's flow handles either; owner's "new local model"
   phrasing doesn't override bundling-vs-download mechanics).
 
 ---
 
-# SEAL — malmazan rulings applied (aquamarine, 22:58). Agenda is now CLOSED.
+# SEAL — owner rulings applied (aquamarine, 22:58). Agenda is now CLOSED.
 
 - JEV: DROPPED ENTIRELY. No bundle-exception exists anymore. A17 and every
   jev reference above are HISTORICAL — do not carry into the merged doc.
 - C2 RESOLVED → LLM one-shot (bismuth/sapphire position). jev-local
   converse replies died with jev. Not open for arbitration anymore.
-- C7 remains open (14d / 30d / forever — three-way, malmazan to pick).
+- C7 remains open (14d / 30d / forever — three-way, owner to pick).
 - G7 RESOLVED → local gate model, primary candidate Qwen2.5-0.5B-Instruct
   ONNX, PENDING bismuth's packaging confirm. Criteria locked: ONNX,
   permissive license, ≤2s verdict on M-series CPU.
@@ -170,7 +170,7 @@ for jev. would rather use a new local model."
   (startup-drop re-enqueue must land before dispatch wiring), TTS sub-call
   (kokoro-onnx verified; piper escape-hatch only).
 
-OPEN FOR MALMAZAN AT SEAL TIME: C1 (STT engine), C3 (discard verdict),
+OPEN FOR OWNER AT SEAL TIME: C1 (STT engine), C3 (discard verdict),
 C4×C5 (duck vs barge-in), C6 (act target), C7 (retention), C8 (whisper
 size), C9 (demo surface). Everything else is decided. Merge order stands:
 C9 → C1+C8 → C4×C5 → C6 → C7 → assembly per §D-Δ.

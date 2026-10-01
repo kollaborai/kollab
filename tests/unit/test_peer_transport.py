@@ -30,6 +30,7 @@ from plugins.hub.dns.storage import DNSStorage
 from plugins.hub.messenger import AgentMessenger, AgentSocketServer
 from plugins.hub.peer_discovery import PeerDiscoveryService
 from plugins.hub.peer_records import peer_id_for_key
+from plugins.hub.peer_router import TransientPeerDeliveryError
 from plugins.hub.peer_transport import PeerMeshRuntime
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_agent import RelayAgentBridge
@@ -158,10 +159,17 @@ async def mesh_network(tmp_path):
     try:
         # First establish B-C, then A-B. The second B-C exchange gossips A's
         # signed record/link to C so the end-to-end TLS binding works without
-        # a relay registration between A and C.
-        await states["relay"]["mesh"].exchange_peer(clients["destination"].public_key)
-        await states["origin"]["mesh"].exchange_peer(clients["relay"].public_key)
-        await states["relay"]["mesh"].exchange_peer(clients["destination"].public_key)
+        # a relay registration between A and C. The lower peer id of a pair
+        # writes its link, so it starts the exchange.
+        async def exchange(left, right):
+            first, second = sorted(
+                (left, right), key=lambda name: states[name]["mesh"].local_peer_id
+            )
+            await states[first]["mesh"].exchange_peer(clients[second].public_key)
+
+        await exchange("relay", "destination")
+        await exchange("origin", "relay")
+        await exchange("relay", "destination")
         yield clients, states, application_calls, dispatch_calls, wire
     finally:
         for state in states.values():
@@ -172,32 +180,32 @@ async def mesh_network(tmp_path):
 
 @pytest.mark.asyncio
 async def test_link_refresh_reuses_statement_until_half_life(mesh_network, monkeypatch):
-    # Re-signing an unchanged link with a new timestamp under the same revision
-    # was rejected as equivocation on the periodic refresh, tearing down the
-    # healthy session (the source of this file's intermittent failures).
+    # An unchanged link is not proposed again: a restated statement carries the
+    # old timestamp, which the peer refuses after a minute, and a fresh timestamp
+    # under the same revision is equivocation. The link is renewed, as a higher
+    # revision with a fresh timestamp, once half its lifetime is gone.
     import plugins.hub.peer_transport as peer_transport
 
     clients, states, _, _, _ = mesh_network
-    mesh = states["origin"]["mesh"]
-    relay_key = clients["relay"].public_key
+    proposer, other = sorted(
+        ("origin", "relay"), key=lambda name: states[name]["mesh"].local_peer_id
+    )
+    mesh = states[proposer]["mesh"]  # the lower peer id writes the link
+    peer_key = clients[other].public_key
     records = mesh.router.record_snapshot()
     local = records[mesh.local_peer_id]
-    remote = records[peer_id_for_key(relay_key)]
+    remote = records[peer_id_for_key(peer_key)]
     link = mesh.router.link_between(mesh.local_peer_id, remote.peer_id)
     assert link is not None
     real_time = time.time
 
     monkeypatch.setattr(peer_transport.time, "time", lambda: real_time() + 1)
-    again = mesh._make_link_signature(local, remote, relay_key)["payload"]
-    assert (again["revision"], again["issued_at"], again["expires_at"]) == (
-        link.revision,
-        link.issued_at,
-        link.expires_at,
-    )
+    assert mesh._make_link_signature(local, remote, peer_key) is None
 
     monkeypatch.setattr(peer_transport.time, "time", lambda: link.expires_at - 10)
-    renewed = mesh._make_link_signature(local, remote, relay_key)["payload"]
+    renewed = mesh._make_link_signature(local, remote, peer_key)["payload"]
     assert renewed["revision"] > link.revision
+    assert renewed["issued_at"] == link.expires_at - 10
 
 
 @pytest.mark.asyncio
@@ -467,6 +475,150 @@ def _mint_tls_cert(tmp_path: Path) -> tuple[str, str]:
 
 
 @pytest.mark.asyncio
+async def test_direct_secure_record_uses_tls_identity_and_rejects_other_methods(
+    tmp_path,
+):
+    cert, key = _mint_tls_cert(tmp_path)
+    server_ssl = build_server_ssl_context(cert, key)
+    dns_storage = DNSStorage(tmp_path / "dns")
+    identity = IdentityManager(dns_storage)
+    registry = AgentRegistry(dns_storage)
+    _, server_key = identity.get_or_create_keypair("server-agent")
+    _, client_key = identity.get_or_create_keypair("client-agent")
+    for designation, public_key in (
+        ("server-agent", server_key),
+        ("client-agent", client_key),
+    ):
+        registry.register(
+            AgentRecord(
+                designation=designation,
+                public_key=public_key,
+                approval_state="approved",
+            )
+        )
+    calls = []
+
+    async def receive_message(_message):
+        raise AssertionError("secure records must not enter Hub message dispatch")
+
+    async def secure_handler(designation, public_key, method, payload):
+        calls.append((designation, public_key, method, payload))
+        return {"records": ["opaque-response"]}
+
+    server = AgentSocketServer(
+        "peer-secure-server", receive_message, socket_name=f"peer-secure-{os.getpid()}"
+    )
+    server.set_dns_auth(
+        registry, identity, require_auth=False, local_designation="server-agent"
+    )
+    server.enable_endpoint("127.0.0.1", 0, server_ssl)
+    server.set_peer_secure_handler(secure_handler)
+    await server.start()
+
+    local = RelayClient(tmp_path / "relay-client", state_dir=tmp_path / "relay-state")
+    remote_relay_key = SigningKey.generate().verify_key.encode().hex()
+    local.approve(remote_relay_key)
+    secure = SecureConversationTransport(local, local._store.key.encode())
+    mesh = PeerMeshRuntime(
+        local,
+        secure,
+        tmp_path / "mesh",
+        _no_application,
+        forwarding_enabled=lambda: False,
+        endpoint_identity_manager=identity,
+        endpoint_designation="client-agent",
+        endpoint_tls_ca=cert,
+        direct_enabled=True,
+        allow_private_network=True,
+    )
+    port = server._tcp_server.sockets[0].getsockname()[1]
+    now = int(time.time())
+    mesh._locators[remote_relay_key] = {
+        "relay_public_key": remote_relay_key,
+        "endpoint_designation": "server-agent",
+        "endpoint_public_key": server_key,
+        "endpoint": f"kollab+tls://127.0.0.1:{port}",
+        "session_id": secrets.token_hex(16),
+        "revision": 1,
+        "issued_at": now,
+        "expires_at": now + 120,
+        "v": 1,
+        "digest": "b" * 64,
+    }
+    try:
+        result = await mesh._send_direct_secure(
+            remote_relay_key, "secure_packet", {"records": ["opaque"]}, timeout=4
+        )
+        assert result == {"records": ["opaque-response"]}
+        assert calls == [
+            ("client-agent", client_key, "secure_packet", {"records": ["opaque"]})
+        ]
+
+        # Only the two secure record methods ride this carrier.
+        with pytest.raises(TransientPeerDeliveryError):
+            await mesh._direct_request(
+                remote_relay_key,
+                {"action": "peer_secure", "method": "message", "payload": {}},
+                "peer_secure_result",
+                timeout=4,
+            )
+        assert len(calls) == 1
+    finally:
+        await mesh.close()
+        secure.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_locator_only_peer_is_reached_directly_and_refreshed(mesh_network):
+    clients, states, application_calls, dispatch_calls, _wire = mesh_network
+    origin_mesh = states["origin"]["mesh"]
+    destination_key = clients["destination"].public_key
+    origin_key = clients["origin"].public_key
+    # The destination is outside the origin's relay room but announced a
+    # signed locator on the origin's network.
+    assert destination_key not in {peer["key"] for peer in clients["origin"].peers()}
+    origin_mesh.direct_enabled = True
+    origin_mesh.endpoint_identity_manager = object()
+    destination_session = clients["destination"]._session_id
+    origin_mesh._locator_for_peer = (
+        lambda key: {"relay_public_key": key, "session_id": destination_session}
+        if key == destination_key
+        else None
+    )
+    carried = []
+
+    async def direct_secure(peer_key, method, payload, *, timeout):
+        carried.append((peer_key, method))
+        return await states["destination"]["mesh"].application_handler(
+            origin_key, method, payload
+        )
+
+    origin_mesh._send_direct_secure = direct_secure
+    for name in application_calls:
+        application_calls[name].clear()
+        dispatch_calls[name].clear()
+
+    result = await states["origin"]["secure"].request(
+        destination_key, "directory", {}, timeout=10
+    )
+
+    assert result == {"agents": [{"name": "destination-agent"}], "truncated": False}
+    assert carried and all(key == destination_key for key, _ in carried)
+    assert application_calls["relay"] == []  # the middle node was not used
+    assert [call[1] for call in dispatch_calls["destination"]] == ["directory"]
+
+    exchanged = []
+
+    async def record_exchange(peer_key):
+        exchanged.append(peer_key)
+
+    origin_mesh.exchange_peer = record_exchange
+    await origin_mesh.refresh()
+    assert destination_key in exchanged
+
+
+@pytest.mark.asyncio
 async def test_direct_peer_forward_uses_tls_identity_and_bounded_listener(
     tmp_path, monkeypatch
 ):
@@ -624,3 +776,260 @@ async def test_direct_peer_forward_uses_tls_identity_and_bounded_listener(
         secure.close()
         await local.close()
         await server.stop()
+
+
+async def _carrier_server(tmp_path, *, register_client, resolver):
+    """A TLS endpoint whose registry may or may not know the dialing designation."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cert, key = _mint_tls_cert(tmp_path)
+    server_storage = DNSStorage(tmp_path / "server-dns")
+    server_identity = IdentityManager(server_storage)
+    server_registry = AgentRegistry(server_storage)
+    _, server_key = server_identity.get_or_create_keypair("server-agent")
+    server_registry.register(
+        AgentRecord(
+            designation="server-agent", public_key=server_key, approval_state="approved"
+        )
+    )
+    client_identity = IdentityManager(DNSStorage(tmp_path / "client-dns"))
+    _, client_key = client_identity.get_or_create_keypair("client-agent")
+    if register_client is not None:
+        server_registry.register(
+            AgentRecord(
+                designation="client-agent",
+                public_key=register_client.get("key", client_key),
+                approval_state=register_client["state"],
+            )
+        )
+    calls = []
+
+    async def receive_message(_message):
+        raise AssertionError("a peer carrier frame must not enter Hub dispatch")
+
+    async def secure_handler(designation, public_key, method, payload):
+        calls.append((designation, public_key, method))
+        return {"records": []}
+
+    server = AgentSocketServer(
+        "carrier-server", receive_message, socket_name=f"carrier-{secrets.token_hex(3)}"
+    )
+    server.set_dns_auth(
+        server_registry, server_identity, require_auth=False, local_designation="server-agent"
+    )
+    server.enable_endpoint("127.0.0.1", 0, build_server_ssl_context(cert, key))
+    server.set_peer_secure_handler(secure_handler)
+    if resolver:
+        server.set_peer_identity_resolver(
+            lambda designation: client_key if designation == "client-agent" else ""
+        )
+    await server.start()
+    port = server._tcp_server.sockets[0].getsockname()[1]
+    return SimpleNamespace(
+        server=server,
+        port=port,
+        cert=cert,
+        server_key=server_key,
+        client_key=client_key,
+        client_identity=client_identity,
+        calls=calls,
+    )
+
+
+async def _dial(carrier):
+    reader, writer = await asyncio.open_connection(
+        "127.0.0.1",
+        carrier.port,
+        ssl=build_client_ssl_context(carrier.cert),
+        server_hostname="127.0.0.1",
+    )
+    ok = await AgentMessenger.do_remote_client_handshake(
+        reader,
+        writer,
+        carrier.client_identity,
+        "client-agent",
+        "server-agent",
+        carrier.server_key,
+        timeout=3,
+    )
+    return ok, reader, writer
+
+
+async def _line(reader):
+    return json.loads(await asyncio.wait_for(reader.readline(), 3))
+
+
+@pytest.mark.asyncio
+async def test_a_locator_named_endpoint_reaches_the_peer_carrier_and_nothing_else(tmp_path):
+    carrier = await _carrier_server(tmp_path, register_client=None, resolver=True)
+    try:
+        ok, reader, writer = await _dial(carrier)
+        assert ok
+        try:
+            writer.write(b'{"action":"ping"}\n')
+            await writer.drain()
+            assert (await _line(reader))["msg"] == "local operator authorization required"
+        finally:
+            writer.close()
+        ok, reader, writer = await _dial(carrier)
+        try:
+            writer.write(
+                b'{"action":"peer_secure","method":"secure_identity","payload":{}}\n'
+            )
+            await writer.drain()
+            assert (await _line(reader))["type"] == "peer_secure_result"
+        finally:
+            writer.close()
+        assert carrier.calls == [("client-agent", carrier.client_key, "secure_identity")]
+    finally:
+        await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_locator_never_overrides_what_the_registry_records(tmp_path):
+    # The registry holds this designation under another key, or rejected: the
+    # locator's claim does not replace either, and the dial ends at the handshake.
+    other = SigningKey.generate().verify_key.encode().hex()
+    for name, record in (
+        ("other-key", {"state": "approved", "key": other}),
+        ("rejected", {"state": "rejected"}),
+    ):
+        carrier = await _carrier_server(tmp_path / name, register_client=record, resolver=True)
+        try:
+            ok, _reader, writer = await _dial(carrier)
+            writer.close()
+            assert not ok, name
+        finally:
+            await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_endpoint_is_turned_away_without_a_locator(tmp_path):
+    carrier = await _carrier_server(tmp_path, register_client=None, resolver=False)
+    try:
+        ok, _reader, writer = await _dial(carrier)
+        writer.close()
+        assert not ok
+    finally:
+        await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_auto_approved_local_agent_is_a_carrier_peer_not_a_message_sender(tmp_path):
+    # Runtime allowlists are not communication authorization: a same-host agent
+    # the registry only auto-approved reaches the carrier through its locator.
+    carrier = await _carrier_server(
+        tmp_path, register_client={"state": "auto_approved"}, resolver=True
+    )
+    try:
+        ok, reader, writer = await _dial(carrier)
+        assert ok
+        try:
+            writer.write(b'{"action":"ping"}\n')
+            await writer.drain()
+            assert (await _line(reader))["msg"] == "local operator authorization required"
+        finally:
+            writer.close()
+    finally:
+        await carrier.server.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_direct_endpoint_falls_back_to_the_relay(mesh_network):
+    # do_remote_client_handshake answers False for a refusal and for a timeout, and the
+    # direct attempt turns that into PeerRouteError: delivery must still take the relay.
+    import time
+
+    from plugins.hub.peer_router import PeerRouteError
+
+    clients, states, *_ = mesh_network
+    mesh = states["origin"]["mesh"]
+    peer_key = clients["relay"].public_key
+    mesh.direct_enabled = True
+    mesh._locators[peer_key] = {"expires_at": int(time.time()) + 60}
+
+    async def refused(*_args, **_kwargs):
+        raise PeerRouteError("direct peer endpoint identity was rejected")
+
+    relayed = []
+
+    async def relay_request(key, method, payload, *, timeout):
+        relayed.append((key, method))
+        return {"v": 1}
+
+    mesh._send_direct_peer_forward = refused
+    clients["origin"].request = relay_request
+    assert await mesh._send_forward_to_peer(peer_key, {}, timeout=3) == {"v": 1}
+    assert relayed == [(peer_key, "peer.forward")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_direct_secure_record_still_takes_the_routed_path(mesh_network):
+    import time
+
+    from plugins.hub.peer_router import PeerRouteError, TransientPeerDeliveryError
+
+    clients, states, *_ = mesh_network
+    mesh = states["origin"]["mesh"]
+    destination = clients["destination"].public_key
+    mesh.direct_enabled = True
+    mesh._locators[destination] = {"expires_at": int(time.time()) + 60}
+    attempts = []
+
+    async def refused(*_args, **_kwargs):
+        raise PeerRouteError("direct peer endpoint identity was rejected")
+
+    async def routed(peer_key, frame, *, timeout):
+        attempts.append(peer_key)
+        raise TransientPeerDeliveryError("stop here")
+
+    mesh._send_direct_secure = refused
+    mesh._send_forward_to_peer = routed
+    with pytest.raises(Exception):
+        await mesh.request(destination, "secure_identity", {"x": 1}, timeout=3)
+    assert attempts, "the direct refusal ended the request before the routed path was tried"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mesh_route_to_a_peer_on_the_relay_falls_back_to_the_relay_once(mesh_network):
+    import time
+
+    from plugins.hub.peer_router import TransientPeerDeliveryError
+
+    clients, states, *_ = mesh_network
+    mesh = states["origin"]["mesh"]
+    relay_key = clients["relay"].public_key
+    mesh.direct_enabled = True
+    mesh._locators[relay_key] = {"expires_at": int(time.time()) + 60}
+    attempts = []
+
+    async def stale(peer_key, frame, *, timeout):
+        attempts.append(peer_key)
+        raise TransientPeerDeliveryError("the link went stale")
+
+    mesh._send_forward_to_peer = stale
+    result = await mesh.request(relay_key, "secure_identity", {}, timeout=3)
+    assert set(result) == {"certificate"}
+    assert attempts, "the mesh route was not tried first"
+
+
+@pytest.mark.asyncio
+async def test_the_direct_endpoint_turns_an_accepted_stranger_away_from_forwarding(mesh_network):
+    # relay_agent refuses peer.forward from an accepted stranger; a locator-admitted
+    # endpoint reaches handle_direct_forward without that dispatcher, so it checks too.
+    import time
+
+    from plugins.hub.peer_router import PeerRouteError
+
+    clients, states, *_ = mesh_network
+    mesh = states["relay"]["mesh"]
+    stranger = clients["origin"].public_key
+    clients["relay"].state.links.append(stranger)
+    endpoint_key = "ab" * 32
+    mesh._locators[stranger] = {
+        "expires_at": int(time.time()) + 60,
+        "relay_public_key": stranger,
+        "endpoint_designation": "stranger-endpoint",
+        "endpoint_public_key": endpoint_key,
+    }
+    with pytest.raises(PeerRouteError, match="stranger"):
+        await mesh.handle_direct_forward("stranger-endpoint", endpoint_key, {})

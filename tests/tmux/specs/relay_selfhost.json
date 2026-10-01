@@ -1,0 +1,135 @@
+{
+  "name": "relay-selfhost",
+  "description": "kollab relay serve --domain runs the relay, publishes the signed discovery document and serves it as the key file, prints the TXT record and the proxy routes it still needs, and a restart keeps the same publisher key (milestone 4, issue #121). Loopback domain and ports, throwaway HOME.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-relay-selfhost\"; PY=\"$R/.venv/bin/python\"; [ -x \"$PY\" ] || PY=\"$(git rev-parse --path-format=absolute --git-common-dir)/../.venv/bin/python\"; [ -x \"$PY\" ] || PY=python3; mkdir -p \"$H\"; cd \"$R\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$PY\" kollabor_cli_main.py relay serve --domain localhost:39443 --port 39078'",
+    "app_init_sleep": 4,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "start from an empty throwaway HOME",
+      "command": "python3 -c \"import os, shutil; shutil.rmtree(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'kollab-spec-relay-selfhost'), ignore_errors=True)\""
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "first run: new key, then the operator's to-do list"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "ready: relay up, key file published",
+      "timeout": 40,
+      "description": "the command reports ready only once the relay answers and the key file is published"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "new signing key created",
+      "description": "first run creates the signing key"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "_agent\\.localhost\\s+TXT\\s+\"v=aid1;u=https://localhost:39443/\\.well-known/agent-keys\\.json\"",
+      "description": "prints the exact TXT record"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "GET\\s+/\\.well-known/agent-keys\\.json[\\s\\S]*GET\\s+/relay/v1/health[\\s\\S]*WS\\s+/relay/v1/ws[\\s\\S]*POST\\s+/relay/v1/enrollment/\\*[\\s\\S]*POST\\s+/relay/v1/contact/\\*",
+      "description": "lists the five proxy routes"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--print nginx\\s+\\(or --print caddy\\)",
+      "description": "points at the paste-ready proxy config"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--print systemd",
+      "description": "points at the systemd unit"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback|Error",
+      "description": "no traceback or error on the first run"
+    },
+    {
+      "action": "section",
+      "title": "the same process serves the signed key file and the relay"
+    },
+    {
+      "action": "shell",
+      "description": "the key file over HTTP verifies against the domain",
+      "command": "PY=\"$PWD/.venv/bin/python\"; [ -x \"$PY\" ] || PY=\"$(git rev-parse --path-format=absolute --git-common-dir)/../.venv/bin/python\"; [ -x \"$PY\" ] || PY=python3; curl -s http://127.0.0.1:39078/.well-known/agent-keys.json | \"$PY\" -c \"import sys, json; sys.path.insert(0, '.'); from plugins.hub.dns.discovery import normalize_target, verify_manifest; p = json.load(sys.stdin); verify_manifest(p, normalize_target('localhost:39443')); print('key file verified; roles=' + ','.join(p['discovery']['roles']) + '; key=' + p['coordinator']['public_key'])\" | tee \"${TMPDIR:-/tmp}/kollab-spec-relay-selfhost.key1\"",
+      "assert_contains": "key file verified; roles=rendezvous,relay; key=[0-9a-f]{64}"
+    },
+    {
+      "action": "shell",
+      "description": "the relay health route answers on the same port",
+      "command": "curl -s http://127.0.0.1:39078/relay/v1/health",
+      "assert_contains": "\"status\": \"ok\".*\"origin\": \"https://localhost:39443\""
+    },
+    {
+      "action": "shell",
+      "description": "the enrollment route is live and strict on the same port",
+      "command": "curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:39078/relay/v1/enrollment/lookup",
+      "assert_contains": "invalid_request"
+    },
+    {
+      "action": "section",
+      "title": "stop, then start again: the same signing key, so joined devices keep trusting the directory"
+    },
+    {
+      "action": "control",
+      "key": "c"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "arrow",
+      "direction": "Up"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "signing key loaded[\\s\\S]*ready: relay up, key file published",
+      "timeout": 40,
+      "description": "the restart loads the key it made and is ready again"
+    },
+    {
+      "action": "shell",
+      "description": "the restarted process publishes the same key",
+      "command": "PY=\"$PWD/.venv/bin/python\"; [ -x \"$PY\" ] || PY=\"$(git rev-parse --path-format=absolute --git-common-dir)/../.venv/bin/python\"; [ -x \"$PY\" ] || PY=python3; curl -s http://127.0.0.1:39078/.well-known/agent-keys.json | \"$PY\" -c \"import sys, json; sys.path.insert(0, '.'); from plugins.hub.dns.discovery import normalize_target, verify_manifest; p = json.load(sys.stdin); verify_manifest(p, normalize_target('localhost:39443')); print('key file verified; roles=' + ','.join(p['discovery']['roles']) + '; key=' + p['coordinator']['public_key'])\" > \"${TMPDIR:-/tmp}/kollab-spec-relay-selfhost.key2\"; cmp -s \"${TMPDIR:-/tmp}/kollab-spec-relay-selfhost.key1\" \"${TMPDIR:-/tmp}/kollab-spec-relay-selfhost.key2\" && echo 'same publisher key after restart'",
+      "assert_contains": "same publisher key after restart"
+    }
+  ],
+  "teardown": [
+    {
+      "action": "control",
+      "key": "c"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "shell",
+      "description": "leave nothing running or behind",
+      "allow_failure": true,
+      "command": "pkill -f 'relay serve --domain localhost:39443'; python3 -c \"import os, shutil; base = os.environ.get('TMPDIR', '/tmp'); shutil.rmtree(os.path.join(base, 'kollab-spec-relay-selfhost'), ignore_errors=True); [os.remove(os.path.join(base, n)) for n in ('kollab-spec-relay-selfhost.key1', 'kollab-spec-relay-selfhost.key2') if os.path.exists(os.path.join(base, n))]\""
+    }
+  ]
+}

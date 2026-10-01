@@ -408,11 +408,11 @@ class LLMService:
 
         # Initialize conversation logger with intelligence features
         conversations_dir = get_conversations_dir()
-        conversations_dir.mkdir(parents=True, exist_ok=True)
+        conversations_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Initialize raw conversation logging directory (inside conversations/)
         self.raw_conversations_dir = conversations_dir / "raw"
-        self.raw_conversations_dir.mkdir(parents=True, exist_ok=True)
+        self.raw_conversations_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.conversation_logger = KollaborConversationLogger(conversations_dir)
 
         # Set conversations_dir on config for ConversationManager (kollabor-ai needs it externally)

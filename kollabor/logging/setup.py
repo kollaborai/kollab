@@ -30,8 +30,38 @@ DEFAULT_LOG_MAX_BYTES = 200 * 1024 * 1024  # 200 MB per file
 DEFAULT_LOG_BACKUP_COUNT = 3  # keep 3 rotated files (+ the live one)
 
 # Enrollment codes are one-device credentials. A user can still paste one
-# into a command or chat line, so no log record may carry it.
-_ENROLLMENT_CODE_RE = re.compile(r"K1-[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*", re.IGNORECASE)
+# into a command or chat line, so no log record may carry it. Covers the
+# short XXXX-XXXX join code as it is shown, in either case; the no-dash
+# form never matches (false positives).
+_ENROLLMENT_CODE_RE = re.compile(
+    r"\b[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}-[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\b"
+)
+
+
+class JoinCodeRedactionFilter(_logging.Filter):
+    """Rewrite any log record that carries a join code, for every formatter.
+
+    One filter attached to each handler this module builds (plus the handlers
+    it adopts), so compact, standard and custom format strings all emit
+    ``[join code redacted]`` instead of the code.
+    """
+
+    def filter(self, record: _logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True  # a malformed record is the formatter's problem, not ours
+        redacted = _ENROLLMENT_CODE_RE.sub("[join code redacted]", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
+        return True
+
+
+def _attach_redaction_filter(handler: _logging.Handler) -> None:
+    """Idempotently attach the one join-code filter to a handler."""
+    if not any(isinstance(item, JoinCodeRedactionFilter) for item in handler.filters):
+        handler.addFilter(JoinCodeRedactionFilter())
 
 
 def _build_rotating_handler(
@@ -53,17 +83,22 @@ def _build_rotating_handler(
     )
     # Preserve the thread-safety override the previous handler used.
     handler.lock = threading.RLock()  # type: ignore[assignment]
+    _attach_redaction_filter(handler)
     return handler
 
 
 class CompactFormatter(_logging.Formatter):
-    """Custom formatter that compacts level names and includes file location."""
+    """Custom formatter that compacts level names and includes file location.
+
+    Join-code redaction is not done here: the ``JoinCodeRedactionFilter``
+    attached to the handler rewrites the record before any formatter runs.
+    """
 
     def format(self, record):
         # Map long level names to 4-char versions
         level_mapping = {"WARNING": "WARN", "CRITICAL": "CRIT", "DEBUG": "DEBG"}
         record.levelname = level_mapping.get(record.levelname, record.levelname)
-        return _ENROLLMENT_CODE_RE.sub("K1-[redacted]", super().format(record))
+        return super().format(record)
 
 
 class LoggingSetup:
@@ -131,9 +166,7 @@ class LoggingSetup:
         format_type = logging_config.get("format_type", "compact")
         custom_format = logging_config.get("format", None)
         max_bytes = int(logging_config.get("max_bytes", DEFAULT_LOG_MAX_BYTES))
-        backup_count = int(
-            logging_config.get("backup_count", DEFAULT_LOG_BACKUP_COUNT)
-        )
+        backup_count = int(logging_config.get("backup_count", DEFAULT_LOG_BACKUP_COUNT))
 
         # Convert string level to logging constant
         numeric_level = getattr(_logging, level, _logging.INFO)
@@ -205,12 +238,14 @@ class LoggingSetup:
         # Apply to root logger handlers
         for root_handler in _logging.getLogger().handlers:
             root_handler.setFormatter(formatter)
+            _attach_redaction_filter(root_handler)
 
         # Apply to all existing logger handlers
         for logger_name in _logging.Logger.manager.loggerDict:
             existing_logger = _logging.getLogger(logger_name)
             for existing_handler in existing_logger.handlers:
                 existing_handler.setFormatter(formatter)
+                _attach_redaction_filter(existing_handler)
 
     def get_current_config(self) -> Dict[str, Any]:
         """Get current logging configuration."""

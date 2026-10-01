@@ -7,6 +7,7 @@ Extracted from LLMService as part of the llm_service.py decomposition.
 import asyncio
 import json
 import logging
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -85,7 +86,18 @@ def _should_ingest(result: ToolExecutionResult) -> bool:
 def _tool_results_requiring_followup(
     results: List[ToolExecutionResult],
 ) -> List[ToolExecutionResult]:
-    """Return tool results that need another LLM turn."""
+    """Return tool results that need another LLM turn.
+
+    Every result does, so the model sees what came back. The exception is a
+    tool that ends the turn on purpose: hub_msg / hub_reply with wait="true"
+    means "send, then stop", and its result says so with metadata["end_turn"].
+    That releases the whole batch, provided nothing in it failed: an error is
+    something the model has to see.
+    """
+    if all(r.success for r in results) and any(
+        r.metadata.get("end_turn") is True for r in results
+    ):
+        return []
     return list(results)
 
 
@@ -275,6 +287,21 @@ class QueueProcessor:
         # Bumped by mark_progress(); starts "now" so a fresh processor is not
         # instantly flagged.
         self.last_progress_at = time.monotonic()
+
+    @property
+    def is_processing(self) -> bool:
+        """True while a chain (a queue drain, a hub continuation, a goal turn) runs."""
+        return getattr(self, "_is_processing", False)
+
+    @is_processing.setter
+    def is_processing(self, value: bool) -> None:
+        # Lowering it is the one place every chain ends, whoever lowers it (a
+        # driver's finally, the goal driver, the watchdog's heal), so a remote
+        # request's turn can never be left open by a path that forgot to say so.
+        was = self.is_processing
+        self._is_processing = value
+        if was and not value:
+            self.note_chain_end()
 
     @property
     def cancel_processing(self) -> bool:
@@ -476,6 +503,32 @@ class QueueProcessor:
         except asyncio.QueueEmpty:
             self.dropped_messages += 1
 
+    def note_chain_end(self) -> None:
+        """Tell the hub a whole chain just ended (a remote request's turn ends here).
+
+        Every exit reports, through `is_processing` falling: a chain that
+        finished, one the user cancelled, and one that died (a turn that raised,
+        an exception leaving the driver). Only the dead one is failed. Nothing
+        left to do means no message queued behind it and no other turn
+        mid-flight; a chain that yielded to a queued message is not over, the one
+        that takes over reports instead. A bare `is_processing` is false for a
+        moment between a tool result and the next model call, so only its
+        falling edge, with an empty queue and a free turn lock, is the signal.
+        """
+        try:
+            if self.processing_queue.empty() and not self._turn_lock.locked():
+                hub = self.event_bus.get_service("hub_plugin") if self.event_bus else None
+                if hub is not None:
+                    # A chain that leaves without completing died: an exception
+                    # still in flight (this runs from a finally), the watchdog's
+                    # heal, any exit nobody recorded. A user cancel is not a failure.
+                    died = not self.cancel_processing and (
+                        not self.turn_completed or sys.exc_info()[0] is not None
+                    )
+                    hub.network_chain_ended(failed=bool(self.last_turn_error) or died)
+        except Exception as exc:
+            logger.debug(f"note_chain_end error: {exc}")
+
     async def process_queue(
         self,
         task_manager,
@@ -640,7 +693,7 @@ class QueueProcessor:
                 logger.info("Re-entering queue drain after mid-turn message arrival")
 
         finally:
-            self.is_processing = False
+            self.is_processing = False  # ends the chain (note_chain_end)
             self.current_processing_tokens = 0
             self.processing_start_time = None
 
@@ -754,9 +807,17 @@ class QueueProcessor:
         # to finish rather than running concurrently.
         async with self._turn_lock:
             self.last_turn_error = None
-            return await self._execute_llm_turn_inner(
-                user_message_provided, current_parent_uuid
-            )
+            try:
+                return await self._execute_llm_turn_inner(
+                    user_message_provided, current_parent_uuid
+                )
+            except BaseException as exc:
+                # The one place every driver's turn passes through: a turn that
+                # raises (a denied pre-request hook, a crash before the provider
+                # call) kills its chain, whichever driver then swallows it.
+                if not self.cancel_processing:
+                    self.last_turn_error = str(exc) or type(exc).__name__
+                raise
 
     async def _execute_llm_turn_inner(
         self,
@@ -1638,9 +1699,13 @@ class QueueProcessor:
 
             # Step 10: Determine continuation
             # If tools executed, the LLM MUST see their results back. Natural
-            # turn completion happens when the model returns no tool calls.
+            # turn completion happens when the model returns no tool calls, or
+            # when a tool ended the turn on purpose (hub_msg wait="true"): the
+            # results wait in history and the reply starts the next turn.
             if _tool_results_requiring_followup(all_results):
                 self.turn_completed = False
+            elif all_results:
+                self.turn_completed = True
 
         except asyncio.CancelledError:
             logger.info("Message processing cancelled by user")

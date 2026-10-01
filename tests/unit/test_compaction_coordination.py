@@ -1,6 +1,6 @@
 """Regression tests for compaction coordination-state loss (2026-09-26).
 
-Three incident classes from tonight (malmazan's directive):
+Three incident classes from tonight (the owner's directive):
   1. GO signals needing re-issue (nephrite ×2) — a GO delivered mid-turn
      lands in the pending agent-HUD queue, is drained as a MERGED block
      without hub metadata, and was then LLM-summarized probabilistically.
@@ -97,7 +97,7 @@ class TestHubDetectionContainment(unittest.TestCase):
     def test_human_elsewhere_not_a_task(self):
         m = _Msg(
             content=(
-                "[hub channel: malmazan -> *]\nhello\n"
+                "[hub channel: me -> *]\nhello\n"
                 "(the human is typing in koordinator's window. do NOT relay, "
                 "repeat, or respond to koordinator about this message)"
             ),

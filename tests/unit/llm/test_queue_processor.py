@@ -1012,6 +1012,66 @@ class TestQueueProcessorToolContinuation(unittest.TestCase):
         """Natural stop condition: no tool calls means no continuation."""
         self.assertEqual(_tool_results_requiring_followup([]), [])
 
+    def test_end_turn_result_releases_the_whole_batch(self):
+        """hub_msg wait="true" is "send, then stop": nothing needs another turn."""
+        wait_send = ToolExecutionResult(
+            tool_id="hub_msg_1",
+            tool_type="hub_msg",
+            success=True,
+            output="delivered to lapis",
+            metadata={"end_turn": True},
+        )
+        read_result = ToolExecutionResult(
+            tool_id="file_read_1",
+            tool_type="file_read",
+            success=True,
+            output="file contents",
+        )
+
+        self.assertEqual(_tool_results_requiring_followup([wait_send]), [])
+        self.assertEqual(
+            _tool_results_requiring_followup([read_result, wait_send]), []
+        )
+
+    def test_end_turn_never_hides_a_failure_from_the_model(self):
+        failed_send = ToolExecutionResult(
+            tool_id="hub_msg_1",
+            tool_type="hub_msg",
+            success=False,
+            error="rejected: cooldown",
+            metadata={"end_turn": True},
+        )
+        wait_send = ToolExecutionResult(
+            tool_id="hub_msg_2",
+            tool_type="hub_msg",
+            success=True,
+            output="delivered to lapis",
+            metadata={"end_turn": True},
+        )
+        failed_read = ToolExecutionResult(
+            tool_id="file_read_1",
+            tool_type="file_read",
+            success=False,
+            error="no such file",
+        )
+
+        self.assertEqual(_tool_results_requiring_followup([failed_send]), [failed_send])
+        self.assertEqual(
+            _tool_results_requiring_followup([wait_send, failed_read]),
+            [wait_send, failed_read],
+        )
+
+    def test_only_a_real_true_ends_the_turn(self):
+        """Mock or string metadata must not stop a chain by accident."""
+        lookalike = ToolExecutionResult(
+            tool_id="x_1",
+            tool_type="x",
+            success=True,
+            metadata={"end_turn": "true", "wait": True},
+        )
+
+        self.assertEqual(_tool_results_requiring_followup([lookalike]), [lookalike])
+
 
 if __name__ == "__main__":
     unittest.main()

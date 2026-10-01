@@ -97,8 +97,8 @@ async def test_join_notice_uses_the_visible_hub_message_renderer():
             to="koordinator",
             scope=MessageScope.DIRECT.value,
             content=(
-                "agent 'lapis' just came online in project /Users/malmazan/dev/kollab.\n"
-                "cwd: /Users/malmazan/dev/kollab\n"
+                "agent 'lapis' just came online in project /Users/me/dev/kollab.\n"
+                "cwd: /Users/me/dev/kollab\n"
                 "model: anthropic/claude-sonnet-4\n"
                 "provider: anthropic\n"
                 "profile: anthropic-main\n"

@@ -16,16 +16,39 @@ from pathlib import Path
 from nacl.exceptions import CryptoError
 from nacl.signing import SigningKey, VerifyKey
 
+from .device_names import validate_device_name, validate_network_name, validate_trust
 from .dns.discovery import normalize_target
 
 KEY = re.compile(r"[0-9a-f]{64}\Z")
 ID = re.compile(r"[0-9a-f]{32}\Z")
 MAX_APPROVALS = 256
+MAX_VOUCHERS = 8  # members remembered per vouched device
+MAX_REVOKED = 64  # revocations remembered
+MAX_ANNOUNCED = 128  # pending join requests and knocks the human was told about
 INVITE_PREFIX = "kollab-invite-v1:"
 
 
 class RelayError(ValueError):
-    """A safe, operator-visible relay failure."""
+    """A safe, operator-visible relay failure.
+
+    `code` is set when a caller reports the failure to a screen by code
+    (`capacity`, `name_taken`, ...) instead of by text.
+    """
+
+    def __init__(self, message: str = "", code: str | None = None):
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+
+
+# Errors whose message is a fixed string this transport wrote; any other type logs its name only.
+_FIXED_MESSAGE_ERRORS = frozenset({"RelayError", "PeerRouteError", "SecureSessionError"})
+
+
+def failure_text(exc: BaseException) -> str:
+    """What a log line may say about a failure: the class, plus the message only when fixed."""
+    name = type(exc).__name__
+    return f"{name}: {exc}" if name in _FIXED_MESSAGE_ERRORS else name
 
 
 def strict_json(raw: str | bytes, *, limit: int = 65536) -> dict:
@@ -123,6 +146,52 @@ class RelayState:
     workspace_id: str = field(default_factory=lambda: secrets.token_hex(16))
     approvals: list[str] = field(default_factory=list)
     inviter: str = ""
+    device_name: str = ""
+    network_name: str = ""  # `<first device>-net`, set by the first device or taken at join
+    trust: str = "open"
+    peer_devices: dict[str, str] = field(default_factory=dict)
+    peer_trust: dict[str, str] = field(default_factory=dict)
+    # Devices this one accepted with a join code: the only peers that receive
+    # the sealed config (a knock-accepted stranger never does).
+    config_recipients: list[str] = field(default_factory=list)
+    # Accepted strangers: devices in their own room, reached through the
+    # directory only while both sides consent to the link.
+    links: list[str] = field(default_factory=list)
+    # Members approved because a member this device already approved vouched
+    # for them (key -> the members that did). A device accepted first-hand, by
+    # join code or as the inviter, has no entry. plugins/hub/network_members.py.
+    vouched_by: dict[str, list[str]] = field(default_factory=dict)
+    # Devices revoked on this network, by this device or announced by a member:
+    # a vouch for one of them counts for nothing until a member accepts it anew.
+    revoked: list[str] = field(default_factory=list)
+    # Knocks this device sent that nobody answered yet: the knocked device's key
+    # -> when the knock was sent (epoch seconds). What a knock leaves behind is
+    # cleared if nothing comes of it (docs/specs/agent-network-simple-flow.md).
+    knocks: dict[str, int] = field(default_factory=dict)
+    # The request id of each knock above, so the directory can be asked how it was
+    # decided (POST /relay/v1/contact/status).
+    knock_requests: dict[str, str] = field(default_factory=dict)
+    # Ids (`join:<id>`, `knock:<receipt>`) of the join requests and knocks the
+    # human was already told about in the main pane, pruned to what is still
+    # pending, so a restart announces only what is new.
+    announced: list[str] = field(default_factory=list)
+    # What the sealed-config sync last told the human in the main pane, so a
+    # restart repeats nothing: a digest of the skipped MCP server names ("" for
+    # none) and whether the "settings sync is off here" refusal was said.
+    config_told_skipped: str = ""
+    config_told_refused: bool = False
+
+    def is_alone(self) -> bool:
+        """True when no other device is on this network: none approved, no inviter, no
+        peer binding, nobody accepted by a code or linked. Every kollab 0.10.7 launch
+        left a network of one; a join may replace that, never a bigger network."""
+        return not (
+            self.approvals
+            or self.inviter
+            or self.peer_devices
+            or self.config_recipients
+            or self.links
+        )
 
 
 class RelayStateStore:
@@ -152,7 +221,11 @@ class RelayStateStore:
         self.state_path = self.path / "state.json"
         if self.state_path.exists() or self.state_path.is_symlink():
             payload = strict_json(self._read_private(self.state_path, 65536))
-            if set(payload) != set(RelayState.__dataclass_fields__):
+            # A subset check, not equality: an older state file predating
+            # device_name/trust/peer_devices/peer_trust is missing those
+            # keys, and the dataclass defaults fill them in. Any key outside
+            # the dataclass is still rejected.
+            if set(payload) - set(RelayState.__dataclass_fields__):
                 raise RelayError("unsupported relay state fields")
             self.state = RelayState(**payload)
             self._validate()
@@ -196,6 +269,100 @@ class RelayStateStore:
             validate_public_key(key)
         if value.inviter:
             validate_public_key(value.inviter)
+        if not isinstance(value.peer_devices, dict) or len(value.peer_devices) > MAX_APPROVALS:
+            raise RelayError("invalid peer device names")
+        for key in value.peer_devices:
+            validate_public_key(key)
+        if (
+            not isinstance(value.config_recipients, list)
+            or len(value.config_recipients) > MAX_APPROVALS
+            or len(set(value.config_recipients)) != len(value.config_recipients)
+        ):
+            raise RelayError("invalid config recipients")
+        for key in value.config_recipients:
+            validate_public_key(key)
+        if not isinstance(value.peer_trust, dict) or len(value.peer_trust) > MAX_APPROVALS:
+            raise RelayError("invalid peer trust levels")
+        for key in value.peer_trust:
+            validate_public_key(key)
+        if (
+            not isinstance(value.links, list)
+            or len(value.links) > MAX_APPROVALS
+            or len(set(value.links)) != len(value.links)
+        ):
+            raise RelayError("invalid stranger links")
+        for key in value.links:
+            validate_public_key(key)
+        if (
+            not isinstance(value.vouched_by, dict)
+            or len(value.vouched_by) > MAX_APPROVALS
+            or not isinstance(value.revoked, list)
+            or len(value.revoked) > MAX_REVOKED
+            or len(set(value.revoked)) != len(value.revoked)
+        ):
+            raise RelayError("invalid network membership")
+        for key, vouchers in value.vouched_by.items():
+            validate_public_key(key)
+            if (
+                not isinstance(vouchers, list)
+                or not vouchers
+                or len(vouchers) > MAX_VOUCHERS
+                or len(set(vouchers)) != len(vouchers)
+            ):
+                raise RelayError("invalid network membership")
+            for voucher in vouchers:
+                validate_public_key(voucher)
+        for key in value.revoked:
+            validate_public_key(key)
+        if (
+            not isinstance(value.knocks, dict)
+            or len(value.knocks) > MAX_APPROVALS
+            or any(type(sent) is not int or sent < 0 for sent in value.knocks.values())
+        ):
+            raise RelayError("invalid knock times")
+        for key in value.knocks:
+            validate_public_key(key)
+        if (
+            not isinstance(value.knock_requests, dict)
+            or len(value.knock_requests) > MAX_APPROVALS
+            or any(
+                not isinstance(item, str)
+                or len(item) != 32
+                or not set(item) <= set("0123456789abcdef")
+                for item in value.knock_requests.values()
+            )
+        ):
+            raise RelayError("invalid knock requests")
+        for key in value.knock_requests:
+            validate_public_key(key)
+        if (
+            not isinstance(value.announced, list)
+            or len(value.announced) > MAX_ANNOUNCED
+            or any(not isinstance(item, str) or not 0 < len(item) <= 96 for item in value.announced)
+        ):
+            raise RelayError("invalid announced requests")
+        if (
+            not isinstance(value.config_told_skipped, str)
+            or len(value.config_told_skipped) > 64
+            or type(value.config_told_refused) is not bool
+        ):
+            raise RelayError("invalid config sync notices")
+        try:
+            if value.device_name:
+                validate_device_name(value.device_name)
+            if value.network_name:
+                validate_network_name(value.network_name)
+            validate_trust(value.trust)
+            for name in value.peer_devices.values():
+                validate_device_name(name)
+            for level in value.peer_trust.values():
+                if level not in ("open", "agents"):
+                    raise ValueError("peer trust must be open or agents")
+        except ValueError as exc:
+            # device_names raises plain ValueError; every failure out of this
+            # store must be the operator-visible RelayError, like every other
+            # field checked above.
+            raise RelayError(str(exc)) from exc
 
     def save(self):
         self._validate()

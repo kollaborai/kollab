@@ -1,7 +1,7 @@
 # Voice Mode Spec — v2 (sapphire) — REVISED for delta 4
 
 Author: sapphire. Lane: plugin architecture & integration. Independent draft for merge.
-Revised per malmazan delta 4: surface-agnostic architecture, web UI (dsk/Mentiko) demo
+Revised per owner delta 4: surface-agnostic architecture, web UI (dsk/Mentiko) demo
 first, bundled jev gatekeeper, one-sentence reply constraint. Written against @9725d35.
 
 ## 1. Summary
@@ -9,7 +9,7 @@ first, bundled jev gatekeeper, one-sentence reply constraint. Written against @9
 `/voicemode` toggles an always-on voice pipeline whose CORE is surface-agnostic: one
 implementation (packages/kollabor-voice/) serves TUI, CLI, web UI, and socket
 connections. The core owns mic capture, VAD segmentation, faster-whisper STT, a
-continuous JSONL transcript, and a bundled LOCAL gatekeeper ("jev", synthyo) that triages
+continuous JSONL transcript, and a bundled LOCAL gatekeeper ("jev", local) that triages
 each finalized segment as `act | converse | silence` BEFORE any big-LLM call. Silence
 dies at the gate. Escalated segments are injected into whatever surface's input stream is
 active — synthetic USER_INPUT on the kollabor event bus for TUI/CLI, session input
@@ -40,10 +40,10 @@ owns recording can't serve web-ui. The plugin becomes a ~100-line adapter; web-u
 the same core for free. Demo surface is WEB UI (dsk/Mentiko) — core must therefore have
 ZERO kollabor-tui imports.
 
-## 3. STT model choice (malmazan's research delta)
+## 3. STT model choice (owner's research delta)
 
 faster-whisper is the v1 default (CTranslate2, proven, HF-downloadable, never bundled).
-Model id configurable (`voice.model`, default "base"). malmazan notes newer 2025/26
+Model id configurable (`voice.model`, default "base"). owner notes newer 2025/26
 whisper-class releases (e.g. small-company distilled variants) — `stt.py` hides behind a
 `Transcriber` interface (`transcribe(frames)->text`), so swapping engines is a config
 change, not a refactor. Local projects (soprano, vi-voice) worth probing for already-
@@ -51,7 +51,7 @@ downloaded weights — `voice.model_path` lets users point at local files, no re
 
 ## 4. Gatekeeper — bundled jev, strict placement
 
-- Bundled, not downloaded: jev model from ~/dev/synthyo ships inside the package
+- Bundled, not downloaded: jev model from ~/dev/models ships inside the package
   (small enough to bundle; whisper is NOT — different rule for different weights).
 - Runs BEFORE the big LLM, inside gate.py, NOT on the event bus: ambient chatter must
   not fan out to user-configurable hooks, and a `silence` verdict must cost zero bus
@@ -136,7 +136,7 @@ BOTH layers, with different jobs:
 
 ## 12. Open questions for merge
 
-- Gate runtime for jev (llamafile vs MLX vs ollama) — probe ~/dev/synthyo format.
+- Gate runtime for jev (llamafile vs MLX vs ollama) — probe ~/dev/models format.
 - Web mic capture: browser-side (getUserMedia) vs server-side mic — demo picks one;
   core is agnostic (it consumes frames either way).
 - Barge-in (user talks over TTS) — needs segment_id pairing from §6; phase 2.

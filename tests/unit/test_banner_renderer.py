@@ -60,7 +60,7 @@ def test_startup_banner_has_contrast_panel_background(monkeypatch):
             "model": "gpt-5.5",
             "profile": "work",
             "skills": 4,
-            "directory": "/Users/malmazan/dev/kollab",
+            "directory": "/Users/me/dev/kollab",
         },
     )
 

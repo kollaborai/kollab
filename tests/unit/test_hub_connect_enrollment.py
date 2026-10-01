@@ -9,12 +9,12 @@ import pytest
 from kollabor.altview.command_integration import AltViewCommandIntegrator
 from kollabor.commands.registry import SlashCommandRegistry
 from plugins.altview.connect_altview import (
-    ConnectOfferAltView,
+    ConnectScreenAltView,
     ConnectStatus,
     ConnectSubmission,
     PrivateCode,
 )
-from plugins.altview.contact_altview import ContactRequestAltView, ContactReviewAltView
+from plugins.altview.contact_altview import ContactReviewAltView
 from plugins.hub.plugin import CODE_IN_COMMAND, HubPlugin
 
 
@@ -57,14 +57,28 @@ async def test_connect_domain_runs_public_discovery_in_owner_session():
 
 
 @pytest.mark.asyncio
-async def test_connect_enroll_domain_opens_private_form_and_uses_typed_attach_rpc():
-    code = "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+async def test_connect_enroll_is_removed_use_bare_connect():
+    """`enroll` is a remnant of the first build (constitution section 6);
+    bare /connect now opens the same private form, always against
+    kollabor.ai -- there is no longer a way to point the entry form at
+    another domain from the command surface."""
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=True)
+
+    assert await plugin._handle_connect_command("enroll example.test") == (
+        "connect: use /connect"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_bare_opens_private_form_and_uses_typed_attach_rpc():
+    code = "ABCD-EFGH"
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(
         hub_enroll=AsyncMock(
             return_value={"status": "pending", "receipt_id": "0123456789abcdef"}
         ),
-        hub_connect=AsyncMock(),
+        hub_connect=AsyncMock(return_value="network none"),
     )
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = _EventBus(
@@ -73,14 +87,14 @@ async def test_connect_enroll_domain_opens_private_form_and_uses_typed_attach_rp
     )
     plugin._cli_args = SimpleNamespace(attach=True)
 
-    result = await plugin._handle_connect_command("enroll example.test")
+    result = await plugin._handle_connect_command("")
 
     assert result == ""
     view, view_name = view_stack.push.await_args.args
     assert view_stack.push.await_args.kwargs == {"reuse": False}
     assert view_name == "connect"
-    assert view.domain == "example.test"
-    submission = ConnectSubmission("example.test", PrivateCode(code))
+    assert view.domain == "kollabor.ai"
+    submission = ConnectSubmission("kollabor.ai", PrivateCode(code))
     try:
         outcome = await view._on_submit(submission)
     finally:
@@ -88,8 +102,8 @@ async def test_connect_enroll_domain_opens_private_form_and_uses_typed_attach_rp
 
     assert outcome.status is ConnectStatus.PENDING
     assert outcome.receipt_id == "0123456789abcdef"
-    state.hub_enroll.assert_awaited_once_with("example.test", code)
-    state.hub_connect.assert_not_awaited()
+    state.hub_enroll.assert_awaited_once_with("kollabor.ai", code)
+    state.hub_connect.assert_awaited_once_with("status")
 
 
 @pytest.mark.asyncio
@@ -117,11 +131,21 @@ async def test_connect_subcommand_remains_on_existing_rpc_and_code_is_not_comman
 
 
 @pytest.mark.asyncio
-async def test_connect_offer_opens_private_view_and_uses_typed_attach_rpc(
+async def test_connect_offer_is_removed_use_connect_code():
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=True)
+
+    assert await plugin._handle_connect_command("offer example.test") == (
+        "connect: use /connect code"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_code_opens_private_view_and_uses_typed_attach_rpc(
     monkeypatch,
 ):
     offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
+    code = "ABCD-EFGH"
     result = {
         "status": "offered",
         "offer_id": offer_id,
@@ -139,12 +163,13 @@ async def test_connect_offer_opens_private_view_and_uses_typed_attach_rpc(
     )
     plugin._cli_args = SimpleNamespace(attach=True)
 
-    opened = await plugin._handle_connect_command("offer example.test")
+    opened = await plugin._handle_connect_command("code example.test")
 
     assert opened == ""
     view, view_name = view_stack.push.await_args.args
     assert view_stack.push.await_args.kwargs == {"reuse": False}
-    assert view_name == "connect-offer"
+    assert view_name == "connect-code"
+    assert view.code_only is True
     assert view.domain == "example.test"
     monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
     await view._create()
@@ -154,28 +179,46 @@ async def test_connect_offer_opens_private_view_and_uses_typed_attach_rpc(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method", "session_name"),
-    [
-        ("_open_contact_request_altview", "contact-request"),
-        ("_open_contact_review_altview", "contact-review"),
-    ],
-)
-async def test_private_contact_views_always_open_fresh_sessions(method, session_name):
+async def test_private_contact_review_always_opens_a_fresh_session():
     view_stack = SimpleNamespace(push=AsyncMock())
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
 
-    result = await getattr(plugin, method)("example.test")
+    result = await plugin._open_contact_review_altview("example.test")
 
     assert result == ""
     _view, view_name = view_stack.push.await_args.args
-    assert view_name == session_name
+    assert view_name == "contact-review"
     assert view_stack.push.await_args.kwargs == {"reuse": False}
 
 
 @pytest.mark.asyncio
-async def test_connect_code_is_rejected_from_command_text_and_offer_domain_is_bounded():
+@pytest.mark.parametrize(
+    "error, reason",
+    [
+        ("capacity", "too many approved devices or pending knocks"),
+        ("already_named", "this device is already on your network as ana-laptop"),
+        ("name_taken", "that device name is already on this network"),
+        ("transport", "try again"),
+    ],
+)
+async def test_knock_review_tells_the_human_why_an_accept_failed(error, reason):
+    from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
+
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
+    plugin._relay_agent = SimpleNamespace(_peer_name=lambda _key: "ana-laptop")
+    plugin._run_connect_contact_decision = AsyncMock(return_value={"error": error})
+    await plugin._open_contact_review_altview("example.test")
+    view = view_stack.push.await_args.args[0]
+    request = PendingContactRequest("b" * 32, "c" * 64, 1_800_000_000, PrivateMessage("hi"), "ana-2")
+
+    assert await view._on_decide(request, "accept") == reason
+
+
+@pytest.mark.asyncio
+async def test_connect_code_is_rejected_from_command_text_and_code_domain_is_bounded():
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(hub_enrollment_offer=AsyncMock(), hub_connect=AsyncMock())
     plugin = HubPlugin.__new__(HubPlugin)
@@ -186,20 +229,20 @@ async def test_connect_code_is_rejected_from_command_text_and_offer_domain_is_bo
     plugin._cli_args = SimpleNamespace(attach=True)
 
     pasted = await plugin._handle_connect_command(
-        "K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+        "ABCD-EFGH"
     )
     pasted_to_enroll = await plugin._handle_connect_command(
-        "enroll K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+        "enroll ABCD-EFGH"
     )
-    pasted_to_offer = await plugin._handle_connect_command(
-        "offer K1-0123456789abcdef0123456789abcdef-ABCD-EFGH-JKMN-PQRS-TVWX"
+    pasted_to_code = await plugin._handle_connect_command(
+        "code ABCD-EFGH"
     )
-    malformed_offer = await plugin._handle_connect_command("offer example.test extra")
+    malformed_code = await plugin._handle_connect_command("code example.test extra")
 
     assert pasted == CODE_IN_COMMAND
     assert pasted_to_enroll == CODE_IN_COMMAND
-    assert pasted_to_offer == CODE_IN_COMMAND
-    assert malformed_offer == "connect: use /connect offer [domain]"
+    assert pasted_to_code == CODE_IN_COMMAND
+    assert malformed_code == "connect: use /connect code [domain]"
     state.hub_enrollment_offer.assert_not_awaited()
     assert view_stack.push.await_count == 0
 
@@ -217,12 +260,11 @@ async def test_altview_discovery_then_hub_registration_keeps_connect_with_hub():
         Path(__file__).resolve().parents[2] / "plugins"
     ) > 0
     assert registry.get_command("connect") is None
-    assert registry.get_command("connect-offer") is None
-    assert registry.get_command("contact-request") is None
+    assert registry.get_command("connect-screen") is None
+    assert registry.get_command("connect-code") is None
     assert registry.get_command("contact-review") is None
     assert "connect" in integrator._plugin_classes
-    assert ConnectOfferAltView().metadata.category == "internal"
-    assert ContactRequestAltView("example.test").metadata.category == "internal"
+    assert ConnectScreenAltView().metadata.category == "internal"
     assert (
         ContactReviewAltView("example.test", lambda: [], lambda *_args: None)
         .metadata.category
@@ -252,7 +294,160 @@ async def test_altview_discovery_then_hub_registration_keeps_connect_with_hub():
     state.hub_connect.assert_awaited_once_with("status")
     assert view_stack.push.await_count == 0
 
+    state.hub_connect.return_value = "network none"
     assert await command.handler("") == ""
     assert view_stack.push.await_count == 1
     _view, view_name = view_stack.push.await_args.args
     assert view_name == "connect"
+
+
+def _connected_plugin(*, attach=False, origin="https://kollabor.ai", **services):
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin.event_bus = _EventBus(**services)
+    plugin._cli_args = SimpleNamespace(attach=attach)
+    plugin._relay_commands = SimpleNamespace(
+        client=SimpleNamespace(state=SimpleNamespace(origin=origin)),
+        connect_snapshot=AsyncMock(return_value="snapshot"),
+    )
+    plugin._relay_agent = SimpleNamespace(decide_enrollment_request=AsyncMock())
+    plugin._identity = SimpleNamespace(agent_id="agent-1")
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_bare_connect_on_a_network_opens_the_screen_not_the_form():
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin = _connected_plugin(altview_stack_manager=view_stack)
+
+    assert await plugin._handle_connect_command("") == ""
+
+    view, view_name = view_stack.push.await_args.args
+    assert view_name == "connect-screen"
+    assert view_stack.push.await_args.kwargs == {"reuse": False}
+    assert type(view).__name__ == "ConnectScreenAltView"
+    assert view.code_only is False
+    assert view.domain == "kollabor.ai"
+    assert await view._on_load() == "snapshot"
+
+
+@pytest.mark.asyncio
+async def test_bare_connect_off_a_network_still_opens_the_code_form():
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin = _connected_plugin(origin="", altview_stack_manager=view_stack)
+
+    assert await plugin._handle_connect_command("") == ""
+
+    _view, view_name = view_stack.push.await_args.args
+    assert view_name == "connect"
+
+
+@pytest.mark.asyncio
+async def test_bare_connect_attached_to_a_daemon_without_a_snapshot_prints_status_text():
+    """Only a daemon too old to send a Connect snapshot falls back to text; a
+    current one feeds the screen (tests/unit/test_connect_attached_and_waiting.py)."""
+    view_stack = SimpleNamespace(push=AsyncMock())
+    state = SimpleNamespace(
+        hub_connect=AsyncMock(return_value="network marco-home via kollabor.ai")
+    )
+    plugin = _connected_plugin(
+        attach=True, altview_stack_manager=view_stack, state_service=state
+    )
+
+    assert await plugin._handle_connect_command("") == (
+        "network marco-home via kollabor.ai"
+    )
+
+    state.hub_connect.assert_awaited_once_with("status")
+    assert view_stack.push.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_connect_code_on_a_network_defaults_to_that_network_and_shows_only_the_code():
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin = _connected_plugin(
+        origin="https://example.org", altview_stack_manager=view_stack
+    )
+
+    assert await plugin._handle_connect_command("code") == ""
+
+    view, view_name = view_stack.push.await_args.args
+    assert view_name == "connect-code"
+    assert view.code_only is True
+    assert view.domain == "example.org"
+    assert view._on_load is None and view._on_decide is None
+
+
+@pytest.mark.asyncio
+async def test_screen_decisions_go_to_the_issuer_and_report_why_they_failed():
+    from plugins.hub.relay_commands import JoinRequestRow
+    from plugins.hub.relay_state import RelayError
+
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin = _connected_plugin(altview_stack_manager=view_stack)
+    await plugin._handle_connect_command("")
+    view, _ = view_stack.push.await_args.args
+    row = JoinRequestRow("a" * 32, "home-server", "abcd…ef01")
+    decide = plugin._relay_agent.decide_enrollment_request
+
+    assert await view._on_decide(row, "accept") is None
+    decide.assert_awaited_once_with("a" * 32, decision="accept", source_agent="agent-1")
+
+    decide.side_effect = RelayError("device name 'x' is already on this network")
+    assert await view._on_decide(row, "accept") == (
+        "device name 'x' is already on this network"
+    )
+    decide.side_effect = RuntimeError("private detail")
+    assert await view._on_decide(row, "reject") == "try again"
+
+
+async def _form_view(plugin):
+    """Open the code form the way bare /connect does and hand back the view."""
+    view_stack = SimpleNamespace(push=AsyncMock())
+    plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
+    await plugin._open_connect_altview("kollabor.ai")
+    view, _name = view_stack.push.await_args.args
+    return view
+
+
+@pytest.mark.asyncio
+async def test_the_form_starts_a_network_when_no_code_is_entered():
+    """First device: nobody has a code yet, so an empty code starts the network."""
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=False)
+    plugin._run_connect_command = AsyncMock(
+        return_value="network kollabor.ai  trust: open\nthis device laptop-kollab"
+    )
+    view = await _form_view(plugin)
+
+    assert await view._on_attach("kollabor.ai") is True
+    plugin._run_connect_command.assert_awaited_once_with("kollabor.ai")
+
+    plugin._run_connect_command.return_value = "connect: relay discovery is unavailable"
+    assert await view._on_attach("kollabor.ai") is False
+    plugin._run_connect_command.return_value = "network none\ncontact route none"
+    assert await view._on_attach("kollabor.ai") is False
+    assert await view._on_attach("not a domain") is False
+
+
+@pytest.mark.asyncio
+async def test_an_approved_join_reports_the_network_device_and_trust():
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._cli_args = SimpleNamespace(attach=False)
+    plugin._run_connect_enrollment = AsyncMock(return_value={"status": "approved"})
+    plugin._relay_agent = SimpleNamespace(
+        network_name=lambda: "marco-home",
+        device_name=lambda: "home-server",
+        trust_level=lambda: "open",
+    )
+    plugin._relay_commands = SimpleNamespace(
+        client=SimpleNamespace(state=SimpleNamespace(origin="https://kollabor.ai"))
+    )
+    view = await _form_view(plugin)
+    submission = ConnectSubmission("kollabor.ai", PrivateCode("ABCD-EFGH"))
+    try:
+        outcome = await view._on_submit(submission)
+    finally:
+        submission.code.clear()
+
+    assert outcome.status.value == "approved"  # the altview module may be reloaded
+    assert outcome.detail == "joined marco-home as home-server. trust: open"

@@ -28,6 +28,8 @@ from typing import Iterator
 
 from kollabor_config.config_utils import encode_project_path, get_config_directory
 
+from .device_names import default_device_name
+
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _STATES = frozenset(
@@ -154,6 +156,14 @@ class LocalAgentDirectory:
         self.stale_after = stale_after
         self.truncated = False
         self.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Shared /tmp path space: refuse a socket dir another user owns
+        # (validated only; a read-side view never creates it).
+        from .presence import secure_socket_dir
+
+        try:
+            secure_socket_dir(self.socket_dir, create=False)
+        except RuntimeError as exc:
+            raise LocalDirectoryError(str(exc)) from None
         root = _directory_fd(self.config_dir)
         try:
             self.machine_id = self._machine_id(root)
@@ -358,17 +368,22 @@ class LocalAgentDirectory:
         finally:
             os.close(root)
 
-    def publishable_agents(self, workspace: Path, workspace_id: str) -> list[dict]:
+    def publishable_agents(
+        self, workspace: Path, workspace_id: str, device_name: str | None = None
+    ) -> list[dict]:
         """Explicitly scoped remote-safe roster; caller must enforce peer grants.
 
         ``workspace_id`` must be the active relay client's authenticated workspace
         ID. Requiring it prevents use of an offline fallback in remote routing.
         The session's agent_id is opaque, not a display name or local socket path.
+        ``device_name`` is this device's human name (agent-network-simple-flow.md
+        §4); when omitted it falls back to the derived default for ``workspace``.
         """
         if not isinstance(workspace_id, str) or not _HEX_ID.fullmatch(workspace_id):
             raise LocalDirectoryError("an active relay workspace identity is required")
         if workspace is None:
             raise LocalDirectoryError("an explicit workspace is required for remote publication")
+        device = device_name or default_device_name(workspace)
         return [
             {
                 "machine_id": item.machine_id,
@@ -377,6 +392,7 @@ class LocalAgentDirectory:
                 "name": item.name,
                 "is_coordinator": item.is_coordinator,
                 "state": item.state,
+                "device": device,
             }
             for item in self.agents(workspace)
         ]

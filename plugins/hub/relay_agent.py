@@ -11,10 +11,11 @@ import collections
 import contextvars
 import json
 import logging
+import os
 import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
@@ -22,9 +23,23 @@ from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import CancellationOrigin
 from kollabor_ai.message_content import content_to_text
 
+from .config_sync import Applied
+from .config_sync_service import ConfigSyncService
+from .device_names import (
+    NAME_RE,
+    default_device_name,
+    format_handle,
+    key_label,
+    parse_handle,
+    validate_device_name,
+    validate_network_name,
+    validate_trust,
+)
 from .local_directory import LocalAgentDirectory
 from .models import HubMessage, MessageScope
-from .relay_commands import RelayCommands
+from .network_members import METHOD as MEMBERS_METHOD
+from .network_members import MembershipSync
+from .relay_commands import RelayCommands, directory_origin
 from .relay_conversations import (
     CONVERSATION_REJECTION_REASONS,
     EVENT_KINDS,
@@ -35,16 +50,33 @@ from .relay_conversations import (
     validate_message,
 )
 from .relay_owner import WorkspaceRelayOwner, local_relay_rpc
-from .relay_state import ID, RelayError, RelayStateStore, validate_key
+from .relay_state import (
+    ID,
+    MAX_APPROVALS,
+    RelayError,
+    RelayStateStore,
+    validate_key,
+    validate_public_key,
+)
 from .secure_conversation import SecureConversationTransport
 
 logger = logging.getLogger(__name__)
 MAX_DIRECTORY = 64
 MAX_REMOTE_PEERS = 8
+# A peer whose directory has not been read for this long is gone (the refresh beat is 15 s).
+DIRECTORY_STALE_SECONDS = 45
 TASK_TIMEOUT = 600
-_ENROLLMENT_CODE_SHAPE = re.compile(
-    r"K1-([0-9a-f]{32})-([0-9A-HJKMNP-TV-Z]{4}-){4}[0-9A-HJKMNP-TV-Z]{4}\Z"
-)
+ARRIVAL_POLL_SECONDS = 3.0
+# A knock nobody answered in a week is forgotten. A rejection is asked of the
+# directory; one that cannot say (older, or the answer expired) leaves silence.
+KNOCK_EXPIRY_SECONDS = 7 * 24 * 3600
+# How often the directory is asked how one knock was decided.
+KNOCK_STATUS_SECONDS = 60
+# The directory forgets a device's consent after a day; repeating it well inside that.
+LINK_REFRESH_SECONDS = 6 * 60 * 60
+LINK_RETRY_SECONDS = 60
+_SHORT_CODE_SHAPE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
+_REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
     "invalid_contact",
@@ -74,6 +106,10 @@ _CONTACT_ERRORS = {
     "transport",
     "invalid_response",
     "discovery",
+    "unknown_route",
+    "ambiguous_route",
+    "name_taken",
+    "already_named",
 }
 
 
@@ -96,15 +132,14 @@ def _safe_enrollment_offer_result(value) -> dict[str, str]:
     }:
         raise RelayError("invalid local enrollment offer result")
     code = value["code"]
-    match = _ENROLLMENT_CODE_SHAPE.fullmatch(code) if isinstance(code, str) else None
+    short = _SHORT_CODE_SHAPE.fullmatch(code) is not None if isinstance(code, str) else False
     if (
         value["status"] != "offered"
         or not isinstance(value["offer_id"], str)
         or not re.fullmatch(r"[0-9a-f]{32}", value["offer_id"])
         or not isinstance(value["expires_at"], str)
         or not value["expires_at"].isdigit()
-        or match is None
-        or match.group(1) != value["offer_id"]
+        or not short
     ):
         raise RelayError("invalid local enrollment offer result")
     return {
@@ -115,9 +150,15 @@ def _safe_enrollment_offer_result(value) -> dict[str, str]:
     }
 
 
+def _receipt_line(label: str, receipt: dict) -> str:
+    """One human line for a receipt: the state and why, never the receipt itself."""
+    extra = receipt.get("reason") or receipt.get("detail")
+    return f"{label}: {receipt.get('state', 'unknown')}" + (f" ({extra})" if extra else "")
+
+
 @dataclass
 class ActiveRelayTask:
-    record: dict
+    record: dict = field(repr=False)  # peer key, addresses and message ids
     started_at: float
     replied: bool = False
     finished: bool = False
@@ -147,6 +188,8 @@ class RelayAgentBridge:
         self._cache = {}
         self._loop_task = None
         self._resume_task = None
+        self._arrivals_task = None
+        self._next_arrivals = 0.0
         self._closed = False
         self._human_until = 0.0
         self._pending_remote_cancellation: tuple[str, int] | None = None
@@ -161,8 +204,247 @@ class RelayAgentBridge:
         self._outbox_lock = asyncio.Lock()
         self._enrollment_issuer = None
         self.secure_transport: SecureConversationTransport | None = None
+        self.config_sync: ConfigSyncService | None = None
+        self.membership_sync: MembershipSync | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
+        self._wall_clock = time.time  # epoch seconds; tests swap it
+        self._knock_asked: dict[str, float] = {}  # knock key -> when its answer was last asked
+        self._no_knock_status = ""  # origin of a directory without the status route
+        self._links_lock = asyncio.Lock()
+        self._links_declared: tuple[str, tuple[str, ...]] | None = None
+        self._links_due = 0.0
+        self._links_failed = False
+
+    def _bind_knock_peer(self, sender_key: str, device_name: str):
+        """Turn an accepted knock into a peer: name it, trust `agents`, approve it.
+
+        The name is bound first so a refusal fails before anything else is
+        written; trust is set before the approval so a failure between the two
+        never leaves an approved key on the network default (`open`); nothing
+        is allowed until `/connect allow`. A failure at any step restores this
+        key's approval, name and trust to what they were before the call, and
+        the same restore is returned as ``undo`` for a later failure (the
+        relay refusing the decision). Failures are never swallowed.
+        """
+        client = self.commands.client
+        was_approved = sender_key in client.state.approvals
+        state = self._state().state
+        name = state.peer_devices.get(sender_key)
+        trust = state.peer_trust.get(sender_key)
+        was_linked = sender_key in state.links
+        if was_approved and not was_linked:
+            # A member that joined by code: a stranger's link and `agents` trust
+            # would bind its envelopes to the pair room while it sits in this one.
+            raise RelayError(
+                f"this device is already on your network as {self._peer_name(sender_key)}",
+                "already_named",
+            )
+
+        def undo() -> None:
+            try:
+                if not was_approved and sender_key in client.state.approvals:
+                    client.revoke(sender_key)  # also drops the name, trust and link
+                store = self._state()
+                for mapping, before in (
+                    (store.state.peer_devices, name),
+                    (store.state.peer_trust, trust),
+                ):
+                    if before is None:
+                        mapping.pop(sender_key, None)
+                    else:
+                        mapping[sender_key] = before
+                if not was_linked and sender_key in store.state.links:
+                    store.state.links.remove(sender_key)
+                store.save()
+            except Exception:
+                logger.warning("could not restore a peer after a failed accept")
+
+        try:
+            self.bind_peer_device(sender_key, device_name)
+            self.set_peer_trust(sender_key, "agents")
+            self.set_peer_link(sender_key)
+            client.approve(sender_key)
+        except Exception:
+            undo()
+            raise
+        return undo
+
+    def _bind_knocked_peer(
+        self, recipient_key: str, agent_name: str, request_id: str = ""
+    ) -> None:
+        """The knocking side of an introduction: get ready to hear back.
+
+        Nothing flows until the other device accepts: the directory links two
+        devices in different rooms only when both declared each other, and
+        only this device's `sync_links` declares for it. The knocked device is
+        treated as a stranger (`agents` trust) and may answer the agent that
+        knocked; that is the whole of what it can reach here until an explicit
+        `/connect allow`.
+        """
+        client = self.commands.client
+        if recipient_key == client.public_key:
+            return
+        if recipient_key in client.state.approvals:
+            if recipient_key in self._state().state.knocks:
+                # knocked again: the week starts over
+                self._record_knock(recipient_key, request_id)
+            return
+        try:
+            self.set_peer_trust(recipient_key, "agents")
+            self.set_peer_link(recipient_key)
+            client.approve(recipient_key)
+            self.store.grant(client.state.room, recipient_key, agent_name)
+            self._record_knock(recipient_key, request_id)
+        except Exception:
+            self._clear_knock(recipient_key)
+            raise
+
+    def _record_knock(self, key: str, request_id: str = "") -> None:
+        store = self._state()
+        store.state.knocks[key] = int(self._wall_clock())
+        if _REQUEST_ID.match(request_id):  # the id the directory can be asked about
+            store.state.knock_requests[key] = request_id
+        else:
+            store.state.knock_requests.pop(key, None)
+        store.save()
+
+    def _clear_knock(self, key: str) -> None:
+        """Take back everything a knock left: approval, name, trust, link, grant."""
+        client = self.commands.client
+        client.revoke(key)
+        self.store.revoke(client.state.room, key)
+        store = self._state()
+        known = store.state.knocks.pop(key, None) is not None
+        if store.state.knock_requests.pop(key, None) is not None or known:
+            store.save()
+        self._knock_asked.pop(key, None)
+
+    def expire_knocks(self) -> None:
+        """Forget knocks nobody answered for KNOCK_EXPIRY_SECONDS.
+
+        A knock the other device accepted never expires: its link is live both
+        ways, or it already reached this device (`_receive` drops the record
+        then). A device that has since become a member, or was removed, is no
+        stranger any more and keeps whatever it now is. While offline no live
+        link is visible, so nothing is judged.
+        """
+        client = self.commands.client
+        store = self._state()
+        knocks = store.state.knocks
+        if not knocks or client.status().get("state") != "online":
+            return
+        live = {row["key"] for row in client.peers()}
+        now = self._wall_clock()
+        expired = []
+        for key, sent in tuple(knocks.items()):
+            if key in live or key not in store.state.links:
+                del knocks[key]  # answered, or no longer a stranger
+            elif now - sent > KNOCK_EXPIRY_SECONDS:
+                expired.append(key)
+        store.save()
+        for key in expired:
+            self._clear_knock(key)
+
+    async def ask_knock_answers(self) -> None:
+        """Ask the directory how one outstanding knock was decided.
+
+        A rejection clears what the knock left at once, as the week's expiry
+        would. Accepted, or an answer the directory no longer holds, ends the
+        asking for that knock; a directory without the route ends it for the
+        directory. The expiry stays the backstop either way. A knock is asked
+        at most once a minute, and one knock per beat so a slow directory
+        cannot hold up the refresh (ponytail: raise if many knocks matter).
+        """
+        client = self.commands.client
+        store = self._state()
+        requests = store.state.knock_requests
+        origin = client.state.origin
+        if not requests or not origin or origin == self._no_knock_status:
+            return
+        if client.status().get("state") != "online":
+            return
+        for key in [key for key in requests if key not in store.state.knocks]:
+            del requests[key]  # answered or cleared meanwhile
+        now = self._wall_clock()
+        due = [
+            key
+            for key in requests
+            if now - self._knock_asked.get(key, float("-inf")) >= KNOCK_STATUS_SECONDS
+        ]
+        if not due:
+            return
+        key = min(due, key=lambda item: self._knock_asked.get(item, 0.0))
+        self._knock_asked[key] = now
+        try:
+            status = await self.commands.contact_request_status(
+                origin.removeprefix("https://"), key, requests[key]
+            )
+        except Exception as exc:
+            if getattr(exc, "code", "") == "no_route":
+                self._no_knock_status = origin  # an older directory: the expiry decides
+            else:
+                logger.debug("could not ask how a knock was answered")  # next minute
+            return
+        if status == "rejected":
+            self._clear_knock(key)
+        elif status != "pending":  # accepted, or gone from the directory
+            del requests[key]
+            store.save()
+
+    def is_stranger(self, address: str) -> bool:
+        """Whether an agent lives on an accepted stranger's device, not on this network."""
+        try:
+            return RelayAddress.parse(address).key in self._state().state.links
+        except (RelayError, ValueError):
+            return False
+
+    def _desired_links(self) -> list[str]:
+        """The accepted strangers this device consents to reach across rooms."""
+        state = self._state().state
+        return sorted(key for key in state.links if key in state.approvals)
+
+    async def sync_links(self, *, force: bool = False, keys: list[str] | None = None) -> None:
+        """Tell the directory which strangers this device consents to link with.
+
+        Idempotent: it posts only when the set or the relay session changed, or
+        the directory is due a reminder. Failures never propagate; the next
+        call retries. An old directory without the route ends up here too, and
+        then strangers just stay unreachable.
+        """
+        commands = self.commands
+        sync = getattr(commands, "sync_links", None)
+        if commands is None or not callable(sync):
+            return
+        async with self._links_lock:
+            client = commands.client
+            status = client.status()
+            if status.get("state") != "online" or not client.state.origin:
+                return
+            wanted = self._desired_links() if keys is None else sorted(keys)
+            marker = (status["session"], tuple(wanted))
+            now = time.monotonic()
+            if not force:
+                if self._links_failed:
+                    if now < self._links_due:
+                        return  # back off after a failure
+                elif not wanted and not (self._links_declared or ("", ()))[1]:
+                    return  # nothing declared, nothing to declare
+                elif marker == self._links_declared and now < self._links_due:
+                    return
+            try:
+                await sync(client.state.origin.removeprefix("https://"), wanted)
+            except (RelayError, OSError, TimeoutError, ValueError) as exc:
+                logger.debug(
+                    "cross-directory links not updated: %s",
+                    getattr(exc, "code", type(exc).__name__),
+                )
+                self._links_failed = True
+                self._links_due = now + LINK_RETRY_SECONDS
+                return
+            self._links_failed = False
+            self._links_declared = marker
+            self._links_due = now + LINK_REFRESH_SECONDS
 
     @property
     def identity(self):
@@ -199,6 +481,219 @@ class RelayAgentBridge:
             raise RelayError(
                 "correlated relay events cannot issue human network commands"
             )
+
+    def device_name(self) -> str:
+        return self._state().state.device_name or default_device_name(self.workspace)
+
+    def set_device_name(self, name: str) -> str:
+        self._require_human_network_context("remote model turns cannot rename this device")
+        try:
+            name = validate_device_name(name)
+        except ValueError as exc:
+            raise RelayError(str(exc)) from exc
+        store = self._state()
+        if name != self.device_name() and name in self._known_device_names():
+            raise RelayError(
+                f"device name '{name}' is already on this network; choose a different name"
+            )
+        store.state.device_name = name
+        store.save()
+        return store.state.device_name
+
+    def network_name(self) -> str:
+        """The network's name, or "" for a network started before names existed."""
+        return self._state().state.network_name
+
+    def bind_network_name(self, name: str) -> bool:
+        """Take the network's name from the device that admitted this one.
+
+        The first name wins and repeating it is harmless. Returns whether the
+        device now has that name.
+        """
+        self._require_human_network_context("remote model turns cannot name the network")
+        try:
+            name = validate_network_name(name)
+        except ValueError:
+            return False
+        store = self._state()
+        if not store.state.network_name:
+            store.state.network_name = name
+            store.save()
+        return store.state.network_name == name
+
+    def trust_level(self) -> str:
+        return self._state().state.trust
+
+    @staticmethod
+    def sends_without_grant(level: str) -> bool:
+        """Open and agents trust send an ordinary message with no human grant."""
+        return level in ("open", "agents")
+
+    def set_trust_level(self, level: str) -> str:
+        self._require_human_network_context(
+            "remote model turns cannot change network trust"
+        )
+        try:
+            level = validate_trust(level)
+        except ValueError as exc:
+            raise RelayError(str(exc)) from exc
+        store = self._state()
+        store.state.trust = level
+        store.save()
+        logger.info("network trust set to %s (pid %d)", level, os.getpid())
+        return store.state.trust
+
+    def effective_trust(self, peer_key: str) -> str:
+        """This network's trust for one peer; manual always wins (docs §4)."""
+        state = self._state().state
+        if state.trust == "manual":
+            return "manual"
+        return state.peer_trust.get(peer_key, state.trust)
+
+    def set_peer_trust(self, peer_key: str, level: str) -> str:
+        self._require_human_network_context("remote model turns cannot change peer trust")
+        try:
+            level = validate_trust(level)
+        except ValueError as exc:
+            raise RelayError(str(exc)) from exc
+        if level != "agents":
+            raise RelayError(
+                "a peer's trust can only be set to agents; open and manual apply to the whole network"
+            )
+        store = self._state()
+        validate_public_key(peer_key)
+        store.state.peer_trust[peer_key] = level
+        store.save()
+        return level
+
+    def clear_peer_trust(self, peer_key: str) -> None:
+        self._require_human_network_context("remote model turns cannot change peer trust")
+        store = self._state()
+        if store.state.peer_trust.pop(peer_key, None) is not None:
+            store.save()
+
+    def set_peer_link(self, peer_key: str) -> None:
+        """Mark a peer as an accepted stranger: reached across rooms, by link."""
+        self._require_human_network_context("remote model turns cannot link peers")
+        store = self._state()
+        validate_public_key(peer_key)
+        if peer_key not in store.state.links:
+            if len(store.state.links) >= MAX_APPROVALS:
+                raise RelayError("local peer approval capacity reached", "capacity")
+            store.state.links.append(peer_key)
+            store.save()
+
+    def _known_device_names(self, *, except_key: str = "") -> set[str]:
+        """Every device name this device knows: its own, each bound peer and
+        each device in the live roster. `except_key` leaves one peer out."""
+        state = self._state().state
+        names = {self.device_name(), *state.peer_devices.values()}
+        for (_session, peer_key, _peer_session), (_time, rows) in self._cache.items():
+            if peer_key != except_key:
+                names.update(row["device"] for row in rows if row.get("device"))
+        return names
+
+    def bind_peer_device(self, key: str, name: str) -> bool:
+        """Bind a human device name to a peer's key at accept time.
+
+        Idempotent when the same (key, name) pair repeats. Fails with a
+        RelayError, and writes nothing, when the key is already bound under a
+        different name (it is never silently renamed) or when the name belongs
+        to any device this one knows (docs/specs/agent-network-simple-flow.md
+        §4). Returns whether this call created a new binding (False when the
+        pair already matched).
+        """
+        self._require_human_network_context("remote model turns cannot bind peer devices")
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+            name = key_label(key)
+        store = self._state()
+        bound = store.state.peer_devices.get(key)
+        if bound == name:
+            return False
+        if bound is not None:
+            raise RelayError(
+                f"this device is already on your network as {bound}", "already_named"
+            )
+        if name in self._known_device_names(except_key=key):
+            raise RelayError(
+                f"device name '{name}' is already on this network; "
+                "that device must run /connect name <other-name> and request a new code",
+                "name_taken",  # the contact RPC reports it by code
+            )
+        store.state.peer_devices[key] = name
+        store.save()
+        return True
+
+    async def remote_agents(self) -> list[dict]:
+        """Remote agents from the cached directory, keyed by agent@device.
+
+        Never raises: an unavailable relay is an empty roster, not an error.
+        """
+        try:
+            result = await self._owner_call(
+                "relay.directory", {"peer": "", "cached": True}
+            )
+        except Exception:
+            return []
+        rows = []
+        for row in result.get("agents", []):
+            try:
+                rows.append(
+                    {
+                        "name": row["name"],
+                        "device": row["device"],
+                        "handle": format_handle(row["name"], row["device"]),
+                        "state": row["state"],
+                        "address": row["address"],
+                        "online": True,
+                        "is_coordinator": row["is_coordinator"],
+                        "workspace_id": row["workspace_id"],
+                    }
+                )
+            except (KeyError, TypeError):
+                continue
+        return rows
+
+    async def device_unknown(self, name: str) -> bool:
+        """Whether the relay is reachable and no approved device can be `name`.
+
+        A device is known by a recorded peer name or by an agent on the live
+        roster. An approved device with neither (unnamed and offline) might be
+        the one meant, so nothing is unknown while one exists, nor while the
+        relay is unreachable and presence is unknowable. Reads through the
+        owner, so a second agent in the workspace answers the same.
+        """
+        try:
+            if (await self._owner_call("relay.status", {})).get("state") != "online":
+                return False
+            rows = await self.remote_agents()
+            state = self._state().state
+        except Exception:
+            return False
+        if name in {*state.peer_devices.values(), *(row["device"] for row in rows)}:
+            return False
+        online = {RelayAddress.parse(row["address"]).key for row in rows}
+        return set(state.approvals) <= set(state.peer_devices) | online
+
+    async def resolve_handle(self, handle: str) -> str:
+        """The relay: address for an approved agent@device, or a clear RelayError."""
+        parsed = parse_handle(handle)
+        matches = (
+            [
+                row
+                for row in await self.remote_agents()
+                if row["name"] == parsed[0] and row["device"] == parsed[1]
+            ]
+            if parsed
+            else []
+        )
+        if not matches:
+            raise RelayError(
+                "unknown agent@device: run /connect status to see who is online"
+            )
+        if len(matches) > 1:
+            raise RelayError("ambiguous agent@device")
+        return matches[0]["address"]
 
     async def start(self):
         rpc = self.plugin._rpc_server
@@ -238,6 +733,8 @@ class RelayAgentBridge:
                 self.commands.client, self.commands.client._store.key.encode()
             )
             self.commands.client.set_request_handler(self._receive)
+            self.make_config_sync().start()
+            self.make_membership_sync().start()
             try:
                 from .peer_transport import PeerMeshRuntime
 
@@ -268,18 +765,22 @@ class RelayAgentBridge:
                 discovery_group = setting(
                     "peer_discovery_multicast_group", "239.255.77.77"
                 )
-                direct_peer_enabled = setting("peer_direct_enabled", False) is True
+                identity_manager = getattr(self.plugin, "_dns_identity", None)
+                # Direct links need this device's endpoint identity; without
+                # one the mesh still forwards over the relay.
+                direct_peer_enabled = (
+                    setting("peer_direct_enabled", True) is True
+                    and identity_manager is not None
+                )
                 self.peer_mesh = PeerMeshRuntime(
                     self.commands.client,
                     self.secure_transport,
                     self.owner.state_dir,
                     self._receive,
                     forwarding_enabled=lambda: setting(
-                        "peer_forward_enabled", False
+                        "peer_forward_enabled", True
                     ) is True,
-                    endpoint_identity_manager=getattr(
-                        self.plugin, "_dns_identity", None
-                    ),
+                    endpoint_identity_manager=identity_manager,
                     endpoint_registry=getattr(self.plugin, "_dns_registry", None),
                     endpoint_designation=self.identity.identity,
                     direct_endpoint=advertised_endpoint,
@@ -305,6 +806,12 @@ class RelayAgentBridge:
                     socket_server.set_peer_forward_handler(
                         self.peer_mesh.handle_direct_forward
                     )
+                    socket_server.set_peer_secure_handler(
+                        self.peer_mesh.handle_direct_secure
+                    )
+                    socket_server.set_peer_identity_resolver(
+                        self.peer_mesh.endpoint_key_for
+                    )
             except Exception:
                 # Peer routing is opt-in and may not prevent existing relay
                 # messaging from starting if its local endpoint is unavailable.
@@ -319,26 +826,33 @@ class RelayAgentBridge:
         self._closed = True
         if self.active and not self.active.finished:
             await self._stop_active("interrupted", "receiving agent stopped")
-        for task in (self._loop_task, self._resume_task, self._directory_task):
+        tasks = (
+            self._loop_task,
+            self._resume_task,
+            self._directory_task,
+            self._arrivals_task,
+        )
+        for task in tasks:
             if task:
                 task.cancel()
-        await asyncio.gather(
-            *(
-                t
-                for t in (self._loop_task, self._resume_task, self._directory_task)
-                if t
-            ),
-            return_exceptions=True,
-        )
+        await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
         if self._enrollment_issuer is not None:
             await self._enrollment_issuer.close()
             self._enrollment_issuer = None
         socket_server = getattr(self.plugin, "_socket_server", None)
         if socket_server is not None:
             socket_server.set_peer_forward_handler(None)
+            socket_server.set_peer_secure_handler(None)
+            socket_server.set_peer_identity_resolver(None)
         if self.peer_mesh is not None:
             await self.peer_mesh.close()
             self.peer_mesh = None
+        if self.config_sync is not None:
+            await self.config_sync.close()
+            self.config_sync = None
+        if self.membership_sync is not None:
+            await self.membership_sync.close()
+            self.membership_sync = None
         if self.secure_transport is not None:
             self.secure_transport.close()
             self.secure_transport = None
@@ -359,6 +873,12 @@ class RelayAgentBridge:
                             self._refresh_directory()
                         )
                         self._next_directory = time.monotonic() + 15
+                if self.commands and time.monotonic() >= self._next_arrivals:
+                    if self._arrivals_task is None or self._arrivals_task.done():
+                        self._arrivals_task = asyncio.create_task(
+                            self._announce_arrivals()
+                        )
+                        self._next_arrivals = time.monotonic() + ARRIVAL_POLL_SECONDS
                 if self.peer_mesh and time.monotonic() >= self._next_peer_refresh:
                     await self.peer_mesh.refresh()
                     self._next_peer_refresh = time.monotonic() + 15
@@ -373,7 +893,28 @@ class RelayAgentBridge:
                 logger.warning("relay agent processing temporarily unavailable")
             await asyncio.sleep(0.2)
 
+    async def _announce_arrivals(self):
+        """Tell the human in the main pane about a new join request or knock."""
+        commands = self.commands
+        show = getattr(self.plugin, "show_network_notice", None)
+        if commands is None or show is None:
+            return
+        try:
+            lines = await commands.new_arrivals()
+        except Exception:
+            return
+        for line in lines:
+            show(line)
+
     async def _refresh_directory(self):
+        try:
+            self.expire_knocks()
+        except Exception:
+            logger.warning("could not expire unanswered knocks")
+        try:
+            await self.ask_knock_answers()
+        except Exception:
+            logger.debug("could not ask how knocks were answered", exc_info=True)
         try:
             self.store.expire_queued(TASK_TIMEOUT)
             local = await asyncio.to_thread(self.directory.agents, self.workspace)
@@ -384,6 +925,7 @@ class RelayAgentBridge:
                     {a.agent_id for a in local}, before=int(time.time()) - 120
                 )
             await self._rpc_directory({"peer": ""})
+            await self.sync_links()
         except (RelayError, OSError, ValueError):
             logger.debug("relay directory refresh unavailable")
 
@@ -402,20 +944,33 @@ class RelayAgentBridge:
         self._require_human_network_context(
             "remote model turns cannot issue human network commands"
         )
-        if any(part.upper().startswith("K1-") for part in value.split()):
+        from .enrollment_codes import looks_like_join_code
+
+        parts = value.split()
+        if parts and (
+            looks_like_join_code(parts[0].upper())
+            or any(looks_like_join_code(part) for part in parts[1:])
+        ):
             raise RelayError("enrollment codes must use the private code-entry view")
         result = await self._owner_call(
             "relay.command", {"value": value, "agent_id": self.identity.agent_id}
         )
         return result["text"]
 
-    async def enroll_device(self, domain: str, code: str) -> dict[str, str]:
-        """Submit a private enrollment code through a typed local RPC."""
+    async def enroll_device(
+        self, domain: str, code: str, on_submitted=None
+    ) -> dict[str, str]:
+        """Submit a private enrollment code through a typed local RPC.
+
+        ``on_submitted`` fires once the relay holds the request. Only the
+        workspace owner can say so; a non-owner window has one blocking RPC to
+        the owner and never calls it.
+        """
         self._require_human_network_context("remote model turns cannot enroll devices")
         await self._ensure_owner()
         params = {"agent_id": self.identity.agent_id, "domain": domain, "code": code}
         if self.commands is not None:
-            return await self._rpc_enroll_device(params)
+            return await self._rpc_enroll_device(params, on_submitted=on_submitted)
         record = self.owner.owner()
         if record is None:
             raise RelayError("workspace relay owner is starting; retry shortly")
@@ -452,12 +1007,17 @@ class RelayAgentBridge:
     async def submit_contact_request(
         self,
         domain: str,
-        recipient_key: str,
+        route: str,
         introduction: str,
         *,
         source_agent: str,
     ) -> dict[str, str]:
-        """Submit a sealed introduction through a typed local-only RPC."""
+        """Resolve a knock's route and submit a sealed introduction.
+
+        The raw recipient key never leaves this bridge: it is resolved from
+        `route` here (or in the owner process) and only used to seal and post
+        the request.
+        """
         self._require_human_network_context(
             "remote model turns cannot submit contact requests"
         )
@@ -465,8 +1025,9 @@ class RelayAgentBridge:
         params = {
             "agent_id": source_agent,
             "domain": domain,
-            "recipient_key": recipient_key,
+            "route": route,
             "introduction": introduction,
+            "device_name": self.device_name(),
         }
         if self.commands is not None:
             return await self._rpc_contact_submit(params)
@@ -517,6 +1078,8 @@ class RelayAgentBridge:
         *,
         decision: str,
         source_agent: str,
+        sender_key: str,
+        device_name: str,
     ) -> dict[str, str]:
         self._require_human_network_context(
             "remote model turns cannot decide contact requests"
@@ -527,6 +1090,8 @@ class RelayAgentBridge:
             "domain": domain,
             "request_id": request_id,
             "decision": decision,
+            "sender_key": sender_key,
+            "device_name": device_name,
         }
         if self.commands is not None:
             result = await self._rpc_contact_decide(params)
@@ -567,8 +1132,9 @@ class RelayAgentBridge:
         if self.commands is None or set(params) != {
             "agent_id",
             "domain",
-            "recipient_key",
+            "route",
             "introduction",
+            "device_name",
         }:
             raise RelayError("invalid local contact request")
         try:
@@ -583,23 +1149,37 @@ class RelayAgentBridge:
             not isinstance(params["domain"], str)
             or not params["domain"]
             or len(params["domain"]) > 253
-            or not isinstance(params["recipient_key"], str)
-            or len(params["recipient_key"]) != 64
+            or not isinstance(params["route"], str)
+            or not re.fullmatch(r"[0-9a-f]{16}", params["route"])
             or not isinstance(params["introduction"], str)
             or introduction_size > 2048
+            or not isinstance(params["device_name"], str)
         ):
             raise RelayError("invalid local contact request")
-        self._local_agent(params["agent_id"])
+        agent = self._local_agent(params["agent_id"])
         try:
+            key = await self.commands.resolve_contact_route(
+                params["domain"], params["route"]
+            )
             receipt = await self.commands.submit_contact_request(
                 params["domain"],
-                params["recipient_key"],
+                key,
                 params["introduction"],
+                params["device_name"],
             )
-            return {"status": "queued", "receipt_id": receipt}
         except Exception as exc:
             code = getattr(exc, "code", None)
             return {"error": code if code in _CONTACT_ERRORS else "transport"}
+        # The knock is sent. If this device is on the knocked directory, get
+        # ready for the answer: the other side's accept then opens the path.
+        try:
+            client = self.commands.client
+            if directory_origin(params["domain"]) == client.state.origin:
+                self._bind_knocked_peer(key, agent.name, receipt)
+                await self.sync_links(force=True)
+        except Exception:
+            logger.warning("knock sent, but a reply path could not be prepared")
+        return {"status": "queued", "receipt_id": receipt}
 
     async def _rpc_contact_pending(self, params):
         self._require_human_network_context(
@@ -615,6 +1195,7 @@ class RelayAgentBridge:
             raise RelayError("invalid local contact inbox request")
         self._local_agent(params["agent_id"])
         try:
+            self.commands.screen_polled()
             requests = await self.commands.pending_contact_requests(params["domain"])
             if not isinstance(requests, list) or len(requests) > 32:
                 raise RelayError("contact inbox unavailable")
@@ -628,6 +1209,7 @@ class RelayAgentBridge:
                             "sender_key": item.sender_key,
                             "expires_at": item.expires_at,
                             "introduction": introduction,
+                            "device_name": item.device_name,
                         }
                     )
                 finally:
@@ -650,6 +1232,8 @@ class RelayAgentBridge:
             "domain",
             "request_id",
             "decision",
+            "sender_key",
+            "device_name",
         }:
             raise RelayError("invalid local contact decision")
         if (
@@ -660,13 +1244,30 @@ class RelayAgentBridge:
             or not re.fullmatch(r"[0-9a-f]{32}", params["request_id"])
             or not isinstance(params["decision"], str)
             or params["decision"] not in {"accept", "reject"}
+            or not isinstance(params["sender_key"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", params["sender_key"])
+            or not isinstance(params["device_name"], str)
         ):
             raise RelayError("invalid local contact decision")
         self._local_agent(params["agent_id"])
         try:
-            result = await self.commands.decide_contact_request(
-                params["domain"], params["request_id"], params["decision"]
+            # Bind before the relay records the decision, like a join accept:
+            # a name collision fails the accept and the knock stays pending.
+            undo = params["decision"] == "accept" and self._bind_knock_peer(
+                params["sender_key"], params["device_name"]
             )
+            try:
+                result = await self.commands.decide_contact_request(
+                    params["domain"], params["request_id"], params["decision"]
+                )
+            except Exception:
+                if undo:
+                    undo()
+                raise
+            if undo:
+                # Accepted: this device now consents to the link, which opens
+                # once the knocking device has declared this one too.
+                await self.sync_links(force=True)
             return {"status": result.status, "receipt_id": result.receipt_id}
         except Exception as exc:
             code = getattr(exc, "code", None)
@@ -707,6 +1308,10 @@ class RelayAgentBridge:
             return await self._ensure_enrollment_issuer().decide(
                 enrollment_id, decision=decision
             )
+        except RelayError:
+            # Already a safe, operator-visible message (e.g. a device-name
+            # collision from bind_peer_device); pass it through unchanged.
+            raise
         except Exception as exc:
             # Do not include tokens, paths, or raw protocol errors in the command result.
             code = getattr(exc, "code", None)
@@ -714,29 +1319,36 @@ class RelayAgentBridge:
                 raise RelayError(
                     "the relay connection restarted after this code was created, "
                     "so this request can no longer be decided; create a new code "
-                    "with /connect offer"
+                    "with /connect code"
                 ) from None
             if isinstance(code, str) and code.isidentifier():
                 raise RelayError(f"enrollment decision unavailable ({code})") from None
             raise RelayError("enrollment decision unavailable") from None
 
-    async def _rpc_enroll_device(self, params):
+    async def _rpc_enroll_device(self, params, on_submitted=None):
         self._require_human_network_context("remote model turns cannot enroll devices")
         if self.commands is None or set(params) != {"agent_id", "domain", "code"}:
             raise RelayError("invalid local enrollment request")
+        from .enrollment_codes import is_short_enrollment_code
+
         if (
             not isinstance(params["domain"], str)
             or not params["domain"]
             or len(params["domain"]) > 253
             or not isinstance(params["code"], str)
-            or len(params["code"]) != 60
+            or not is_short_enrollment_code(params["code"])
         ):
             raise RelayError("invalid local enrollment request")
         self._local_agent(params["agent_id"])
         from .enrollment_client import enroll_device
 
         return _safe_enrollment_result(
-            await enroll_device(self.commands, params["domain"], params["code"])
+            await enroll_device(
+                self.commands,
+                params["domain"],
+                params["code"],
+                on_submitted=on_submitted,
+            )
         )
 
     async def _rpc_enrollment_offer(self, params):
@@ -803,14 +1415,19 @@ class RelayAgentBridge:
             if identity is None and parsed.agent_id != address.agent_id:
                 continue
             matches.append(row)
-        if len(matches) != 1:
+        if not matches:
+            # Gone from the roster (denied, left): say what the roster says.
+            raise RelayError(
+                "unknown agent@device: run /connect status to see who is online"
+            )
+        if len(matches) > 1:
             raise RelayError("remote conversation participant is not uniquely online")
         return matches[0]
 
     async def _rpc_send(self, params):
         if self.commands is None:
             raise RelayError("workspace relay owner changed; retry")
-        if set(params) != {
+        required = {
             "agent_id",
             "to",
             "content",
@@ -819,7 +1436,8 @@ class RelayAgentBridge:
             "reply_to",
             "kind",
             "id",
-        }:
+        }
+        if not required <= set(params) <= required | {"turn_end"}:
             raise RelayError("invalid local relay send")
         if not isinstance(params["grant_id"], str) or (
             params["grant_id"] and not ID.fullmatch(params["grant_id"])
@@ -837,31 +1455,49 @@ class RelayAgentBridge:
         state = self._state().state
         if state.room != client.state.room or destination.key not in state.approvals:
             raise RelayError("peer is not approved in the current room")
+        # Open and agents trust need no human communication grant to send a
+        # message: it is an ordinary hub message, not a task
+        # (docs/specs/agent-network-simple-flow.md §4/§6).
+        level = self.trust_level()
+        open_trust = self.sends_without_grant(level)
+        # Which process judged the send, and what it read: the human sets trust
+        # in one process and the owner sends from another.
+        logger.info("network send gate: kind=%s trust=%s pid=%d", kind, level, os.getpid())
         expires_at = int(time.time()) + TASK_TIMEOUT
+        candidates = None
         if kind == "message":
-            # Reject missing or mismatched human authorization before the
-            # directory lookup causes any network request to the peer.
-            contacts = self.store.contacts(state.room, sender)
-            candidates = [
-                item
-                for item in contacts
-                if item["recipient"] == str(destination)
-                and item["expires"] > int(time.time())
-                and item["state"] in {"ready", "sent"}
-            ]
-            exact = [item for item in candidates if item["id"] == params["grant_id"]]
-            ready = [item for item in candidates if item["state"] == "ready"]
-            candidates = exact if params["grant_id"] else ready
-            if len(candidates) != 1:
-                raise RelayError(
-                    "a human communication grant is required; use /connect authorize or /connect send"
-                )
-            if params["content"].strip() != candidates[0]["purpose"]:
-                raise RelayError(
-                    "initial message must match the human-authorized request exactly"
-                )
-            remote = await self._remote_participant(destination)
+            if open_trust:
+                remote = await self._remote_participant(destination)
+            else:
+                # Reject missing or mismatched human authorization before the
+                # directory lookup causes any network request to the peer.
+                contacts = self.store.contacts(state.room, sender)
+                candidates = [
+                    item
+                    for item in contacts
+                    if item["recipient"] == str(destination)
+                    and item["expires"] > int(time.time())
+                    and item["state"] in {"ready", "sent"}
+                ]
+                exact = [item for item in candidates if item["id"] == params["grant_id"]]
+                ready = [item for item in candidates if item["state"] == "ready"]
+                candidates = exact if params["grant_id"] else ready
+                if len(candidates) != 1:
+                    raise RelayError(
+                        "a human communication grant is required; use /connect authorize or /connect send"
+                    )
+                if params["content"].strip() != candidates[0]["purpose"]:
+                    raise RelayError(
+                        "initial message must match the human-authorized request exactly"
+                    )
+                remote = await self._remote_participant(destination)
         elif kind == "answer":
+            # Owner-side twin of the guard in send(): a direct relay.send RPC
+            # from a model turn cannot answer a question either.
+            self._require_human_network_context(
+                "relay answers carry a human-supplied answer only; "
+                "use /connect answer"
+            )
             question = self.store.event(params["reply_to"])
             if (
                 question is None
@@ -921,11 +1557,13 @@ class RelayAgentBridge:
             }
             destination = RelayAddress.parse(original["from"])
             expires_at = original["expires_at"]
+        if kind == "message":
+            thread_id = params["thread_id"] if open_trust else candidates[0]["id"]
+        else:
+            thread_id = params["thread_id"]
         payload = {
             "id": params["id"],
-            "thread_id": (
-                candidates[0]["id"] if kind == "message" else params["thread_id"]
-            ),
+            "thread_id": thread_id,
             "reply_to": params["reply_to"],
             "from": sender,
             "to": str(destination),
@@ -936,7 +1574,14 @@ class RelayAgentBridge:
             "content": params["content"],
             "kind": kind,
             "expires_at": expires_at,
+            "from_device": self.device_name(),
         }
+        if params.get("turn_end") is not None:
+            payload["turn_end"] = params["turn_end"]
+        if kind == "message" and not open_trust:
+            # Sent under a human grant: the receiver runs it as a task, whatever
+            # its own trust, and answers on this thread as the task's result.
+            payload["task"] = True
         if kind in EVENT_KINDS and kind != "answer":
             payload["reply_to"] = payload["thread_id"]
         validate_message(
@@ -948,7 +1593,11 @@ class RelayAgentBridge:
         if state.room != client.state.room or destination.key not in state.approvals:
             raise RelayError("peer is not approved in the current room")
         if payload["kind"] == "message":
-            payload = self.store.prepare_outbound(state.room, payload)
+            payload = (
+                self.store.queue_open_message(state.room, payload)
+                if open_trust
+                else self.store.prepare_outbound(state.room, payload)
+            )
         else:
             self.store.queue_outbound(state.room, payload)
         if kind == "progress":
@@ -963,8 +1612,16 @@ class RelayAgentBridge:
             return {"id": event_id, "state": item["state"], "duplicate": True}
         client = self.commands.client
         state = self._state().state
-        if not self.store.delivery_authorized(
-            event_id, room=state.room, approvals=state.approvals
+        # An open row waits in the outbox with no grant behind it. It goes out only
+        # while the trust level still lets a message go without one, so raising
+        # trust to manual revokes it instead of letting the retry loop send it.
+        if (
+            item["open"] and not self.sends_without_grant(self.trust_level())
+        ) or not self.store.delivery_authorized(
+            event_id,
+            room=state.room,
+            approvals=state.approvals,
+            without_grant=self.effective_trust(item["peer"]) == "open",
         ):
             self.store.mark_outbound(
                 event_id, "revoked", detail="authorization changed"
@@ -1087,6 +1744,7 @@ class RelayAgentBridge:
         reply_to="",
         kind="message",
         source_agent=None,
+        turn_end=None,
     ):
         active = self.active if self._turn.get() is not None else None
         if self._turn.get() is not None:
@@ -1120,6 +1778,15 @@ class RelayAgentBridge:
             self._authorize_active()
         elif kind in {"progress", "question", "result", "error"}:
             raise RelayError("correlated network events require an active remote task")
+        if kind == "answer":
+            # kind='answer' carries a human-supplied answer only (docs
+            # section 7): the turn that reports the question must not answer
+            # it. A plain local turn (the human relayed the answer in chat)
+            # and /connect answer both pass this guard.
+            self._require_human_network_context(
+                "relay answers carry a human-supplied answer only; "
+                "use /connect answer"
+            )
         message_id = secrets.token_hex(16)
         params = {
             "agent_id": source_agent or self.identity.agent_id,
@@ -1133,6 +1800,8 @@ class RelayAgentBridge:
             "kind": kind,
             "id": message_id,
         }
+        if turn_end is not None:
+            params["turn_end"] = turn_end
         receipt = await self._owner_call("relay.send", params)
         if (
             active
@@ -1155,7 +1824,13 @@ class RelayAgentBridge:
         client = self.commands.client
         if peer not in client.state.approvals:
             raise RelayError("peer is not approved")
-        self._state()
+        store = self._state()
+        stranger = peer in store.state.links
+        if store.state.knocks.pop(peer, None) is not None:
+            store.save()  # it reached us: the knock was accepted
+        if stranger and method in {"peer.forward", "peer.exchange", MEMBERS_METHOD}:
+            # A stranger reaches allowed agents only; it is not a network member.
+            raise RelayError("peer is not part of this network")
         if method == "peer.forward" and not _secure:
             if self.peer_mesh is None:
                 raise RelayError("peer forwarding is unavailable")
@@ -1178,8 +1853,16 @@ class RelayAgentBridge:
             if payload != {}:
                 raise RelayError("invalid directory request")
             agents = self.directory.publishable_agents(
-                self.workspace, client.state.workspace_id
+                self.workspace, client.state.workspace_id, self.device_name()
             )
+            if stranger:
+                # A stranger sees only the agents it may message.
+                granted = {
+                    row["agent"]
+                    for row in self.store.grants(client.state.room)
+                    if row["peer"] == peer
+                }
+                agents = [row for row in agents if row.get("name") in granted]
             return {
                 "agents": agents[:MAX_DIRECTORY],
                 "truncated": len(agents) > MAX_DIRECTORY or self.directory.truncated,
@@ -1188,6 +1871,14 @@ class RelayAgentBridge:
             if self.peer_mesh is None:
                 raise RelayError("peer exchange is unavailable")
             return await self.peer_mesh.handle_exchange(peer, payload)
+        if method == "config_sync":
+            if self.config_sync is None:
+                raise RelayError("config sync is unavailable")
+            return await self.config_sync.receive(peer, payload)
+        if method == MEMBERS_METHOD:
+            if self.membership_sync is None:
+                raise RelayError("network membership is unavailable")
+            return await self.membership_sync.receive(peer, payload)
         if method == "message":
             message = validate_message(
                 payload,
@@ -1209,7 +1900,14 @@ class RelayAgentBridge:
                 ):
                     raise ConversationRejection("recipient_unavailable")
                 receipt = self.store.admit(
-                    client.state.room, peer, message, agent_name=target.name
+                    client.state.room,
+                    peer,
+                    message,
+                    agent_name=target.name,
+                    # Open trust admits any approved peer to any local agent;
+                    # agents/manual trust still require a receiving grant. This
+                    # peer's own trust can differ from the network default.
+                    require_grant=self.effective_trust(peer) != "open",
                 )
                 try:
                     if receipt["state"] == "queued":
@@ -1315,7 +2013,9 @@ class RelayAgentBridge:
         raise RelayError("unsupported relay operation")
 
     async def _receive_secure_application(self, peer, method, payload):
-        if method not in {"message", "status", "cancel", "directory", "peer.exchange"}:
+        if method not in {
+            "message", "status", "cancel", "directory", "peer.exchange", "config_sync", MEMBERS_METHOD
+        }:
             raise RelayError("unsupported secure conversation operation")
         try:
             return await self._receive(peer, method, payload, _secure=True)
@@ -1629,6 +2329,7 @@ class RelayAgentBridge:
                 "relay_reply_to": payload["id"],
                 "relay_parent_reply_to": payload["reply_to"],
                 "relay_peer": payload["from"],
+                "display_from": self._sender_handle(payload),
             },
         )
 
@@ -1699,7 +2400,11 @@ class RelayAgentBridge:
             scope=MessageScope.DIRECT.value,
             thread_id=payload["thread_id"],
             reply_to=payload["reply_to"],
-            metadata={"relay_event": payload["kind"]},
+            metadata={
+                "relay_event": payload["kind"],
+                "relay_event_id": payload["id"],
+                "display_from": self._sender_handle(payload),
+            },
         )
         self.plugin._display_hub_message(message)
 
@@ -1820,6 +2525,7 @@ class RelayAgentBridge:
             }
         client = self.commands.client
         status = client.status()
+        peer_devices = self._state().state.peer_devices
         if requested:
             validate_key(requested)
         # Relay-approved peers are always reachable; the peer mesh only adds
@@ -1843,7 +2549,12 @@ class RelayAgentBridge:
             cache_key = (status["session"], peer_key, peer_session)
             cached = self._cache.get(cache_key)
             try:
-                if not cached or time.monotonic() - cached[0] > 15:
+                # A cached read never drops a known peer for being a few
+                # seconds past its TTL: the refresher runs on the same 15 s
+                # beat, and skipping the entry would flash the device offline.
+                if not cached or (
+                    not params.get("cached") and time.monotonic() - cached[0] > 15
+                ):
                     if params.get("cached"):
                         continue
                     if self.secure_transport is None:
@@ -1864,7 +2575,15 @@ class RelayAgentBridge:
                             "is_coordinator",
                             "state",
                         }
-                        if not isinstance(row, dict) or set(row) != fields:
+                        # A peer on this version always sends "device" too; an
+                        # older peer has none, and its agents fall back to a
+                        # stable per-peer stand-in below.
+                        optional_fields = {"device"}
+                        if (
+                            not isinstance(row, dict)
+                            or not fields <= set(row)
+                            or set(row) - fields - optional_fields
+                        ):
                             raise RelayError("invalid remote agent descriptor")
                         if (
                             not isinstance(row["machine_id"], str)
@@ -1878,16 +2597,34 @@ class RelayAgentBridge:
                             or len(row["state"]) > 20
                         ):
                             raise RelayError("invalid remote agent descriptor")
+                        device = row.get("device")
+                        if device is not None and (
+                            not isinstance(device, str) or not NAME_RE.fullmatch(device)
+                        ):
+                            raise RelayError("invalid remote agent descriptor")
+                        # The recorded binding wins over the peer's self-report.
+                        device = peer_devices.get(peer_key) or device or key_label(peer_key)
                         address = str(
                             RelayAddress(
                                 peer_key, row["workspace_id"], row["agent_id"]
                             )
                         )
-                        safe.append({**row, "address": address})
+                        safe.append(
+                            {
+                                **row,
+                                "address": address,
+                                "device": device,
+                                "handle": format_handle(row["name"], device),
+                            }
+                        )
                     cached = (time.monotonic(), safe)
                     self._cache[cache_key] = cached
                 rows.extend(cached[1])
             except (RelayError, TimeoutError) as exc:
+                # Cached reads never refresh, so a device that stopped answering
+                # would be listed for as long as the mesh remembers its key.
+                if cached and time.monotonic() - cached[0] > DIRECTORY_STALE_SECONDS:
+                    self._cache.pop(cache_key, None)
                 logger.warning(
                     "remote directory for peer %s unavailable: %s",
                     peer_key[:12],
@@ -1906,6 +2643,108 @@ class RelayAgentBridge:
             or len(peer_sessions) > MAX_REMOTE_PEERS,
         }
 
+    def make_config_sync(self, root=None) -> ConfigSyncService:
+        """The sealed-config service for this device (started by the owner)."""
+        client = self.commands.client
+        self.config_sync = ConfigSyncService(
+            key=client._store.key,
+            transport=self.secure_transport,
+            online=self._config_online_peers,
+            recipients=lambda: list(self._state().state.config_recipients),
+            primary=lambda: self._state().state.inviter,
+            device_name=self.device_name,
+            peer_name=self._peer_name,
+            after_apply=self._config_applied,
+            notice=self._config_notice,
+            told=(client.state.config_told_skipped, client.state.config_told_refused),
+            remember_told=client.remember_config_told,
+            root=root,
+        )
+        return self.config_sync
+
+    def make_membership_sync(self) -> MembershipSync:
+        """Tells every member who this device approves, and hears theirs."""
+        self.membership_sync = MembershipSync(
+            client=self.commands.client,
+            transport=self.secure_transport,
+            online=self._members_online,
+        )
+        return self.membership_sync
+
+    def _members_online(self) -> dict[str, str]:
+        """Members reachable now: on the relay roster, or by a signed locator."""
+        online = self._config_online_peers()
+        if self.peer_mesh is not None:
+            online = {**self.peer_mesh._live_peers(), **online}
+        return online
+
+    def _config_online_peers(self) -> dict[str, str]:
+        """Approved peers on the relay right now: key -> their relay session."""
+        client = self.commands.client
+        if client.status().get("state") != "online":
+            return {}
+        approved = set(client.state.approvals)
+        return {p["key"]: p["session"] for p in client.peers() if p["key"] in approved}
+
+    def _config_notice(self, text: str) -> None:
+        """One system line in the main pane about settings sync."""
+        show = getattr(self.plugin, "show_network_notice", None)
+        if show is not None:
+            show(text)
+
+    async def _config_applied(self, applied: Applied) -> None:
+        """Make the running app follow settings its primary just wrote to disk."""
+        config = getattr(self.plugin, "config", None)
+        if applied.config_changed and hasattr(config, "reload"):
+            config.reload()
+        bus = self.plugin.event_bus
+        state_service = bus.get_service("state_service") if bus else None
+        if state_service is None:
+            return
+        if applied.profiles_changed:
+            active = config.get("kollabor.llm.active_profile") if config else None
+            try:
+                await state_service.set_active_profile(active or "default", reload_profile=True)
+            except ValueError:
+                # The primary's loadout needs a login this device lacks (OAuth
+                # never travels); the settings still show as managed.
+                logger.info("config sync: the synced loadout cannot be activated here")
+        if applied.mcp_changed:
+            await state_service.reload_mcp_servers()
+
+    def _peer_name(self, peer_key: str) -> str:
+        """The human name for a peer key: its bound device name, never the key."""
+        return self._state().state.peer_devices.get(peer_key) or key_label(peer_key)
+
+    def number(self, kind: str, ref: str) -> int:
+        """The short number a screen shows for a request or a question on this network."""
+        return self.store.number(self.commands.client.state.room, kind, ref)
+
+    def _resolve_number(self, kind: str, text: str) -> tuple[int, str]:
+        """The number a human typed and the real id behind it; unknown or stale is refused."""
+        if not (text.isascii() and text.isdigit()) or len(text) > 9:
+            raise RelayError(f"give the {kind} number that /connect printed")
+        ref = self.store.resolve_number(
+            self.commands.client.state.room, kind, int(text)
+        )
+        if ref is None:
+            raise RelayError(f"no {kind} numbered {int(text)} on this network")
+        return int(text), ref
+
+    def _sender_handle(self, payload) -> str:
+        """agent@device for a relay sender: the name this network bound, never the address."""
+        try:
+            key = RelayAddress.parse(payload["from"]).key
+            device = (
+                self._state().state.peer_devices.get(key)
+                or payload.get("from_device")
+                or key_label(key)
+            )
+            return format_handle(payload["from_identity"], device)
+        except (RelayError, KeyError, TypeError, ValueError):
+            # A label must never block delivery, and never falls back to the address.
+            return "remote agent"
+
     async def application_command(self, head, rest, source_agent=None):
         self._require_human_network_context(
             "remote model turns cannot issue human network commands"
@@ -1915,7 +2754,7 @@ class RelayAgentBridge:
         parts = rest.split()
         if head == "allow":
             if len(parts) != 2:
-                return "usage: /connect allow <peer public key> <local agent name>"
+                return "usage: /connect allow <device> <agent>"
             peer, name = parts
             if peer not in client.state.approvals:
                 raise RelayError(
@@ -1926,10 +2765,13 @@ class RelayAgentBridge:
                     "grant requires an online agent name in this workspace"
                 )
             self.store.grant(client.state.room, peer, name)
-            return f"conversation allowed: {peer} -> {name}; local tool permissions still apply"
+            return (
+                f"conversation allowed: {self._peer_name(peer)} -> {name}; "
+                "local tool permissions still apply"
+            )
         if head == "deny":
             if len(parts) not in (1, 2):
-                return "usage: /connect deny <peer public key> [local agent name]"
+                return "usage: /connect deny <device> [agent]"
             self.store.revoke(
                 client.state.room, parts[0], parts[1] if len(parts) == 2 else None
             )
@@ -1953,9 +2795,10 @@ class RelayAgentBridge:
             result = await self._rpc_directory({"peer": rest})
             return json.dumps(result, indent=2)
         if head in {"authorize", "send"}:
-            target, sep, content = rest.partition(" ")
+            handle, sep, content = rest.partition(" ")
             if not sep:
-                return f"usage: /connect {head} <full relay agent address> <purpose or message>"
+                return f"usage: /connect {head} <agent@device> <purpose or message>"
+            target = await self.resolve_handle(handle)
             destination = RelayAddress.parse(target)
             if destination.key not in client.state.approvals:
                 raise RelayError("approve the peer before authorizing contact")
@@ -1968,8 +2811,13 @@ class RelayAgentBridge:
             grant = self.store.authorize_contact(
                 client.state.room, sender, target, content, ttl=TASK_TIMEOUT
             )
+            number = self.number("request", grant["id"])
             if head == "authorize":
-                return f"communication authorized: {grant['id']}; expires at {grant['expires']}; recipient {target}"
+                until = time.strftime("%H:%M", time.localtime(int(grant["expires"])))
+                return (
+                    f"communication authorized: request {number}; "
+                    f"expires at {until}; recipient {handle}"
+                )
             receipt = await self.send(
                 target,
                 content,
@@ -1977,19 +2825,21 @@ class RelayAgentBridge:
                 grant_id=grant["id"],
                 source_agent=source_agent,
             )
-            return "remote receipt: " + json.dumps(receipt, sort_keys=True)
+            return _receipt_line(f"request {number} to {handle}", receipt)
         if head == "withdraw":
             if len(parts) != 1:
-                return "usage: /connect withdraw <communication grant id>"
-            self.store.withdraw_contact(client.state.room, parts[0])
+                return "usage: /connect withdraw <number>"
+            number, grant_id = self._resolve_number("request", parts[0])
+            self.store.withdraw_contact(client.state.room, grant_id)
             return (
-                "communication withdrawn; late replies cannot start work here; "
+                f"request {number} withdrawn; late replies cannot start work here; "
                 "use /connect cancel to stop remote work"
             )
         if head == "answer":
-            question_id, sep, content = rest.partition(" ")
+            number_text, sep, content = rest.partition(" ")
             if not sep or not content.strip():
-                return "usage: /connect answer <question event id> <answer>"
+                return "usage: /connect answer <number> <text>"
+            number, question_id = self._resolve_number("question", number_text)
             question = self.store.event(question_id)
             if (
                 question is None
@@ -2026,21 +2876,22 @@ class RelayAgentBridge:
                 kind="answer",
                 source_agent=agent.agent_id,
             )
-            return "conversation answer: " + json.dumps(receipt, sort_keys=True)
+            return _receipt_line(f"question {number} answered", receipt)
         if head in {"task", "cancel"}:
             if len(parts) != 2:
-                return f"usage: /connect {head} <full relay agent address> <message id>"
-            address = RelayAddress.parse(parts[0])
+                return f"usage: /connect {head} <agent@device> <number>"
+            address = RelayAddress.parse(await self.resolve_handle(parts[0]))
+            number, request_id = self._resolve_number("request", parts[1])
             if self.secure_transport is None:
                 raise RelayError("secure conversation transport is unavailable")
             receipt = await self.secure_transport.request(
                 address.key,
                 "status" if head == "task" else "cancel",
-                {"to": str(address), "id": parts[1]},
+                {"to": str(address), "id": request_id},
             )
             if head == "cancel":
-                self.store.forget_expectation(parts[1], room=client.state.room)
-            return json.dumps(receipt, sort_keys=True)
+                self.store.forget_expectation(request_id, room=client.state.room)
+            return _receipt_line(f"request {number} on {parts[0]}", receipt)
         raise RelayError("unsupported conversation command")
 
     def _authorize_active(self, *, turn_id=None):
@@ -2056,7 +2907,10 @@ class RelayAgentBridge:
             record["agent_id"] != self.identity.agent_id
             or record["agent_name"] != self.identity.identity
             or not self.store.authorized(
-                record["id"], room=state.room, approvals=state.approvals
+                record["id"],
+                room=state.room,
+                approvals=state.approvals,
+                without_grant=self.effective_trust(record["peer"]) == "open",
             )
         ):
             raise RelayError("remote task authority was revoked or changed")
@@ -2067,6 +2921,9 @@ class RelayAgentBridge:
         llm = self.llm
         if llm is None:
             return
+        # The turn that handled a delivered request may have just ended: tell
+        # its requester before anything else reaches the model.
+        await self.plugin.settle_network_turn(llm)
         self._release_remote_cancellation_if_idle(llm)
         cleanup_ready = getattr(llm, "cancellation_cleanup_ready", None)
         if callable(cleanup_ready) and not cleanup_ready():
@@ -2128,6 +2985,29 @@ class RelayAgentBridge:
         if not queued:
             return
         record = self.store.task(queued[0]["id"])
+        state = self._state().state
+        if record["peer"] not in state.approvals:
+            # A revocation that arrived through membership dropped the
+            # approval without touching this store (accept_membership ->
+            # client.revoke); the queued record dies here the way a local
+            # /connect revoke cancels it (docs section 4).
+            self.store.transition(
+                record["id"], "cancelled", detail="peer approval revoked"
+            )
+            return
+        # A sender on manual trust marks its request as a task and waits for its
+        # result: run it as one whatever this device's trust.
+        as_task = record["payload"].get("task") is True
+        if self.effective_trust(record["peer"]) != "manual" and not as_task:
+            # Open and agents trust: an ordinary hub turn, no task envelope,
+            # no active-task bookkeeping (docs/specs/agent-network-simple-flow.md §6).
+            # One request at a time: the next reaches the model only after the
+            # turn that handles this one has ended, so each turn answers one
+            # request and its replies go on that request's thread.
+            if self.plugin.network_turn_open():
+                return
+            await self._deliver_open_message(record)
+            return
         self.active = ActiveRelayTask(record, time.monotonic())
         token = self._turn.set(record["id"])
         try:
@@ -2146,7 +3026,7 @@ class RelayAgentBridge:
                 scope=MessageScope.DIRECT.value,
                 thread_id=payload["thread_id"],
                 reply_to=payload["reply_to"],
-                metadata={},
+                metadata={"display_from": self._sender_handle(payload)},
             )
             self._injecting_message = message
             await self.plugin._on_message_received(message)
@@ -2157,6 +3037,63 @@ class RelayAgentBridge:
         finally:
             self._injecting_message = None
             self._turn.reset(token)
+
+    async def _deliver_open_message(self, record):
+        """Deliver a queued message as a plain hub turn (open/agents trust).
+
+        No ActiveRelayTask, no self._turn: the receiving agent runs its own
+        tools under its own permissions and answers later with its own
+        hub_msg, exactly like a local agent. Nothing here waits for that
+        reply or captures it.
+        """
+        level = self.effective_trust(record["peer"])
+        payload = record["payload"]
+        end = payload.get("turn_end")
+        if end is not None:
+            # The far runtime's end-of-turn frame: it settles whoever waits on
+            # this thread and is never shown or given to the model.
+            try:
+                self.plugin.on_network_turn_end(
+                    payload["thread_id"], end, payload["content"]
+                )
+                self.store.transition(record["id"], "delivered")
+            except Exception:
+                self.store.transition(
+                    record["id"], "failed", detail="could not settle the request"
+                )
+            return
+        # The recorded binding wins over the sender's self-reported name.
+        from_device = (
+            self._state().state.peer_devices.get(record["peer"])
+            or payload.get("from_device")
+            or key_label(RelayAddress.parse(payload["from"]).key)
+        )
+        message = HubMessage(
+            id=payload["id"],
+            action="message",
+            from_agent=payload["from"],
+            from_identity=format_handle(payload["from_identity"], from_device),
+            to=self.identity.identity,
+            content=payload["content"],
+            scope=MessageScope.DIRECT.value,
+            thread_id=payload["thread_id"],
+            reply_to=payload["reply_to"],
+            metadata={
+                "network": {
+                    "from": payload["from"],
+                    "from_device": from_device,
+                    "thread_id": payload["thread_id"],
+                    "trust": level,
+                }
+            },
+        )
+        try:
+            await self.plugin._on_message_received(message)
+            self.store.transition(record["id"], "delivered")
+        except Exception:
+            self.store.transition(
+                record["id"], "failed", detail="could not enter the model pipeline"
+            )
 
     def _release_remote_cancellation_if_idle(self, llm):
         pending = self._pending_remote_cancellation
@@ -2198,6 +3135,7 @@ class RelayAgentBridge:
                     record["id"],
                     room=record["room"],
                     approvals=self._state().state.approvals,
+                    without_grant=self.effective_trust(record["peer"]) == "open",
                 ):
                     token = self._turn.set(record["id"])
                     try:
@@ -2274,7 +3212,7 @@ class RelayAgentBridge:
         self.plugin._active_thread_msg_id = ""
         # Recognize only an explicit, anchored instruction from human input.
         # Quoted examples, negations and model-provided approval flags never
-        # mint authority. Ambiguous names require the complete directory address.
+        # mint authority. Ambiguous names require the full agent@device.
         text = content_to_text(data.get("message") or "").strip()
         match = re.fullmatch(
             r"(?:please\s+)?(?:ask|tell)\s+(\S+)\s+to\s+(.+)",
@@ -2284,12 +3222,16 @@ class RelayAgentBridge:
         if match:
             target, purpose = match.groups()
             try:
-                if not target.startswith("relay:"):
+                if parse_handle(target) is None:
+                    # A bare name works only when it names exactly one remote
+                    # agent; the grant is then minted for its agent@device.
                     directory = await self._owner_call(
                         "relay.directory", {"peer": "", "cached": True}
                     )
                     matches = {
-                        r["address"] for r in directory["agents"] if r["name"] == target
+                        format_handle(r["name"], r["device"])
+                        for r in directory["agents"]
+                        if r["name"] == target
                     }
                     if len(matches) != 1 or any(
                         a.name == target for a in self.directory.agents()
@@ -2386,20 +3328,29 @@ class RelayAgentBridge:
             await self._stop_active("failed", "final response could not be delivered")
 
     async def harness_context(self):
-        lines = [
-            "Network conversations require human direction. Do not contact agents because they appear online.",
-            "Discovery and peer approval do not grant tool access. Receiving workspace permissions always apply.",
-            "Send a relay answer only after the human supplies it, using kind='answer' "
-            "with the exact pending question's peer, thread_id, and event ID as reply_to.",
-            "After a relay send, results and questions arrive in this conversation on their "
-            "own and progress is shown to the human; do not poll with hub_status, hub_capture or cron jobs.",
-        ]
+        manual = self.trust_level() == "manual"
+        if manual:
+            lines = [
+                "Network conversations require human direction. Do not contact agents because they appear online.",
+                "Discovery and peer approval do not grant tool access. Receiving workspace permissions always apply.",
+                "Send a relay answer only after the human supplies it, using kind='answer' "
+                "with the exact pending question's peer, thread_id, and event ID as reply_to.",
+                "After a relay send, results and questions arrive in this conversation on their "
+                "own and progress is shown to the human; do not poll with hub_status, hub_capture or cron jobs.",
+            ]
+        else:
+            # Open and agents trust: no grant lines, no one-question line, no
+            # human-answer line, no do-not-poll line (docs/specs/agent-network-simple-flow.md §7).
+            lines = [
+                "Discovery and peer approval do not grant tool access. Receiving workspace permissions always apply.",
+            ]
         if self._correlated_event_context.get() is not None:
             lines.append(
                 "This turn reports a relay event to the human: reply in text. No tools are available."
             )
         if (
-            self.active
+            manual
+            and self.active
             and not self.active.finished
             and self.active.record["id"] == self._turn.get()
         ):
@@ -2427,6 +3378,8 @@ class RelayAgentBridge:
                     separators=(",", ":"),
                 ),
             ]
+        if not manual:
+            return lines
         try:
             state = self._state().state
             sender = str(

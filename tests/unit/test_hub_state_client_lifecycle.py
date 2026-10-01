@@ -1,6 +1,8 @@
 """Regression tests for HubStateClient connection teardown."""
 
 import asyncio
+import socket
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -28,13 +30,24 @@ class _CloseFailingWriter:
 
 @pytest.mark.asyncio
 async def test_connect_waits_for_writer_even_when_close_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reader = asyncio.StreamReader()
     writer = _CloseFailingWriter()
-    socket_path = tmp_path / "peer.sock"
-    socket_path.touch()
+    # The owner guard requires a real socket file this user owns; AF_UNIX
+    # bind needs a short path on macOS.
+    with tempfile.TemporaryDirectory(prefix="hsc-", dir="/tmp") as root:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        socket_path = Path(root) / "peer.sock"
+        server.bind(str(socket_path))
+        try:
+            await _exercise_connect(monkeypatch, socket_path, reader, writer)
+        finally:
+            server.close()
+    assert writer.wait_closed_called
 
+
+async def _exercise_connect(monkeypatch, socket_path, reader, writer) -> None:
     async def open_connection(_socket_path: str) -> tuple[Any, Any]:
         return reader, writer
 
@@ -49,5 +62,3 @@ async def test_connect_waits_for_writer_even_when_close_fails(
 
     async with HubStateClient.connect("peer"):
         pass
-
-    assert writer.wait_closed_called

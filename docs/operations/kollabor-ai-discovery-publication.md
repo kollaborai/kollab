@@ -8,9 +8,51 @@ This guide covers signed public discovery and the optional encrypted-presence re
 
 Kollab 0.9.0 installed with plain `pip install kollab` includes the relay client, service, supervisor, and Redis client dependency. A2A server/signing support remains optional: install `kollab[a2a]` only when operating the separate A2A receiver. Upgrade older installations with `pip install --upgrade kollab`. The dated deployment summary describes a source deployment, independently of package installation checks.
 
-## Run the relay service
+## Self-host a directory in one command
 
-Use a stable HTTPS origin with a valid certificate and an operator-controlled service host. Create a private runtime directory owned by the service account with mode `0700`; keep the config file at mode `0600`. The runtime directory and config parent must not be shared writable or symbolic-link paths. The sample selects Kollab's managed, single-host Valkey sidecar, which requires Docker:
+For one host, `kollab relay serve --domain <domain>` replaces the supervised relay, the standalone publisher and the static file server described further down: no config file, no Docker, no Redis.
+
+```sh
+kollab relay serve --domain agents.example.com
+```
+
+One process runs the relay (one worker on the in-memory backend), signs the discovery document and renews it every 60 seconds (it names the relay only while the relay is ready), and serves it at `/.well-known/agent-keys.json` on the same port. It listens on plain HTTP at `127.0.0.1:9078` (`--bind`, `--port`); a TLS proxy in front is the only public endpoint. On start it creates or loads its state, prints what is left to do, and prints `ready` once the relay answers and the document is published. What is left is always the same three things:
+
+1. **DNS.** One TXT record: `_agent.agents.example.com  TXT  "v=aid1;u=https://agents.example.com/.well-known/agent-keys.json"`.
+2. **The TLS proxy.** Terminate TLS for `agents.example.com` and forward these five routes to the port, nothing else: `GET /.well-known/agent-keys.json`, `GET /relay/v1/health`, the WebSocket at `/relay/v1/ws`, `POST /relay/v1/enrollment/*` and `POST /relay/v1/contact/*`. Never forward `/relay/v1/metrics`. `--print nginx` and `--print caddy` print that config for your settings; both set `X-Real-IP` from the connecting client.
+3. **Keeping it running.** `--print systemd` prints a unit. It runs the same command as the same user on the same state directory, so moving from a shell to systemd keeps the published identity. The command never installs anything: pipe the unit to `sudo tee` yourself.
+
+Then every device runs `/connect agents.example.com` and joins with a code, as on kollabor.ai.
+
+| Option | Default | Use it when |
+| --- | --- | --- |
+| `--state-dir` | `~/.kollab/relay/<domain>` | The signing key and revision counter live somewhere else. Must be yours and mode `0700`. |
+| `--bind`, `--port` | `127.0.0.1`, `9078` | The proxy is on another host or the port is taken. |
+| `--trusted-proxy IP` | loopback, when bound to loopback | The proxy connects from another address (repeatable). Without it every client looks like the proxy and shares one per-address limit. |
+| `--max-connections-per-source` | `16` | An office or NAT puts many devices behind one address. |
+| `--max-connections-per-room` | `16` | One network needs more than 16 devices (up to 256). |
+| `--print nginx\|caddy\|systemd` | | Print that config for these settings and exit; nothing is created. |
+
+**State and identity.** The state directory holds `service.key` (mode `0600`) and `publisher.json` (the revision counter). Together they are the directory's published identity: devices pin the key, and a directory that comes back with a different key is refused with `key_changed`. Back the directory up. The command refuses to replace a lost key, refuses a directory that belongs to another domain, and holds a lock so a second copy cannot run on the same directory. A state directory that already runs the standalone publisher below is adopted as it is: key and revision history carry over.
+
+**What one process gives up.** A restart ends the join codes (five minutes) and knocks (24 hours) that were waiting, exactly as it does behind the managed Valkey sidecar, which keeps no data on disk. Presence and the sockets rebuild as devices reconnect, on their own. One event loop carries all the traffic; the capacity numbers in the [goal tracker](agent-network-goal-wbs.md) were measured on two workers and are not a promise for one. The relay also limits each address to ten calls a minute on each enrollment route (sixty on the polling routes); those limits are fixed. For several workers, several hosts or a shared backend use `kollab relay run --config`, which is what kollabor.ai runs.
+
+**Moving a manual setup.** Stop the relay supervisor, the publisher and the static server. Start the command with `--state-dir` set to the publisher's state directory, and `--bind`/`--port` set to an address the proxy can reach (a proxy on another host also needs `--trusted-proxy <its address>`). Repoint all five proxy routes at that one port: the key file route now forwards to `/.well-known/agent-keys.json` on it rather than to a static file server, and health comes from the same port. If your TXT record selects the alias `/.well-known/agent-keys` (no `.json`), forward that route too; the command serves both. Then run the checks below.
+
+**Check it from outside.**
+
+```sh
+dig +short TXT _agent.agents.example.com
+curl -s https://agents.example.com/.well-known/agent-keys.json | head -c 300
+curl -s https://agents.example.com/relay/v1/health
+curl -s -o /dev/null -w '%{http_code}\n' https://agents.example.com/relay/v1/metrics   # 404
+```
+
+Then `/connect agents.example.com` on a device: it runs the same DNS, TLS and signature checks a client runs, and reports what failed.
+
+## Run the relay service (several workers or hosts)
+
+This is the form kollabor.ai runs: `kollab relay run --config` supervises several workers around a shared backend, and the standalone publisher (below) signs the discovery document. Use a stable HTTPS origin with a valid certificate and an operator-controlled service host. Create a private runtime directory owned by the service account with mode `0700`; keep the config file at mode `0600`. The runtime directory and config parent must not be shared writable or symbolic-link paths. The sample selects Kollab's managed, single-host Valkey sidecar, which requires Docker:
 
 ```json
 {
@@ -43,17 +85,17 @@ Configure the HTTPS reverse proxy for the same origin:
 - Serve `GET /.well-known/agent-keys.json` from the publisher output with `application/json` and `Cache-Control: no-store`.
 - Forward `GET /relay/v1/health` to the supervisor's private health listener.
 - Forward WebSocket upgrades at `/relay/v1/ws` to the private worker listeners.
-- Forward `POST /relay/v1/enrollment/` (path prefix) to the private worker listeners. Without this route, `/connect offer`, `/connect requests`, `/connect accept`, and `/connect reject` cannot reach the relay. See the [beacon HTTP contract](../specs/agent-public-beacon.md#http-and-websocket-contract) for the exact route list.
-- Forward `POST /relay/v1/contact/` (path prefix) to the private worker listeners. Without this route, `/connect contact` and `/connect contacts` cannot reach the relay.
+- Forward `POST /relay/v1/enrollment/` (path prefix) to the private worker listeners. Without this route, `/connect code`, joining with a code, `/connect accept`, and `/connect reject` cannot reach the relay. See the [beacon HTTP contract](../specs/agent-public-beacon.md#http-and-websocket-contract) for the exact route list.
+- Forward `POST /relay/v1/contact/` (path prefix) to the private worker listeners. Without this route, `/connect knock` and `/connect knocks` cannot reach the relay. `POST /relay/v1/contact/lookup` (the public route -> key lookup a knock resolves before sending) and `POST /relay/v1/contact/links` (the signed consent that lets an accepted stranger's messages cross rooms) are already covered by this prefix.
 - Do not publish `/relay/v1/metrics`. Keep worker listeners and metrics private.
 
 Both prefixes are POST-only; the application rejects query strings and caps every request body at 64 KiB regardless of route.
 
 The `origin` in the service config, TLS endpoint, discovery publisher, and advertised relay URL must match exactly. Add a reverse-proxy address to `trusted_proxies` only when the relay must use `X-Real-IP`; use the exact immediate peer address. The relay does not trust `X-Forwarded-For`.
 
-## Self-hosting on your own domain or a private network
+## Private CAs and private networks
 
-Everything above works unchanged on any operator-controlled domain; substitute it for `example.org`. Two client-side settings extend `/connect <domain>` beyond the public-CA, publicly-routable case:
+Everything in this guide works unchanged on any operator-controlled domain; substitute it for `example.org`. Two client-side settings extend `/connect <domain>` beyond the public-CA, publicly-routable case:
 
 - `plugins.hub.endpoint_tls_ca` (default `""`): absolute path to a PEM CA bundle file. When set, the connecting client verifies the relay's TLS certificate against this bundle instead of the system trust store — use this for a relay behind an internal/private CA. Because it replaces the system roots, a client that also connects to a public-CA relay such as `kollabor.ai` needs a bundle that contains both the private CA and the public roots (for example the private CA appended to certifi's `cacert.pem`). The same key is the CA for the direct hub endpoint.
 - `plugins.hub.discovery_private_origins` (default `{}`): a JSON object mapping an exact discovery origin to a list of CIDR strings, for example `{"https://relay.internal.example.com": ["10.0.0.0/8"]}`. By default discovery refuses to resolve any target to a non-public IP address (loopback, link-local, or private ranges are all rejected); listing an origin here permits its DNS answer to land inside the given CIDR(s) so a private-network relay can be discovered and joined at all.
@@ -72,7 +114,7 @@ The managed Valkey sidecar has container resource limits. Kollab does not impose
 
 ## Publish signed discovery
 
-Choose a public output directory served only at the discovery route and a separate private state directory. The publisher stores its stable signing key and monotonic revision state in the private directory; preserve both across upgrades and keep that directory outside every served path.
+`kollab relay serve --domain` does this itself; the standalone publisher below is for `kollab relay run` deployments. Choose a public output directory served only at the discovery route and a separate private state directory. The publisher stores its stable signing key and monotonic revision state in the private directory; preserve both across upgrades and keep that directory outside every served path.
 
 Run the publisher from the same Python environment as Kollab:
 

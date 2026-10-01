@@ -48,7 +48,7 @@ historical evidence for their original checks.
 ## Source-based agent conversation — 2026-09-27 22:10–22:14 UTC
 
 A later live run, `c2af5e59e5c743259dec129747f5987e`, used an unreleased source
-snapshot (manifest SHA-256 prefix `2942e10178a9`) on the Mac and alzan-prod.
+snapshot (manifest SHA-256 prefix `2942e10178a9`) on the Mac and server.
 The attached `/connect status` check passed on both machines. The core exchange
 also passed: the sender's `gpt-5.6-luna` model used native `hub_msg`; the remote
 `gpt-5.6-luna` model executed normal `file_create` and `file_read` tools in its

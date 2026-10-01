@@ -151,7 +151,7 @@ class StateService:
 
     async def send_hub_user_message(self, target, content):
         self.sent.append((target, content))
-        return "sent to zicron as malmazan from koordinator"
+        return "sent to zicron as me from koordinator"
 
 
 class SubmitEventBus:

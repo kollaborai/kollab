@@ -28,7 +28,7 @@ uv pip install --python .venv/bin/python 'a2a-sdk[http-server,signing]==1.1.5' '
 
 Provision the private directory with a pinned owner key, a human-approved paired
 device membership credential, and a signed conversation grant using the
-[pairing CLI walkthrough](../specs/agent-device-pairing.md#local-cli-walkthrough).
+[pairing CLI walkthrough](../specs/agent-network-simple-flow.md).
 It also gives the exact state-file mapping and separate Card key setup.
 The receiving directory must know the member
 before a request can run. Keep signing seeds in local files readable only by the

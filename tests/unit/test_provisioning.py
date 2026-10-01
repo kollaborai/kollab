@@ -13,7 +13,6 @@ from plugins.hub.provisioning import (
     InstalledRevision,
     InstallReceipt,
     NetworkPreferences,
-    OpenAIOAuthCredential,
     ProfilePreferences,
     ProvisioningCredential,
     ProvisioningError,
@@ -27,7 +26,6 @@ from plugins.hub.provisioning import (
 )
 
 _NOW = 1_800_000_000
-_TOKEN_ACCESS = "synthetic-access-token-DO-NOT-LOG"
 _TOKEN_REFRESH = "synthetic-refresh-token-DO-NOT-LOG"
 _API_KEY = "synthetic-api-key-DO-NOT-LOG"
 
@@ -56,38 +54,18 @@ def _scope(
 
 def _payload(
     *,
-    oauth: bool = False,
     credentials: tuple[ProvisioningCredential, ...] | None = None,
 ) -> ProvisioningPayload:
     profile = ProfilePreferences(
-        name="server-openai",
-        provider="openai_responses" if oauth else "openai",
-        model="gpt-5.6-luna" if oauth else "gpt-4o-mini",
-        auth_type="oauth" if oauth else "api_key",
-        base_url="https://chatgpt.com/backend-api/codex" if oauth else None,
+        name="server-openai", provider="openai", model="gpt-4o-mini"
     )
     if credentials is None:
         credentials = (
-            (
-                ProvisioningCredential(
-                    category="provider:openai:oauth_tokens",
-                    profile_name=profile.name,
-                    secret=OpenAIOAuthCredential(
-                        access_token=_TOKEN_ACCESS,
-                        refresh_token=_TOKEN_REFRESH,
-                        expires_at=1_800_003_600.0,
-                        account_id="synthetic-account",
-                    ),
-                ),
-            )
-            if oauth
-            else (
-                ProvisioningCredential(
-                    category="provider:openai:api_key",
-                    profile_name=profile.name,
-                    secret=_API_KEY,
-                ),
-            )
+            ProvisioningCredential(
+                category="provider:openai:api_key",
+                profile_name=profile.name,
+                secret=_API_KEY,
+            ),
         )
     return ProvisioningPayload(
         profile=profile,
@@ -173,7 +151,7 @@ class _FakeTransaction:
             self.pending_revision[1], self.pending_revision[2]
         )
         if self.store.fail_commit:
-            raise OSError(f"failed while writing {_TOKEN_REFRESH}")
+            raise OSError(f"failed while writing {_API_KEY}")
 
     def rollback(self) -> None:
         self.store.rollback_count += 1
@@ -262,68 +240,73 @@ def test_seal_installs_device_bound_api_key_bundle_transactionally() -> None:
     assert store.revisions["enrollment-001"].digest == receipt.digest
 
 
-def test_oauth_bundle_round_trips_existing_openai_token_schema_without_receipt_leak() -> (
-    None
-):
-    scope = _scope(
-        categories=frozenset({"provider:openai:oauth_tokens"}),
-    )
-    ciphertext = _seal(_payload(oauth=True), scope=scope)
-    receipt, store = _install(ciphertext, scope=scope)
-    credential = store.installed["enrollment-001"].credentials[0]
+def test_an_oauth_login_cannot_be_sealed_into_a_bundle() -> None:
+    """Two devices sharing one refresh token sign each other out: it never travels."""
+    scope = _scope(categories=frozenset({"provider:openai:oauth_tokens"}))
+    with pytest.raises(ProvisioningError, match="invalid_input"):
+        _seal(scope=scope)  # the category is not one a delegation may grant
 
-    assert receipt.status == "installed"
-    assert credential.category == "provider:openai:oauth_tokens"
-    assert credential.secret.access_token == _TOKEN_ACCESS
-    assert credential.secret.refresh_token == _TOKEN_REFRESH
-    assert credential.secret.expires_at == 1_800_003_600.0
-    assert credential.secret.account_id == "synthetic-account"
-    assert _TOKEN_ACCESS not in repr(receipt)
-    assert _TOKEN_REFRESH not in repr(receipt)
-    serialized_secret = provisioning_module._validate_payload(
-        _payload(oauth=True), scope
-    )["credentials"][0]["secret"]
-    assert set(serialized_secret) == {
-        "access_token",
-        "refresh_token",
-        "expires_at",
-        "account_id",
-    }
+    oauth_profile = ProvisioningPayload(
+        profile=ProfilePreferences(
+            name="server-openai",
+            provider="openai_responses",
+            model="gpt-5.6-luna",
+            auth_type="oauth",
+            base_url="https://chatgpt.com/backend-api/codex",
+        ),
+        networks=_payload().networks,
+        credentials=(
+            ProvisioningCredential(
+                "provider:openai:oauth_tokens", "server-openai", _TOKEN_REFRESH
+            ),
+        ),
+    )
+    with pytest.raises(ProvisioningError):
+        _seal(oauth_profile)
+    assert _TOKEN_REFRESH.encode() not in _seal()
+
+
+def test_a_signed_bundle_that_carries_an_oauth_login_is_refused_on_arrival() -> None:
+    """Even an issuer that signs one correctly cannot put a login on this device."""
+    content = _content_dict(_payload())
+    content["profile"]["auth_type"] = "oauth"
+    content["credentials"] = [
+        {
+            "category": "provider:openai:oauth_tokens",
+            "profile_name": "server-openai",
+            "secret": {
+                "access_token": "synthetic-access-token-DO-NOT-LOG",
+                "refresh_token": _TOKEN_REFRESH,
+                "expires_at": 1_800_003_600.0,
+            },
+        }
+    ]
+    with pytest.raises(ProvisioningError) as error:
+        provisioning_module._content_from_dict(
+            content, _scope(categories=frozenset({"provider:openai:api_key"}))
+        )
+
+    assert str(error.value) == "invalid_bundle"
+    assert _TOKEN_REFRESH not in str(error.value)
 
 
 def test_secret_bearing_dataclass_repr_is_redacted() -> None:
     api_credential = ProvisioningCredential(
         "provider:openai:api_key", "server-openai", _API_KEY
     )
-    oauth = OpenAIOAuthCredential(
-        _TOKEN_ACCESS, _TOKEN_REFRESH, 1_800_003_600.0, "synthetic-account"
-    )
-    oauth_credential = ProvisioningCredential(
-        "provider:openai:oauth_tokens", "server-openai", oauth
-    )
     payload = _payload()
     expectation = _expectation()
 
     for rendered in (
         repr(api_credential),
-        repr(oauth),
-        repr(oauth_credential),
         repr(payload),
         repr(expectation),
     ):
         assert _API_KEY not in rendered
-        assert _TOKEN_ACCESS not in rendered
-        assert _TOKEN_REFRESH not in rendered
     assert "<redacted>" in repr(api_credential)
 
 
 def test_secret_values_do_not_appear_in_bundle_ciphertext() -> None:
-    ciphertext = _seal(
-        _payload(oauth=True),
-        scope=_scope(categories=frozenset({"provider:openai:oauth_tokens"})),
-    )
-    assert _TOKEN_ACCESS.encode() not in ciphertext
-    assert _TOKEN_REFRESH.encode() not in ciphertext
     assert _API_KEY.encode() not in _seal()
 
 
@@ -485,29 +468,7 @@ def test_provider_specific_fields_are_typed_and_retained_for_existing_adapters()
     assert profile.deployment_id == "deployment-west"
 
 
-def test_openai_oauth_cannot_be_redirected_to_an_issuer_chosen_endpoint() -> None:
-    scope = _scope(categories=frozenset({"provider:openai:oauth_tokens"}))
-    oauth = _payload(oauth=True)
-    unsafe_profile = ProfilePreferences(
-        name="server-openai",
-        provider="openai_responses",
-        model="gpt-5.6-luna",
-        auth_type="oauth",
-        base_url="https://attacker.example/token-collector",
-    )
-    payload = ProvisioningPayload(
-        profile=unsafe_profile,
-        networks=oauth.networks,
-        settings=oauth.settings,
-        credentials=oauth.credentials,
-    )
-    with pytest.raises(ProvisioningError, match="invalid_bundle"):
-        _seal(payload, scope=scope)
-
-
-def test_api_key_and_oauth_category_are_bound_to_profile_provider_and_auth_type() -> (
-    None
-):
+def test_api_key_category_is_bound_to_profile_provider_and_auth_type() -> None:
     wrong_provider = ProvisioningPayload(
         profile=ProfilePreferences("server-openai", "anthropic", "claude-sonnet"),
         networks=_payload().networks,
@@ -516,18 +477,6 @@ def test_api_key_and_oauth_category_are_bound_to_profile_provider_and_auth_type(
     scope = _scope(categories=frozenset({"provider:openai:api_key"}))
     with pytest.raises(ProvisioningError, match="unauthorized_credential"):
         _seal(wrong_provider, scope=scope)
-
-    oauth_scope = _scope(categories=frozenset({"provider:openai:oauth_tokens"}))
-    oauth_payload = _payload(oauth=True)
-    wrong_oauth_profile = ProvisioningPayload(
-        profile=ProfilePreferences(
-            "server-openai", "openai", "gpt-5.6-luna", auth_type="oauth"
-        ),
-        networks=oauth_payload.networks,
-        credentials=oauth_payload.credentials,
-    )
-    with pytest.raises(ProvisioningError):
-        _seal(wrong_oauth_profile, scope=oauth_scope)
 
 
 def test_agents_and_skills_are_names_only_and_must_be_delegated() -> None:
@@ -593,7 +542,7 @@ def test_store_failure_is_redacted_and_rolls_back_partial_staging() -> None:
         _install(_seal(), store=store)
 
     assert str(error.value) == "storage_failure"
-    assert _TOKEN_REFRESH not in str(error.value)
+    assert _API_KEY not in str(error.value)
     assert store.installed == {"unrelated": "untouched"}
     assert not store.revisions
     assert store.rollback_count == 1
@@ -602,21 +551,14 @@ def test_store_failure_is_redacted_and_rolls_back_partial_staging() -> None:
 def test_credential_callback_never_returns_raw_failure_or_emits_logs(caplog) -> None:
     class FailingStore(_FakeStore):
         def begin(self):
-            raise RuntimeError(f"private store rejected {_TOKEN_ACCESS}")
+            raise RuntimeError(f"private store rejected {_API_KEY}")
 
     with pytest.raises(ProvisioningError) as error:
-        _install(
-            _seal(
-                _payload(oauth=True),
-                scope=_scope(categories=frozenset({"provider:openai:oauth_tokens"})),
-            ),
-            store=FailingStore(),
-            scope=_scope(categories=frozenset({"provider:openai:oauth_tokens"})),
-        )
+        _install(_seal(), store=FailingStore())
 
     assert str(error.value) == "storage_failure"
-    assert _TOKEN_ACCESS not in str(error.value)
-    assert _TOKEN_ACCESS not in caplog.text
+    assert _API_KEY not in str(error.value)
+    assert _API_KEY not in caplog.text
 
 
 def test_install_receipt_is_not_the_joined_or_complete_acknowledgment() -> None:

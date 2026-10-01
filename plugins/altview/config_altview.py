@@ -16,9 +16,16 @@ Keyboard:
 """
 
 import asyncio
+import json
 import logging
 from typing import Any, List, Optional
 
+from kollabor_config.config_utils import get_global_config_path
+from kollabor_config.managed_config import (
+    ManagedConfig,
+    managed_by,
+    read_managed_config,
+)
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, S, T, TagBox, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
@@ -78,6 +85,11 @@ class ConfigAltView(AltView):
         # failures are observed and teardown can cancel pending work.
         self._save_tasks: set[asyncio.Task[Any]] = set()
 
+        # What the network's primary manages on this device (None: nothing) and
+        # the global settings file it wrote, read fresh each time the view opens.
+        self._managed: Optional[ManagedConfig] = None
+        self._global_settings: dict = {}
+
     # -- external setup -----------------------------------------------------
 
     def set_app(self, app: Any) -> None:
@@ -112,6 +124,9 @@ class ConfigAltView(AltView):
 
     def _create_widget(self, widget_config: dict) -> Any:
         """Create a real TUI widget instance from a config definition dict."""
+        owner = managed_by(widget_config.get("config_path", ""), self._managed)
+        if owner:
+            return self._managed_label(widget_config, owner)
         from kollabor_tui.widgets.checkbox import CheckboxWidget
         from kollabor_tui.widgets.dropdown import DropdownWidget
         from kollabor_tui.widgets.label import LabelWidget
@@ -160,8 +175,10 @@ class ConfigAltView(AltView):
         """Load config definition and create real widget instances."""
         from kollabor_tui.config_widgets import ConfigWidgetDefinitions
 
+        self._managed = read_managed_config()
+        self._global_settings = self._read_global_settings() if self._managed else {}
         defn = ConfigWidgetDefinitions.get_config_modal_definition()
-        sections = defn.get("sections", [])
+        sections = self._with_loadout_rows(defn.get("sections", []))
 
         self._sections = []
         self._section_widgets = []
@@ -185,6 +202,107 @@ class ConfigAltView(AltView):
         vis = self._visible_widgets()
         if vis:
             vis[0].set_focus(True)
+
+    # -- settings the network's primary manages ------------------------------
+
+    @staticmethod
+    def _read_global_settings() -> dict:
+        try:
+            data = json.loads(get_global_config_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _managed_value(self, config_path: str) -> Any:
+        """A synced key's value as the primary last wrote it, straight from disk.
+
+        In an attached window this process's config service can lag a sync by a
+        moment; the file is the truth, so a synced row never shows a stale value.
+        """
+        for segments in self._managed.keys if self._managed else ():
+            if ".".join(segments) == config_path:
+                node: Any = self._global_settings
+                for part in segments:
+                    node = node.get(part) if isinstance(node, dict) else None
+                return node
+        return None
+
+    def _managed_label(self, widget_config: dict, owner: str) -> Any:
+        """A synced setting is a read-only label: value, then who manages it."""
+        from kollabor_tui.widgets.label import LabelWidget
+
+        config_path = widget_config.get("config_path", "")
+        last = config_path.rsplit(".", 1)[-1].lower()
+        value = self._managed_value(config_path)
+        if any(word in last for word in ("key", "token", "secret", "password")):
+            shown = "set" if value else "empty"  # a secret is never drawn
+        elif value is None:
+            shown = "unset"
+        elif isinstance(value, bool):
+            shown = "on" if value else "off"
+        else:
+            shown = (
+                value
+                if isinstance(value, str)
+                else json.dumps(value, separators=(",", ":"))
+            )
+            shown = shown if len(shown) <= 60 else shown[:57] + "..."
+        return LabelWidget(
+            label=widget_config.get("label", config_path),
+            value=f"{shown}   managed by {owner}",
+            help_text=widget_config.get("help", ""),
+            config_path=config_path,
+        )
+
+    def _effective(self, config_path: str) -> Any:
+        if managed_by(config_path, self._managed):
+            return self._managed_value(config_path)
+        return self.config_service.get(config_path) if self.config_service else None
+
+    def _with_loadout_rows(self, sections: List[dict]) -> List[dict]:
+        """Show the active loadout at the top of LLM Settings, read-only.
+
+        Change it with /llm; on a secondary it also says who manages it.
+        """
+        active = self._effective("kollabor.llm.active_profile") or "default"
+        rows = [
+            {
+                "type": "label",
+                "label": "Loadout",
+                "config_path": "kollabor.llm.active_profile",
+                "value": str(active),
+                "help": "The active LLM loadout; change it with /llm",
+            }
+        ]
+        model_path = f"kollabor.llm.profiles.{active}.model"
+        if managed_by(model_path, self._managed):
+            model = self._managed_value(model_path)
+        else:
+            profiles = (
+                self.config_service.get("kollabor.llm.profiles")
+                if self.config_service
+                else None
+            )
+            profile = profiles.get(active) if isinstance(profiles, dict) else None
+            model = profile.get("model") if isinstance(profile, dict) else None
+        if model:
+            rows.append(
+                {
+                    "type": "label",
+                    "label": "Model",
+                    "config_path": model_path,
+                    "value": str(model),
+                    "help": "The model of the active loadout; change it with /llm",
+                }
+            )
+        return [
+            (
+                {**section, "widgets": rows + list(section.get("widgets", []))}
+                if section.get("title") == "LLM Settings"
+                else section
+            )
+            for section in sections
+        ]
 
     # -- filtered views -----------------------------------------------------
 
@@ -724,9 +842,7 @@ class ConfigAltView(AltView):
 
             ok = True
             for key_path, val in dirty_values:
-                if not self.config_service.save_key(
-                    key_path, val, save_target=target
-                ):
+                if not self.config_service.save_key(key_path, val, save_target=target):
                     ok = False
 
             if ok:

@@ -4,7 +4,7 @@ all session data lives under a per-project directory:
   ~/.kollab/projects/<encoded-project-path>/
 
   for example, in ~/dev/kollab:
-    ~/.kollab/projects/Users_malmazan_dev_kollab/
+    ~/.kollab/projects/Users_me_dev_kollab/
 
   the project path is encoded by replacing / with _
   e.g. /Users/username/dev/kollab -> Users_username_dev_kollab

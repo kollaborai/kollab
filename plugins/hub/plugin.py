@@ -9,15 +9,17 @@ offer help or coordinate work.
 import asyncio
 import collections
 import hashlib
+import inspect
 import json
 import logging
 import os
 import re
+import secrets
 import signal
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env
 from kollabor.user_input_source import UserInputSource
@@ -36,6 +38,7 @@ from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
+from .device_names import DEFAULT_TRUST, format_handle, parse_handle
 from .messaging_bridge import (
     BRIDGE_CONFLICT_BACKOFF,
     BridgeConflictError,
@@ -67,6 +70,7 @@ from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .task_ledger import TaskLedger
 from .vault import AgentVault, sanitize_rebirth_text
+from .xml_tags import embedded_attrs, tag_attrs, tag_pattern
 
 # Agent DNS (discovery, identity, trust) — guarded: PyNaCl is optional
 try:
@@ -102,58 +106,223 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
-# One list feeds the command palette and the /connect router, so a documented
-# subcommand can't be listed without being routable (or the reverse).
+# A remote request's turn ends when the queue processor finishes the whole chain
+# that handled it (`HubPlugin.network_chain_ended`, docs/specs/agent-network-
+# simple-flow.md section 7). One request ends failed when no turn came for it
+# within the shell's own wait ceiling.
+_NET_TURN_MAX_SECONDS = 600.0
+# Carried by the end-of-turn frame; only the failed text is ever printed.
+_NET_TURN_DONE = "The receiving agent finished this request."
+_NET_TURN_FAILED = "The receiving agent could not complete this request."
+
+
+# A plain-text answer is sent as the reply when the turn sent none. No hub XML,
+# thinking or control characters go with it (the far side refuses the last).
+_NET_MARKUP_NAMES = (
+    r"think(?:ing)?|hub_\w+|scratchpad\w*|state_update|task_\w+|lane_\w+"
+    r"|file_\w+|feed_\w+|claims|vault_write|crystal_\w+|wait_for_user"
+)
+_NET_MARKUP = re.compile(
+    rf"<({_NET_MARKUP_NAMES})\b[^>]*?/>"  # self-closing
+    rf"|<({_NET_MARKUP_NAMES})\b[^>]*>.*?</\2\s*>"  # an element and its content
+    rf"|</?(?:{_NET_MARKUP_NAMES})\b[^>]*>",  # a stray opener or closer
+    re.DOTALL | re.IGNORECASE,
+)
+_NET_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _network_answer_text(text: Optional[str], limit: int) -> str:
+    """``text`` as a reply: no hub XML, thinking or control characters, <= ``limit`` bytes."""
+    text = _NET_CONTROL.sub("", _NET_MARKUP.sub("", text or "")).strip()
+    raw = text.encode("utf-8")
+    if len(raw) > limit:
+        text = raw[: limit - 3].decode("utf-8", "ignore") + "..."
+    return text
+
+
+@dataclass
+class _NetworkTurn:
+    """The remote request whose turn this agent is running."""
+
+    handle: str  # agent@device that asked
+    thread_id: str
+    message_id: str
+    opened_at: float  # time.monotonic()
+    deferred: bool = False  # a chain was busy when it arrived; its turn is the next
+    skipped: bool = False  # no turn will come for it (acknowledgement, duplicate)
+    started: bool = False  # the model has been called since it arrived
+    ended: bool = False  # the queue processor finished the chain that handled it
+    failed: bool = False  # ... and that chain errored
+    replies: int = 0  # hub_msgs already sent on its thread
+    answer: str = ""  # text of the model's last response, if it ended the chain
+
+# Three lists per the agent network constitution (docs/specs/agent-network-
+# simple-flow.md, section 6): the shown palette, the advanced (help all,
+# trust manual) commands, and the removed names with their one-release
+# redirect message. A documented subcommand can't be listed without being
+# routable (or the reverse).
 CONNECT_SUBCOMMANDS = [
-    SubcommandInfo("enroll", "[domain]", "Enter an enrollment code in the private form"),
-    SubcommandInfo("offer", "[domain]", "Create a one-device, five-minute enrollment code"),
-    SubcommandInfo("requests", "", "List pending enrollment requests"),
-    SubcommandInfo("accept", "<receipt-id>", "Accept a verified enrollment request"),
-    SubcommandInfo("reject", "<receipt-id>", "Reject a verified enrollment request"),
-    SubcommandInfo("networks", "", "List provisioned networks and their domains"),
-    SubcommandInfo("status", "", "Show transport state and this workspace's key"),
-    SubcommandInfo("peers", "", "List online peers and their approval state"),
-    SubcommandInfo("invite", "", "Save a private invitation file"),
-    SubcommandInfo("join", "<file>", "Join from a private invitation file"),
-    SubcommandInfo("contact-point", "[domain]", "Show the contact route to share"),
-    SubcommandInfo("contact", "[domain]", "Send a sealed introduction"),
-    SubcommandInfo("contacts", "[domain]", "Review introductions sent to this key"),
-    SubcommandInfo("approve", "<peer-key>", "Permit encrypted ping and presence"),
-    SubcommandInfo("revoke", "<peer-key>", "Remove a peer's approval and grants"),
-    SubcommandInfo("ping", "<peer-key>", "Request an encrypted presence response"),
-    SubcommandInfo("rotate", "", "Replace the room capability, clear approvals"),
-    SubcommandInfo("disconnect", "", "Close the connection, stop reconnecting"),
-    SubcommandInfo("agents", "[local|peer-key]", "List remote or local agents"),
-    SubcommandInfo("allow", "<peer-key> <agent>", "Let a peer talk to a local agent"),
-    SubcommandInfo("deny", "<peer-key> [agent]", "Revoke a peer's access, cancel work"),
-    SubcommandInfo("grants", "", "List receiving and sending grants"),
-    SubcommandInfo("authorize", "<address> <request>", "Authorize one exact request"),
-    SubcommandInfo("send", "<address> <request>", "Authorize and send one request"),
-    SubcommandInfo("withdraw", "<grant-id>", "Withdraw a sending grant"),
-    SubcommandInfo("task", "<address> <id>", "Inspect a remote task"),
-    SubcommandInfo("cancel", "<address> <id>", "Cancel a remote task"),
-    SubcommandInfo("answer", "<event-id> <text>", "Answer a pending question"),
-    SubcommandInfo("help", "", "Show usage for every subcommand"),
+    SubcommandInfo("code", "[domain]", "Show a join code on a private screen"),
+    SubcommandInfo("accept", "<device>", "Accept a join request by name"),
+    SubcommandInfo("reject", "<device>", "Reject a join request by name"),
+    SubcommandInfo(
+        "status", "", "Show network, this device, contact route, online agents"
+    ),
+    SubcommandInfo("name", "<name>", "Name this device"),
+    SubcommandInfo("trust", "open|agents|manual", "Trust level for this network"),
+    SubcommandInfo(
+        "knock", '<route> "text"', "Introduce yourself to a stranger's contact route"
+    ),
+    SubcommandInfo("knocks", "[domain]", "Review introductions you received"),
+    SubcommandInfo(
+        "allow", "<device> <agent>", "Let a device's agent message a local agent"
+    ),
+    SubcommandInfo("deny", "<device> [agent]", "Revoke a device's access"),
+    SubcommandInfo("revoke", "<device>", "Remove a device or peer"),
+    SubcommandInfo("leave", "[domain]", "Disconnect and stop reconnecting"),
+    SubcommandInfo(
+        "help", "[all]", "This list; all adds the manual-trust and reset commands"
+    ),
 ]
+
+# Only under /connect help all: trust-manual conversation commands and resets.
+CONNECT_ADVANCED = [
+    SubcommandInfo(
+        "authorize",
+        "<agent@device> <request>",
+        "Authorize one exact request (trust manual)",
+    ),
+    SubcommandInfo(
+        "send",
+        "<agent@device> <request>",
+        "Authorize and send one request (trust manual)",
+    ),
+    SubcommandInfo("withdraw", "<number>", "Withdraw a request you authorized (trust manual)"),
+    SubcommandInfo(
+        "answer", "<number> <text>", "Answer a pending question (trust manual)"
+    ),
+    SubcommandInfo("task", "<agent@device> <number>", "Inspect a remote request (trust manual)"),
+    SubcommandInfo("cancel", "<agent@device> <number>", "Cancel a remote request (trust manual)"),
+    SubcommandInfo("rotate", "", "Replace the network secret after a lost device"),
+]
+
+# Removed subcommand -> the redirect message the router prints for one release.
+CONNECT_REMOVED = {
+    "enroll": "use /connect",
+    "offer": "use /connect code",
+    "requests": "use /connect or /connect status",
+    "peers": "use /connect or /connect status",
+    "agents": "use /connect or /connect status",
+    "networks": "use /connect or /connect status",
+    "approve": "accepting a device approves it; presence is on /connect",
+    "ping": "accepting a device approves it; presence is on /connect",
+    "contact-point": "your contact route is in /connect status",
+    "contact": "use /connect knock, /connect knocks",
+    "contacts": "use /connect knock, /connect knocks",
+    "invite": "file pairing is gone; use a join code",
+    "join": "file pairing is gone; use a join code",
+    "disconnect": "use /connect leave",
+    "grants": "use /connect status",
+}
+
+# A finished join stays readable this long for a window that is still polling.
+_CONNECT_JOIN_KEEP_SECONDS = 900.0
+
+# How long an attached window waits to learn whether its daemon runs the relay
+# before it opens `/connect code` as if it does.
+_CONNECT_OWNER_CHECK_SECONDS = 1.5
 
 CODE_IN_COMMAND = (
     "connect: codes never go in a command. Run /connect with nothing after it "
     "and paste the code into the private form."
 )
 
+# The one line the Connect screen shows in a window that does not own the
+# workspace's relay: it can read the network, but a code, a request and a
+# decision all live in the window that runs it.
+CONNECT_OWNED_ELSEWHERE = (
+    "another window in this workspace runs the network; use /connect there"
+)
+# What an attached window says when its daemon predates the knock RPCs.
+CONNECT_NO_CONTACT_DAEMON = (
+    "connect: attached daemon does not support private contact requests"
+)
+_KNOCK_USAGE = 'connect: use /connect knock <route> "text"'
 
-def format_connect_help() -> str:
-    """Aligned /connect usage built from the same list as the command menu."""
+
+def format_connect_help(show_all: bool = False) -> str:
+    """Aligned /connect usage built from the same lists as the command menu."""
     rows = [
-        ("/connect", "Join with a code from a connected device (private form)"),
+        ("/connect", "The screen: network, join code, requests, agents (no network: enter a code, or start one)"),
         ("/connect <domain>", "Connect this agent to a network, e.g. kollabor.ai"),
     ]
     rows += [
         (f"/connect {sub.name} {sub.args}".rstrip(), sub.description)
         for sub in CONNECT_SUBCOMMANDS
     ]
-    width = max(len(left) for left, _ in rows)
-    return "\n".join(f"{left:<{width}}  {text}" for left, text in rows)
+    advanced_rows = [
+        (f"/connect {sub.name} {sub.args}".rstrip(), sub.description)
+        for sub in CONNECT_ADVANCED
+    ]
+    width = max(len(left) for left, _ in rows + advanced_rows)
+    lines = [f"{left:<{width}}  {text}" for left, text in rows]
+    if show_all:
+        lines.append("advanced (trust manual, resets):")
+        lines.extend(f"{left:<{width}}  {text}" for left, text in advanced_rows)
+    return "\n".join(lines)
+
+
+_KNOCK_ROUTE = re.compile(
+    r"(?:https://)?(?P<domain>[^/\s]+)/c/(?P<route>[0-9a-fA-F]{16})\Z"
+)
+
+
+def _parse_knock_route(value: str) -> tuple[str, str]:
+    """`[https://]<domain>/c/<16 hex>` -> `(domain, lowercased route)`."""
+    match = _KNOCK_ROUTE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError("not a contact route")
+    domain = match.group("domain")
+    if not _looks_like_connect_target(domain):
+        raise ValueError("not a contact route")
+    return domain, match.group("route").lower()
+
+
+def _contact_requests(rows):
+    """The relay's pending-knock rows as review requests; raises on any bad row."""
+    from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
+
+    requests = []
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {
+                "receipt_id",
+                "sender_key",
+                "expires_at",
+                "introduction",
+                "device_name",
+            }
+            or not isinstance(row["receipt_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", row["receipt_id"])
+            or not isinstance(row["sender_key"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["sender_key"])
+            or type(row["expires_at"]) is not int
+            or not isinstance(row["introduction"], str)
+            or not isinstance(row["device_name"], str)
+        ):
+            raise ValueError("invalid private contact request")
+        requests.append(
+            PendingContactRequest(
+                row["receipt_id"],
+                row["sender_key"],
+                row["expires_at"],
+                PrivateMessage(row["introduction"]),
+                row["device_name"],
+            )
+        )
+    return requests
 
 
 def _looks_like_connect_target(value: str) -> bool:
@@ -169,7 +338,10 @@ def _looks_like_connect_target(value: str) -> bool:
 
 
 def _unknown_connect_subcommand(head: str) -> str:
-    matches = [sub.name for sub in CONNECT_SUBCOMMANDS if sub.name.startswith(head)]
+    names = [sub.name for sub in CONNECT_SUBCOMMANDS] + [
+        sub.name for sub in CONNECT_ADVANCED
+    ]
+    matches = [name for name in names if name.startswith(head)]
     hint = f" Did you mean /connect {matches[0]}?" if len(matches) == 1 else ""
     return f"connect: unknown subcommand '{head}'.{hint} Run /connect help for the list."
 
@@ -181,13 +353,27 @@ _TASK_CRON_REPORT_TO_RE = re.compile(
     r"^\s*report\s+to\s*:\s*([^\s]+)",
     re.IGNORECASE | re.MULTILINE,
 )
-_HUB_MSG_EMBEDDED_ATTRS_RE = re.compile(
-    r'^\s*(?:<hub_msg\s+)?to\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))'
-    r'(?:\s+wait\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
-    r'(?:\s+force\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))?'
-    r"(?:\s*>\s*(.*?)(?:</hub_msg>)?)?\s*$",
-    re.IGNORECASE | re.DOTALL,
+
+
+_REMOTE_REFUSED_STATES = frozenset(
+    {"rejected", "failed", "cancelled", "interrupted", "revoked", "unavailable"}
 )
+
+
+def _receipt_refusal(receipt: Any) -> str:
+    """Why the network refused a send, from its receipt; "" when it accepted.
+
+    The receiver's fixed rejection reasons are safe to show. Anything else that
+    is not an acceptance gets a plain sentence, never the receipt's raw fields.
+    """
+    state = receipt.get("state") if isinstance(receipt, dict) else ""
+    if state not in _REMOTE_REFUSED_STATES:
+        return ""
+    from .relay_conversations import CONVERSATION_REJECTION_DETAILS
+
+    return CONVERSATION_REJECTION_DETAILS.get(
+        receipt.get("reason"), f"the network did not deliver it ({state})"
+    )
 
 
 @dataclass
@@ -204,12 +390,13 @@ class HubCronJob:
     """A scheduled recurring message to a hub agent."""
 
     id: str
-    target: str  # identity or "all"
+    target: str  # identity, "all", or an agent@device on the network
     message: str
     interval_seconds: float
     next_fire: float
     recurring: bool = True
     created_at: float = field(default_factory=time.time)
+    last_error: str = ""  # why the latest fire to an agent@device was not delivered
 
 
 def _compile_marker_pattern(markers: Tuple[str, ...]) -> "re.Pattern[str]":
@@ -333,6 +520,20 @@ class HubPlugin(BasePlugin):
         self._relay_commands = None
         self._relay_agent = None
         self._relay_startup_task = None
+        # Joins this device started with a code, keyed by an opaque receipt:
+        # the task waits for the other device's decision (see
+        # `_run_connect_enrollment`).
+        self._connect_joins: Dict[str, "asyncio.Task"] = {}
+        # CLI `kollab --hub msg agent@device` waiters (docs/specs/
+        # agent-network-simple-flow.md, CLI bullet), keyed by the outbound
+        # HubMessage's thread_id, each an event queue: ("reply", from,
+        # content) for every message on that thread and ("end", replies,
+        # failed, text) when the far agent's turn ends. The thread id crosses
+        # the wire in the relay payload and the answering turn echoes it (see
+        # _net_turn), so a waiter sees only the replies to its own request.
+        self._cli_waiters: Dict[str, "asyncio.Queue"] = {}
+        # The inbound remote request whose turn this agent is running.
+        self._net_turn: Optional[_NetworkTurn] = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
@@ -482,10 +683,13 @@ class HubPlugin(BasePlugin):
                     "endpoint_advertise_host": "",
                     "endpoint_allow_insecure": False,
                     "discovery_private_origins": {},
-                    # Peer mesh data paths are separately opt-in. LAN
-                    # discovery never grants contact or tool authority.
-                    "peer_direct_enabled": False,
-                    "peer_forward_enabled": False,
+                    # Devices on one network reach each other directly when they
+                    # can and forward for each other when they cannot; both stay
+                    # off switches. Neither opens a socket by itself: the TLS
+                    # endpoint and LAN discovery below are still opt-in, and
+                    # none of it grants contact or tool authority.
+                    "peer_direct_enabled": True,
+                    "peer_forward_enabled": True,
                     "peer_allow_private_network": False,
                     "peer_discovery_scan_enabled": False,
                     "peer_discovery_advertise_enabled": False,
@@ -857,6 +1061,11 @@ class HubPlugin(BasePlugin):
 
         import re as _re
 
+        # Every tag that takes two or more attributes is matched with tag_pattern
+        # and read with tag_attrs (xml_tags.py): the attributes may come in any
+        # order and in either quote style. A pattern that spells them out in one
+        # order leaves every other order on screen as raw text, never run.
+
         # --- hub_msg ---
         # Matches: <hub_msg to="x">msg</hub_msg>
         #          <hub_msg to="x" wait="true">msg</hub_msg>
@@ -864,27 +1073,21 @@ class HubPlugin(BasePlugin):
         #          <hub_msg to="x" thread="tid">msg</hub_msg>
         #          <hub_msg to="x" thread_id="tid">msg</hub_msg>
         #          <hub_msg to="x" reply_to="mid">msg</hub_msg>
+        #          <hub_msg to="x" kind="answer">msg</hub_msg>
         #          <hub_msg to="x">msg  (unclosed)
-        hub_msg_pat = _re.compile(
-            r'<hub_msg\s+to="([^"]+)"'
-            r'(?:\s+wait="([^"]*)")?'
-            r'(?:\s+force="([^"]*)")?'
-            r'(?:\s+thread(?:_id)?="([^"]*)")?'
-            r'(?:\s+reply_to="([^"]*)")?'
-            r'(?:\s+kind="([^"]*)")?'
-            r"\s*>(.*?)(?:</hub_msg>|$)",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        # `to` is required; the rest are optional and may come in any order.
+        hub_msg_pat = tag_pattern("hub_msg", required={"to": "some"}, end="body?")
 
         def _extract_hub_msg(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "target": m.group(1),
-                "wait_attr": (m.group(2) or "").lower(),
-                "force_attr": (m.group(3) or "").lower(),
-                "thread_id": (m.group(4) or "").strip(),
-                "reply_to": (m.group(5) or "").strip(),
-                "kind": (m.group(6) or "").strip().lower(),
-                "content": m.group(7).strip(),
+                "target": attrs.get("to", ""),
+                "wait_attr": attrs.get("wait", "").lower(),
+                "force_attr": attrs.get("force", "").lower(),
+                "thread_id": (attrs.get("thread_id") or attrs.get("thread") or "").strip(),
+                "reply_to": attrs.get("reply_to", "").strip(),
+                "kind": attrs.get("kind", "").strip().lower(),
+                "content": m.group(2).strip(),
             }
 
         response_parser.register_plugin_tag(
@@ -900,18 +1103,14 @@ class HubPlugin(BasePlugin):
         # thread_id manually — the hub injects it from the incoming message context.
         # <hub_reply to="x">msg</hub_reply>
         # <hub_reply to="x" wait="true">msg</hub_reply>
-        hub_reply_pat = _re.compile(
-            r'<hub_reply\s+to="([^"]+)"'
-            r'(?:\s+wait="([^"]*)")?'
-            r"\s*>(.*?)(?:</hub_reply>|$)",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        hub_reply_pat = tag_pattern("hub_reply", required={"to": "some"}, end="body?")
 
         def _extract_hub_reply(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "target": m.group(1),
-                "wait_attr": (m.group(2) or "").lower(),
-                "content": m.group(3).strip(),
+                "target": attrs.get("to", ""),
+                "wait_attr": attrs.get("wait", "").lower(),
+                "content": m.group(2).strip(),
                 "_is_reply": True,  # flag: use active thread context
             }
 
@@ -926,16 +1125,18 @@ class HubPlugin(BasePlugin):
         # --- hub_broadcast ---
         # Matches: <hub_broadcast>msg</hub_broadcast>
         #          <hub_broadcast force="true">msg</hub_broadcast>
-        bc_pat = _re.compile(
-            r'<hub_broadcast(?:\s+force="([^"]*)")?\s*>(.*?)</hub_broadcast>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        #          <hub_broadcast scope="network">msg</hub_broadcast>
+        bc_pat = tag_pattern("hub_broadcast")
 
         def _extract_hub_broadcast(m):
-            return {
+            attrs = tag_attrs(m.group(1))
+            tool_data = {
                 "content": m.group(2).strip(),
-                "force_attr": (m.group(1) or "").lower(),
+                "force_attr": attrs.get("force", "").lower(),
             }
+            if "scope" in attrs:  # the handler reads it; no key without the attribute
+                tool_data["scope"] = attrs["scope"]
+            return tool_data
 
         response_parser.register_plugin_tag(
             "hub_broadcast", bc_pat, "hub_broadcast", _extract_hub_broadcast
@@ -1095,15 +1296,18 @@ class HubPlugin(BasePlugin):
         # --- task_snooze ---
         # Self-closing: <task_snooze id="abc" minutes="30"/>. Lets an agent
         # silence reminders for a while without lying about progress.
-        tsnz_pat = _re.compile(
-            r'<task_snooze\s+id="([^"]+)"(?:\s+minutes="([0-9.]+)")?\s*/?>',
-            _re.IGNORECASE,
+        tsnz_pat = tag_pattern(
+            "task_snooze",
+            required={"id": "some"},
+            valid={"minutes": r"[0-9.]+"},
+            end="/?>",
         )
 
         def _extract_task_snooze(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "task_id": m.group(1).strip(),
-                "minutes": m.group(2) or "30",
+                "task_id": attrs.get("id", "").strip(),
+                "minutes": attrs.get("minutes") or "30",
             }
 
         response_parser.register_plugin_tag(
@@ -1306,18 +1510,14 @@ class HubPlugin(BasePlugin):
         #   <hub_spawn name="lapis" type="research">task</hub_spawn>
         #     → explicit identity + type override
         def _extract_hub_spawn(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "name": m.group(1).strip(),
-                "agent_type_override": (m.group(2) or "").strip(),
-                "task": m.group(3).strip(),
+                "name": attrs.get("name", "").strip(),
+                "agent_type_override": attrs.get("type", "").strip(),
+                "task": m.group(2).strip(),
             }
 
-        spawn_pat = _re.compile(
-            r'<hub_spawn\s+name="([^"]+)"'
-            r'(?:\s+type="([^"]*)")?'
-            r">(.*?)</hub_spawn>",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        spawn_pat = tag_pattern("hub_spawn", required={"name": "some"})
         response_parser.register_plugin_tag(
             "hub_spawn", spawn_pat, "hub_spawn", _extract_hub_spawn
         )
@@ -1390,20 +1590,21 @@ class HubPlugin(BasePlugin):
             "hub_vaults", self._handle_hub_vaults_tool
         )
 
-        # hub_cron_add (flexible attribute order)
+        # hub_cron_add
+        # Matches: <hub_cron_add interval="5m">msg</hub_cron_add>
+        #          <hub_cron_add to="infra@home-server" interval="1h">msg</hub_cron_add>
+        # `to` (`target` is the older spelling) names who gets the reminder;
+        # without it the reminder comes back to the sender. The handler reports
+        # a missing interval, so the tag is not left on screen for it.
         def _extract_hub_cron_add(m):
-            attrs = m.group(1)
-            msg = m.group(2).strip()
-            i_match = _re.search(r'interval="([^"]+)"', attrs)
+            attrs = tag_attrs(m.group(1))
             return {
-                "interval": i_match.group(1).strip() if i_match else "",
-                "message": msg,
+                "interval": attrs.get("interval", "").strip(),
+                "target": (attrs.get("to") or attrs.get("target") or "").strip(),
+                "message": m.group(2).strip(),
             }
 
-        cron_add_pat = _re.compile(
-            r"<hub_cron_add\s+([^>]+)>(.*?)</hub_cron_add>",
-            _re.DOTALL | _re.IGNORECASE,
-        )
+        cron_add_pat = tag_pattern("hub_cron_add")
         response_parser.register_plugin_tag(
             "hub_cron_add", cron_add_pat, "hub_cron_add", _extract_hub_cron_add
         )
@@ -1443,11 +1644,17 @@ class HubPlugin(BasePlugin):
 
         # hub_capture (self-closing, optional lines attribute)
         def _extract_hub_capture(m):
-            return {"cap_name": m.group(1).strip(), "cap_lines": m.group(2) or "50"}
+            attrs = tag_attrs(m.group(1))
+            return {
+                "cap_name": attrs.get("name", "").strip(),
+                "cap_lines": attrs.get("lines") or "50",
+            }
 
-        cap_pat = _re.compile(
-            r'<hub_capture\s+name="([^"]+)"(?:\s+lines="(\d+)")?\s*/>',
-            _re.IGNORECASE,
+        cap_pat = tag_pattern(
+            "hub_capture",
+            required={"name": "some"},
+            valid={"lines": r"\d+"},
+            end="/>",
         )
         response_parser.register_plugin_tag(
             "hub_capture", cap_pat, "hub_capture", _extract_hub_capture
@@ -1517,14 +1724,18 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_search ---
-        cs_pat = _re.compile(
-            r'<crystal_search\s+query="([^"]*)"(?:\s+limit="(\d+)")?\s*/>'
+        cs_pat = tag_pattern(
+            "crystal_search",
+            required={"query": "any"},
+            valid={"limit": r"\d+"},
+            end="/>",
         )
 
         def _extract_crystal_search(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "query": m.group(1),
-                "limit": int(m.group(2)) if m.group(2) else 5,
+                "query": attrs.get("query", ""),
+                "limit": int(attrs["limit"]) if attrs.get("limit") else 5,
             }
 
         response_parser.register_plugin_tag(
@@ -1548,14 +1759,15 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_list ---
-        cl_pat = _re.compile(
-            r'<crystal_list(?:\s+limit="(\d+)")?(?:\s+offset="(\d+)")?\s*/>'
+        cl_pat = tag_pattern(
+            "crystal_list", valid={"limit": r"\d+", "offset": r"\d+"}, end="/>"
         )
 
         def _extract_crystal_list(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "limit": int(m.group(1)) if m.group(1) else 20,
-                "offset": int(m.group(2)) if m.group(2) else 0,
+                "limit": int(attrs["limit"]) if attrs.get("limit") else 20,
+                "offset": int(attrs["offset"]) if attrs.get("offset") else 0,
             }
 
         response_parser.register_plugin_tag(
@@ -1566,22 +1778,13 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_edit ---
-        # Attributes may appear in any order; extract them with secondary regexes
-        # rather than positional groups so reversed attrs don't cause a miss.
-        ce_pat = _re.compile(
-            r"<crystal_edit\b([^>]*?)>(.*?)</crystal_edit>",
-            _re.DOTALL | _re.IGNORECASE,
-        )
-        _ce_id_re = _re.compile(r'(?:entry_)?id="([^"]+)"', _re.IGNORECASE)
-        _ce_summary_re = _re.compile(r'summary="([^"]*)"', _re.IGNORECASE)
-        _ce_keywords_re = _re.compile(r'keywords="([^"]*)"', _re.IGNORECASE)
+        # No attribute is required here: a missing id reaches the handler, which
+        # says so, instead of leaving the tag on screen.
+        ce_pat = tag_pattern("crystal_edit")
 
         def _extract_crystal_edit(m):
-            attrs = m.group(1)
-            id_match = _ce_id_re.search(attrs)
-            summary_match = _ce_summary_re.search(attrs)
-            keywords_match = _ce_keywords_re.search(attrs)
-            keywords_raw = keywords_match.group(1) if keywords_match else None
+            attrs = tag_attrs(m.group(1))
+            keywords_raw = attrs.get("keywords")
             if keywords_raw is None:
                 keywords = None
             elif keywords_raw == "":
@@ -1589,9 +1792,9 @@ class HubPlugin(BasePlugin):
             else:
                 keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()]
             return {
-                "entry_id": id_match.group(1) if id_match else "",
+                "entry_id": attrs.get("id") or attrs.get("entry_id") or "",
                 "content": m.group(2).strip(),
-                "summary": summary_match.group(1) if summary_match else None,
+                "summary": attrs.get("summary"),
                 "keywords": keywords,
             }
 
@@ -1603,23 +1806,14 @@ class HubPlugin(BasePlugin):
         )
 
         # --- crystal_delete ---
-        # Attributes may appear in any order (id/entry_id, reason are both optional
-        # positionally). Use a lookahead-based approach to match the tag regardless
-        # of attribute order so the regex fires even when the LLM writes reason first.
-        cd_pat = _re.compile(
-            r"<crystal_delete\b([^>]*?)/>",
-            _re.DOTALL,
-        )
-        _cd_id_re = _re.compile(r'(?:entry_)?id="([^"]+)"')
-        _cd_reason_re = _re.compile(r'reason="([^"]*)"')
+        # As crystal_edit: no attribute is required, the handler reports a missing id.
+        cd_pat = tag_pattern("crystal_delete", end="/>")
 
         def _extract_crystal_delete(m):
-            attrs = m.group(1)
-            id_match = _cd_id_re.search(attrs)
-            reason_match = _cd_reason_re.search(attrs)
+            attrs = tag_attrs(m.group(1))
             return {
-                "entry_id": id_match.group(1) if id_match else "",
-                "reason": reason_match.group(1) if reason_match else "",
+                "entry_id": attrs.get("id") or attrs.get("entry_id") or "",
+                "reason": attrs.get("reason", ""),
             }
 
         response_parser.register_plugin_tag(
@@ -1630,16 +1824,16 @@ class HubPlugin(BasePlugin):
         )
 
         # --- Context service: curate ---
-        curate_pat = _re.compile(
-            r'<curate\s+id="([^"]+)"\s+decision="(keep|summary)"\s*>' r"(.*?)</curate>",
-            _re.DOTALL | _re.IGNORECASE,
+        curate_pat = tag_pattern(
+            "curate", required={"id": "some", "decision": "keep|summary"}
         )
 
         def _extract_curate(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "ctx_id": m.group(1).strip(),
-                "decision": m.group(2),
-                "body": m.group(3).strip(),
+                "ctx_id": attrs.get("id", "").strip(),
+                "decision": attrs.get("decision", ""),
+                "body": m.group(2).strip(),
             }
 
         response_parser.register_plugin_tag(
@@ -1685,15 +1879,13 @@ class HubPlugin(BasePlugin):
         # --- hub_ask_ctx ---
         # <hub_ask_ctx peer="lapis" />
         # <hub_ask_ctx peer="lapis" filter="file:kollabor/" />
-        ask_ctx_pat = _re.compile(
-            r'<hub_ask_ctx\s+peer="([^"]+)"' r'(?:\s+filter="([^"]*)")?' r"\s*/>",
-            _re.IGNORECASE,
-        )
+        ask_ctx_pat = tag_pattern("hub_ask_ctx", required={"peer": "some"}, end="/>")
 
         def _extract_hub_ask_ctx(m):
+            attrs = tag_attrs(m.group(1))
             return {
-                "peer": m.group(1),
-                "filter": (m.group(2) or "").strip(),
+                "peer": attrs.get("peer", ""),
+                "filter": attrs.get("filter", "").strip(),
             }
 
         response_parser.register_plugin_tag(
@@ -2512,6 +2704,147 @@ class HubPlugin(BasePlugin):
                 output=f"crystal_delete error: {e}",
             )
 
+    def _open_network_turn(self, message: HubMessage, mode: str) -> None:
+        """Bind a delivered remote request to the turn that will handle it.
+
+        Every hub_msg from that turn to the requester goes on this request's
+        thread (the model never sees thread ids), and the request stays open
+        until the turn ends: `settle_network_turn` then sends the requester the
+        end-of-turn frame. ``mode`` is the wake decision: a request that starts
+        no turn (an acknowledgement, a duplicate) ends at once, and one that
+        found the model busy waits for that chain to finish first. The relay
+        delivers one request at a time (`network_turn_open`), so a second
+        request never finds one open.
+        """
+        self._net_turn = _NetworkTurn(
+            handle=message.from_identity,
+            thread_id=message.thread_id,
+            message_id=message.id,
+            opened_at=time.monotonic(),
+            deferred=mode == "buffer",
+            skipped=mode not in ("wake", "buffer"),
+        )
+
+    def _network_answering(self, handle: str) -> Optional["_NetworkTurn"]:
+        """The open request from ``handle`` this turn is handling, if any."""
+        # getattr: some tests build HubPlugin via __new__ without __init__.
+        turn = getattr(self, "_net_turn", None)
+        return turn if turn is not None and turn.handle == handle else None
+
+    def network_turn_open(self) -> bool:
+        """True while a delivered remote request's turn has not ended."""
+        return getattr(self, "_net_turn", None) is not None
+
+    def _note_network_answer(self, data: dict, text: Optional[str]) -> None:
+        """Keep the model's plain-text answer while it handles a remote request.
+
+        Called on every model response. Only the response that ends the chain
+        counts (`_end_network_turn` sends it when the turn sent no reply); one
+        with tool calls, or one a plugin continues past, is an interim.
+        """
+        turn = getattr(self, "_net_turn", None)
+        if turn is None or turn.skipped or turn.deferred or not turn.started:
+            return
+        ends_chain = (
+            not (data.get("all_tools") or data.get("has_native_tools"))
+            and data.get("turn_completed") is not False
+        )
+        turn.answer = (text or "") if ends_chain else ""
+
+    def network_chain_ended(self, failed: bool = False) -> None:
+        """The queue processor finished a whole chain: nothing pending, nothing queued.
+
+        That is the end of the open request's turn, provided the model was
+        called for it. A chain that was already running when the request arrived
+        is not its turn. The end frame goes out on the relay's next tick, after
+        every hub_msg reply and the forwarded plain-text answer.
+        """
+        turn = getattr(self, "_net_turn", None)
+        if turn is not None and turn.started and not turn.deferred and not turn.skipped:
+            turn.ended = True
+            turn.failed = turn.failed or failed
+
+    async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
+        """Relay tick: send the end-of-turn frame of a request whose turn is over.
+
+        The frame says how many replies went on the request's thread and whether
+        the turn failed. The runtime sends it, never the model. The turn is over
+        when the queue processor says so (`network_chain_ended`), never because
+        the model looks idle: it reads idle for a moment between a tool result
+        and the next model call. An acknowledgement or no-model request has no
+        turn and ends at once; a request that found the model busy waits for
+        that chain to finish first.
+        """
+        turn = getattr(self, "_net_turn", None)
+        if turn is None:
+            return
+        if turn.deferred:
+            # A chain already running when the request arrived is not the
+            # request's turn; the next one is.
+            turn.deferred = bool(getattr(llm, "is_processing", False))
+            return
+        if not (turn.skipped or turn.ended):
+            now = time.monotonic() if now is None else now
+            if not turn.started and now - turn.opened_at > _NET_TURN_MAX_SECONDS:
+                # No turn ever came for it and the shell has stopped waiting:
+                # the relay must not stay closed to requests, and the requester
+                # is told it failed instead of hearing nothing.
+                await self._end_network_turn(turn, failed=True)
+            return
+        await self._end_network_turn(turn, failed=turn.failed)
+
+    async def _end_network_turn(self, turn: "_NetworkTurn", *, failed: bool) -> None:
+        """Close ``turn`` and tell its requester, on the request's thread."""
+        from .relay_conversations import MAX_CONTENT, MAX_TURN_REPLIES
+
+        self._net_turn = None
+        # The model answered in plain text and sent nothing on the thread: that
+        # text is the reply, or a shell or cron job would get nothing back.
+        answer = _network_answer_text(turn.answer, MAX_CONTENT)
+        if answer and not turn.replies and not failed:
+            if await self._send_on_thread(turn, answer, "reply"):
+                turn.replies += 1
+        await self._send_on_thread(
+            turn,
+            _NET_TURN_FAILED if failed else _NET_TURN_DONE,
+            "turn end",
+            turn_end={"replies": min(turn.replies, MAX_TURN_REPLIES), "failed": failed},
+        )
+
+    async def _send_on_thread(
+        self, turn: "_NetworkTurn", content: str, what: str, **metadata
+    ) -> bool:
+        """Send ``content`` to the requester on the request's thread; True once taken."""
+        message = HubMessage(
+            action="message",
+            from_agent=(self._identity.agent_id if self._identity else ""),
+            from_identity=(self._identity.identity if self._identity else ""),
+            to=turn.handle,
+            content=content,
+            scope=MessageScope.DIRECT.value,
+            thread_id=turn.thread_id,
+            reply_to=turn.message_id,
+            metadata=metadata,
+        )
+        try:
+            rejections = await self._route_message(message)
+        except Exception as exc:
+            logger.debug("network %s for %s was not sent: %s", what, turn.handle, exc)
+            return False
+        if rejections:
+            logger.debug("network %s for %s refused: %s", what, turn.handle, rejections)
+        return not rejections
+
+    def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:
+        """The far agent's turn on our request ended: settle whoever waits on it.
+
+        Only a shell (`kollab --hub msg`) waits; an agent that asked simply
+        gets no end frame on its screen or in its model.
+        """
+        waiter = (getattr(self, "_cli_waiters", None) or {}).get(thread_id)
+        if waiter is not None:
+            waiter.put_nowait(("end", end["replies"], end["failed"], text))
+
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -2530,22 +2863,13 @@ class HubPlugin(BasePlugin):
         # identities such as ``to=\"sapphire\"`` or silently lose ``wait``.
         target = str(target or "").strip()
         content = str(content or "").strip()
-        embedded_attrs = _HUB_MSG_EMBEDDED_ATTRS_RE.match(target)
-        if embedded_attrs:
-            target = next(
-                value for value in embedded_attrs.groups()[0:3] if value is not None
-            ).strip()
-            embedded_wait = next(
-                (value for value in embedded_attrs.groups()[3:6] if value is not None),
-                "",
-            )
-            embedded_force = next(
-                (value for value in embedded_attrs.groups()[6:9] if value is not None),
-                "",
-            )
-            embedded_content = embedded_attrs.group(10)
-            wait_attr = str(wait_attr or embedded_wait or "").lower()
-            force_attr = str(force_attr or embedded_force or "").lower()
+        attrs, embedded_content = embedded_attrs("hub_msg", target) or ({}, "")
+        # Only the attributes this recovery has always understood; anything else
+        # (kind, thread_id) stays a literal target and fails loudly.
+        if "to" in attrs and set(attrs) <= {"to", "wait", "force"}:
+            target = attrs["to"].strip()
+            wait_attr = str(wait_attr or attrs.get("wait", "")).lower()
+            force_attr = str(force_attr or attrs.get("force", "")).lower()
             if not content and embedded_content:
                 content = embedded_content.strip()
 
@@ -2630,9 +2954,12 @@ class HubPlugin(BasePlugin):
                 error=error,
             )
 
-        # Auto-detect idle chatter
-        any_wait = wait_attr in ("true", "yes", "1")
+        # wait="true" means "send, then stop": once the send succeeds, this turn
+        # ends (the result's end_turn flag below, honoured by the queue
+        # processor). A native call may pass a JSON true instead of "true".
+        any_wait = str(wait_attr).strip().lower() in ("true", "yes", "1")
         if not any_wait:
+            # Auto-detect idle chatter
             content_lower = content.lower().strip().rstrip(".")
             idle_phrases = (
                 "standing by",
@@ -2662,30 +2989,63 @@ class HubPlugin(BasePlugin):
                 error=f"invalid target '{target}'. use a real agent identity name.",
             )
 
-        # Dedup
+        # A remote target is addressed agent@device (docs/specs/
+        # agent-network-simple-flow.md section 4). Normalize case so dedup
+        # and routing see one canonical form regardless of how the model
+        # capitalized it.
+        handle = parse_handle(target)
+        if handle:
+            target = format_handle(*handle)
+
+        # A message to the agent whose request this turn is handling is a reply
+        # on that request's thread, whatever else that agent asked meanwhile.
+        # The wake header shows the model a short `[thread:xxxxxxxx]` tag and it
+        # echoes that back as thread_id. A prefix is not the thread, so for the
+        # agent whose request this turn handles the runtime's ids always win.
+        answering = self._network_answering(target) if handle else None
+
+        # Dedup. The same words on another request's thread are another reply.
         dedup_window = 120
-        msg_hash = hashlib.md5(f"{target}:{content}".encode()).hexdigest()
+        msg_hash = hashlib.md5(
+            f"{target}:{content}"
+            f"{':' + answering.thread_id if answering else ''}".encode()
+        ).hexdigest()
         now = time.time()
         self._recent_hub_msgs = {
             k: v for k, v in self._recent_hub_msgs.items() if now - v < dedup_window
         }
         # Network admission owns durable deduplication. Caching content here
         # before authorization would turn a failed send into silent success on
-        # retry, including after the human grants the requested contact.
+        # retry, including after the human grants the requested contact. An
+        # agent@device send is cached only once the network accepted it.
         if not target.startswith("relay:") and msg_hash in self._recent_hub_msgs:
             logger.debug(f"hub_msg dedup: skipping duplicate to {target}")
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_msg",
                 success=True,
-                output="",  # silent -- prevents continuation loops
+                # A remote send says why nothing went out; a local one stays
+                # silent to prevent continuation loops.
+                output=(
+                    f"not sent again: this exact message to {target} was already sent"
+                    if handle
+                    else ""
+                ),
+                metadata={"end_turn": True} if any_wait else None,
             )
-        if not target.startswith("relay:"):
+        if not target.startswith("relay:") and not handle:
             self._recent_hub_msgs[msg_hash] = now
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
-        if is_reply and self._active_thread_id:
+        if handle:
+            # A remote agent answers on the thread of the request its turn is
+            # handling, so the asker (a CLI waiter, another agent) can tell
+            # whose answer this is. The model never sees thread ids, so the
+            # runtime supplies them.
+            if answering is not None:
+                thread_id, reply_to = answering.thread_id, answering.message_id
+        elif is_reply and self._active_thread_id:
             # <hub_reply> — inherit active thread from last received message
             thread_id = thread_id or self._active_thread_id
             reply_to = reply_to or self._active_thread_msg_id
@@ -2766,19 +3126,31 @@ class HubPlugin(BasePlugin):
 
         # Bridge forward
         my_name = self._identity.identity if self._identity else "?"
-        await self._bridge_forward(f"[{my_name} -> {target}] {content}")
+        await self._bridge_forward(
+            f"[{my_name} -> {self._outgoing_label(target)}] {content}"
+        )
+
+        # The relay address the router recorded is routing state. The tool
+        # result is published to attached clients, so it must not carry it.
+        metadata = {k: v for k, v in metadata.items() if k != "network"}
 
         # Build output — check rejections first
         queued_for = list((msg.metadata or {}).get("_queued_for", []))
+        warned = False  # the send went nowhere; the model has to read that
         if rejections:
             parts = []
             for ident, reason in rejections:
                 parts.append(f"{ident}: {reason}")
-            output = f"[hub_msg] rejected: {'; '.join(parts)}. " + (
-                "Network grants and receiver permissions must authorize delivery."
-                if target.startswith("relay:")
-                or (self._relay_agent and self._relay_agent._turn.get())
-                else 'send with force="true" to break through.'
+            output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
+                # The reason already says what to do; force means nothing here.
+                ""
+                if handle
+                else (
+                    " Network grants and receiver permissions must authorize delivery."
+                    if target.startswith("relay:")
+                    or (self._relay_agent and self._relay_agent._turn.get())
+                    else ' send with force="true" to break through.'
+                )
             )
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2790,13 +3162,36 @@ class HubPlugin(BasePlugin):
             )
         elif msg.metadata.get("relay_receipt"):
             receipt = msg.metadata["relay_receipt"]
-            output = f"remote task {receipt['id']}: {receipt['state']}; acceptance is not completion"
+            output = (
+                f"remote {self._remote_request_label(msg, receipt)}: "
+                f"{receipt['state']}; acceptance is not completion"
+            )
+        elif handle:
+            # The network accepted it (a rejection returned above). Local
+            # presence knows nothing of agent@device, so it cannot say the peer
+            # is offline; the roster answers that.
+            self._recent_hub_msgs[msg_hash] = now
+            if answering is not None:
+                answering.replies += 1
+            output = f"sent to {target}"
+            if not (thread_id or reply_to):
+                # A new request, not an answer on a received thread. The model
+                # reads this result to pick its next move, and left alone it
+                # polls hub_status, tries hub_capture, then asks again, which
+                # runs the task twice on the far side. Say where the reply
+                # comes from here rather than in the prompt alone.
+                output += (
+                    "; its reply arrives by itself as a hub message. end your "
+                    "turn unless you have other local work, and do not check "
+                    "status, capture, or send again."
+                )
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
         elif self._presence:
             known = self._presence.scan_all_presence()
             known_ids = {a.identity for a in known}
             if target not in known_ids and target not in ("all", "*", "everyone"):
+                warned = True
                 output = (
                     f"warning: '{target}' is not online. "
                     f"message broadcast but no matching agent. "
@@ -2807,6 +3202,8 @@ class HubPlugin(BasePlugin):
         else:
             output = f"delivered to {target}"
 
+        if any_wait and not warned:
+            metadata["end_turn"] = True
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_msg",
@@ -2833,8 +3230,9 @@ class HubPlugin(BasePlugin):
             )
 
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
+        scope = str(tool_data.get("scope", "") or "").strip().lower()
         result_text = await self._handle_broadcast_command(
-            content, force=force_attr in ("true", "yes", "1")
+            content, force=force_attr in ("true", "yes", "1"), scope=scope
         )
         rejected = "rejected:" in result_text.lower()
         return ToolExecutionResult(
@@ -2991,6 +3389,7 @@ class HubPlugin(BasePlugin):
                 error="hub not initialized",
             )
 
+        await self._refresh_remote_agent_rows()
         status = self._format_status()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -3012,6 +3411,7 @@ class HubPlugin(BasePlugin):
             )
 
         # Reuse the same status formatter as hub_status
+        await self._refresh_remote_agent_rows()
         status = self._format_status()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -3770,35 +4170,47 @@ class HubPlugin(BasePlugin):
         """Execute a hub_cron_add tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        target = tool_data.get("target", "")
+        # The XML tag reads `to` (or the older `target`) into "target"; a native
+        # call passes `to`. Without either, the reminder comes back to us.
+        target = str(tool_data.get("to") or tool_data.get("target") or "").strip()
         interval = tool_data.get("interval", "")
         msg = tool_data.get("message", "")
 
         if not target:
             target = self._identity.identity if self._identity else ""
 
-        if not target or not interval:
+        def refuse(error: str):
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_cron_add",
                 success=False,
-                error="requires target and interval attributes",
+                error=error,
             )
+
+        if not target or not interval:
+            return refuse('requires an interval attribute, for example interval="5m"')
+
+        error = self._cron_target_error(target)
+        if error:
+            return refuse(error)
+
+        # A remote task may reply only to its sender (see _handle_hub_msg_tool);
+        # a job it schedules would send to another device after the turn ended.
+        relay = getattr(self, "_relay_agent", None)
+        if parse_handle(target) and relay is not None and relay._turn.get() is not None:
+            return refuse("a remote task cannot schedule messages to other devices")
 
         # Enforce 30s minimum for XML-originated cron
         try:
             secs = _parse_interval(interval)
             if secs < 30:
-                return ToolExecutionResult(
-                    tool_id=tool_data.get("id", "unknown"),
-                    tool_type="hub_cron_add",
-                    success=False,
-                    error="minimum interval is 30s",
-                )
+                return refuse("minimum interval is 30s")
         except ValueError:
             pass  # let _cron_add handle the error
 
         result = self._cron_add(f"{target} {interval} {msg}")
+        if not result.startswith("cron job "):  # "bad interval: ...", "usage: ..."
+            return refuse(result)
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_cron_add",
@@ -3957,6 +4369,17 @@ class HubPlugin(BasePlugin):
             priority=HookPriority.DISPLAY.value,
         )
         await self.event_bus.register_hook(nudge_hook)
+
+        # First launch: offer the guided network setup once the TUI is ready.
+        await self.event_bus.register_hook(
+            Hook(
+                name="hub_connect_guide",
+                plugin_name=self.name,
+                event_type=EventType.SYSTEM_STARTUP,
+                callback=self._on_startup_connect_guide,
+                priority=HookPriority.DISPLAY.value,
+            )
+        )
 
         # Start the hub after all plugins initialized
         # Skip in attach mode - we're a viewer, not a peer on the mesh
@@ -4209,6 +4632,8 @@ class HubPlugin(BasePlugin):
                 on_get_output=self._get_output_lines,
                 on_shutdown=self._on_remote_shutdown,
                 on_input_inject=self._inject_attacher_input,
+                on_network_status=self._handle_network_status_request,
+                on_network_send=self._handle_network_send_request,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -4709,6 +5134,19 @@ class HubPlugin(BasePlugin):
             logger.error(f"Hub startup failed: {e}", exc_info=True)
         finally:
             self._starting = False
+
+    def show_network_notice(self, text: str) -> None:
+        """One system line in the main pane; attached windows get it from the renderer."""
+        renderer = self.event_bus.get_service("renderer") if self.event_bus else None
+        coordinator = getattr(renderer, "message_coordinator", None)
+        if coordinator is None:
+            return
+        try:
+            coordinator.display_message_sequence(
+                [("system", text, {"display_type": "info"})]
+            )
+        except Exception:
+            logger.warning("network notice display failed")
 
     def _display_startup_status(
         self, renderer: Any, role: str, peers: List[AgentRuntime]
@@ -5602,6 +6040,84 @@ class HubPlugin(BasePlugin):
                 return await self._deliver_to_agent(agent, reminder_msg)
         return False
 
+    async def _cron_device_gone(self, device: str) -> bool:
+        """True when the network is reachable and never told us about `device`.
+
+        An offline device stays known through its recorded name, so only a
+        typo, a revoked device or this device's own name (its agents are never
+        on the remote roster) reads as gone. With no way to tell (no bridge,
+        relay unreachable) the answer is no.
+        """
+        unknown = getattr(getattr(self, "_relay_agent", None), "device_unknown", None)
+        try:
+            return callable(unknown) and bool(await unknown(device))
+        except Exception:
+            return False
+
+    async def _fire_cron_job(self, job: HubCronJob) -> bool:
+        """Send one due cron job. True when the job must be dropped.
+
+        An agent@device target goes out through _route_message, the path
+        hub_msg uses: handle resolution, trust and relay. The router reports a
+        refusal instead of raising, so it is read here, logged with its reason
+        and kept for hub_cron_list; a job whose device is not on the network is
+        dropped rather than failing on every interval.
+        """
+        target = job.target
+        scope = self._resolve_scope(target)
+        if target in ("all", "*"):
+            to = "*"
+            scope = MessageScope.BROADCAST.value
+        else:
+            to = target
+
+        msg = HubMessage(
+            action="message",
+            from_agent=self._identity.agent_id,
+            from_identity="hub-cron",
+            to=to,
+            content=f"[cron {job.id}] {job.message}",
+            scope=scope,
+        )
+        handle = parse_handle(target)
+        try:
+            rejections = await self._route_message(msg)
+        except Exception as exc:
+            if not handle:
+                raise
+            # The router turns a refusal into a reason; what escapes it is
+            # unexpected, so only its class is kept.
+            rejections = [(target, f"send failed ({type(exc).__name__})")]
+
+        if handle and rejections:
+            reason = rejections[0][1]
+            job.last_error = reason
+            if await self._cron_device_gone(handle[1]):
+                logger.warning(
+                    "hub cron %s dropped: device %s is not on this network (%s)",
+                    job.id,
+                    handle[1],
+                    reason,
+                )
+                return True
+            logger.warning(
+                "hub cron %s not delivered to %s: %s", job.id, target, reason
+            )
+            return False
+
+        # Self-targeted cron: _route_message skips self
+        # (open channel model), so deliver directly.
+        my_identity = self._identity.identity if self._identity else ""
+        if my_identity and target == my_identity:
+            await self._on_message_received(msg)
+
+        if handle:
+            job.last_error = ""
+            # One dim line per fire: a 30 s job must not draw a message box every 30 s.
+            self.show_network_notice(f"cron {job.id} -> {target}")
+        logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
+        return False
+
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
         while True:
@@ -5620,44 +6136,16 @@ class HubPlugin(BasePlugin):
 
                 # --- Hub cron jobs ---
                 if has_cron_jobs:
-                    fired: List[str] = []
                     remove_ids: List[str] = []
 
-                    for job in self._hub_cron_jobs:
+                    for job in list(self._hub_cron_jobs):
                         if now >= job.next_fire:
-                            target = job.target
-                            scope = self._resolve_scope(target)
-                            if target in ("all", "*"):
-                                to = "*"
-                                scope = MessageScope.BROADCAST.value
-                            else:
-                                to = target
+                            gone = await self._fire_cron_job(job)
 
-                            msg = HubMessage(
-                                action="message",
-                                from_agent=self._identity.agent_id,
-                                from_identity="hub-cron",
-                                to=to,
-                                content=f"[cron {job.id}] {job.message}",
-                                scope=scope,
-                            )
-                            await self._route_message(msg)
-
-                            # Self-targeted cron: _route_message skips self
-                            # (open channel model), so deliver directly.
-                            my_identity = (
-                                self._identity.identity if self._identity else ""
-                            )
-                            if my_identity and target == my_identity:
-                                await self._on_message_received(msg)
-
-                            logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
-                            fired.append(job.id)
-
-                            if job.recurring:
-                                job.next_fire = now + job.interval_seconds
-                            else:
+                            if gone or not job.recurring:
                                 remove_ids.append(job.id)
+                            else:
+                                job.next_fire = now + job.interval_seconds
 
                     if remove_ids:
                         self._hub_cron_jobs = [
@@ -6301,6 +6789,12 @@ class HubPlugin(BasePlugin):
             # recipient's grant. Content heuristics must not strand an admitted
             # request merely because it says "thanks" or resembles old text.
             return HubWakeDecision("wake", True, "authorized remote conversation")
+        if message.thread_id in (getattr(self, "_cli_waiters", None) or {}):
+            # A reply to `kollab --hub msg` belongs to that shell, which has
+            # it. Waking the model to react would spend a turn on it, and the
+            # next reply would wait behind that turn (the relay delivers only
+            # while the model is idle).
+            return HubWakeDecision("observe", False, "answer to a shell request")
         if not is_intended:
             return HubWakeDecision("observe", False, "not intended")
         if is_human_elsewhere:
@@ -6550,6 +7044,28 @@ class HubPlugin(BasePlugin):
             self._seen_messages[msg_id] = None
             while len(self._seen_messages) > 1000:
                 self._seen_messages.popitem(last=False)
+
+        # A request from a remote agent@device (not a reply to ours) is handled
+        # by one turn, and that turn's replies go on this request's thread.
+        network_request = bool(
+            message.action == "message"
+            and not message.reply_to
+            and (message.metadata or {}).get("network")
+            and parse_handle(message.from_identity or "") is not None
+        )
+
+        # `kollab --hub msg agent@device` waiter: hand it every message on its
+        # own request's thread, in order (the answering turn echoes the thread
+        # id). Any other message from that agent -- an older answer, a late
+        # duplicate, unrelated chatter -- is on another thread and is not for
+        # it. This never blocks or consumes the message: it is still shown
+        # below, though it does not wake the model (see _decide_hub_wake).
+        # getattr: some tests construct HubPlugin via __new__ without running
+        # __init__, the same reason _relay_agent above is read with getattr.
+        cli_waiters = getattr(self, "_cli_waiters", None)
+        waiter = cli_waiters.get(message.thread_id) if cli_waiters else None
+        if waiter is not None:
+            waiter.put_nowait(("reply", message.from_identity, message.content))
 
         # Context control-plane traffic — dispatch without vault/display
         if message.action == "context_ledger_update":
@@ -6840,6 +7356,9 @@ class HubPlugin(BasePlugin):
                 is_human_elsewhere=is_human_elsewhere,
                 llm_service=llm_service,
             )
+            if network_request:
+                # Before the model can start: its turn is this request's turn.
+                self._open_network_turn(message, wake_decision.mode)
             if self._task_ledger and wake_decision.mode == "wake":
                 try:
                     self._task_ledger.resolve_reply(
@@ -7040,7 +7559,9 @@ class HubPlugin(BasePlugin):
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
                         {
-                            "source": f"hub:{message.from_identity}",
+                            # A relay: address is routing state (it holds a key):
+                            # name the sender as its handle, never the address.
+                            "source": f"hub:{self._outgoing_label(message.from_identity or '')}",
                             "content": message.content,
                             "hub_message_id": message.id,
                             "hub_wake_mode": wake_decision.mode,
@@ -7053,6 +7574,9 @@ class HubPlugin(BasePlugin):
                     )
             except Exception as e:
                 logger.error(f"Hub message trigger failed: {e}")
+        elif network_request:
+            # No model to run: nothing will handle it, so the shell must not wait.
+            self._open_network_turn(message, "observe")
 
     # Fallback colors when identity isn't in the gem pool
     _FALLBACK_COLORS = [
@@ -7114,6 +7638,25 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.warning(f"Hub message display failed: {e}")
 
+    def _remote_request_label(self, message, receipt) -> str:
+        """`request N` for a request a human authorized, the event kind for the rest.
+
+        A screen shows the network's short number, never the real id.
+        """
+        kind = message.metadata.get("relay_kind", "message")
+        if kind != "message":
+            return kind
+        try:
+            return f"request {self._relay_agent.number('request', receipt['id'])}"
+        except Exception:  # a number is a courtesy; the line still says what happened
+            return "request"
+
+    def _relay_question_number(self, event_id) -> int | None:
+        try:
+            return self._relay_agent.number("question", event_id)
+        except Exception:
+            return None
+
     def _display_hub_message(self, message: HubMessage) -> None:
         """Display an incoming hub message with agent-colored TagBox.
 
@@ -7149,28 +7692,37 @@ class HubPlugin(BasePlugin):
             and not is_operator_direct
         )
 
+        # Manual-trust relay events carry the sender's verified address; a screen
+        # shows the name and the short number instead (section 13).
+        meta = message.metadata or {}
+        sender = meta.get("display_from") or message.from_identity
+        content = message.content
+        if meta.get("relay_event") == "question":
+            number = self._relay_question_number(meta.get("relay_event_id"))
+            if number:
+                content += f" (answer with /connect answer {number} <text>)"
+
         if is_human_elsewhere:
             # Show "user -> koordinator" (observed), not "user -> lapis"
-            self._render_hub_box(
-                message.from_identity,
-                source_agent,
-                message.content,
-                observing=True,
-            )
+            self._render_hub_box(sender, source_agent, content, observing=True)
         elif is_intended:
-            self._render_hub_box(message.from_identity, my_name, message.content)
+            self._render_hub_box(sender, my_name, content)
         else:
-            self._render_hub_box(
-                message.from_identity,
-                message.to,
-                message.content,
-                observing=True,
-            )
+            self._render_hub_box(sender, message.to, content, observing=True)
+
+    def _outgoing_label(self, target: str) -> str:
+        """What a screen calls `target`: a relay: address is routing state, never shown."""
+        if not target.startswith("relay:"):
+            return target
+        for row in self._remote_agent_rows():
+            if row.get("address") == target and row.get("name") and row.get("device"):
+                return format_handle(row["name"], row["device"])
+        return "a remote agent"
 
     def _display_outgoing_message(self, to_name: str, content: str) -> None:
         """Display an outgoing hub message with agent-colored TagBox."""
         my_name = self._identity.identity if self._identity else "?"
-        self._render_hub_box(my_name, to_name, content)
+        self._render_hub_box(my_name, self._outgoing_label(to_name), content)
 
     async def _inject_roster_context(self, context, event=None):
         """Inject hub roster into conversation history before LLM calls.
@@ -7189,9 +7741,22 @@ class HubPlugin(BasePlugin):
         lines.append(f'you are "{self._identity.identity}" on the kollabor hub.')
         if self._identity.is_coordinator:
             lines.append("you are the coordinator.")
+
+        network_domain = self._relay_network_domain()
+        if network_domain:
+            trust = self._relay_trust_level()
+            lines.append(
+                f"network: {self._relay_network_name(network_domain)} "
+                f"via {network_domain} (trust: {trust})"
+            )
+            device_name = self._relay_device_name()
+            if device_name:
+                lines.append(f"this device: {device_name}")
+
         lines.append("")
 
-        if self._roster:
+        remote_rows = await self._refresh_remote_agent_rows()
+        if self._roster or remote_rows:
             lines.append("active agents:")
             for agent in self._roster:
                 if not isinstance(agent, dict):
@@ -7205,6 +7770,29 @@ class HubPlugin(BasePlugin):
                     lines.append(f"  {ident}{coord} - {status}: {task}")
                 else:
                     lines.append(f"  {ident}{coord} - {status}")
+            for row in remote_rows:
+                handle = row.get("handle") or format_handle(
+                    row.get("name", "?"), row.get("device", "?")
+                )
+                status = row.get("state", "unknown")
+                task = row.get("task", "") or row.get("current_task", "")
+                if task:
+                    lines.append(f"  {handle} - {status}: {task}")
+                else:
+                    lines.append(f"  {handle} - {status}")
+            from .relay_commands import offline_device_names
+
+            relay = getattr(self, "_relay_agent", None)
+            offline_devices = []
+            if relay is not None:
+                try:
+                    offline_devices = offline_device_names(
+                        relay, remote_rows, relay.commands.client
+                    )
+                except Exception:
+                    offline_devices = []
+            if offline_devices:
+                lines.append(f"offline devices: {', '.join(offline_devices)}")
         else:
             lines.append("no other agents online.")
 
@@ -7223,6 +7811,12 @@ class HubPlugin(BasePlugin):
 
         lines.append("to message an agent, ALWAYS use this exact format:")
         lines.append('<hub_msg to="identity">your message</hub_msg>')
+        lines.append("remote agents use the same tag with their full name:")
+        lines.append('<hub_msg to="infra@home-server">your message</hub_msg>')
+        lines.append(
+            "a remote agent runs your message with its own tools on its own machine "
+            "and answers with the same tag."
+        )
         lines.append("")
         lines.append(
             "IMPORTANT: when asked to delegate, coordinate, or assign tasks "
@@ -7265,7 +7859,8 @@ class HubPlugin(BasePlugin):
         lines.append('  <hub_vault name="identity"/>  -- read agent vault summary')
         lines.append("  <hub_vaults/>  -- list all vaults")
         lines.append(
-            '  <hub_cron_add target="name" interval="5m">' "message</hub_cron_add>"
+            '  <hub_cron_add to="name" interval="5m">message</hub_cron_add>'
+            "  -- to is optional (you); agent@device for a remote agent"
         )
         lines.append("  <hub_cron_list/>  -- list cron jobs")
         lines.append("  <hub_cron_delete>job-id</hub_cron_delete>")
@@ -7423,6 +8018,9 @@ class HubPlugin(BasePlugin):
         """
         from .presence_states import PresenceState
 
+        turn = getattr(self, "_net_turn", None)
+        if turn is not None and not turn.deferred:
+            turn.started = True  # the model runs the open remote request's turn
         if self._identity:
             if self._identity.state != PresenceState.WAITING.value:
                 self._identity.state = AgentState.WORKING.value
@@ -7624,6 +8222,7 @@ class HubPlugin(BasePlugin):
         """
         # Use raw response_text for PARSING (finding tags)
         response = data.get("response_text", "") or data.get("clean_response", "")
+        self._note_network_answer(data, data.get("clean_response", response))
         if not response:
             return data
 
@@ -7918,6 +8517,64 @@ class HubPlugin(BasePlugin):
             Empty list means all recipients accepted.
         """
         relay = getattr(self, "_relay_agent", None)
+        handle = parse_handle(message.to or "")
+        if handle is not None:
+            # An agent@device handle: the network is the hub across machines
+            # (docs/specs/agent-network-simple-flow.md section 4). Under open
+            # and agents trust this needs no human grant -- resolve the
+            # handle and deliver it like any other hub message.
+            from .relay_state import ID, RelayError
+
+            handle_str = format_handle(*handle)
+            resolve = getattr(relay, "resolve_handle", None)
+            send = getattr(relay, "send", None)
+            if relay is None:
+                # No bridge yet: never fall through to local presence, which
+                # cannot hold a remote agent and would report it as absent.
+                return [
+                    (
+                        message.to,
+                        "the network is not connected on this device: run /connect status",
+                    )
+                ]
+            if resolve is None or send is None:
+                return [(message.to, "network messaging is not available on this build")]
+            try:
+                address = resolve(handle_str)
+                if inspect.isawaitable(address):
+                    address = await address
+                # The thread and reply ids travel in the relay payload so the
+                # receiver's answer can name the request it answers. The
+                # runtime's end-of-turn frame rides the same path.
+                turn_end = (message.metadata or {}).get("turn_end")
+                receipt = await send(
+                    address,
+                    message.content,
+                    kind="message",
+                    thread_id=(
+                        message.thread_id
+                        if ID.fullmatch(message.thread_id or "")
+                        else ""
+                    ),
+                    reply_to=(
+                        message.reply_to if ID.fullmatch(message.reply_to or "") else ""
+                    ),
+                    **({"turn_end": turn_end} if turn_end else {}),
+                )
+            except RelayError as exc:
+                return [(message.to, str(exc))]
+            refusal = _receipt_refusal(receipt)
+            if refusal:
+                if receipt.get("reason") == "recipient_unavailable" or (
+                    receipt.get("state") == "unavailable"
+                ):
+                    # The peer answered that nobody by that name is there, so the
+                    # roster this handle was resolved from is stale.
+                    refusal = "that agent is not online: run /connect status to see who is"
+                return [(message.to, refusal)]
+            message.metadata["network"] = {"to": address}
+            self._trace_delivery(message, "remote_accepted", detail="network")
+            return []
         if (message.to or "").startswith("relay:"):
             from .relay_state import ID, RelayError
 
@@ -7955,6 +8612,11 @@ class HubPlugin(BasePlugin):
                     kind=relay_kind,
                 )
                 message.metadata["relay_receipt"] = receipt
+                logger.info(
+                    "network send result: path=relay kind=%s state=%s",
+                    relay_kind,
+                    receipt.get("state"),
+                )
                 if receipt["state"] in {
                     "rejected",
                     "failed",
@@ -7967,6 +8629,7 @@ class HubPlugin(BasePlugin):
                 )
                 return []
             except (RelayError, OSError, TimeoutError) as exc:
+                logger.info("network send result: path=relay refused=%s", type(exc).__name__)
                 if str(exc) in {
                     "initial message must match the human-authorized request exactly",
                     "a human communication grant is required; use /connect authorize or /connect send",
@@ -8283,6 +8946,84 @@ class HubPlugin(BasePlugin):
             return MessageScope.PROJECT.value
         return MessageScope.DIRECT.value
 
+    def _remote_agent_rows(self) -> list:
+        """The last fetched remote rows (agent@device). Sync readers use this.
+
+        `_refresh_remote_agent_rows()` fills it; the relay bridge's
+        `remote_agents()` is async, so anything synchronous (the trender
+        roster, `_format_status`) reads this snapshot instead.
+        """
+        rows = getattr(self, "_remote_rows_snapshot", None)
+        return list(rows) if isinstance(rows, list) else []
+
+    async def _refresh_remote_agent_rows(self) -> list:
+        """Ask the relay bridge for remote agents and cache the answer."""
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "remote_agents", None)
+        rows: Any = []
+        if callable(getter):
+            try:
+                rows = getter()
+                if inspect.isawaitable(rows):
+                    rows = await rows
+            except Exception:
+                rows = []
+        if not isinstance(rows, (list, tuple)):
+            rows = []
+        self._remote_rows_snapshot = [row for row in rows if isinstance(row, dict)]
+        return list(self._remote_rows_snapshot)
+
+    def _relay_network_domain(self) -> str:
+        """This device's network domain for display, without the scheme."""
+        commands = getattr(self, "_relay_commands", None)
+        client = getattr(commands, "client", None)
+        origin = getattr(getattr(client, "state", None), "origin", "") if client else ""
+        if not origin:
+            # A second window in the workspace does not own the relay, but the
+            # network is the workspace's: read it from the shared state file.
+            try:
+                origin = self._relay_agent._state().state.origin
+            except Exception:
+                origin = ""
+        if isinstance(origin, str) and origin:
+            return origin[len("https://") :] if origin.startswith("https://") else origin
+        return ""
+
+    def _relay_network_name(self, domain: str) -> str:
+        """The network's human name when available, else its domain."""
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "network_name", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return value
+            except Exception:
+                pass
+        return domain
+
+    def _relay_trust_level(self) -> str:
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "trust_level", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return value
+            except Exception:
+                pass
+        return DEFAULT_TRUST
+
+    def _relay_device_name(self) -> str:
+        relay = getattr(self, "_relay_agent", None)
+        getter = getattr(relay, "device_name", None)
+        if callable(getter):
+            try:
+                return getter() or ""
+            except Exception:
+                pass
+        return ""
+
     async def _maybe_route_to_coordinator(self, response: str) -> None:
         """Auto-route untagged responses to coordinator if enabled.
 
@@ -8456,7 +9197,7 @@ class HubPlugin(BasePlugin):
         self.command_registry.register_command(
             CommandDefinition(
                 name="connect",
-                description="Discover, pair, authorize and message agents across networks",
+                description="Join a network, pair devices and message agents across machines",
                 category=CommandCategory.CUSTOM,
                 plugin_name=self.name,
                 handler=self._handle_connect_command,
@@ -8473,56 +9214,357 @@ class HubPlugin(BasePlugin):
             value = " ".join(getattr(command_or_args, "args", None) or []).strip()
         parts = value.split()
         head = parts[0].lower() if parts else ""
-        if any(part.upper().startswith("K1-") for part in parts):
+        from .enrollment_codes import looks_like_join_code
+
+        # A bare code in any case is never a domain; inside a subcommand only the
+        # upper-case form is treated as a code, so lower-case device names pass.
+        if parts and (
+            looks_like_join_code(parts[0].upper())
+            or any(looks_like_join_code(part) for part in parts[1:])
+        ):
             return CODE_IN_COMMAND
         if head == "help":
-            return format_connect_help()
-        enrollment_commands = {"", "enroll"}
-        if head in enrollment_commands:
+            show_all = len(parts) >= 2 and parts[1].lower() == "all"
+            return format_connect_help(show_all)
+        if head in CONNECT_REMOVED:
+            return f"connect: {CONNECT_REMOVED[head]}"
+        if head == "":
+            return await self._connect_home()
+        if head == "code":
             if len(parts) > 2:
-                return CODE_IN_COMMAND
-            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            return await self._open_connect_altview(domain)
-        if head == "offer":
-            if len(parts) > 2:
-                return "connect: use /connect offer [domain]"
-            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            return await self._open_connect_offer_altview(domain)
-        if head in {"contact", "contacts"}:
-            if len(parts) > 2:
-                return f"connect: use /connect {head} [relay-domain]"
-            if getattr(getattr(self, "_cli_args", None), "attach", None):
-                return (
-                    "connect: attached daemon does not support private contact requests"
-                )
-            domain = parts[1] if len(parts) == 2 else "kollabor.ai"
-            return (
-                await self._open_contact_request_altview(domain)
-                if head == "contact"
-                else await self._open_contact_review_altview(domain)
+                return "connect: use /connect code [domain]"
+            domain = (
+                parts[1]
+                if len(parts) == 2
+                else self._relay_network_domain() or "kollabor.ai"
             )
-        if head not in {sub.name for sub in CONNECT_SUBCOMMANDS}:
+            return await self._open_connect_screen(domain, code_only=True)
+        if head == "knock":
+            return await self._run_connect_knock(value.partition(" ")[2].strip())
+        if head == "knocks":
+            if len(parts) > 2:
+                return "connect: use /connect knocks [relay-domain]"
+            if len(parts) == 2:
+                domain = parts[1]
+            elif self._attached():
+                domain = ""  # the daemon that owns the relay knows its network
+            else:
+                domain = self._relay_network_domain() or "kollabor.ai"
+            return await self._open_contact_review_altview(domain)
+        known = {sub.name for sub in CONNECT_SUBCOMMANDS} | {
+            sub.name for sub in CONNECT_ADVANCED
+        }
+        if head not in known:
             if not _looks_like_connect_target(parts[0]):
                 return _unknown_connect_subcommand(head)
             if len(parts) != 1:
                 return CODE_IN_COMMAND
             # A domain argument joins the public discovery/relay network. Device
-            # enrollment remains an explicit private flow via /connect enroll.
+            # enrollment remains an explicit private flow via bare /connect.
         if getattr(getattr(self, "_cli_args", None), "attach", None):
-            state = (
-                self.event_bus.get_service("state_service") if self.event_bus else None
-            )
-            if state is None:
-                return "connect: this window is not connected to its agent daemon; restart kollab"
-            handler = getattr(state, "hub_connect", None)
-            if handler is None:
-                return "beacon: attached daemon must be updated to support /connect"
-            try:
-                return await handler(value)
-            except Exception:
-                # Never create an alternate identity/connection in the viewer.
-                return "beacon: daemon connection command failed; no viewer connection opened"
+            return await self._attached_connect(value)
         return await self._run_connect_command(value)
+
+    async def _attached_connect(self, value: str) -> str:
+        """Hand one /connect command to the daemon that owns this identity."""
+        state = self.event_bus.get_service("state_service") if self.event_bus else None
+        if state is None:
+            return "connect: this window is not connected to its agent daemon; restart kollab"
+        handler = getattr(state, "hub_connect", None)
+        if handler is None:
+            return "beacon: attached daemon must be updated to support /connect"
+        try:
+            return await handler(value)
+        except Exception:
+            # Never create an alternate identity/connection in the viewer.
+            return "beacon: daemon connection command failed; no viewer connection opened"
+
+    def _attached(self) -> bool:
+        """True in a window attached to a daemon, which owns the relay."""
+        return bool(getattr(getattr(self, "_cli_args", None), "attach", None))
+
+    def _relay_owned_elsewhere(self) -> bool:
+        """True in a process whose workspace relay another window owns."""
+        if self._attached() or self._relay_commands is not None:
+            return False
+        try:
+            return self._relay_agent.owner.owner() is not None
+        except Exception:
+            return False
+
+    def _shared_state_snapshot(self, domain: str):
+        """What a process that does not run the relay can say: network, trust, device."""
+        from .relay_commands import ConnectSnapshot
+
+        return ConnectSnapshot(
+            network=self._relay_network_name(domain) if domain else "",
+            domain=domain,
+            trust=self._relay_trust_level(),
+            device=self._relay_device_name(),
+            relay_online=False,  # not shown: only the owner sees the relay
+            read_only=True,
+        )
+
+    async def _read_only_snapshot(self, domain: str, fetched=None):
+        """The Connect screen's data when this window cannot act, else None.
+
+        A window that lost the workspace lock to another window knows it from
+        the lock. An attached window's daemon says it in its snapshot; the
+        caller may already hold that snapshot, and a fetch that stalls (a slow
+        relay behind the knock count) means the daemon runs the relay.
+        """
+        if not self._attached():
+            return (
+                self._shared_state_snapshot(domain)
+                if self._relay_owned_elsewhere()
+                else None
+            )
+        snapshot = fetched
+        if snapshot is None:
+            try:
+                snapshot = await asyncio.wait_for(
+                    self._attached_connect_snapshot(), _CONNECT_OWNER_CHECK_SECONDS
+                )
+            except asyncio.TimeoutError:
+                return None
+        return snapshot if snapshot is not None and snapshot.read_only else None
+
+    async def _attached_connect_snapshot(self):
+        """The daemon's Connect snapshot, or None when it cannot supply one."""
+        from .relay_commands import ConnectSnapshot
+
+        state = self.event_bus.get_service("state_service") if self.event_bus else None
+        handler = getattr(state, "hub_connect_snapshot", None)
+        if handler is None:
+            return None
+        try:
+            return ConnectSnapshot.from_wire(await handler())
+        except Exception:
+            return None
+
+    async def _on_startup_connect_guide(self, context, event_context=None):
+        """SYSTEM_STARTUP: offer the guided network setup once per machine.
+
+        Only the window that has the terminal gets here with a yes: an attached
+        client or a single process, never the daemon or a spawned agent (see
+        ``guide_applies``). It starts a task, so startup never waits on a person.
+        """
+        import sys
+
+        from .connect_guide import guide_applies
+
+        try:
+            interactive = bool(sys.stdin.isatty() and sys.stdout.isatty())
+        except Exception:
+            interactive = False
+        if guide_applies(getattr(self, "_cli_args", None), interactive=interactive):
+            self._connect_guide_task = asyncio.get_running_loop().create_task(
+                self._run_connect_guide()
+            )
+        return {"success": True}
+
+    async def _run_connect_guide(self) -> None:
+        """The notice, then the path the person picks (constitution, Story 1)."""
+        from plugins.altview.connect_altview import ConnectGuideAltView
+
+        from .connect_guide import DEFAULT_DOMAIN, mark_guide_seen
+
+        try:
+            startup = getattr(self, "_startup_task", None)
+            if startup is not None:
+                await asyncio.wait({startup}, timeout=10)  # the relay agent exists after
+            stack = self._altview_stack()
+            if stack is None or stack.is_in_altview:
+                return  # another screen is open: the notice waits for the next launch
+            view = ConnectGuideAltView(
+                has_network=await self._connect_has_network(),
+                on_answer=mark_guide_seen,
+            )
+            await stack.push(view, "connect-guide", reuse=False)
+            if view.answer == "screen":
+                text = await self._connect_home(guide=True)
+            elif view.answer == "new_network":
+                text = await self._guided_new_network()
+            elif view.answer == "join":
+                text = await self._open_connect_altview(DEFAULT_DOMAIN)
+            else:
+                return
+            if text:
+                self._say_connect(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The type only: nothing in this flow holds a code, but a message might.
+            logger.warning("Connect guide failed: %s", type(exc).__name__)
+
+    async def _connect_has_network(self) -> bool:
+        """Whether this device shares a network with another device, asked the way bare
+        /connect asks. A device alone on one (every 0.10.7 launch made it) counts as not
+        set up: the notice offers it the two choices, not the Connect screen."""
+        from .relay_commands import NO_NETWORK
+
+        if self._attached():
+            snapshot = await self._attached_connect_snapshot()
+            if snapshot is not None:
+                return bool(snapshot.domain) and bool(
+                    snapshot.remote_agents or snapshot.offline_devices or snapshot.config_from
+                )
+            status = str(await self._attached_connect("status"))
+            return status.splitlines()[:1] != [NO_NETWORK]
+        domain = self._relay_network_domain()
+        if not domain and self._relay_commands is None:
+            # A second window does not own the relay; asking for status starts the bridge.
+            await self._run_connect_command("status")
+            domain = self._relay_network_domain()
+        return bool(domain) and not self._relay_alone()
+
+    def _relay_alone(self) -> bool:
+        """True when no other device is on this device's network (RelayState.is_alone)."""
+        try:
+            return self._relay_agent._state().state.is_alone()
+        except Exception:
+            return False  # cannot tell: keep the Connect screen's path
+
+    async def _guided_new_network(self) -> str:
+        """Start a network on kollabor.ai, then show the Connect screen with the
+        steps for the other computer; a reason string when it cannot."""
+        from .connect_guide import DEFAULT_DOMAIN
+
+        # A device alone on a network keeps it: connecting again re-attaches the same
+        # room (naming it if it has no name), so there is no second network.
+        domain = self._relay_network_domain() or DEFAULT_DOMAIN
+        if not await self._start_connect_network(domain):
+            # A half-set-up network of one (a 0.10.7 room with no domain and
+            # networking off) cannot be re-attached: leave it, as Join does, and
+            # start fresh. Never a network that has another device on it.
+            if await self._connect_has_network():
+                return f"connect: could not start a network on {domain}; try /connect"
+            try:
+                if self._attached():
+                    await self._attached_connect("leave")
+                else:
+                    await self._run_connect_command("leave")
+            except Exception:
+                logger.debug("guided setup: leaving a lone network failed")
+            domain = DEFAULT_DOMAIN
+            if not await self._start_connect_network(domain):
+                return f"connect: could not start a network on {domain}; try /connect"
+        return await self._open_connect_screen(
+            self._relay_network_domain() or domain, guide=True
+        )
+
+    async def _start_connect_network(self, domain: str) -> bool:
+        """Start a network on `domain` (the first device); True once one exists."""
+        from .relay_commands import NO_NETWORK
+
+        if not _looks_like_connect_target(domain):
+            return False
+        try:
+            if self._attached():
+                text = await self._attached_connect(domain)
+            else:
+                text = await self._run_connect_command(domain)
+        except Exception:
+            return False
+        first = str(text).splitlines()[:1]
+        return bool(first) and first[0].startswith("network ") and first[0] != NO_NETWORK
+
+    def _altview_stack(self):
+        """The AltView stack manager, created on first use."""
+        if not self.event_bus:
+            return None
+        stack_mgr = None
+        try:
+            stack_mgr = self.event_bus.get_service("altview_stack_manager")
+        except Exception:
+            pass
+        if not stack_mgr:
+            from kollabor_tui.altview.stack_manager import AltViewStackManager
+
+            renderer = self.event_bus.get_service("renderer")
+            stack_mgr = AltViewStackManager(self.event_bus, renderer)
+            self.event_bus.register_service("altview_stack_manager", stack_mgr)
+        return stack_mgr
+
+    def _say_connect(self, text: str) -> None:
+        """One system line in the chat, for a result no screen shows."""
+        renderer = self.event_bus.get_service("renderer") if self.event_bus else None
+        coordinator = getattr(renderer, "message_coordinator", None)
+        if coordinator is not None:
+            coordinator.display_message_sequence(
+                [("system", text, {"display_type": "info"})]
+            )
+
+    def _primary_name(self) -> str:
+        """The primary's device name once this device knows it, else ''.
+
+        The join binds the issuer's name when the issuer sent one, and the
+        first sealed config carries it too. A key label is a stand-in.
+        """
+        try:
+            from kollabor_config.managed_config import read_managed_config
+
+            from .device_names import key_label
+
+            state = self._relay_agent._state().state
+            inviter = state.inviter
+            if not inviter:
+                return ""
+            record = read_managed_config()
+            names = (
+                state.peer_devices.get(inviter),
+                record.primary_name if record and record.primary_key == inviter else None,
+            )
+            return next((n for n in names if n and n != key_label(inviter)), "")
+        except Exception:
+            return ""
+
+    def _say_join_line(self, line) -> None:
+        """The post-join line in the main pane, once, however the form went: a form
+        closed before the approval never shows its own."""
+        tasks = self.__dict__.setdefault("_join_line_tasks", set())
+        task = asyncio.ensure_future(line.say(self.show_network_notice))
+        tasks.add(task)  # the set is what keeps a detached task alive
+        task.add_done_callback(tasks.discard)
+
+    async def _connect_home(self, *, guide: bool = False) -> str:
+        """Bare /connect: the Connect screen on a network, the code form off one.
+
+        ``guide`` (the first-launch notice) adds the steps for the other computer.
+        """
+        from .relay_commands import NO_NETWORK
+
+        status = None
+        snapshot = None
+        if self._attached():
+            # The daemon owns the relay, so the screen's data and decisions
+            # come from it over the state service. A daemon too old to send a
+            # snapshot only has its status text to show; one that lost the
+            # workspace lock to another window sends a read-only snapshot.
+            snapshot = await self._attached_connect_snapshot()
+            if snapshot is None:
+                status = str(await self._attached_connect("status"))
+            domain = snapshot.domain if snapshot is not None else ""
+        else:
+            if self._relay_commands is None:
+                # A second window in the workspace does not own the relay
+                # either; asking for status also starts the bridge, which may
+                # elect this window the owner after all.
+                status = str(await self._run_connect_command("status"))
+                if self._relay_commands is not None:
+                    status = None
+            domain = self._relay_network_domain()
+        if (snapshot is not None and snapshot.read_only) or self._relay_owned_elsewhere():
+            # Another window runs the network: this one still opens the
+            # screen, read-only, and says so.
+            return await self._open_connect_screen(domain, snapshot=snapshot)
+        if status is not None:
+            if status.splitlines()[:1] == [NO_NETWORK]:
+                return await self._open_connect_altview("kollabor.ai")
+            return status
+        if not domain:
+            return await self._open_connect_altview("kollabor.ai")
+        return await self._open_connect_screen(domain, snapshot=snapshot, guide=guide)
 
     async def _open_connect_altview(self, domain: str = "kollabor.ai") -> str:
         """Open the private enrollment form without putting its code in chat."""
@@ -8534,10 +9576,39 @@ class HubPlugin(BasePlugin):
                 ConnectOutcome,
             )
 
+            from .connect_guide import post_join_line
+
+            def outcome_of(result, domain: str):
+                if not isinstance(result, dict):
+                    return ConnectOutcome.error()
+                status = result.get("status")
+                if status == "pending":
+                    try:
+                        return ConnectOutcome.pending(result.get("receipt_id"))
+                    except (TypeError, ValueError):
+                        return ConnectOutcome.error()
+                if status == "approved":
+                    # The daemon names the network, device and trust level; a
+                    # window cannot know them, and an older daemon sends none.
+                    # A daemon that sends a note sends "" while it still waits for
+                    # the primary's name; only one that sends none (an older daemon)
+                    # gets the generic line here.
+                    note = result.get("note")
+                    try:
+                        return ConnectOutcome.approved(
+                            result.get("detail") or self._joined_line(domain),
+                            post_join_line() if note is None else note,
+                        )
+                    except (TypeError, ValueError):
+                        return ConnectOutcome.approved()
+                if status == "rejected":
+                    return ConnectOutcome.rejected()
+                return ConnectOutcome.error()
+
             async def submit(submission):
                 try:
                     code = submission.code.reveal()
-                    if getattr(getattr(self, "_cli_args", None), "attach", None):
+                    if self._attached():
                         state = self.event_bus.get_service("state_service")
                         result = await state.hub_enroll(submission.domain, code)
                     else:
@@ -8546,36 +9617,27 @@ class HubPlugin(BasePlugin):
                         )
                 except Exception:
                     return ConnectOutcome.error()
+                return outcome_of(result, submission.domain)
 
-                if not isinstance(result, dict):
-                    return ConnectOutcome.error()
-                status = result.get("status")
-                if status == "pending":
-                    receipt_id = result.get("receipt_id")
-                    try:
-                        return ConnectOutcome.pending(receipt_id)
-                    except (TypeError, ValueError):
-                        return ConnectOutcome.error()
-                if status == "approved":
-                    return ConnectOutcome.approved()
-                if status == "rejected":
-                    return ConnectOutcome.rejected()
-                return ConnectOutcome.error()
+            async def wait(receipt_id: str, target_domain: str):
+                """Where the request stands; raises when that cannot be told."""
+                if self._attached():
+                    state = self.event_bus.get_service("state_service")
+                    result = await state.hub_enroll_status(receipt_id)
+                else:
+                    result = await self._connect_enrollment_status(receipt_id)
+                return outcome_of(result, target_domain)
 
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
+            async def attach(domain: str) -> bool:
+                """No code: this is the first device, so start a network."""
+                return await self._start_connect_network(domain)
 
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            stack_mgr = self._altview_stack()
 
             await stack_mgr.push(
-                ConnectAltView(domain=domain, on_submit=submit),
+                ConnectAltView(
+                    domain=domain, on_submit=submit, on_attach=attach, on_wait=wait
+                ),
                 "connect",
                 reuse=False,
             )
@@ -8584,8 +9646,24 @@ class HubPlugin(BasePlugin):
             # UI initialization failures must not include the private code.
             return "connect: private enrollment view is unavailable"
 
+    def _joined_line(self, domain: str) -> str:
+        """`joined <network> as <device>. trust: <level>` once a join is approved."""
+        device = self._relay_device_name()
+        if not device:
+            return f"joined {domain}"
+        network = self._relay_network_name(self._relay_network_domain() or domain)
+        return f"joined {network} as {device}. trust: {self._relay_trust_level()}"
+
     async def _run_connect_enrollment(self, domain: str, code: str) -> dict[str, str]:
-        """Run typed enrollment in the daemon that owns the local identity."""
+        """Start typed enrollment in the daemon that owns the local identity.
+
+        Returns as soon as the relay holds the join request: ``pending`` plus
+        an opaque receipt for ``_connect_enrollment_status``. The wait for the
+        other device's decision goes on in a task here, so no caller (an
+        attached window's RPC loop included) blocks for as long as a person
+        takes to answer. A failure before the request is submitted comes back
+        as the final result.
+        """
         if (
             not isinstance(domain, str)
             or not domain
@@ -8595,6 +9673,7 @@ class HubPlugin(BasePlugin):
             or len(code) > 128
         ):
             return {"error": "invalid connect enrollment request"}
+        failed = {"error": "connect request could not be submitted"}
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -8602,30 +9681,116 @@ class HubPlugin(BasePlugin):
             enroll = getattr(self._relay_agent, "enroll_device", None)
             if enroll is None:
                 return {"error": "connect enrollment is unavailable"}
-            result = await enroll(domain, code)
         except Exception:
             # Enrollment exceptions may contain secrets; keep this boundary
             # deliberately quiet and return only a fixed status.
-            return {"error": "connect request could not be submitted"}
-        if not isinstance(result, dict):
-            return {"error": "connect request could not be submitted"}
-        status = result.get("status")
-        if status == "pending" and isinstance(result.get("receipt_id"), str):
-            return {"status": "pending", "receipt_id": result["receipt_id"]}
-        if isinstance(status, str) and status in {"approved", "rejected"}:
-            return {"status": status}
-        return {"error": "connect request could not be submitted"}
+            return failed
+        submitted = asyncio.Event()
 
-    async def _open_connect_offer_altview(self, domain: str = "kollabor.ai") -> str:
-        """Create and display an enrollment code only in the private view."""
-        if not self.event_bus:
-            return "connect: private offer view is unavailable"
+        async def run() -> dict[str, str]:
+            try:
+                result = await enroll(domain, code, on_submitted=submitted.set)
+            except Exception:
+                return failed
+            status = result.get("status") if isinstance(result, dict) else None
+            if status == "approved":
+                try:
+                    from .connect_guide import JoinLine
+
+                    line = JoinLine(self._primary_name)
+                    self._say_join_line(line)
+                    return {
+                        "status": "approved",
+                        "detail": self._joined_line(domain),
+                        "note": line.text(),
+                    }
+                except Exception:
+                    return {"status": "approved"}
+            return {"status": "rejected"} if status == "rejected" else failed
+
+        joins = self.__dict__.setdefault("_connect_joins", {})
+        receipt = secrets.token_hex(8)
+        task = asyncio.ensure_future(run())
+        joins[receipt] = task  # the dict is what keeps a detached task alive
+        task.add_done_callback(
+            lambda _task: asyncio.get_running_loop().call_later(
+                _CONNECT_JOIN_KEEP_SECONDS, joins.pop, receipt, None
+            )
+        )
+        waiter = asyncio.ensure_future(submitted.wait())
         try:
-            from plugins.altview.connect_altview import ConnectOfferAltView
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if task.done():
+            joins.pop(receipt, None)
+            return failed if task.cancelled() else task.result()
+        return {"status": "pending", "receipt_id": receipt}
+
+    async def _connect_enrollment_status(self, receipt_id: str) -> dict[str, str]:
+        """Where a started join stands, without waiting.
+
+        ``failed`` means the daemon ended the attempt (the offer expired, was
+        used, or the relay refused); an unknown receipt raises, because the
+        daemon cannot say what became of a request it no longer tracks.
+        """
+        task = self.__dict__.get("_connect_joins", {}).get(receipt_id)
+        if task is None:
+            raise ValueError("connect request is not tracked")
+        if not task.done():
+            return {"status": "pending", "receipt_id": receipt_id}
+        result = {} if task.cancelled() else task.result()
+        return result if result.get("status") else {"status": "failed"}
+
+    async def _connect_snapshot(self):
+        """The Connect screen's data; only the process that owns the relay has it.
+
+        A process that lost the workspace lock to another window can still say
+        what the shared state knows, marked read-only, so the window attached
+        to it shows the same one line a second window does.
+        """
+        commands = self._relay_commands
+        if commands is None:
+            if self._relay_owned_elsewhere():
+                return self._shared_state_snapshot(self._relay_network_domain())
+            raise ValueError("connect screen unavailable")
+        return await commands.connect_snapshot()
+
+    async def _decide_join_request(self, enrollment_id: str, decision: str) -> str:
+        """Accept or reject one join request; "" when decided, else the reason."""
+        from .relay_state import RelayError
+
+        try:
+            await self._relay_agent.decide_enrollment_request(
+                enrollment_id,
+                decision=decision,
+                source_agent=self._identity.agent_id,
+            )
+        except RelayError as exc:
+            return str(exc)  # already operator-safe text
+        except Exception:
+            return "try again"
+        return ""
+
+    async def _open_connect_screen(
+        self, domain: str, *, code_only: bool = False, snapshot=None, guide: bool = False
+    ) -> str:
+        """Open the Connect screen; `/connect code` opens only its private code.
+
+        The join code is created here and shown only in the private view: it
+        never goes through the message coordinator, history, or a log.
+        ``snapshot`` is the attached daemon's, when the caller already has it.
+        """
+        if not self.event_bus:
+            return "connect: the Connect screen is unavailable"
+        try:
+            from plugins.altview.connect_altview import ConnectScreenAltView
+
+            from .relay_commands import ConnectSnapshot
 
             async def create_offer(target_domain: str) -> dict[str, str]:
                 try:
-                    if getattr(getattr(self, "_cli_args", None), "attach", None):
+                    if self._attached():
                         state = self.event_bus.get_service("state_service")
                         result = await state.hub_enrollment_offer(target_domain)
                     else:
@@ -8638,71 +9803,125 @@ class HubPlugin(BasePlugin):
                     else {"error": "connect offer could not be created"}
                 )
 
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
+            async def load():
+                if self._attached():
+                    state = self.event_bus.get_service("state_service")
+                    return ConnectSnapshot.from_wire(await state.hub_connect_snapshot())
+                return await self._connect_snapshot()
 
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
-
-            await stack_mgr.push(
-                ConnectOfferAltView(domain=domain, on_create=create_offer),
-                "connect-offer",
-                reuse=False,
-            )
-            return ""
-        except Exception:
-            return "connect: private offer view is unavailable"
-
-    async def _open_contact_request_altview(self, domain: str) -> str:
-        """Open private entry for an opaque unknown-agent introduction."""
-        if not self.event_bus:
-            return "connect: private contact view is unavailable"
-        try:
-            from plugins.altview.contact_altview import (
-                ContactRequestAltView,
-                ContactSubmissionOutcome,
-            )
-
-            async def submit(submission):
-                try:
-                    result = await self._run_connect_contact_request(
-                        submission.domain,
-                        submission.recipient_key,
-                        submission.introduction.reveal(),
+            async def decide(row, decision: str):
+                """None when decided; otherwise the reason it was not."""
+                if self._attached():
+                    state = self.event_bus.get_service("state_service")
+                    reason = await state.hub_connect_decide(row.enrollment_id, decision)
+                else:
+                    reason = await self._decide_join_request(
+                        row.enrollment_id, decision
                     )
-                except Exception:
-                    return ContactSubmissionOutcome()
-                receipt = result.get("receipt_id") if isinstance(result, dict) else None
-                try:
-                    return ContactSubmissionOutcome(receipt)
-                except (TypeError, ValueError):
-                    return ContactSubmissionOutcome()
+                return reason or None
 
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
+            stack_mgr = self._altview_stack()
 
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            # Another window owns the relay: a code, a request and a decision
+            # all live there, so this screen shows what the shared state says
+            # and offers nothing else.
+            read_only = await self._read_only_snapshot(domain, snapshot)
             await stack_mgr.push(
-                ContactRequestAltView(domain=domain, on_submit=submit),
-                "contact-request",
+                ConnectScreenAltView(
+                    domain=domain,
+                    on_create=create_offer,
+                    on_load=None if code_only else load,
+                    on_decide=None if code_only else decide,
+                    code_only=code_only,
+                    snapshot=None if code_only else read_only,
+                    note=CONNECT_OWNED_ELSEWHERE if read_only is not None else "",
+                    guide=guide,
+                ),
+                "connect-code" if code_only else "connect-screen",
                 reuse=False,
             )
             return ""
         except Exception:
-            return "connect: private contact view is unavailable"
+            return "connect: the Connect screen is unavailable"
+
+    async def _run_connect_knock(self, rest: str) -> str:
+        """`/connect knock <route> "text"` -- no private form, no keys.
+
+        A route is public (it is copied, never typed), so unlike a join code
+        it is a plain command argument.
+        """
+        parts = rest.split(None, 1)
+        if len(parts) != 2 or not parts[1].strip():
+            return _KNOCK_USAGE
+        route_token, text = parts[0], parts[1].strip()
+        if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+            text = text[1:-1]
+        try:
+            domain, route_hex = _parse_knock_route(route_token)
+        except ValueError:
+            return _KNOCK_USAGE
+        from plugins.hub.contact_requests import ContactProtocolError, validate_introduction
+
+        try:
+            introduction = validate_introduction(text)
+        except ContactProtocolError:
+            return _KNOCK_USAGE
+        if self._attached():
+            return await self._attached_knock(domain, route_hex, introduction)
+        return await self._send_knock(domain, route_hex, introduction)
+
+    async def _attached_knock(self, domain: str, route_hex: str, introduction: str) -> str:
+        """The daemon owns the relay: it sends the knock and says how it went."""
+        from kollabor_rpc import RpcMethodNotFound
+
+        bus = getattr(self, "event_bus", None)
+        state = bus.get_service("state_service") if bus else None
+        handler = getattr(state, "hub_contact_knock", None)
+        if handler is None:
+            return CONNECT_NO_CONTACT_DAEMON
+        try:
+            return await handler(domain, route_hex, introduction)
+        except RpcMethodNotFound:
+            return CONNECT_NO_CONTACT_DAEMON
+        except Exception:
+            return "connect: knock could not be sent"
+
+    async def _send_knock(self, domain: str, route_hex: str, introduction: str) -> str:
+        """Send one knock from the process that owns the relay.
+
+        Runs here in a single-process window and in the daemon for an attached
+        one; the text is what the human reads either way.
+        """
+        from plugins.hub.contact_requests import ContactProtocolError, validate_introduction
+
+        try:
+            introduction = validate_introduction(introduction)
+        except ContactProtocolError:
+            return _KNOCK_USAGE
+        if self._identity is None or self._rpc_server is None:
+            return "connect: knock is unavailable"
+        try:
+            await self._start_relay_agent()
+            submit = getattr(self._relay_agent, "submit_contact_request", None)
+            if submit is None:
+                return "connect: knock is unavailable"
+            result = await submit(
+                domain, route_hex, introduction, source_agent=self._identity.agent_id
+            )
+        except Exception:
+            return "connect: knock could not be sent"
+        if isinstance(result, dict) and result.get("status") == "queued":
+            return f"knock sent to {domain}/c/{route_hex}"
+        error = result.get("error") if isinstance(result, dict) else None
+        reason = {
+            "unknown_route": "no one is registered at that route right now",
+            "ambiguous_route": "that route is ambiguous; ask for a fresh one",
+            "capacity": "too many pending knocks right now; try again later",
+            "rate_limited": "too many knocks; wait a moment and try again",
+            "conflict": "that introduction was already sent",
+            "invalid_request": "that route or text is not valid",
+        }.get(error, "could not reach that contact route")
+        return f"connect: {reason}"
 
     async def _open_contact_review_altview(self, domain: str) -> str:
         """Open the local-only review view for requests addressed to this key."""
@@ -8710,53 +9929,51 @@ class HubPlugin(BasePlugin):
             return "connect: private contact review is unavailable"
         try:
             from plugins.altview.contact_altview import ContactReviewAltView
-            from plugins.hub.contact_requests import (
-                PendingContactRequest,
-                PrivateMessage,
-            )
+
+            attached = self._attached()
+            state = self.event_bus.get_service("state_service") if attached else None
+            # An attached window reads and decides through the daemon that owns
+            # the relay. Asking once here tells a daemon that predates the knock
+            # RPCs apart, and the screen shows what was asked.
+            fetched = None
+            if attached:
+                from kollabor_rpc import RpcMethodNotFound
+
+                try:
+                    fetched = await state.hub_contact_pending(domain)
+                except RpcMethodNotFound:
+                    return CONNECT_NO_CONTACT_DAEMON
+                except Exception:
+                    fetched = None  # the screen says the inbox is unavailable
 
             async def load():
-                rows = await self._run_connect_contact_pending(domain)
-                requests = []
-                for row in rows:
-                    if (
-                        not isinstance(row, dict)
-                        or set(row)
-                        != {"receipt_id", "sender_key", "expires_at", "introduction"}
-                        or not isinstance(row["receipt_id"], str)
-                        or not re.fullmatch(r"[0-9a-f]{32}", row["receipt_id"])
-                        or not isinstance(row["sender_key"], str)
-                        or not re.fullmatch(r"[0-9a-f]{64}", row["sender_key"])
-                        or type(row["expires_at"]) is not int
-                        or not isinstance(row["introduction"], str)
-                    ):
-                        raise ValueError("invalid private contact request")
-                    requests.append(
-                        PendingContactRequest(
-                            row["receipt_id"],
-                            row["sender_key"],
-                            row["expires_at"],
-                            PrivateMessage(row["introduction"]),
-                        )
+                nonlocal fetched
+                rows, fetched = fetched, None
+                if rows is None:
+                    rows = await (
+                        state.hub_contact_pending(domain)
+                        if attached
+                        else self._run_connect_contact_pending(domain)
                     )
-                return requests
+                return _contact_requests(rows)
 
-            async def decide(receipt_id: str, decision: str):
-                return await self._run_connect_contact_decision(
-                    domain, receipt_id, decision
+            async def decide(request, decision: str):
+                """None when decided; otherwise the reason it was not."""
+                args = (
+                    domain,
+                    request.receipt_id,
+                    decision,
+                    request.sender_key,
+                    request.device_name,
                 )
+                reason = await (
+                    state.hub_contact_decide(*args)
+                    if attached
+                    else self._decide_contact_request(*args)
+                )
+                return reason or None
 
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
-
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            stack_mgr = self._altview_stack()
             await stack_mgr.push(
                 ContactReviewAltView(domain, load, decide),
                 "contact-review",
@@ -8765,25 +9982,6 @@ class HubPlugin(BasePlugin):
             return ""
         except Exception:
             return "connect: private contact review is unavailable"
-
-    async def _run_connect_contact_request(
-        self, domain: str, recipient_key: str, introduction: str
-    ) -> dict[str, str]:
-        if self._identity is None or self._rpc_server is None:
-            return {"error": "unavailable"}
-        try:
-            await self._start_relay_agent()
-            submit = getattr(self._relay_agent, "submit_contact_request", None)
-            if submit is None:
-                return {"error": "unavailable"}
-            return await submit(
-                domain,
-                recipient_key,
-                introduction,
-                source_agent=self._identity.agent_id,
-            )
-        except Exception:
-            return {"error": "transport"}
 
     async def _run_connect_contact_pending(self, domain: str):
         if self._identity is None or self._rpc_server is None:
@@ -8795,7 +9993,13 @@ class HubPlugin(BasePlugin):
         return await pending(domain, source_agent=self._identity.agent_id)
 
     async def _run_connect_contact_decision(
-        self, domain: str, receipt_id: str, decision: str
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        *,
+        sender_key: str,
+        device_name: str,
     ):
         if self._identity is None or self._rpc_server is None:
             raise ValueError("contact review unavailable")
@@ -8808,7 +10012,47 @@ class HubPlugin(BasePlugin):
             receipt_id,
             decision=decision,
             source_agent=self._identity.agent_id,
+            sender_key=sender_key,
+            device_name=device_name,
         )
+
+    async def _contact_pending(self, domain: str):
+        """The knocks waiting for this device; an empty domain means its own network."""
+        return await self._run_connect_contact_pending(
+            domain or self._relay_network_domain() or "kollabor.ai"
+        )
+
+    async def _decide_contact_request(
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        sender_key: str,
+        device_name: str,
+    ) -> str:
+        """Accept or reject one knock; "" when decided, else the reason it was not."""
+        result = await self._run_connect_contact_decision(
+            domain or self._relay_network_domain() or "kollabor.ai",
+            receipt_id,
+            decision,
+            sender_key=sender_key,
+            device_name=device_name,
+        )
+        if isinstance(result, dict) and "status" in result:
+            return ""
+        error = result.get("error") if isinstance(result, dict) else None
+        if error == "already_named":
+            try:
+                old = self._relay_agent._peer_name(sender_key)
+            except Exception:
+                old = "another name"
+            return f"this device is already on your network as {old}"
+        return {
+            "name_taken": "that device name is already on this network",
+            "capacity": "too many approved devices or pending knocks",
+            "conflict": "that knock was already decided",
+            "unavailable": "that knock is no longer available",
+        }.get(error, "try again")
 
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device enrollment offer in the owning relay daemon."""
@@ -8842,10 +10086,7 @@ class HubPlugin(BasePlugin):
             and isinstance(expires_at, str)
             and expires_at.isdigit()
             and isinstance(code, str)
-            and re.fullmatch(
-                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
-                code,
-            )
+            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
         ):
             return {
                 "status": "offered",
@@ -8949,6 +10190,7 @@ class HubPlugin(BasePlugin):
             text = await self._read_hub_text_via_state_service("get_hub_status_text")
             if text is not None:
                 return text
+            await self._refresh_remote_agent_rows()
             return self._format_status()
         elif subcmd == "whoami":
             text = await self._read_hub_text_via_state_service("get_hub_whoami_text")
@@ -9278,6 +10520,15 @@ class HubPlugin(BasePlugin):
         header = f"[{peer.identity}]"
         return header + "\n" + "\n".join(output_lines)
 
+    @staticmethod
+    def _remote_target_refusal(target: Any) -> str | None:
+        """capture, spawn and stop stay local; a remote handle is refused with
+        a hint to message that agent instead (constitution section 7)."""
+        target = str(target or "").strip()
+        if parse_handle(target) is None:
+            return None
+        return f"not allowed on a remote device; ask {target} to do it"
+
     async def _handle_spawn_command(self, rest: Any) -> str:
         """Handle /hub spawn <name> <task>.
 
@@ -9291,6 +10542,10 @@ class HubPlugin(BasePlugin):
           3. Explicit identity + type: name is identity, type attr overrides
              → e.g. name="lapis" type="research"
         """
+        first = str(rest.get("name", "") if isinstance(rest, dict) else rest or "").split()
+        refusal = self._remote_target_refusal(first[0] if first else "")
+        if refusal:
+            return refusal
         orch = self._get_orchestrator()
         if not orch:
             return "error: agent orchestrator not available"
@@ -9570,10 +10825,13 @@ class HubPlugin(BasePlugin):
         names, or "all". Hub identities capture directly over peer sockets.
         Orchestrator session names still route through agent_orchestrator.
         """
+        args = rest.split() if rest.strip() else []
+        refusal = self._remote_target_refusal(args[0] if args else "")
+        if refusal:
+            return refusal
         orch = self._get_orchestrator()
         if not orch:
             return "error: agent orchestrator not available"
-        args = rest.split() if rest.strip() else []
         if not args:
             return "usage: /hub capture <identity|name|all> [lines]"
 
@@ -9620,6 +10878,9 @@ class HubPlugin(BasePlugin):
         target = rest.strip()
         if not target:
             return "usage: /hub wake <identity>"
+        refusal = self._remote_target_refusal(target)
+        if refusal:
+            return refusal
 
         if not self._presence:
             return "hub not active"
@@ -9740,6 +11001,9 @@ class HubPlugin(BasePlugin):
         target = rest.strip()
         if not target:
             return "usage: /hub stop <identity|all>"
+        refusal = self._remote_target_refusal(target)
+        if refusal:
+            return refusal
 
         if not self._presence or not self._identity:
             return "hub not active"
@@ -9989,6 +11253,22 @@ class HubPlugin(BasePlugin):
                 "  clear"
             )
 
+    @staticmethod
+    def _cron_target_error(target: str) -> str:
+        """Why `target` cannot be a cron target, or "" when it can.
+
+        A name, `all` or `*` is left to the fire path as before. Anything shaped
+        like a network address has to be a real agent@device: a relay: address
+        or a half-typed handle would never resolve. Whether the device is online
+        is not asked here; an offline remote is fine to schedule.
+        """
+        if target.startswith("relay:") or ("@" in target and not parse_handle(target)):
+            return (
+                "bad target: use an agent name, or agent@device as "
+                "/connect status lists it"
+            )
+        return ""
+
     def _cron_add(self, args: str) -> str:
         """Add a new cron job: /hub cron add <target> <interval> <message>."""
         parts = args.strip().split(maxsplit=2)
@@ -9996,6 +11276,13 @@ class HubPlugin(BasePlugin):
             return "usage: /hub cron add <target> <interval> <message>"
 
         target, interval_str, message = parts
+
+        error = self._cron_target_error(target)
+        if error:
+            return error
+        handle = parse_handle(target)
+        if handle:
+            target = format_handle(*handle)
 
         try:
             interval_seconds = _parse_interval(interval_str)
@@ -10030,6 +11317,8 @@ class HubPlugin(BasePlugin):
                 f" | next in {self._format_seconds(remaining)}"
             )
             lines.append(f"    msg: {job.message[:80]}")
+            if job.last_error:
+                lines.append(f"    last fire failed: {job.last_error[:80]}")
         return "\n".join(lines)
 
     def _cron_delete(self, job_id: str) -> str:
@@ -10805,6 +12094,13 @@ class HubPlugin(BasePlugin):
             proj = f" [{a.project}]" if a.project else ""
             lines.append(f"  {a.identity}{role}{me}: {state_str}{proj}{task}")
 
+        for row in self._remote_agent_rows():
+            handle = row.get("handle") or format_handle(
+                row.get("name", "?"), row.get("device", "?")
+            )
+            online_str = "online" if row.get("online") else "offline"
+            lines.append(f"  {handle} - {row.get('state', 'unknown')} (device {online_str})")
+
         pending = self._work_queue.get_pending() if self._work_queue else []
         if pending:
             lines.append(f"\nwork queue: {len(pending)} pending")
@@ -10932,7 +12228,8 @@ class HubPlugin(BasePlugin):
             self._identity.identity if self._identity else COORDINATOR_IDENTITY
         )
 
-        if live_target is not None:
+        # A remote agent@device is never in local presence; the network owns it.
+        if live_target is not None or parse_handle(target) is not None:
             message = HubMessage(
                 action="message",
                 from_agent="human",
@@ -10986,12 +12283,17 @@ class HubPlugin(BasePlugin):
         rejections = await self._route_message(msg)
         if rejections:
             parts = [f"{ident}: {reason}" for ident, reason in rejections]
+            if parse_handle(target) is not None:
+                # A remote reason is complete; force does not apply to it.
+                return f"rejected: {'; '.join(parts)}"
             return (
                 f"rejected: {'; '.join(parts)}. " f'use force="true" to break through.'
             )
         return f"sent to {target}"
 
-    async def _handle_broadcast_command(self, content: str, force: bool = False) -> str:
+    async def _handle_broadcast_command(
+        self, content: str, force: bool = False, scope: str = ""
+    ) -> str:
         if not content:
             return "usage: /hub broadcast <message>"
         msg = HubMessage(
@@ -11008,6 +12310,39 @@ class HubPlugin(BasePlugin):
             return "broadcast sent (hub not fully initialized)"
         agents = self._presence.get_cached_agents()
         base = f"broadcast to {len(agents)} agent(s)"
+
+        # scope="network": under open trust, also reach every online remote
+        # agent (docs/specs/agent-network-simple-flow.md section 7). Any
+        # other trust level stays local-only -- messaging a stranger's
+        # device needs an explicit allow, not a broadcast.
+        if scope == "network" and self._relay_trust_level() == "open":
+            relay = getattr(self, "_relay_agent", None)
+            resolve = getattr(relay, "resolve_handle", None)
+            send = getattr(relay, "send", None)
+            is_stranger = getattr(relay, "is_stranger", None)
+            reached = 0
+            if callable(resolve) and callable(send):
+                from .relay_state import RelayError
+
+                for row in await self._refresh_remote_agent_rows():
+                    if not row.get("online"):
+                        continue
+                    if callable(is_stranger) and is_stranger(row.get("address", "")):
+                        continue  # an accepted stranger is not on this network
+                    handle = row.get("handle") or format_handle(
+                        row.get("name", "?"), row.get("device", "?")
+                    )
+                    try:
+                        address = resolve(handle)
+                        if inspect.isawaitable(address):
+                            address = await address
+                        receipt = await send(address, content, kind="message")
+                        if not _receipt_refusal(receipt):
+                            reached += 1
+                    except RelayError:
+                        continue
+            base += f"; {reached} network agent(s)"
+
         if rejections:
             parts = [f"{ident}: {reason}" for ident, reason in rejections]
             base += f" (rejected: {'; '.join(parts)})"
@@ -11434,6 +12769,138 @@ class HubPlugin(BasePlugin):
                 )
         except Exception as e:
             logger.debug("Attacher input inject error (%s)", type(e).__name__)
+
+    async def _handle_network_status_request(self) -> Dict[str, Any]:
+        """Answer the CLI's `network_status` socket request.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: `kollab --hub
+        status` asks one online local agent for the network section instead
+        of reading relay state off disk itself. Never raises -- an
+        unavailable relay is "not connected", not a CLI crash.
+        """
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            try:
+                await self._start_relay_agent()
+            except Exception as e:
+                logger.debug("network_status: relay agent unavailable: %s", e)
+            relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            return {"device": "", "trust": "", "agents": []}
+
+        agents: List[dict] = []
+        try:
+            result = relay.remote_agents()
+            if asyncio.iscoroutine(result):
+                result = await result
+            if isinstance(result, list):
+                # Rows carry the relay: address; the CLI never gets it.
+                agents = [
+                    {k: v for k, v in row.items() if k not in ("address", "workspace_id")}
+                    for row in result
+                    if isinstance(row, dict)
+                ]
+        except Exception as e:
+            logger.debug("network_status: remote_agents failed: %s", e)
+
+        device, trust = "", ""
+        try:
+            device = relay.device_name() or ""
+            trust = relay.trust_level() or ""
+        except Exception as e:
+            logger.debug("network_status: device/trust unavailable: %s", e)
+
+        return {"device": device, "trust": trust, "agents": agents}
+
+    async def _handle_network_send_request(
+        self, to: str, content: str, wait_seconds: int
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Answer the CLI's `network_send` socket request, one frame at a time.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: deliver
+        ``content`` to the ``agent@device`` handle ``to`` as an ordinary hub
+        message (so it shows on this daemon's screen and the receiving
+        agent runs it with its own tools), then stream every reply on that
+        request's thread (`network_reply`, in order) until the far agent's
+        turn ends (`network_done`, or `error` when that turn failed) or
+        ``wait_seconds`` pass (`network_timeout`). ``wait_seconds <= 0``
+        returns right after sending (``--no-wait``).
+        """
+        handle = parse_handle(to)
+        if handle is None:
+            yield {"type": "error", "msg": f"not an agent@device handle: {to!r}"}
+            return
+        handle_str = format_handle(*handle)
+
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            try:
+                await self._start_relay_agent()
+            except Exception:
+                pass
+            relay = getattr(self, "_relay_agent", None)
+        resolve = getattr(relay, "resolve_handle", None)
+        if relay is None or resolve is None:
+            yield {
+                "type": "error",
+                "msg": "network messaging is not available on this build",
+            }
+            return
+
+        from .relay_state import RelayError
+
+        try:
+            result = resolve(handle_str)
+            if asyncio.iscoroutine(result):
+                await result
+        except RelayError as exc:
+            yield {"type": "error", "msg": str(exc)}
+            return
+
+        msg = HubMessage(
+            action="message",
+            from_agent=(self._identity.agent_id if self._identity else ""),
+            from_identity=(self._identity.identity if self._identity else ""),
+            to=handle_str,
+            content=content,
+            scope=MessageScope.DIRECT.value,
+        )
+        events: asyncio.Queue = asyncio.Queue()
+        self._cli_waiters[msg.thread_id] = events
+        try:
+            rejections = await self._route_message(msg)
+            self._display_outgoing_message(handle_str, content)
+            if rejections:
+                yield {"type": "error", "msg": rejections[0][1]}
+                return
+            if wait_seconds <= 0:
+                yield {"type": "network_sent", "to": handle_str}
+                return
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + wait_seconds
+            replies = 0
+            end = None  # (replies the far turn sent, failed, text)
+            # Done only when the far turn has ended AND every reply it sent has
+            # come: an end frame can overtake a reply that had to be retried.
+            while end is None or replies < end[0]:
+                try:
+                    event = await asyncio.wait_for(
+                        events.get(), timeout=max(0.0, deadline - loop.time())
+                    )
+                except asyncio.TimeoutError:
+                    yield {"type": "network_timeout", "replies": replies}
+                    return
+                if event[0] == "reply":
+                    replies += 1
+                    yield {"type": "network_reply", "from": event[1], "content": event[2]}
+                else:
+                    end = event[1:]
+            if end[1]:
+                yield {"type": "error", "msg": end[2]}
+            else:
+                yield {"type": "network_done", "replies": replies}
+        finally:
+            self._cli_waiters.pop(msg.thread_id, None)
 
     async def _on_remote_shutdown(self, reason: str = "") -> None:
         """Handle shutdown signal received via hub socket.

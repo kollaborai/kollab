@@ -1,0 +1,205 @@
+{
+  "name": "config-managed-by",
+  "description": "A device whose primary syncs its settings shows them in /config as read-only rows marked 'managed by <primary>': the loadout and model rows, a synced setting, and never the API key. Settings the primary does not send still edit as before. Throwaway HOME, --no-daemon, no keyring (issue #121, Story 8).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-config-managed-by\"; cd \"$H\"; KOLLAB_NO_KEYRING=1 HOME=\"$H\" PYTHONPATH=\"$R:$R/packages/kollabor-agent/src:$R/packages/kollabor-ai/src:$R/packages/kollabor-config/src:$R/packages/kollabor-engine/src:$R/packages/kollabor-events/src:$R/packages/kollabor-plugins/src:$R/packages/kollabor-rpc/src:$R/packages/kollabor-tui/src:$R/packages/kollabor-webui/src:$R/packages/kollabor-voice/src\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "Throwaway HOME with synced settings and the managed-config record",
+      "command": "H=\"${TMPDIR:-/tmp}/kollab-spec-config-managed-by\"; mkdir -p \"$H/.kollab/private\"; chmod 700 \"$H/.kollab/private\"; ln -sfn \"$PWD/plugins\" \"$H/plugins\"; PYTHONPATH=\"$PWD\" \"$PWD/.venv/bin/python\" - \"$H\" <<'PY'\nimport json, sys\nfrom pathlib import Path\n\nhome = Path(sys.argv[1])\nkollab = home / \".kollab\"\nconfig = {\n    \"kollabor\": {\n        \"llm\": {\n            \"active_profile\": \"anthropic\",\n            \"max_history\": 50,\n            \"profiles\": {\n                \"anthropic\": {\n                    \"provider\": \"anthropic\",\n                    \"model\": \"claude-opus-5-5\",\n                    \"api_key\": \"sk-fake-config-managed-by-1f00\",\n                }\n            },\n        },\n        \"updates\": {\"check_enabled\": False},\n    },\n    \"plugins\": {\"hub\": {\"enabled\": False}},\n}\n(kollab / \"config.json\").write_text(json.dumps(config))\nkeys = [\n    [\"kollabor\", \"llm\", \"active_profile\"],\n    [\"kollabor\", \"llm\", \"max_history\"],\n    [\"kollabor\", \"llm\", \"profiles\", \"anthropic\", \"model\"],\n    [\"kollabor\", \"llm\", \"profiles\", \"anthropic\", \"api_key\"],\n]\nrecord = {\n    \"version\": 1,\n    \"primary_key\": \"a\" * 64,\n    \"primary_name\": \"laptop-kollab\",\n    \"revision\": 1,\n    \"digest\": \"d\" * 64,\n    \"keys\": keys,\n    \"mcp_servers\": [],\n    \"files\": {},\n}\npath = kollab / \"private\" / \"managed-config.json\"\npath.write_text(json.dumps(record))\npath.chmod(0o600)\nprint(\"fixture ready\")\nPY",
+      "assert_contains": "fixture ready"
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "❯",
+      "timeout": 20,
+      "description": "app ready at the input prompt"
+    },
+    {
+      "action": "section",
+      "title": "open /config and look for the loadout"
+    },
+    {
+      "action": "type",
+      "text": "/config"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 10,
+      "description": "config view painted"
+    },
+    {
+      "action": "type",
+      "text": "/"
+    },
+    {
+      "action": "type",
+      "text": "loadout",
+      "delay": 0.08
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Loadout: anthropic +managed by laptop-kollab",
+      "description": "the synced loadout is marked managed"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Model: claude-opus-5-5 +managed by laptop-kollab",
+      "description": "the synced model is marked managed"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "sk-fake|api_key",
+      "description": "the API key is never drawn"
+    },
+    {
+      "action": "section",
+      "title": "a synced row does not edit"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Space"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "arrow",
+      "direction": "Right"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Loadout: anthropic +managed by laptop-kollab",
+      "description": "still the same after Space, Enter and Right"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "unsaved",
+      "description": "nothing became a pending change"
+    },
+    {
+      "action": "section",
+      "title": "another synced setting, and one the primary does not send"
+    },
+    {
+      "action": "type",
+      "text": "/"
+    },
+    {
+      "action": "type",
+      "text": "max history",
+      "delay": 0.08
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Max History: 50 +managed by laptop-kollab",
+      "description": "a synced setting shows its synced value, read-only"
+    },
+    {
+      "action": "type",
+      "text": "/"
+    },
+    {
+      "action": "type",
+      "text": "streaming",
+      "delay": 0.08
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Enable Streaming",
+      "description": "an unsynced setting is still listed"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "managed by",
+      "description": "and not marked managed"
+    },
+    {
+      "action": "section",
+      "title": "close"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "System Configuration",
+      "description": "the view closed"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback|Exception",
+      "description": "no error text"
+    }
+  ]
+}

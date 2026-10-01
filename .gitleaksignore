@@ -3,3 +3,4 @@
 52bf8b1b45617e010420e0a9c43a7059e8ad5168:tests/unit/test_enrollment_codes.py:generic-api-key:11
 85c14f026d85917084607366ebfcd06e4202ee65:tests/unit/test_relay_agent_bridge.py:generic-api-key:571
 52bf8b1b45617e010420e0a9c43a7059e8ad5168:plugins/hub/dns/private_directory.py:generic-api-key:947
+7b652aabc4d56b48bfb80b9faf8c1a4e0376beec:plugins/hub/enrollment_client.py:generic-api-key:1778

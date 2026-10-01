@@ -140,7 +140,7 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
             HubMessage(
                 action="message",
                 from_agent="human",
-                from_identity="malmazan",
+                from_identity="me",
                 to="sapphire",
                 content="Please work on x.",
                 scope=MessageScope.DIRECT.value,

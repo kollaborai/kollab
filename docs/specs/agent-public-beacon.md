@@ -1,12 +1,17 @@
 # Kollab public beacon and encrypted agent transport
 
-Status: 0.9.0 release baseline plus Kollab 0.10.0's conversation and partial enrollment source. The public relay had a successful deployment check on 2026-09-27: two independent client hosts completed approved encrypted ping/pong through public WSS. See the [dated deployment summary](../operations/relay-deployment-2026-09-27.md). Those observations do not prove current liveness or real model conversations. Current source separates `/connect <domain>` public discovery/relay attachment from bare `/connect` private code entry. One-device/five-minute offers, proof handling, redacted request listing and explicit local accept/reject commands are present. When a supported active profile is available, acceptance also delivers allowlisted profile settings and one provider credential in a device-sealed bundle; roster access, workspace grants, and tool permissions remain unprovisioned. Current source integration and remaining full-network acceptance gates are tracked in the [implementation ledger](agent-network-implementation-status.md).
+> Product decisions and the `/connect` command surface live in
+> [agent-network-simple-flow.md](agent-network-simple-flow.md). This document is the wire
+> contract only; a command or flow that appears here and not there is not part of the design.
+
+Status: the relay routes described here run on kollabor.ai; the enrollment lookup and contact lookup routes and the cross-room links (`/relay/v1/contact/links`) ship with Kollab 0.11.0.
 
 ## Product boundary
 
 This is one optional subsystem of the Kollab app. It is not a separate relay product or a hosted account service.
 
-- `kollab relay serve` runs one relay worker. A worker can use an external Redis-compatible shared backend. Explicit `--dev-in-memory` is single-process development only.
+- `kollab relay serve --domain <domain>` runs a whole directory in one process: one relay worker on the in-memory backend, the signed discovery publisher and the key file (`/.well-known/agent-keys.json`) on the same port. It changes none of the routes below. See [the operations guide](../operations/kollabor-ai-discovery-publication.md).
+- `kollab relay serve --origin <origin>` runs one bare relay worker. A worker can use an external Redis-compatible shared backend. Explicit `--dev-in-memory` is single-process development only.
 - `kollab relay run --config <private-file>` supervises multiple workers and can manage one standalone Valkey sidecar. It does not provision a Redis/Valkey Cluster.
 - Multiple workers or hosts share an operator-provisioned standalone Redis/Valkey service or Redis/Valkey Cluster. Cluster mode uses sharded Pub/Sub and requires backend support for `SSUBSCRIBE` and `SPUBLISH`.
 - The signed Kollab domain descriptor is the locator. It advertises the same-origin control route only when the service is intentionally published. An identity-only publisher must not guess or advertise an absent relay.
@@ -39,17 +44,30 @@ uncommitted and has not been shown deployed. It is POST-only, rejects query
 strings, caps bodies at 64 KiB and proxies to workers. The public GET probe of
 `/relay/v1/enrollment/offers` returned 404 on 2026-09-27; no POST acceptance or
 deployed proxy-route check has been performed. See the [implementation
-ledger](agent-network-implementation-status.md).
+ledger](agent-network-simple-flow.md).
 
-The contact-request source registers three further POST routes, also in
+The contact-request source registers six further POST routes, also in
 `plugins/hub/relay_service.py`: `/relay/v1/contact/requests` (submit a sealed
 introduction), `/relay/v1/contact/inbox` (list requests addressed to a key),
-and `/relay/v1/contact/decisions` (accept or reject one). Same constraints:
+`/relay/v1/contact/decisions` (accept or reject one),
+`/relay/v1/contact/status` (the sender of a knock asks how it was decided:
+signed by the sender's key, answer `{"status":"pending"|"accepted"|"rejected"}`,
+404 `unavailable` for an unknown, expired or someone else's request id, the same
+answer for all three; a decided request stays readable for the knock's 24 hours),
+`/relay/v1/contact/lookup` (unsigned; body `{"v":1,"route":"<16 hex>"}`, answer
+`{"key":"<64 hex>"}`, 404 `unknown_route`, 409 `ambiguous_route`; the client
+recomputes the route from the returned key and refuses a mismatch), and
+`/relay/v1/contact/links` (a key's signed consent to reach other keys across
+rooms; see [Cross-room links](#cross-room-links)). Same constraints:
 POST-only, no query strings, 64 KiB application-wide body cap
 (`web.Application(client_max_size=...)`), proxy to workers. The companion
 `deploy/nginx.conf` checkout is not part of this source tree, so whether it
 proxies these routes could not be checked here; verify on the deployment host
-before relying on `/connect contact` against a public relay.
+before relying on `/connect knock` against a public relay.
+
+`/relay/v1/contact/status` is new in 0.11.0. A device whose directory predates
+it gets a plain 404, stops asking that directory (debug log only) and leaves a
+rejected knock to the seven-day expiry.
 
 The configured `origin` is the exact canonical external HTTPS origin, with no path or trailing slash. TLS and signed discovery must agree with it. The public descriptor advertises `control: <origin>/relay/v1` with `relay`/`rendezvous` roles only while the deployed service is intentionally published. The current public descriptor and service evidence are summarized above and in the deployment ledger.
 
@@ -58,10 +76,43 @@ Registration and routing:
 1. A connected peer receives `{type:"challenge", protocol:"kollab-relay/1", origin, nonce}`. Nonce is 64 lowercase hex characters; registration must arrive within 10 seconds.
 2. It sends `{type:"register", key, room, session, signature}`. The Ed25519 public key is 64 lowercase hex, the room capability is 256 random bits in 64 lowercase hex, and the session ID is 16 random bytes in 32 lowercase hex.
 3. The signature covers UTF-8 `kollab-relay/1\n<origin>\n<nonce>\n<key>\n<room>\n<session>` with no trailing newline. The server verifies possession before recording presence. It stores a hash of the room capability, not the raw capability.
-4. Success sends `registered`, then a recipient-specific `peers` snapshot excluding that recipient. Join, leave, and lease-expiry changes send updated snapshots. A room/key may have one live session; duplicate registration is rejected without replacing the current peer.
-5. A peer sends `{type:"send", to, id, ciphertext}`. The server checks exact frame shape, size, quota, and an online destination in the same room; it forwards ciphertext to that peer and waits for a bounded route acknowledgment. It never decrypts the payload or dials a caller-supplied address. Missing peers return `peer_offline`; messages are not queued.
+4. Success sends `registered`, then a recipient-specific `peers` snapshot excluding that recipient. Join, leave, and lease-expiry changes send updated snapshots. A room/key may have one live session; duplicate registration is rejected without replacing the current peer. Devices in other rooms that are linked to the recipient (see [Cross-room links](#cross-room-links)) are listed after the room's own peers in the same `{key, session}` shape.
+5. A peer sends `{type:"send", to, id, ciphertext}`. The server checks exact frame shape, size, quota, and an online destination in the same room, or a linked online destination in another room; it forwards ciphertext to that peer and waits for a bounded route acknowledgment. It never decrypts the payload or dials a caller-supplied address. Missing peers return `peer_offline`; messages are not queued.
 
 JSON parsing rejects duplicate keys and non-finite values. Frames are capped at 64 KiB; encoded ciphertext at 48 KiB. Per-connection ingress uses a 10-frame/second token bucket with burst 20. A route acknowledgment deadline is 3 seconds. Heartbeats are 20 seconds. The WebSocket profile rejects browser `Origin` headers and query parameters; credentials never go in a URL. `X-Real-IP` is trusted only when the immediate peer matches an exact configured proxy IP. `X-Forwarded-For` is not trusted.
+
+## Cross-room links
+
+An accepted stranger stays in its own room. Two devices in different rooms exchange sealed frames only while each of them has told the relay, with its own signature, that it consents to reach the other. The relay never takes one side's word for the other's consent, and it never enrolls a stranger into a room.
+
+**Declaration.** `POST /relay/v1/contact/links`, JSON:
+
+```json
+{"v":1,"key":"<64 hex>","peers":["<64 hex>"],"issued_at":1800921600,"nonce":"<32 hex>","signature":"<128 hex>"}
+```
+
+- The signature is the contact signature (domain `kollab-relay-contact-http/1`, method, canonical origin, path, canonical body without `signature`) made by `key`.
+- `peers` is sorted, has no duplicates, holds at most 64 keys and does not contain `key`. It replaces everything `key` declared before; an empty list withdraws.
+- The reply is `{"status":"stored"}` and nothing else. It does not say whether the other side has declared.
+- `key` must be registered on the WebSocket at that moment (403 `unauthorized`), which ties the stored declarations to live, connection-limited devices.
+- Same clock skew (120 s) and nonce replay window as the other contact routes, and the same per-source rate bucket (10 requests per 60 seconds). A request older than the stored declaration is refused (409 `conflict`), so a delayed request cannot undo a later withdrawal; a withdrawal keeps its timestamp for 5 minutes. At most 8,192 keys hold a declaration (429 `capacity`).
+- A declaration expires after 24 hours unless repeated. Devices repeat it after every relay registration, whenever their set changes, and every 6 hours.
+
+**Link.** Keys A and B are linked exactly while A's live declaration names B and B's names A. A link between two keys is not transitive and adds neither key to the other's room.
+
+**Routing.** A `send` frame goes to the destination in the sender's room as before. Only when that finds no one, the relay checks for a link with the destination key; if one exists and the destination is registered in any room, the ciphertext is forwarded to it with the same bounded acknowledgment. Anything else answers `peer_offline`, exactly as for an absent peer, so the answer never reveals whether a consent exists. The delivered `message` frame is unchanged.
+
+**Presence.** A registered device linked to the recipient appears in the recipient's `peers` snapshot after the room's own entries, as `{key, session}`. The whole snapshot stays within 256 entries; linked entries only fill what the room leaves. Registering, leaving, lease expiry and a declaration each push fresh snapshots to the affected rooms, and the 10-second room reconciliation repairs a missed one. Redis workers find a key's room through an expiring presence key beside the room lease.
+
+**Envelope binding.** The encrypted envelope's `room` field, the room hash between two members of one room, is for a stranger the hex of `sha256("kollab-relay-link/1\x00" || lower key || higher key)` over the two raw 32-byte keys, so both sides compute the same value. A message bound the other way is dropped by the client.
+
+**Device rules.** A client declares only the accepted strangers it approved (`links` in its relay state). A stranger reaches only the secure session and the `message`, `status`, `cancel` and `directory` operations, and the directory answer to a stranger lists only the agents it was allowed. Strangers get no mesh records (`peer.exchange`, `peer.forward`) and no network broadcast.
+
+**Compatibility.**
+
+- Old client, new relay: same-room registration, snapshots and routing are byte-identical. Linked entries appear in a snapshot only after two 0.11.0 devices declared each other, so an old client never receives one, and an entry it does not approve would be ignored anyway.
+- New client, old relay: `POST /relay/v1/contact/links` does not exist there (404 or a non-JSON reply). The client keeps the knock and the accept locally, retries the declaration at most once a minute, logs at debug level only, and nothing is delivered between the two networks until the directory is upgraded. Nothing about registration or same-room traffic changes.
+- Edge proxy: the route sits under the existing `POST /relay/v1/contact/` prefix, so a proxy that forwards that prefix needs no change.
 
 ## Shared state, quotas, and failure behavior
 
@@ -118,194 +169,5 @@ Clients use PyNaCl Ed25519-to-Curve25519 conversion and `Box` authenticated encr
 
 Encrypted envelope fields bind version, sender/recipient keys, sender/recipient sessions, room hash, message ID, timestamps, kind, and payload. The receiver checks the current session, room, peer key, expiry, replay ledger, and approval before processing. The 0.9.0 baseline supports `ping` and `pong`. Current source adds application request/response/cancel envelopes for directory, message, status and cancellation operations. A routing acknowledgment is not a destination receipt or task completion. An approved ping may return an explicitly disclosed workspace label and opaque workspace ID; it does not wake an LLM.
 
-The relay sees stable raw public keys, source IPs, room membership, timing, and ciphertext sizes. The same key is linkable across rooms. `Box` with long-lived device keys does not provide forward secrecy after key compromise. The service cannot revoke a copied room capability. A room rotation creates a new capability for this device and clears its local approvals; it does not invalidate an old invitation, close other members, or revoke old-room access at the relay. If an invite is exposed, rotate, distribute the new private invitation, and have affected peers explicitly disconnect/rejoin; treat the old room as still usable by existing holders.
+The relay sees stable raw public keys, source IPs, room membership, timing, and ciphertext sizes. The same key is linkable across rooms. It also sees which keys declared consent to which, so it knows which pairs of devices are linked; it still sees no frame contents. `Box` with long-lived device keys does not provide forward secrecy after key compromise. The service cannot revoke a copied room capability. A room rotation creates a new capability for this device and clears its local approvals; it does not invalidate an old invitation, close other members, or revoke old-room access at the relay. If an invite is exposed, rotate, distribute the new private invitation, and have affected peers explicitly disconnect/rejoin; treat the old room as still usable by existing holders.
 
-## Client workflow
-
-`/connect <domain>` verifies signed discovery and the durable origin pin before
-connecting to the exact same-origin relay route. `/hub dns connect <domain>` is
-an alias. Bare `/connect` and `/connect enroll [domain]` open a private
-code-entry view; enrollment discovery begins after code submission.
-`/connect offer [domain]` opens a private one-time-code offer view. Codes are
-not slash-command arguments. The client stores its stable device key and
-per-workspace room state under a private user state directory outside the
-project.
-
-### Code-enrollment source (Kollab 0.10.0, partial)
-
-`/connect offer [domain]` creates a single-device K1 offer that expires after
-five minutes. The issuer records a durable local delegation for the current
-agent/session, issuer, selected network IDs/profile, the sole `conversation:send`
-credential category, and a one-device maximum. The offer code is displayed in
-the private view; the enrollment UI returns status and receipt ID, not the code
-or credentials to model/tool history.
-
-After the joining device proves both code possession and its device key,
-current issuer source records a pending request. The local issuer reviews
-redacted metadata with `/connect requests` and must explicitly run
-`/connect accept <receipt-id>` or `/connect reject <receipt-id>`. Acceptance
-issues a `conversation:send` credential and room invitation, and may deliver an
-encrypted configuration bundle containing only the profile and provider
-credential material explicitly authorized by the delegation. The destination
-checks the issuer, recipient, workspace audience, scope, revision and expiry,
-then persists its signed install acknowledgment before posting it. Bounded local
-recovery journals resume the same enrollment round and exact acknowledgment
-after a client restart. This ships in Kollab 0.10.0; local regression tests
-do not prove the enrollment POST routes are deployed or the flow works between
-the Mac and `alzan-prod`. Enrollment grants no private roster, workspace-tool
-permission or shell access.
-See the canonical [delegated enrollment contract](agent-device-pairing.md#code-enrollment-and-delegated-approval).
-
-The invitation-file flow below describes the published 0.9.0 baseline; the new
-code UI ships in Kollab 0.10.0. Keep code input/output out of chat/model history, command
-arguments, logs, events and telemetry. Current public discovery and relay health
-do not establish that enrollment POST routes are deployed or usable.
-
-### Current installed invitation-file flow
-
-New laptop to existing workspace:
-
-1. On the existing workspace, run `/connect <domain>` and confirm `/connect status` says online.
-2. Run `/connect invite`. Kollab writes the capability to a private invitation file and displays only its path. Move that file through a private channel; do not paste its contents into chat, shell history, hooks, or an LLM prompt.
-3. On the new laptop, run `/connect join <local-invitation-file>`. This explicitly joins the inviter's room and pins the inviter's public key on the new endpoint. It authorizes room presence and routing only.
-4. On the existing workspace, inspect `/connect peers`, verify the full new public-key fingerprint through a trusted human channel, then run `/connect approve <64-hex-public-key>`.
-5. Run `/connect ping <64-hex-public-key>`. Only the encrypted ping/pong and the new endpoint's explicitly disclosed label/opaque workspace ID are exchanged. A later A2A conversation, task, workspace grant, or tool action requires its separate authorization flow.
-6. Use `/connect disconnect` to disable automatic reconnect for that workspace.
-
-`/connect rotate` moves only the local endpoint into a new room. It is not server-side revocation. `/connect revoke <key>` removes this endpoint's approval and pending requests; it does not revoke a key at another endpoint or grant authority to remaining peers.
-
-Automatic reconnect is scoped to the explicitly enabled workspace. Retries use bounded backoff; shutdown closes local sockets. The relay has no offline inbox. Current endpoint source admits typed messages into a bounded durable workspace queue only after separate receiver authorization, then uses Hub's normal model/tool pipeline. Presence and directory traffic never start model turns.
-
-### Discovering peers and agents
-
-There is no global directory to browse. `/connect <domain>` attaches this
-workspace to that domain's relay inside its own room; a fresh workspace's
-first attachment starts in a random, empty room with nobody else in it (see
-the product boundary above). Peers become visible only after an explicit
-pairing step puts two workspaces in the same room — the invitation-file flow
-above or an accepted enrollment offer.
-
-Once paired:
-
-1. `/connect peers` lists every other key currently online in this room and
-   whether it is locally approved.
-2. `/connect agents local` lists this machine's own agents (workspace ID,
-   agent ID, name) without opening a conversation or touching the network.
-3. `/connect agents <peer-public-key>` queries that one approved peer's agent
-   roster over the encrypted transport; `/connect agents` with no key queries
-   every currently approved peer in the room. Each row includes the full
-   `relay:<key>:<workspace-id>:<agent-id>` address the conversation commands
-   below need. Results are cached 15 seconds per peer/session.
-
-Only peers that share a relay room link in the peer mesh today; there is no
-cross-room or global agent search.
-
-### Approving unknown contact
-
-A stranger cannot enumerate or message this workspace without first knowing
-its contact route. Share yours deliberately: `/connect contact-point
-[domain]` (default: the currently attached relay's origin, else
-`kollabor.ai`) prints `<origin> ed25519:<64-hex-key>` for you to hand out
-through a trusted channel. Nothing here opens a room or changes local state.
-
-To reach a published contact point, run `/connect contact [domain]`; the
-private form (never chat/command history) asks for the domain, the 64-hex key
-only (drop the `ed25519:` prefix), and a short introduction, then submits it
-sealed to that key over `POST /relay/v1/contact/requests`. The recipient runs
-`/connect contacts [domain]` to open a private review list fetched from `POST
-/relay/v1/contact/inbox`, and explicitly accepts or rejects each one
-(`POST /relay/v1/contact/decisions`). `/connect contact` and `/connect
-contacts` are unavailable from an attached viewer session; run them on the
-daemon that owns the identity.
-
-Accepting only resolves that one bounded receipt. It does not create a reply
-channel, approve room membership, grant conversation authority, or expose a
-roster — a genuinely new relationship still needs its own invitation or
-enrollment offer before either side can talk. There is no owner-configured
-auto-accept policy in current source; every request needs an explicit local
-decision.
-
-### Agent conversation commands in current source
-
-These commands are being verified for the corrected release. They are not a
-claim that the deployed service and both installed hosts have passed this flow.
-
-1. Complete invitation pairing and verify both endpoint keys as above.
-2. On the receiving server, run `/connect allow <sender-public-key> <local-agent-name>`.
-   This grants incoming conversations for that agent; its normal tool permissions
-   still apply. Inspect it with `/connect grants`; revoke with `/connect deny`.
-3. On the sending laptop, run `/connect agents <server-public-key>` and use the
-   complete `relay:<key>:<workspace-id>:<agent-id>` address. Names are labels and
-   may repeat on different computers. `/connect agents local` shows the private
-   machine-wide roster without opening conversations.
-4. Submit `/connect send <full-address> <request>` to authorize and send the
-   exact request. Alternatively, `/connect authorize <full-address> <request>`
-   records the human instruction for the ordinary `hub_msg` tool. It must send
-   that exact request. XML accepts `thread="<grant-id>"` and
-   `thread_id="<grant-id>"`; structured `hub-msg` calls carry the same value
-   through optional `thread_id`. The runtime checks that an explicit ID selects
-   the exact durable grant; an unknown ID does not fall back to another grant.
-   Focused tests exercise normalized native dispatch into the relay fixture, but
-   a live model-provider invocation remains unverified. The human input
-   `Ask <full-address> to <request>` creates the grant before model execution.
-   Admission returns a task ID and state.
-   `/connect task <full-address> <task-id>` reads its state;
-   `/connect cancel <full-address> <task-id>` cancels that sender's work.
-5. The receiver runs its normal model and permitted tools in its own workspace.
-   Its final response follows the authenticated return address and request ID.
-   A returned result does not automatically generate another network reply.
-
-The native relay send boundary now requires a durable human instruction bound
-to the local session, room, exact destination and exact initial request. It is
-one-use with byte-identical retries under the same ID and a ten-minute default
-deadline (the store accepts at most one hour). The authenticated payload carries
-that deadline; admission, queued work, model turns, awaited tool approvals and
-return routing check it. A correlated result cannot extend it. Quoted/negated
-instructions and model-supplied approval flags do not authorize a contact.
-`/connect grants` lists receiving and sending grants. `/connect withdraw <id>`
-withdraws local send/return authority; use `/connect cancel` to cancel remote work.
-
-The full contract still requires authorization across older direct/local paths,
-progress and follow-up conversation lifecycles, and live installed acceptance.
-The current exact initial request and single-result exchange is one implemented
-boundary within that contract, not completion of the whole network.
-
-### Revoking access
-
-- `/connect deny <peer-key> [local agent name]` revokes conversation grant(s)
-  to that peer — all of them, or just one local agent's if a name is given —
-  and cancels affected queued/running work. Presence approval is untouched;
-  the peer can still ping.
-- `/connect revoke <64-hex-key>` is the harder stop: it removes local
-  presence approval for that key *and* every conversation grant to it (the
-  same store-level effect as `deny` with no agent name), in one command.
-- `/connect withdraw <grant-id>` withdraws a local *sending* grant created by
-  `/connect authorize` or `/connect send`; it does not touch a peer's own
-  grants. Use `/connect cancel <address> <id>` to stop work already running
-  on the remote side.
-- `/connect rotate` replaces this endpoint's room capability and clears its
-  local peer approvals — a full reset for this workspace. It is not
-  server-side revocation: the relay cannot revoke a copied room capability,
-  so existing holders of the old invitation are not evicted by this alone
-  (see the encryption contract above). Disconnect/rotate every affected peer
-  to fully retire an old room.
-- `/connect disconnect` detaches and disables automatic reconnect for this
-  workspace; it revokes nothing by itself.
-
-None of these are reversible from the revoking side; restoring access needs a
-fresh invitation, enrollment offer, or `/connect approve`/`/connect allow`.
-
-## Self-host and rollout evidence
-
-For portable self-host instructions, see the [discovery and relay operator guide](../operations/kollabor-ai-discovery-publication.md). The service command is `kollab relay run --config <private-file>`. Verify the exact installed version and source artifact when reporting a run. The current conversation bridge requires a corrected release and its own clean-install, live model/tool verification.
-
-The current ledger records public health for the observed build, signed discovery, two-host WSS, approval-gated ping/pong, worker/backend recovery and private metrics exposure. The dated capacity runs measured an earlier source artifact and a closed-loop ping/pong workload. The current candidate changes backend queueing, room reconciliation, HTTP admission routes and limits, so those measurements do not characterize it. `scripts/relay/measure_capacity.py` still measures only encrypted ping/pong and generator-side resource counters; it does not establish server CPU, RSS, file-descriptor use, worker placement, or conversation throughput. Rerun the checks against the exact final service artifact and record both generator and server evidence before making capacity claims:
-
-- Public HTTPS health from outside the host and successful WSS from two independent outbound-only hosts.
-- The hosts land on different workers and complete invite, key approval, encrypted ping/pong, and disconnect/reconnect.
-- Wrong-room, unapproved peer, replay/tamper, duplicate key, offline destination, and malformed/oversize frame checks fail closed.
-- Abrupt worker loss removes stale presence without requiring a new join; supervisor recovers after Redis/Valkey outage, Cluster reshard, and primary failover.
-- `/relay/v1/metrics` is not reachable from the public proxy; no URL, invite capability, private key, room key, or ciphertext is logged.
-- Record the deployed artifact SHA-256, source allowlist manifest, config fields excluding credentials, date, probe output, and any still-unverified backend/topology limits in the operations ledger.
-
-Rollback is limited to stopping the relay worker/supervisor and removing only its exact proxy routes and signed relay advertisement. Preserve the discovery signer and monotonic revision state. Do not alter unrelated website routes or other service processes.

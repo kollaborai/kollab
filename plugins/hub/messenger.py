@@ -1,6 +1,7 @@
 """Socket-based messaging between agents."""
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -8,6 +9,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .models import HubMessage
 from .presence import _atomic_write, get_messages_dir, get_socket_dir
+from .relay_state import failure_text
 
 # --- Durable inbox bounds ---
 # Max ordinary messages kept on disk per inbox. Durable task controls are
@@ -74,6 +77,15 @@ def _coerce_line_count(value: Any, default: int) -> int:
     except (TypeError, ValueError, OverflowError):
         count = default
     return max(1, count)
+
+
+def _coerce_wait_seconds(value: Any, default: int) -> int:
+    """Normalize an optional wait duration; 0 is valid (``--no-wait``)."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        count = default
+    return max(0, count)
 
 
 def _remote_auth_bytes(kind: str, *values: str) -> bytes:
@@ -312,6 +324,24 @@ def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
 
 
+def require_own_socket(path: str) -> None:
+    """Refuse a unix hub socket another local user planted or took over.
+
+    Hub sockets live in shared /tmp path space; a swapped socket file would
+    receive everything we send. A missing path falls through so the connect
+    attempt raises the real error.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise ConnectionError(
+            f"refusing hub socket {path}: not a socket owned by this user"
+            f" (uid {info.st_uid})"
+        )
+
+
 class AgentSocketServer:
     """Per-agent unix domain socket server for receiving messages.
 
@@ -326,6 +356,8 @@ class AgentSocketServer:
         on_get_output: Optional[Callable] = None,
         on_shutdown: Optional[Callable] = None,
         on_input_inject: Optional[Callable] = None,
+        on_network_status: Optional[Callable] = None,
+        on_network_send: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -336,6 +368,10 @@ class AgentSocketServer:
         self._on_get_output = on_get_output
         self._on_shutdown = on_shutdown
         self._on_input_inject = on_input_inject
+        # Agent network CLI (docs/specs/agent-network-simple-flow.md): local
+        # operator only, same gate as get_output/get_status below.
+        self._on_network_status = on_network_status
+        self._on_network_send = on_network_send
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -356,6 +392,10 @@ class AgentSocketServer:
         # is an opaque, authenticated peer carrier frame. No Hub message or
         # model hook is involved in this callback.
         self._peer_forward_handler: Optional[Callable[..., Any]] = None
+        self._peer_secure_handler: Optional[Callable[..., Any]] = None
+        # Resolves a designation to the endpoint key an approved device signed
+        # into its locator. It admits a peer to the carrier actions only.
+        self._peer_identity_resolver: Optional[Callable[[str], str]] = None
         self._peer_forward_semaphore = asyncio.Semaphore(
             REMOTE_PEER_FORWARD_MAX_CONCURRENCY
         )
@@ -796,15 +836,12 @@ class AgentSocketServer:
             await reject()
             return None
 
-        client_record = self._dns_registry.resolve(client_designation)
-        client_key = getattr(client_record, "public_key", "")
-        # Remote traffic requires a human-approved peer. Runtime allowlists
-        # and unknown/pending records are not communication authorization.
-        if (
-            client_record is None
-            or getattr(client_record, "approval_state", "") != "approved"
-            or not _valid_ed25519_key_hex(client_key)
-        ):
+        # Remote traffic requires a human-approved peer: a registry record the
+        # human approved, or the endpoint an approved device's own locator
+        # names (which reaches the peer carrier only). Runtime allowlists and
+        # unknown or pending records are not communication authorization.
+        client_key, _via_locator = self._remote_peer_identity(client_designation)
+        if not client_key:
             await reject()
             return None
 
@@ -873,6 +910,60 @@ class AgentSocketServer:
             raise TypeError("peer forward handler must be callable")
         self._peer_forward_handler = handler
 
+    def set_peer_secure_handler(
+        self, handler: Optional[Callable[[str, str, str, dict], Any]]
+    ) -> None:
+        """Install the direct secure-record handler for authenticated TLS peers.
+
+        Same boundary as ``set_peer_forward_handler``: called only for a peer
+        verified by the remote Ed25519 handshake, with the record method and
+        payload, and never for Unix/local operator requests.
+        """
+        if handler is not None and not callable(handler):
+            raise TypeError("peer secure handler must be callable")
+        self._peer_secure_handler = handler
+
+    def set_peer_identity_resolver(
+        self, resolver: Optional[Callable[[str], str]]
+    ) -> None:
+        """Install the locator lookup that admits approved devices' endpoints.
+
+        The callback maps an endpoint designation to the key a signed locator of
+        an approved device names for it, or to an empty string. A connection
+        admitted this way reaches ``peer_forward`` and ``peer_secure`` only: no
+        Hub message, ping or operator action.
+        """
+        if resolver is not None and not callable(resolver):
+            raise TypeError("peer identity resolver must be callable")
+        self._peer_identity_resolver = resolver
+
+    def _remote_peer_identity(self, designation: str) -> tuple[str, bool]:
+        """The key for a remote endpoint designation, and whether a locator gave it.
+
+        A designation this device's registry holds as approved keeps its
+        registered key. Otherwise the resolver may name the key an approved
+        device signed into its locator, never one that contradicts what the
+        registry already records for that designation.
+        """
+        record = self._dns_registry.resolve(designation) if self._dns_registry else None
+        registered = str(getattr(record, "public_key", "") or "").lower()
+        if record is not None and getattr(record, "approval_state", "") == "approved":
+            return (registered, False) if _valid_ed25519_key_hex(registered) else ("", False)
+        resolver = self._peer_identity_resolver
+        if resolver is None:
+            return "", False
+        try:
+            located = str(resolver(designation) or "").lower()
+        except Exception:
+            return "", False
+        if not _valid_ed25519_key_hex(located):
+            return "", False
+        if record is not None and (
+            getattr(record, "approval_state", "") == "rejected" or registered != located
+        ):
+            return "", False
+        return located, True
+
     def _allow_peer_forward_rate(self, public_key: str) -> bool:
         minute = int(time.monotonic() // 60)
         if minute != self._peer_forward_rate_minute:
@@ -892,12 +983,7 @@ class AgentSocketServer:
         """Recheck peer approval and key pin between remote requests."""
         if not self._dns_registry or not designation or not public_key:
             return False
-        record = self._dns_registry.resolve(designation)
-        return bool(
-            record
-            and getattr(record, "approval_state", "") == "approved"
-            and str(getattr(record, "public_key", "")).lower() == public_key
-        )
+        return self._remote_peer_identity(designation)[0] == public_key
 
     def _accept_connection(
         self,
@@ -1094,14 +1180,17 @@ class AgentSocketServer:
 
                 action = msg_data.get("action", "")
 
-                if require_auth and not self._remote_peer_is_current(
-                    authenticated_as, authenticated_public_key
-                ):
-                    writer.write(
-                        b'{"type":"error","msg":"remote peer is not approved"}\n'
+                carrier_only = False
+                if require_auth:
+                    current_key, carrier_only = self._remote_peer_identity(
+                        authenticated_as
                     )
-                    await writer.drain()
-                    return
+                    if not authenticated_public_key or current_key != authenticated_public_key:
+                        writer.write(
+                            b'{"type":"error","msg":"remote peer is not approved"}\n'
+                        )
+                        await writer.drain()
+                        return
 
                 # A verified peer key grants peer messaging, never operator
                 # access to the local daemon. The same dispatcher backs the
@@ -1113,9 +1202,9 @@ class AgentSocketServer:
                     and peer_cred[1] == os.getuid()
                 )
                 remote_admin = require_auth and action not in (
-                    "message",
-                    "ping",
-                    "peer_forward",
+                    ("peer_forward", "peer_secure")
+                    if carrier_only
+                    else ("message", "ping", "peer_forward", "peer_secure")
                 )
                 local_admin = not require_auth and action not in ("message", "ping")
                 if remote_admin or (local_admin and not local_operator):
@@ -1186,18 +1275,31 @@ class AgentSocketServer:
                     writer.write(ack.encode())
                     await writer.drain()
 
-                elif action == "peer_forward":
-                    # This route is only for a TLS-authenticated peer. It
-                    # bypasses Hub message hooks, task admission and RPC.
-                    handler = self._peer_forward_handler
+                elif action in ("peer_forward", "peer_secure"):
+                    # These routes are only for a TLS-authenticated peer. They
+                    # bypass Hub message hooks, task admission and RPC.
+                    # peer_forward carries a routed frame; peer_secure carries
+                    # the end-to-end TLS records that bootstrap a direct link.
+                    if action == "peer_forward":
+                        handler = self._peer_forward_handler
+                        fields = {"action", "frame"}
+                        carried = (msg_data.get("frame"),)
+                        well_formed = isinstance(carried[0], dict)
+                    else:
+                        handler = self._peer_secure_handler
+                        fields = {"action", "method", "payload"}
+                        carried = (msg_data.get("method"), msg_data.get("payload"))
+                        well_formed = carried[0] in (
+                            "secure_identity",
+                            "secure_packet",
+                        ) and isinstance(carried[1], dict)
                     ssl_object = writer.get_extra_info("ssl_object")
-                    frame = msg_data.get("frame")
                     if (
                         not require_auth
                         or ssl_object is None
                         or handler is None
-                        or set(msg_data) != {"action", "frame"}
-                        or not isinstance(frame, dict)
+                        or set(msg_data) != fields
+                        or not well_formed
                         or not self._allow_peer_forward_rate(authenticated_public_key)
                     ):
                         writer.write(
@@ -1211,24 +1313,27 @@ class AgentSocketServer:
                                 result = handler(
                                     authenticated_as,
                                     authenticated_public_key,
-                                    frame,
+                                    *carried,
                                 )
                                 if inspect.isawaitable(result):
                                     result = await result
                         if not isinstance(result, dict):
                             raise ValueError("invalid peer forward response")
                         response_line = json.dumps(
-                            {"type": "peer_forward_result", "response": result},
+                            {"type": f"{action}_result", "response": result},
                             separators=(",", ":"),
                         ).encode("utf-8") + b"\n"
                         if len(response_line) > REMOTE_PEER_FORWARD_MAX_FRAME_BYTES:
                             raise ValueError("peer forward response too large")
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
+                    except Exception as exc:
                         # Never expose payloads, callback text, or exception
-                        # messages through a remote protocol reply or log.
-                        logger.warning("authenticated peer forwarding failed")
+                        # messages through a remote protocol reply; the log
+                        # gets the class, and the text only when it is fixed.
+                        logger.warning(
+                            "authenticated peer forwarding failed: %s", failure_text(exc)
+                        )
                         writer.write(
                             b'{"type":"error","msg":"peer forwarding failed"}\n'
                         )
@@ -1397,6 +1502,57 @@ class AgentSocketServer:
                         except Exception as exc:
                             logger.debug(f"shutdown callback error: {exc}")
 
+                elif action == "network_status":
+                    # docs/specs/agent-network-simple-flow.md, CLI bullet:
+                    # `kollab --hub status` asks one online local agent for
+                    # the network section. Local operator only (see the
+                    # local_admin/remote_admin gate above) -- never exposed
+                    # to a remote peer.
+                    payload: Dict[str, Any] = {}
+                    if self._on_network_status:
+                        try:
+                            result = self._on_network_status()
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            if isinstance(result, dict):
+                                payload = result
+                        except Exception as exc:
+                            logger.debug(f"network_status callback error: {exc}")
+                    resp = (
+                        json.dumps(
+                            {
+                                "type": "network_status",
+                                "device": payload.get("device", ""),
+                                "trust": payload.get("trust", ""),
+                                "agents": payload.get("agents", []),
+                            },
+                            default=str,
+                        )
+                        + "\n"
+                    )
+                    writer.write(resp.encode())
+                    await writer.drain()
+
+                elif action == "network_send":
+                    # docs/specs/agent-network-simple-flow.md, CLI bullet:
+                    # `kollab --hub msg agent@device text` delivers through
+                    # this local agent's daemon and optionally waits for the
+                    # reply to it. Local operator only, same as above.
+                    to = str(msg_data.get("to", "") or "")
+                    content = str(msg_data.get("content", "") or "")
+                    wait_seconds = _coerce_wait_seconds(
+                        msg_data.get("wait_seconds"), 600
+                    )
+                    # One frame per reply on the request's thread, then a
+                    # terminal frame (network_done, network_timeout,
+                    # network_sent or error). aclosing: a CLI that hangs up
+                    # mid-wait ends the handler's wait now, not at its timeout.
+                    frames = self._network_send_frames(to, content, wait_seconds)
+                    async with contextlib.aclosing(frames):
+                        async for frame in frames:
+                            writer.write((json.dumps(frame, default=str) + "\n").encode())
+                            await writer.drain()
+
                 elif action == "rpc_request":
                     # Handshake-phase RPC: no concurrent writer, safe to write
                     # directly without a lock. Attached-phase RPC is handled
@@ -1426,6 +1582,34 @@ class AgentSocketServer:
 
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
+
+    async def _network_send_frames(self, to: str, content: str, wait_seconds: int):
+        """The frames that answer one `network_send`: the handler's stream, or
+        one terminal frame when it has none (or fails)."""
+        if not self._on_network_send:
+            yield {
+                "type": "error",
+                "msg": "network messaging is not available on this build",
+            }
+            return
+        try:
+            frames = self._on_network_send(to, content, wait_seconds)
+            if asyncio.iscoroutine(frames):
+                frames = await frames
+            if isinstance(frames, dict):
+                yield frames
+            elif hasattr(frames, "__aiter__"):
+                async with contextlib.aclosing(frames):
+                    async for frame in frames:
+                        yield frame
+            else:
+                yield {
+                    "type": "error",
+                    "msg": "network send handler returned no result",
+                }
+        except Exception as exc:
+            logger.debug(f"network_send callback error: {exc}")
+            yield {"type": "error", "msg": "network send failed"}
 
     async def _get_context(self, lines: int) -> str:
         """Get recent context - override in plugin integration."""
@@ -1946,6 +2130,7 @@ class AgentMessenger:
                 timeout=timeout,
             )
         else:
+            require_own_socket(target)
             reader, writer = await asyncio.wait_for(
                 asyncio.open_unix_connection(target),
                 timeout=timeout,
@@ -2213,6 +2398,120 @@ class AgentMessenger:
             return {}
         except Exception:
             return {}
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_network_status(
+        socket_path: str,
+        timeout: float = 5.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> Optional[dict]:
+        """Ask a local agent's daemon for the network section.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: `kollab --hub
+        status` merges this into the local rows. Returns None on any
+        transport failure or malformed response -- callers print
+        "network: not connected" in that case.
+        """
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            req = json.dumps({"action": "network_status"}) + "\n"
+            writer.write(req.encode())
+            await writer.drain()
+
+            resp_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+
+            if resp_line:
+                resp = json.loads(resp_line.decode().strip())
+                if isinstance(resp, dict) and resp.get("type") == "network_status":
+                    return resp
+            return None
+        except Exception as exc:
+            logger.debug("network_status request failed for %s: %s", socket_path, exc)
+            return None
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_network_send(
+        socket_path: str,
+        handle: str,
+        content: str,
+        wait_seconds: int = 600,
+        *,
+        on_reply: Optional[Callable[[dict], Any]] = None,
+        connect_timeout: float = 5.0,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> dict:
+        """Ask a local agent's daemon to deliver to agent@device and wait.
+
+        docs/specs/agent-network-simple-flow.md, CLI bullet: `kollab --hub
+        msg agent@device text`. The daemon holds the connection open while
+        it waits, streaming a `network_reply` frame for every reply on the
+        request's thread; each is handed to ``on_reply`` as it arrives. The
+        wait ends with one terminal frame, returned as-is (`network_done` when
+        the far agent's turn ended, `network_timeout`, `network_sent`, or
+        `error`); a transport failure is normalized to `{"type": "error",
+        "msg": ...}` so callers have one shape to check.
+        """
+        wait_seconds = _coerce_wait_seconds(wait_seconds, 600)
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=connect_timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            req = (
+                json.dumps(
+                    {
+                        "action": "network_send",
+                        "to": handle,
+                        "content": content,
+                        "wait_seconds": wait_seconds,
+                    }
+                )
+                + "\n"
+            )
+            writer.write(req.encode())
+            await writer.drain()
+
+            # The daemon enforces wait_seconds; this deadline only covers a
+            # daemon that stops answering, with slack for the final frame.
+            deadline = time.monotonic() + wait_seconds + connect_timeout + 5.0
+            while True:
+                resp_line = await asyncio.wait_for(
+                    reader.readline(), timeout=max(0.0, deadline - time.monotonic())
+                )
+                if not resp_line:
+                    return {"type": "error", "msg": "empty response"}
+                resp = json.loads(resp_line.decode().strip())
+                if not isinstance(resp, dict):
+                    return {"type": "error", "msg": "invalid response envelope"}
+                if resp.get("type") != "network_reply":
+                    return resp
+                if on_reply is not None:
+                    on_reply(resp)
+        except asyncio.TimeoutError:
+            return {"type": "error", "msg": "timed out waiting for the daemon"}
+        except Exception as exc:
+            logger.debug("network_send request failed for %s: %s", socket_path, exc)
+            return {"type": "error", "msg": str(exc) or type(exc).__name__}
         finally:
             if writer:
                 writer.close()

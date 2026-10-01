@@ -1,6 +1,6 @@
 # Voice Engine Contract — v2.2 amendment (sapphire)
 
-Amends contract-v2.1. v2.1 §§1-8 remain in force except where amended below (marked [AMENDS §x]). New sections §9-14 are normative. malmazan's dictated speech-output subsystem (2026-09-25 stream): sentence-atomic playback queue, first-sentence cap, output-layer interrupt, receipts, disruption. C4 interlock RESOLVED: duck on input, interrupt on output — no conflict.
+Amends contract-v2.1. v2.1 §§1-8 remain in force except where amended below (marked [AMENDS §x]). New sections §9-14 are normative. owner's dictated speech-output subsystem (2026-09-25 stream): sentence-atomic playback queue, first-sentence cap, output-layer interrupt, receipts, disruption. C4 interlock RESOLVED: duck on input, interrupt on output — no conflict.
 
 ## 9. Output state machine (normative, parallel to input §2)
 

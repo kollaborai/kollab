@@ -32,6 +32,42 @@ from .snapshots import (
 )
 
 
+def enrollment_result(
+    result: Any, *, allow_failed: bool = False
+) -> dict[str, str] | None:
+    """The bounded, printable result of a join call, or None if it is off-shape.
+
+    Shared by the daemon, its RPC handler and the attached window so all three
+    accept exactly the same thing. ``detail`` is the one line the joining
+    device shows once approved (`joined <network> as <device>. trust:
+    <level>`); it is display text only, never a key or an id.
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return None
+    status = result.get("status")
+    receipt_id = result.get("receipt_id")
+    if (
+        status == "pending"
+        and isinstance(receipt_id, str)
+        and 1 <= len(receipt_id) <= 128
+    ):
+        return {"status": "pending", "receipt_id": receipt_id}
+    if status == "approved":
+        approved = {"status": "approved"}
+        detail = result.get("detail")
+        if isinstance(detail, str) and 0 < len(detail) <= 200 and detail.isprintable():
+            approved["detail"] = detail
+        # The line about settings and logins. "" is an answer: the daemon still
+        # waits for the primary's name, so the window must not guess one.
+        note = result.get("note")
+        if isinstance(note, str) and len(note) <= 200 and note.isprintable():
+            approved["note"] = note
+        return approved
+    if status == "rejected" or (allow_failed and status == "failed"):
+        return {"status": status}
+    return None
+
+
 @runtime_checkable
 class StateService(Protocol):
     """The unified state access protocol.
@@ -565,12 +601,63 @@ class StateService(Protocol):
         """Submit a private device enrollment code through the owning daemon.
 
         This typed RPC keeps the code out of slash-command strings and model
-        input. The result contains only a bounded status and optional receipt.
+        input. It returns once the relay holds the request: ``pending`` with a
+        receipt for ``hub_enroll_status``, or a final result if it failed
+        first. The result contains only a bounded status and optional receipt.
+        """
+        ...
+
+    async def hub_enroll_status(self, receipt_id: str) -> dict[str, str]:
+        """Where a submitted join request stands, without waiting.
+
+        ``pending`` (with the receipt), ``approved`` (with the joined line),
+        ``rejected`` or ``failed``. Raises when the daemon cannot tell.
         """
         ...
 
     async def hub_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device code for display in the private connect view."""
+        ...
+
+    async def hub_connect_snapshot(self) -> dict[str, Any]:
+        """The Connect screen's data as plain JSON types (ConnectSnapshot.to_wire).
+
+        Raises when this daemon does not own the relay; the window validates
+        the reply with ``ConnectSnapshot.from_wire``.
+        """
+        ...
+
+    async def hub_connect_decide(self, enrollment_id: str, decision: str) -> str:
+        """Accept or reject one join request; "" when decided, else the reason."""
+        ...
+
+    async def hub_contact_knock(
+        self, domain: str, route: str, introduction: str
+    ) -> str:
+        """Send a knock to a stranger's contact route through the relay's owner.
+
+        Returns what the human reads: ``knock sent to <domain>/c/<route>`` or
+        ``connect: <reason>``.
+        """
+        ...
+
+    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
+        """Knocks waiting for this device, as the relay lists them.
+
+        An empty ``domain`` means the daemon's own network. Raises when the
+        daemon cannot list them; the window validates every row.
+        """
+        ...
+
+    async def hub_contact_decide(
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        sender_key: str,
+        device_name: str,
+    ) -> str:
+        """Accept or reject one knock; "" when decided, else the reason."""
         ...
 
     async def hub_connect(self, command: str) -> str:

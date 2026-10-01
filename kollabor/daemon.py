@@ -79,6 +79,74 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
         sys.exit(0)
 
 
+# A launch that names an agent, a project or a first message asks for a new
+# daemon; any other flag leaves the workspace's live one in charge.
+_NEW_DAEMON_FLAGS = {"--agent", "-a", "--as", "--daemon", "--project"}
+_VALUE_FLAGS = {
+    "--llm",
+    "--model",
+    "--effort",
+    "--context",
+    "--system-prompt",
+    "--skill",
+    "-s",
+    "--timeout",
+}
+
+
+def _is_bare_launch(argv: list[str]) -> bool:
+    args = iter(argv)
+    for arg in args:
+        flag = arg.split("=", 1)[0]
+        if flag in _NEW_DAEMON_FLAGS:
+            return False
+        if not arg.startswith("-"):
+            return False  # query text: the live daemon would never see it
+        if flag in _VALUE_FLAGS and "=" not in arg:
+            next(args, None)
+    return True
+
+
+def find_workspace_daemon(argv: list[str]) -> tuple[int, str] | None:
+    """The live daemon already serving this workspace, as (pid, socket_path).
+
+    A bare relaunch attaches to it. Forking another one doubles the agent: the
+    new daemon takes a second designation while the first keeps running with no
+    window, and whatever is sent to the first is never seen.
+    """
+    if not _is_bare_launch(argv):
+        return None
+
+    import json
+
+    from plugins.hub.presence import PresenceManager, get_presence_dir
+    from plugins.hub.project_scope import is_project_scoped
+
+    try:
+        records = list(get_presence_dir().glob("*.json"))
+    except OSError:
+        return None
+    live = []
+    for record in records:
+        try:
+            data = json.loads(record.read_text())
+            pid, sock = int(data["pid"]), str(data["socket_path"])
+            started = float(data.get("started_at") or 0)
+            # A daemon is its own session leader (fork_daemon and --detached
+            # both setsid); an interactive window never is. Raises for a dead pid.
+            if os.getsid(pid) != pid or not PresenceManager._socket_responds(sock):
+                continue
+            if not is_project_scoped() and data.get("project") != os.getcwd():
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        live.append((not data.get("is_coordinator"), started, pid, sock))
+    if not live:
+        return None
+    _, _, pid, sock = min(live)
+    return pid, sock
+
+
 def stop_daemon(pid: int, grace_seconds: float = 5.0) -> None:
     """SIGTERM an owned daemon and reap it, escalating to SIGKILL after the grace.
 

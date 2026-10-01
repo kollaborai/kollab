@@ -7,8 +7,16 @@ the wire formats and configuration. Recheck them before editing or deploying.
 ## Read the owner of the behavior
 
 - `kollabor_cli_main.py`: early headless entrypoint. `kollab relay run --config
-  <private-file>` invokes the supervisor; `kollab relay serve` runs one worker.
-  Confirm the installed artifact contains the command before recommending it.
+  <private-file>` invokes the supervisor; `kollab relay serve --domain <domain>`
+  is the one-command directory (`relay_selfhost.py`); `kollab relay serve --origin
+  <origin>` runs one bare worker. Confirm the installed artifact contains the
+  command before recommending it.
+- `plugins/hub/relay_selfhost.py`: `serve --domain`. Builds the relay app with
+  `create_app` on the in-memory backend, adds the key file route, and renews the
+  signed document with `discovery_publish.publish` while the relay is ready. Owns
+  the state directory (`service.key`, `publisher.json`, `serve.lock`,
+  `public/agent-keys.json`) and prints the TXT record and the nginx/Caddy/systemd
+  config. It must not fork relay or publisher logic.
 - `plugins/hub/relay_runtime.py`: worker supervision, readiness, managed Valkey
   sidecar ownership and restarts; external backend configuration.
 - `plugins/hub/relay_service.py`: registration challenge, presence, bounded routing,
@@ -21,7 +29,7 @@ the wire formats and configuration. Recheck them before editing or deploying.
   and `/connect` flow.
 - `plugins/hub/enrollment_client.py`, `enrollment_codes.py`,
   `enrollment_delegations.py`, and `plugins/altview/connect_altview.py`: private
-  code entry/offer UI, K1 proof and issuer behavior, and local non-secret
+  code entry/join code UI, short-code proof and issuer behavior, and local non-secret
   delegation state. The code is not a CLI argument or approval by itself.
   Verified proof creates a pending request; the local issuer can inspect
   redacted metadata and explicitly accept/reject it. Acceptance grants
@@ -46,11 +54,9 @@ the wire formats and configuration. Recheck them before editing or deploying.
 
 Canonical docs:
 
+- `docs/specs/agent-network-simple-flow.md` (the contract; commands, trust, stories)
 - `docs/specs/agent-domain-discovery-contract.md`
 - `docs/specs/agent-public-beacon.md`
-- `docs/specs/agent-network-discovery-and-relaying.md`
-- `docs/specs/agent-network-walkthroughs.md`
-- `docs/specs/agent-network-implementation-status.md`
 - `docs/specs/agent-device-pairing.md`
 - `docs/reference/commands.md`
 - `docs/architecture/reference/agent-dns-reference.md`
@@ -73,9 +79,9 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
   separate checks. Discovery and an online roster must not start unsolicited model
   turns or grant file/shell access. Keep human-directed communication explicit.
 - The `/connect <domain>` command is public signed discovery/relay attachment;
-  bare `/connect` and `/connect enroll [domain]` are private code entry.
-  Current unreleased enrollment source has `/connect offer`, redacted request
-  listing, and explicit local accept/reject. It permits one device per
+  bare `/connect` opens the Connect screen (private code entry when there is no
+  network). Current unreleased enrollment source has `/connect code` and
+  explicit local accept/reject by device name. It permits one device per
   five-minute offer and a durable, scope-bound delegation. Verified
   code/device-key proof creates a pending request and is not approval.
   Acceptance may send the supported active profile and one explicitly listed
@@ -108,7 +114,7 @@ domain. Do not silently substitute `colabor.ai` or another spelling.
   `relay_owner.py`, and `local_directory.py` to reach the existing Hub/model/tool
   pipeline. Direct approved same-room TLS sessions are not a Hub mesh route;
   `peer_router.py` and `peer_records.py` remain unintegrated. Inspect the
-  implementation ledger before claiming release or live proof. Keep peer/room
+  agent network contract's proof bar before claiming release or live proof. Keep peer/room
   approval separate from sender communication grants and receiver tool policy.
 - Native relay sends require a durable human instruction bound to the sender
   session, room, exact recipient, exact initial request and deadline. Preserve

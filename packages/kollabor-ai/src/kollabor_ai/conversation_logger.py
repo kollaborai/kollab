@@ -7,6 +7,8 @@ that learn from user patterns and project context.
 
 import json
 import logging
+import os
+import stat
 import subprocess
 import time
 import tomllib
@@ -19,6 +21,9 @@ from uuid import uuid4
 from kollabor_ai.session_naming import generate_session_name
 
 logger = logging.getLogger(__name__)
+
+# Bound for the one-time tighten walk over an existing conversations tree.
+_TIGHTEN_ENTRY_LIMIT = 4096
 
 
 def _get_app_version() -> str:
@@ -58,7 +63,12 @@ class KollaborConversationLogger:
             conversations_dir: Directory to store conversation JSONL files
         """
         self.conversations_dir = conversations_dir
-        self.conversations_dir.mkdir(parents=True, exist_ok=True)
+        self.conversations_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        # Raw API response logs live beside the transcripts and are just as
+        # private (full request/response bodies).
+        self.raw_dir = self.conversations_dir / "raw"
+        self.raw_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Session management - use memorable session names
         self.session_id = generate_session_name()
@@ -71,7 +81,8 @@ class KollaborConversationLogger:
 
         # Memory directory (used by _load/_save_conversation_memory)
         self.memory_dir = self.conversations_dir / "memory"
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.memory_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._tighten_private_modes()
         self._load_conversation_memory()
 
         # Intelligence features
@@ -85,6 +96,43 @@ class KollaborConversationLogger:
         self.active_plugins: List[str] = []
         self.file_interactions: Dict[str, Any] = {}
         self.llm_provider = "unknown"  # Provider type (openai, anthropic, azure_openai)
+
+    def _tighten_private_modes(self) -> None:
+        """Tighten an existing conversations tree left loose by older versions.
+
+        Transcripts contain everything typed and every tool result, so the
+        dirs are 0700 and the files 0600. mkdir(mode=...) never fixes what
+        already exists, hence this bounded one-time walk at logger init.
+        """
+        directories = (self.conversations_dir, self.raw_dir, self.memory_dir)
+        for directory in directories:
+            try:
+                info = directory.lstat()
+                if info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) & 0o077:
+                    os.chmod(directory, 0o700)
+            except OSError:
+                continue
+        try:
+            entries = 0
+            for directory in directories:
+                for child in sorted(directory.iterdir()):
+                    entries += 1
+                    if entries > _TIGHTEN_ENTRY_LIMIT:
+                        return
+                    try:
+                        info = child.lstat()
+                    except OSError:
+                        continue
+                    if info.st_uid != os.getuid():
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        if stat.S_IMODE(info.st_mode) & 0o077:
+                            os.chmod(child, 0o700)
+                    elif stat.S_ISREG(info.st_mode):
+                        if stat.S_IMODE(info.st_mode) & 0o077:
+                            os.chmod(child, 0o600)
+        except OSError:
+            pass
 
     def record_file_interaction(self, file_path: str, operation: str) -> None:
         """Record a file interaction for session tracking.
@@ -228,7 +276,12 @@ class KollaborConversationLogger:
     async def _append_to_jsonl(self, message: Dict[str, Any]):
         """Append message to JSONL file."""
         try:
-            with open(self.session_file, "a") as f:
+            fd = os.open(
+                self.session_file,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            with os.fdopen(fd, "a") as f:
                 f.write(json.dumps(message) + "\n")
             self.message_count += 1
         except Exception as e:

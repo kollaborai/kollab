@@ -1350,6 +1350,16 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 return a
         return None
 
+    def _pick_relay_agent() -> Optional[dict]:
+        """One online local agent to ask about the network: prefer the
+        coordinator, else the first with a socket (docs/specs/
+        agent-network-simple-flow.md, CLI bullet)."""
+        candidates = [a for a in _get_live_agents() if a.get("socket_path")]
+        for a in candidates:
+            if a.get("is_coordinator"):
+                return a
+        return candidates[0] if candidates else None
+
     def _pid_alive(pid: int) -> bool:
         if not pid:
             return False
@@ -1485,16 +1495,46 @@ async def _handle_cli_hub(hub_args: list) -> None:
         agents = _get_live_agents()
         if not agents:
             print("no agents online")
-            return
-        print(f"{len(agents)} agent(s) online:\n")
-        for a in sorted(agents, key=lambda x: x.get("identity", "")):
-            desig = a.get("identity", "?")
-            state = a.get("state", "?")
-            pid = a.get("pid", "?")
-            coord = " *" if a.get("is_coordinator") else ""
-            task = a.get("current_task", "")
-            task_str = f"  task: {task[:60]}" if task else ""
-            print(f"  {desig}{coord}  pid={pid}  {state}{task_str}")
+        else:
+            print(f"{len(agents)} agent(s) online:\n")
+            for a in sorted(agents, key=lambda x: x.get("identity", "")):
+                desig = a.get("identity", "?")
+                state = a.get("state", "?")
+                pid = a.get("pid", "?")
+                coord = " *" if a.get("is_coordinator") else ""
+                task = a.get("current_task", "")
+                task_str = f"  task: {task[:60]}" if task else ""
+                print(f"  {desig}{coord}  pid={pid}  {state}{task_str}")
+
+        # Agent network (docs/specs/agent-network-simple-flow.md, CLI bullet):
+        # ask one online local agent for its network section. Never print
+        # keys or relay: addresses -- the daemon's answer never contains any.
+        asker = _pick_relay_agent()
+        network = (
+            await AgentMessenger.request_network_status(asker["socket_path"])
+            if asker
+            else None
+        )
+        print()
+        if not network:
+            print("network: not connected")
+        else:
+            print(
+                f"network: {network.get('device') or '?'}  "
+                f"trust: {network.get('trust') or '?'}"
+            )
+            rows = network.get("agents") or []
+            if not rows:
+                print("  (no remote agents)")
+            for row in sorted(rows, key=lambda r: r.get("handle", "")):
+                handle = row.get("handle") or "{}@{}".format(
+                    row.get("name", "?"), row.get("device", "?")
+                )
+                state = row.get("state", "?")
+                task = row.get("task", "")
+                detail = f"{state}: {task}" if task else state
+                online = "online" if row.get("online") else "offline"
+                print(f"  {handle} - {detail} ({online})")
 
     elif subcmd in ("stop", "kill"):
         if not rest:
@@ -1559,10 +1599,61 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "msg":
         if len(rest) < 2:
-            print("usage: kollab --hub msg <identity> <message>")
+            print("usage: kollab --hub msg <identity|agent@device> <message> [--no-wait]")
             sys.exit(1)
         target = rest[0]
-        content = " ".join(rest[1:])
+        msg_rest = rest[1:]
+
+        from plugins.hub.device_names import parse_handle
+
+        if parse_handle(target) is not None:
+            # Agent network (docs/specs/agent-network-simple-flow.md, CLI
+            # bullet): deliver through one online local agent's daemon and
+            # wait for the reply to it. A plain local target below is
+            # unchanged.
+            wait_seconds = 0 if "--no-wait" in msg_rest else 600
+            content = " ".join(tok for tok in msg_rest if tok != "--no-wait")
+            if not content:
+                print("usage: kollab --hub msg <agent@device> <message> [--no-wait]")
+                sys.exit(1)
+            asker = _pick_relay_agent()
+            if not asker:
+                print("no local agent online to reach the network")
+                sys.exit(1)
+            # Every reply on this request's thread is printed as it arrives;
+            # the remote turn ending is what ends the wait.
+            printed = 0
+
+            def show_reply(frame: dict) -> None:
+                nonlocal printed
+                printed += 1
+                print(f"{frame.get('from', target)}: {frame.get('content', '')}", flush=True)
+
+            result = await AgentMessenger.request_network_send(
+                asker["socket_path"],
+                target,
+                content,
+                wait_seconds=wait_seconds,
+                on_reply=show_reply,
+            )
+            rtype = result.get("type") if isinstance(result, dict) else None
+            if rtype == "network_done":
+                if not printed:
+                    print(f"{target} finished without a reply")
+            elif rtype == "network_sent":
+                print(f"sent to {result.get('to', target)}")
+            elif rtype == "network_timeout":
+                if printed:
+                    print(f"{target} did not finish within {wait_seconds} s")
+                else:
+                    print(f"no reply from {target} within {wait_seconds} s")
+                sys.exit(1)
+            else:
+                print((result or {}).get("msg") or "network message failed")
+                sys.exit(1)
+            return
+
+        content = " ".join(msg_rest)
         agent = _find_agent(target)
         if not agent:
             print(f"agent '{target}' not found")
@@ -2010,10 +2101,14 @@ def cli_main() -> None:
         import json
         import os
 
-        from kollabor.daemon import LAUNCH_ARGS_ENV, fork_daemon
+        from kollabor.daemon import LAUNCH_ARGS_ENV, find_workspace_daemon, fork_daemon
 
         try:
-            daemon_pid, socket_path = fork_daemon(sys.argv)
+            # A bare relaunch attaches to the workspace's live daemon; forking
+            # another one doubles the agent.
+            daemon_pid, socket_path = find_workspace_daemon(
+                sys.argv[1:]
+            ) or fork_daemon(sys.argv)
         except RuntimeError as e:
             print(f"daemon startup failed: {e}", file=sys.stderr)
             print("falling back to single-process mode", file=sys.stderr)

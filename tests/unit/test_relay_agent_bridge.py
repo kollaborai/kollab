@@ -31,7 +31,7 @@ from plugins.hub.models import HubMessage
 from plugins.hub.peer_records import PEER_RECORD_TTL_MAX, PeerRecord
 from plugins.hub.peer_router import PeerLink
 from plugins.hub.plugin import HubPlugin
-from plugins.hub.relay_agent import RelayAgentBridge
+from plugins.hub.relay_agent import DIRECTORY_STALE_SECONDS, RelayAgentBridge
 from plugins.hub.relay_commands import RelayCommands
 from plugins.hub.relay_conversations import ConversationStore, RelayAddress
 from plugins.hub.relay_state import RelayError
@@ -67,7 +67,7 @@ class Directory:
     def agents(self, workspace=None):
         return self.rows
 
-    def publishable_agents(self, workspace, workspace_id):
+    def publishable_agents(self, workspace, workspace_id, device_name=None):
         return [
             {
                 "machine_id": row.machine_id,
@@ -76,6 +76,7 @@ class Directory:
                 "name": row.name,
                 "is_coordinator": row.is_coordinator,
                 "state": row.state,
+                "device": device_name or "test-device",
             }
             for row in self.rows
         ]
@@ -231,6 +232,11 @@ async def bridges(tmp_path):
         origin.commands.client._store.save()
     for bridge, *_ in members:
         client = bridge.commands.client
+        # This whole file exercises the Codex/manual model: human grants, the
+        # active-task envelope, correlated replies. Open trust (the network's
+        # new default) skips all of that, so pin these fixtures to manual.
+        client._store.state.trust = "manual"
+        client._store.save()
         bridge.secure_transport = SecureConversationTransport(
             client, client._store.key.encode()
         )
@@ -247,6 +253,13 @@ def address(bridge):
             client.public_key, client.state.workspace_id, bridge.identity.agent_id
         )
     )
+
+
+async def handle(origin, target):
+    """The `agent@device` name `origin` sees for `target`, from its live roster."""
+    await origin._rpc_directory({"peer": ""})
+    (row,) = [r for r in await origin.remote_agents() if r["address"] == address(target)]
+    return row["handle"]
 
 
 def allow(origin, target):
@@ -384,6 +397,9 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
         is_processing = False
         turn_completed = False
         processing_queue = asyncio.Queue()
+
+        def note_chain_end(self):
+            pass
 
     class ContinuationCoordinator:
         def __init__(self):
@@ -676,17 +692,14 @@ async def test_relay_payload_contains_only_pinned_tls_records_for_conversations(
 async def test_relay_status_reports_the_attached_workspace_and_agent_identity(bridges):
     members, _ = bridges
     bridge = members[0][0]
-    status = bridge.commands.format_status()
-    client_status = bridge.commands.client.status()
-
-    assert f"workspace id: {client_status['workspace_id']}" in status
-    assert f"workspace path: {bridge.commands.client.workspace}" in status
-    assert f"agent identity: {bridge.identity.identity}" in status
-    assert f"agent id: {bridge.identity.agent_id}" in status
-    assert (
-        "Private room; conversation grants and receiving workspace permissions are separate."
-        in status
-    )
+    # Default /connect status shows names, not keys or workspace ids
+    # (docs/specs/agent-network-simple-flow.md section 6); the agent's own
+    # identity is always visible in the online list.
+    status = await bridge.commands.format_status()
+    assert f"{bridge.identity.identity} (this device)" in status
+    assert bridge.commands.client.public_key not in status
+    assert bridge.commands.client.status()["workspace_id"] not in status
+    assert bridge.identity.agent_id not in status
 
 
 @pytest.mark.asyncio
@@ -740,7 +753,7 @@ async def test_tool_progress_is_bounded_and_does_not_forward_tool_arguments(brid
 
     await right._flush_outbound()
     # Progress is shown to the human but never starts a sender model turn: in
-    # the live Mac/alzan-prod run each event produced a filler reply.
+    # the live Mac/server run each event produced a filler reply.
     assert left_model.contexts == []
     assert not any(
         "[relay progress]" in str(item.content) for item in left_model.conversation_history
@@ -795,7 +808,7 @@ async def test_remote_task_reply_binds_sender_with_drifted_agent_segment(bridges
 
 @pytest.mark.asyncio
 async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
-    # Live Mac/alzan-prod run: the receiving model sent its final answer with
+    # Live Mac/server run: the receiving model sent its final answer with
     # hub_msg three times and got only a generic "not accepted" error.
     members, _ = bridges
     (left, _, _, _), (right, right_hub, right_model, _) = members
@@ -874,6 +887,100 @@ async def test_human_answer_binds_thread_and_asker_from_the_question(bridges):
     )
     assert answered.success, answered.error
     assert left.store.event(question_id)["state"] == "answered"
+    assert right.store.task(task_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_relay_event_turn_cannot_answer_its_own_question(bridges):
+    """kind='answer' carries a human-supplied answer only (docs section 7).
+
+    The turn that reports a remote question to the human must not answer it:
+    peer content is untrusted task data and the answer waits for the human.
+    A plain local turn -- the human relayed the answer in chat -- still sends.
+    """
+    members, _ = bridges
+    (left, left_hub, left_model, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+    asked = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    question_id = asked.metadata["relay_receipt"]["id"]
+    asker = left.store.event(question_id)["payload"]["from"]
+    assert left_model.contexts, "the question's reporting turn is live"
+
+    with pytest.raises(RelayError, match="correlated relay events|human-supplied"):
+        await in_turn(
+            left_model,
+            left.send(
+                asker,
+                "The model answers itself.",
+                kind="answer",
+                thread_id=task_id,
+                reply_to=question_id,
+            ),
+        )
+    assert left.store.event(question_id)["state"] == "pending"
+
+    # The same ids from a plain local turn still go through: that is the
+    # documented path for relaying the human's answer.
+    answered = await left.send(
+        asker,
+        "Use the workspace root.",
+        kind="answer",
+        thread_id=task_id,
+        reply_to=question_id,
+    )
+    assert answered["state"] not in {"failed", "rejected"}
+    assert left.store.event(question_id)["state"] in {"answer_queued", "answered"}
+
+
+@pytest.mark.asyncio
+async def test_connect_answer_path_and_remote_task_turn_stay_bounded(bridges):
+    """/connect answer (the human command) works end to end; a remote-task
+    turn, which already may only send progress/question/result/error, is
+    refused an answer outright."""
+    members, _ = bridges
+    (left, left_hub, left_model, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+
+    with pytest.raises(RelayError):
+        await in_turn(
+            right_model,
+            right.send(address(left), "no", kind="answer"),
+        )
+
+    asked = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    question_id = asked.metadata["relay_receipt"]["id"]
+    room = left.commands.client.state.room
+    number = left.store.number(room, "question", question_id)
+    line = await left.application_command("answer", f"{number} Use the workspace root.")
+    assert "answered" in line
     assert right.store.task(task_id)["state"] == "running"
 
 
@@ -1921,6 +2028,32 @@ async def test_directory_keeps_relay_peers_when_peer_mesh_knows_none(bridges):
 
 
 @pytest.mark.asyncio
+async def test_directory_drops_a_peer_that_stopped_answering(bridges):
+    """A stopped device must leave the cached listing, not stay while the mesh remembers its key."""
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    listed = {"peer": "", "cached": True}
+    assert [r["address"] for r in (await left._rpc_directory(listed))["agents"]] == []
+    first = await left._rpc_directory({"peer": ""})
+    assert [r["address"] for r in first["agents"]] == [address(right)]
+
+    async def unreachable(peer_key, method, payload, *, timeout=10):
+        raise RelayError("secure conversation transport failed")
+
+    def age(seconds):
+        for key, (stamp, rows) in list(left._cache.items()):
+            left._cache[key] = (stamp - seconds, rows)
+
+    left.secure_transport.request = unreachable
+    age(16)  # one late refresh inside the grace keeps the row: no flash offline
+    await left._rpc_directory({"peer": ""})
+    assert [r["address"] for r in (await left._rpc_directory(listed))["agents"]] == [address(right)]
+    age(DIRECTORY_STALE_SECONDS)  # still in the roster, never answering: gone
+    await left._rpc_directory({"peer": ""})
+    assert (await left._rpc_directory(listed))["agents"] == []
+
+
+@pytest.mark.asyncio
 async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity_on_takeover(
     tmp_path,
 ):
@@ -1958,9 +2091,15 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
             await second._owner_call("relay.event", {"id": "a" * 32})
         with pytest.raises(RelayError, match="method or parameters"):
             await second._owner_call("relay.arbitrary", {"id": "a" * 32})
+        # /connect status shows names, never keys (docs/specs/agent-network-
+        # simple-flow.md section 6); the owner's own agent in the list proves
+        # the RPC reached the real owner's state.
         forwarded = await second.command("status")
-        assert original_key in forwarded
+        assert "one (this device)" in forwarded
+        assert original_key not in forwarded
         assert second.commands is None
+        # allow only means something under agents trust (open ignores grants).
+        await second.command("trust agents")
         assert "approve the peer" in await second.command(
             "allow " + "a" * 64 + " absent"
         )
@@ -1969,7 +2108,7 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
         await second._ensure_owner()
         assert second.commands is not None
         assert second.commands.client.public_key == original_key
-        assert original_key in await second.command("status")
+        assert "two (this device)" in await second.command("status")
     finally:
         for bridge, server in instances:
             await bridge.close()
@@ -2038,7 +2177,7 @@ async def test_model_send_without_human_contact_is_denied_then_identical_retry_w
     assert not denied.success and len(wire.sent) == before
     assert not right.store.queued(right.identity.agent_id)
     await left.human_input(
-        {"message": f"Ask {address(right)} to Create proof.txt"},
+        {"message": f"Ask {await handle(left, right)} to Create proof.txt"},
         SimpleNamespace(source="user"),
     )
     assert len(left.store.contacts(left.commands.client.state.room)) == 1
@@ -2134,7 +2273,7 @@ async def test_authenticated_attacher_input_mints_scoped_contact_grant(
                 json.dumps(
                     {
                         "type": "input",
-                        "text": f"Ask {address(right)} to Create proof.txt",
+                        "text": f"Ask {await handle(left, right)} to Create proof.txt",
                     }
                 )
                 + "\n"
@@ -2356,7 +2495,7 @@ async def test_human_send_command_records_grant_and_transmits(bridges):
     members, _ = bridges
     (left, _, _, _), (right, _, _, _) = members
     allow(left, right)
-    text = await left.command(f"send {address(right)} Create proof.txt")
+    text = await left.command(f"send {await handle(left, right)} Create proof.txt")
     assert "queued" in text
     contacts = left.store.contacts(left.commands.client.state.room)
     assert len(contacts) == 1 and contacts[0]["state"] == "sent"
@@ -2434,3 +2573,364 @@ async def test_first_model_send_cannot_substitute_another_task(bridges):
         }
     )
     assert correct.success
+
+
+@pytest.mark.asyncio
+async def test_manual_commands_take_and_print_agent_at_device_never_a_relay_address(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    allow(left, right)
+    target = await handle(left, right)
+    agent, _, device = target.partition("@")
+    assert agent and device
+
+    authorized = await left.command(f"authorize {target} Create proof.txt")
+
+    assert f"recipient {target}" in authorized
+    assert "relay:" not in authorized
+    grant = left.store.contacts(left.commands.client.state.room)[0]
+    assert grant["recipient"] == address(right)  # the stored grant still binds the exact address
+    text = await left.command(f"send {target} Create proof.txt")
+    assert "relay:" not in text
+
+    for usage in ("authorize", "send"):
+        assert await left.command(f"{usage} {target}") == (
+            f"usage: /connect {usage} <agent@device> <purpose or message>"
+        )
+    for usage in ("task", "cancel"):
+        assert await left.command(f"{usage} {target}") == (
+            f"usage: /connect {usage} <agent@device> <number>"
+        )
+    assert await left.command("withdraw") == "usage: /connect withdraw <number>"
+    assert await left.command("answer 1") == "usage: /connect answer <number> <text>"
+
+
+@pytest.mark.asyncio
+async def test_manual_commands_refuse_a_relay_address_and_an_unknown_handle(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    allow(left, right)
+    await handle(left, right)  # fills the live roster
+
+    for target in (address(right), "nobody@nowhere", "ops"):
+        for command in (
+            f"authorize {target} Create proof.txt",
+            f"send {target} Create proof.txt",
+            f"task {target} {'a' * 32}",
+            f"cancel {target} {'a' * 32}",
+        ):
+            refused = await left.command(command)
+            assert refused.startswith("connect: unknown agent@device"), (command, refused)
+            assert "relay:" not in refused
+    assert left.store.contacts(left.commands.client.state.room) == []
+
+
+# --- manual trust: a human types short numbers, never ids or relay addresses ---
+
+
+@pytest.mark.asyncio
+async def test_conversation_numbers_are_stable_per_network_and_never_reused(
+    bridges, monkeypatch
+):
+    import plugins.hub.relay_conversations as conversations
+
+    members, _ = bridges
+    (left, *_), _ = members
+    store, room, other = left.store, left.commands.client.state.room, "c" * 64
+    ids = [secrets.token_hex(16) for _ in range(6)]
+
+    assert store.number(room, "request", ids[0]) == 1
+    assert store.number(room, "question", ids[1]) == 2  # one count for both kinds
+    assert store.number(room, "request", ids[0]) == 1  # stable while the item lives
+    assert store.number(other, "request", ids[2]) == 1  # each network counts alone
+    assert store.resolve_number(room, "request", 1) == ids[0]
+    assert store.resolve_number(room, "question", 2) == ids[1]
+    assert store.resolve_number(room, "request", 2) is None  # a question is no request
+    assert store.resolve_number(room, "request", 9) is None
+    assert store.resolve_number(other, "request", 2) is None
+    for bad in ("", "nothex", "A" * 32):
+        with pytest.raises(RelayError):
+            store.number(room, "request", bad)
+    with pytest.raises(RelayError):
+        store.number(room, "thread", ids[3])
+
+    # Only numbers far behind the newest are dropped, and a dropped number is
+    # never handed out again.
+    monkeypatch.setattr(conversations, "NUMBER_KEEP", 2)
+    assert [store.number(room, "request", ref) for ref in ids[3:]] == [3, 4, 5]
+    assert [store.resolve_number(room, "request", n) for n in (1, 2, 3)] == [None] * 3
+    assert store.resolve_number(room, "request", 5) == ids[5]
+    assert store.number(room, "request", secrets.token_hex(16)) == 6
+
+
+@pytest.mark.asyncio
+async def test_authorize_says_when_the_request_expires_as_a_local_time(bridges):
+    import re
+
+    from plugins.hub.relay_agent import TASK_TIMEOUT
+
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    allow(left, right)
+    target = await handle(left, right)
+
+    before = time.time()
+    line = await left.command(f"authorize {target} Create proof.txt")
+    after = time.time()
+
+    shown = re.search(r"expires at (\d\d:\d\d);", line).group(1)
+    expected = {
+        time.strftime("%H:%M", time.localtime(moment + TASK_TIMEOUT))
+        for moment in (before, after)
+    }
+    assert shown in expected
+
+
+@pytest.mark.asyncio
+async def test_manual_commands_print_and_take_short_numbers(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    allow(left, right)
+    target = await handle(left, right)
+    room = left.commands.client.state.room
+
+    first = await left.command(f"authorize {target} Create proof.txt")
+    second = await left.command(f"authorize {target} Create proof.txt")
+    assert first.startswith("communication authorized: request 1; expires at ")
+    assert first.endswith(f"recipient {target}")
+    assert second.startswith("communication authorized: request 2;")
+    one = left.store.resolve_number(room, "request", 1)
+    two = left.store.resolve_number(room, "request", 2)
+    assert {one, two} == {g["id"] for g in left.store.contacts(room)}
+
+    withdrawn = await left.command("withdraw 1")
+    assert withdrawn.startswith("request 1 withdrawn; late replies cannot start work")
+    states = {g["id"]: g["state"] for g in left.store.contacts(room)}
+    assert (states[one], states[two]) == ("revoked", "ready")
+
+    sent = await left.command(f"send {target} Create proof.txt")
+    assert sent.startswith(f"request 3 to {target}: ")
+    await right._tick()
+    assert (await left.command(f"task {target} 3")).startswith(
+        f"request 3 on {target}: "
+    )
+    assert (await left.command(f"cancel {target} 3")).startswith(
+        f"request 3 on {target}: "
+    )
+
+    # A number nobody issued, or one that is not the right kind, is refused; so
+    # is anything that is not a number (the old 32-hex ids included).
+    for command in ("withdraw 99", f"task {target} 99", f"cancel {target} 99"):
+        assert "no request numbered 99 on this network" in await left.command(command)
+    assert "no question numbered 3 on this network" in await left.command("answer 3 hi")
+    for command in (
+        f"withdraw {one}",
+        "withdraw one",
+        "withdraw 1.5",
+        f"task {target} {two}",
+    ):
+        assert "give the request number that /connect printed" in await left.command(
+            command
+        )
+    assert "give the question number" in await left.command(f"answer {two} hi")
+
+
+@pytest.mark.asyncio
+async def test_a_question_shows_its_number_and_the_sender_by_name(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+
+    # The remote task itself reaches the screen under the sender's name.
+    shown = [call.args[0] for call in right_hub._display_hub_message.call_args_list]
+    labels = [m.metadata.get("display_from") for m in shown if m.metadata]
+    assert labels and all("@" in label and "relay:" not in label for label in labels)
+
+    result = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    assert result.output == "remote question: pending; acceptance is not completion"
+    question_id = result.metadata["relay_receipt"]["id"]
+    payload = left.store.event(question_id)["payload"]
+
+    left_hub._render_hub_box = MagicMock()
+    HubPlugin._display_hub_message(left_hub, left._correlated_event_message(payload))
+    sender, _, content = left_hub._render_hub_box.call_args.args
+    number = left.number("question", question_id)
+    assert sender.startswith(payload["from_identity"] + "@") and "relay:" not in sender
+    assert content.endswith(f"(answer with /connect answer {number} <text>)")
+    assert question_id not in content and payload["from"] not in content
+
+    answered = await left.command(f"answer {number} Use the workspace root.")
+    assert answered.startswith(f"question {number} answered: ")
+    assert "no longer pending" in await left.command(f"answer {number} again")
+
+
+@pytest.mark.asyncio
+async def test_starting_a_request_reports_its_number_not_its_id(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, *_) = members
+    allow(left, right)
+    grant = authorize(left, right, "Create proof.txt")
+
+    result = await left_hub._handle_hub_msg_tool(
+        {
+            "id": "start",
+            "to": address(right),
+            "content": "Create proof.txt",
+            "thread_id": grant["id"],
+        }
+    )
+
+    assert result.success
+    assert result.output.startswith("remote request 1: ")
+    assert result.output.endswith("; acceptance is not completion")
+    assert grant["id"] not in result.output
+
+
+# --- manual trust: a send with no human grant is refused, never queued or retried ---
+
+
+def _record_wire(bridge, fail=False):
+    """Count every conversation request the bridge puts on the wire."""
+    sent, request = [], bridge.secure_transport.request
+
+    async def recording(*args, **kwargs):
+        sent.append(args[1])
+        if fail:
+            raise RelayError("peer unreachable")
+        return await request(*args, **kwargs)
+
+    bridge.secure_transport.request = recording
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_manual_trust_refuses_an_ungranted_message_and_queues_nothing(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, *_) = members
+    allow(left, right)
+    target = await handle(left, right)
+    sent = _record_wire(left)
+
+    for to in (address(right), target):
+        result = await left_hub._handle_hub_msg_tool(
+            {"id": "send", "to": to, "content": "Create proof.txt"}
+        )
+        assert not result.success and "/connect authorize" in result.output
+    with pytest.raises(RelayError, match="/connect authorize"):
+        await left.send(address(right), "Create proof.txt")
+
+    await left._flush_outbound()  # the loop that retries the outbox every second
+    assert left.store.pending_outbound() == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_manual_trust_authorized_message_goes_out_as_a_task(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, _, right_model, _) = members
+    allow(left, right)
+    target = await handle(left, right)
+    sent = _record_wire(left)
+    await left.command(f"authorize {target} Create proof.txt")
+
+    result = await left_hub._handle_hub_msg_tool(
+        {"id": "send", "to": address(right), "content": "Create proof.txt"}
+    )
+
+    assert result.success and sent == ["message"]
+    await right._tick()
+    assert len(right_model.contexts) == 1  # a task, not a chat message
+
+
+@pytest.mark.asyncio
+async def test_raising_trust_to_manual_stops_a_message_queued_under_open_trust(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, *_) = members
+    target = await handle(left, right)
+    left.set_trust_level("open")
+    _record_wire(left, fail=True)  # the peer is unreachable: the send stays queued
+    result = await left_hub._handle_hub_msg_tool(
+        {"id": "send", "to": address(right), "content": "Create proof.txt"}
+    )
+    assert result.success and "queued" in result.output
+    assert len(left.store.pending_outbound()) == 1
+
+    left.set_trust_level("manual")  # the human takes control; the peer comes back
+    left.secure_transport = SecureConversationTransport(
+        left.commands.client, left.commands.client._store.key.encode()
+    )
+    sent = _record_wire(left)
+    await left._flush_outbound()
+
+    assert sent == []
+    assert left.store.pending_outbound() == []
+    assert target
+
+
+# --- mixed trust: each device's trust is its own ---
+
+
+@pytest.mark.asyncio
+async def test_a_manual_senders_request_runs_as_a_task_on_an_open_receiver(bridges):
+    members, _ = bridges
+    (left, left_hub, left_model, _), (right, right_hub, right_model, _) = members
+    right.set_trust_level("open")  # the sender stays manual
+    target = await handle(left, right)
+    await left.command(f"authorize {target} Find out what uname -n prints")
+
+    sent = await left_hub._handle_hub_msg_tool(
+        {"id": "send", "to": address(right), "content": "Find out what uname -n prints"}
+    )
+    assert sent.success
+    await right._tick()
+
+    # A remote task turn bound to the request, not an ordinary hub turn.
+    assert right.active is not None and not right.active.finished
+    assert len(right_model.contexts) == 1
+    assert right_model.contexts[-1].run(right._turn.get) == right.active.record["id"]
+    running = await left.command(f"task {target} 1")
+    assert running.startswith(f"request 1 on {target}: ") and "running" in running
+
+    await in_turn(right_model, right.guard_model({}, SimpleNamespace(cancelled=False)))
+    await in_turn(
+        right_model,
+        right_hub._parse_hub_messages(
+            {"response_text": "It prints worker-1.", "turn_completed": True}
+        ),
+    )
+    assert right.store.task(right.active.record["id"])["state"] == "completed"
+    await left._tick()
+    returned = left_model.conversation_history[-1]
+    assert "[relay result] It prints worker-1." in returned.content
+    assert "completed" in await left.command(f"task {target} 1")
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_a_manual_senders_request_running_on_an_open_receiver(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    right.set_trust_level("open")
+    target = await handle(left, right)
+    await left.command(f"send {target} Find out what uname -n prints")
+    await right._tick()
+    task = right.active
+    assert task is not None and not task.finished
+
+    cancelled = await left.command(f"cancel {target} 1")
+
+    assert cancelled.startswith(f"request 1 on {target}: ")
+    assert task.finished
+    assert right.store.task(task.record["id"])["state"] == "cancelled"

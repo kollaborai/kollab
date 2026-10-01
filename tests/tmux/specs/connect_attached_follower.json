@@ -1,0 +1,217 @@
+{
+  "name": "connect-attached-follower",
+  "description": "The default launch (a daemon plus an attached window) in a workspace where another window already runs the network: the daemon cannot own the relay, so the attached window opens the Connect screen read-only instead of printing /connect status text. It shows the network and this device, says in one plain line that another window runs the network, and offers no code, requests or accept/reject keys; /connect code says the same. Checked at 80 and 120 columns (issue #121, Story 1).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-attached-follower\"; cd \"$H/ws\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 14,
+    "show_captures": false,
+    "term_width": 80,
+    "term_height": 30
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "throwaway HOME with one workspace on an offline network",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-attached-follower\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'laptop-kollab'; s.save()\""
+    },
+    {
+      "action": "shell",
+      "description": "start a single-process window first (it owns the relay) and wait until it holds it",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-attached-follower\"; S=kollab-spec-attached-follower; tmux -L $S kill-server 2>/dev/null; tmux -L $S new-session -d -s owner -x 80 -y 30 && tmux -L $S send-keys -t owner -l \"cd $H/ws && env HOME=$H KOLLAB_NO_KEYRING=1 PYTHONPATH=$R $R/.venv/bin/python $R/main.py --no-daemon\" && tmux -L $S send-keys -t owner Enter; for i in $(seq 1 80); do [ $(find \"$H/.kollab/network\" -name relay-owner.json 2>/dev/null | wc -l) -ge 1 ] && break; sleep 0.5; done; [ $(find \"$H/.kollab/network\" -name relay-owner.json | wc -l) -ge 1 ]"
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "attached window whose daemon lost the relay: 80 columns"
+    },
+    {
+      "action": "type",
+      "text": "/connect",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "another window in this workspace runs the network",
+      "timeout": 20
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ Connect *$",
+      "description": "the screen is titled Connect, not printed as status text"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "network +relay\\.invalid +trust: open",
+      "description": "it shows the workspace's network, read by the daemon"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "this device +laptop-kollab",
+      "description": "it shows this device"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ another window in this workspace runs the network; use /connect there *$",
+      "description": "one plain line says why nothing else is offered"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ esc close *$",
+      "description": "the only key is esc"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|requests|online|knocks|new code|accept|reject",
+      "description": "no code, requests, roster or decision keys that only the owner can carry out"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "contact route|reconnect on launch disabled|\\(this device\\)",
+      "description": "not the /connect status text"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "[0-9a-f]{64}|relay:",
+      "description": "no key or relay address"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^▄{80} *$",
+      "description": "the title bar is exactly as wide as the terminal"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "attached window: /connect code offers no code"
+    },
+    {
+      "action": "type",
+      "text": "/connect code",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "^ Connect code *$",
+      "timeout": 20
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ another window in this workspace runs the network; use /connect there *$",
+      "description": "the code screen says the same one line"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|press c|creating|could not create",
+      "description": "no code, and no key that would fail"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "attached window: 120 columns"
+    },
+    {
+      "action": "shell",
+      "description": "widen this window to 120 columns (the runner is this shell's parent and names its tmux socket and session after its pid and this spec)",
+      "command": "tmux -L kollab-test-$PPID-connect-attached-follower resize-window -t connect-attached-follower-$PPID -x 120 -y 30"
+    },
+    {
+      "action": "sleep",
+      "seconds": 3
+    },
+    {
+      "action": "type",
+      "text": "/connect",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "^▄{120} *$",
+      "timeout": 20,
+      "description": "the screen is redrawn at 120 columns"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^ another window in this workspace runs the network; use /connect there *$",
+      "description": "the plain line at 120"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "join code|requests|online|knocks|new code|accept|reject",
+      "description": "nothing to act on at 120 either"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "the window that owns the relay keeps the full screen"
+    },
+    {
+      "action": "shell",
+      "description": "open /connect in the single-process window and read it",
+      "command": "S=kollab-spec-attached-follower; for c in / c o n n e c t; do tmux -L $S send-keys -t owner -l \"$c\"; sleep 0.06; done; tmux -L $S send-keys -t owner Enter; sleep 5; tmux -L $S capture-pane -t owner -p; tmux -L $S send-keys -t owner Escape"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "join code +",
+      "description": "the owner has the join code row"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "requests +none",
+      "description": "and the requests row"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "c new code +esc close",
+      "description": "and its keys"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "another window in this workspace",
+      "description": "the owner is not told another window owns the network"
+    }
+  ],
+  "teardown": [
+    {
+      "action": "control",
+      "key": "c"
+    },
+    {
+      "action": "sleep",
+      "seconds": 3
+    },
+    {
+      "action": "shell",
+      "description": "stop the daemon this launch forked (hub CLI of the throwaway HOME) and the single-process window",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-attached-follower\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all; tmux -L kollab-spec-attached-follower kill-server",
+      "allow_failure": true
+    }
+  ]
+}

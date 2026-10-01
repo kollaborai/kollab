@@ -7,6 +7,7 @@ orchestration methods.
 
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -412,7 +413,11 @@ class MessageHandler:
         """
         source = data.get("source", "unknown")
         coord = self._coordinator
-        logger.info(f"TRIGGER_LLM_CONTINUE: Received from {source}")
+        # Never log a relay: address (it carries a device key), whoever sent it.
+        logger.info(
+            "TRIGGER_LLM_CONTINUE: Received from %s",
+            re.sub(r"relay:\S+", "relay:<address>", str(source)),
+        )
 
         # Don't trigger in pipe mode (would interfere with normal flow)
         renderer = coord.renderer
@@ -510,7 +515,7 @@ class MessageHandler:
                             logger.error(f"Hub continue error (turn {turn_count}): {e}")
                             break
                 finally:
-                    qp.is_processing = False
+                    qp.is_processing = False  # ends the chain (note_chain_end)
                     # User messages arrive via process_user_input(), which
                     # enqueues them to processing_queue but SKIPS creating
                     # _process_queue() when is_processing is True.  After

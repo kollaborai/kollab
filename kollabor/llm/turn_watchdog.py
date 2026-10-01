@@ -165,7 +165,11 @@ class TurnWatchdog:
                 snapshot,
             )
             # Close the phantom turn and clear the stuck flags so a fresh turn
-            # can start. Reset progress so we don't immediately re-fire.
+            # can start. Reset progress so we don't immediately re-fire. The
+            # error comes first: lowering is_processing ends the chain, and a
+            # wedge must end a remote request failed even if turn_completed is
+            # stale True.
+            qp.last_turn_error = "session wedged (stuck-busy)"
             qp.is_processing = False
             qp.turn_completed = True
             if hasattr(self._mh, "_retry_pending"):

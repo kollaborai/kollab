@@ -150,11 +150,15 @@ def cli_main():
 
             return main(sys.argv[3:])
         if sys.argv[2:3] != ["serve"]:
-            print("usage: kollab relay run --config <file> | serve --origin https://your-domain [options]")
+            print("usage: kollab relay serve --domain <domain> [options] | run --config <file>")
             if sys.argv[2:] and sys.argv[2] not in {"-h", "--help"}:
                 raise SystemExit(2)
             return
-        from plugins.hub.relay_service import main
+        # `serve --origin ...` is the bare worker `run` supervises; every other `serve` is the directory.
+        if any(arg == "--origin" or arg.startswith("--origin=") for arg in sys.argv[3:]):
+            from plugins.hub.relay_service import main
+        else:
+            from plugins.hub.relay_selfhost import main
 
         return main(sys.argv[3:])
     # Server-only startup must not initialize a TUI, provider or workspace agent.

@@ -1,0 +1,67 @@
+{
+  "name": "connect-knock-usage",
+  "description": "/connect knock with no arguments prints the usage line, and the removed /connect contact name redirects to knock/knocks (issue #121).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-knock\"; mkdir -p \"$H\"; mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":true}}}\" > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "/connect knock with no arguments prints the usage line"
+    },
+    {
+      "action": "type",
+      "text": "/connect knock",
+      "delay": 0.08
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "use /connect knock <route> \"text\"",
+      "timeout": 8
+    },
+    {
+      "action": "section",
+      "title": "the removed contact name redirects to knock/knocks"
+    },
+    {
+      "action": "type",
+      "text": "/connect contact",
+      "delay": 0.08
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "use /connect knock, /connect knocks",
+      "timeout": 8
+    },
+    {
+      "action": "section",
+      "title": "the removed contact-point name redirects to status"
+    },
+    {
+      "action": "type",
+      "text": "/connect contact-point",
+      "delay": 0.08
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "your contact route is in /connect status",
+      "timeout": 8
+    }
+  ]
+}

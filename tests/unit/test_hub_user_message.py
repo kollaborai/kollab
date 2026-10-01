@@ -23,7 +23,7 @@ def _hub(*, agents, identity="koordinator"):
         agent_id="koordinator-id",
         is_coordinator=True,
     )
-    hub.config = {"plugins.hub.user_name": "malmazan"}
+    hub.config = {"plugins.hub.user_name": "me"}
     return hub
 
 
@@ -40,10 +40,10 @@ def test_online_operator_message_carries_human_and_source_metadata():
 
         result = await hub.send_user_message("zicron", "Please work on x.")
 
-        assert result == "sent to zicron as malmazan from koordinator"
+        assert result == "sent to zicron as me from koordinator"
         message = hub._route_message.await_args.args[0]
         assert message.from_agent == "human"
-        assert message.from_identity == "malmazan"
+        assert message.from_identity == "me"
         assert message.to == "zicron"
         assert message.content == "Please work on x."
         assert message.force is True
@@ -65,11 +65,11 @@ def test_offline_pool_identity_is_started_with_provenance_in_initial_task():
 
         result = await hub.send_user_message("lapis", "inspect the queue")
 
-        assert result.startswith("started lapis as malmazan from koordinator")
+        assert result.startswith("started lapis as me from koordinator")
         spawn_args = hub._handle_spawn_command.await_args.args[0]
         assert spawn_args["name"] == "lapis"
         assert spawn_args["task"] == (
-            "[message from malmazan via koordinator] inspect the queue"
+            "[message from me via koordinator] inspect the queue"
         )
 
     asyncio.run(scenario())

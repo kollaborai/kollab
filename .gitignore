@@ -233,3 +233,14 @@ docs/scratchpad/
 # Claude Code session artifacts
 /2026-*-deploy-handoff-*.txt
 /2027-*-deploy-handoff-*.txt
+
+# Live proof evidence (captures, logs) stays local
+tests/live/*/evidence/
+
+# Real hosts and addresses for the live proofs: private, never committed (template: tests/live/local.env.example)
+tests/live/local.env
+
+# Agent network handoff: local only (Codex reads it from this checkout); never public.
+docs/handoff/agent-network/
+# Claude session dumps: never in the public repo
+20[0-9][0-9]-*-this-session-is-being-continued-*.txt

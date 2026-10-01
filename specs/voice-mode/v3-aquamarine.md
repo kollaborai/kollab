@@ -18,7 +18,7 @@ continuous JSONL transcript; segment finalize on silence OR 5-10s window;
 agent-gated dispatch (triage: act | converse | silence ~2s, keep listening);
 strict ambient prompt ("not everything is about the project", "uh
 huh"/"okay" continue); agents = one collective from user POV. New delta:
-tiny LOCAL decision model (the "jev" class model at ~/synthyo — user
+tiny LOCAL decision model (the "jev" class model at ~/models — user
 provided) gates whether the big LLM activates — cheap local triage before
 any expensive call.
 
@@ -97,7 +97,7 @@ possibly big LLM. Reasons:
   - audio-gate (option B) would need its own audio classifier; skipping
     whisper entirely on silence-verdicts saves one whisper run per
     non-utterance, but misclassifies conversational filler as silence
-    more often, which breaks the "uh huh" continuation UX malmazan wants.
+    more often, which breaks the "uh huh" continuation UX owner wants.
 
 Option B (audio-gate): jev-class model scores raw segment audio, only
 non-silence goes to whisper. Cheaper per idle minute, riskier on
@@ -205,7 +205,7 @@ ever want to experiment.
 
 # v3 AMENDMENT — Echo Defense (AEC-primary design, supersedes §5 duck-primary)
 
-Order from malmazan via koordinator, 23:0x: the engine must use reference-signal
+Order from owner via koordinator, 23:0x: the engine must use reference-signal
 echo cancellation so the mic stays OPEN during playback (real talk-over), with
 the agent never hearing itself speak back. Layered design below replaces the
 duck-primary §5; duck demotes to fallback tier.
@@ -236,7 +236,7 @@ duck-primary §5; duck demotes to fallback tier.
 
 ### Reference signal — DIGITAL, not loopback recording
 
-- malmazan asked for "record the actual playing track as reference". We can
+- owner asked for "record the actual playing track as reference". We can
   do better: we SYNTHESIZE the TTS ourselves, so the exact samples we hand to
   sounddevice's output stream ARE the reference — feed the same buffer as
   `far`. Pre-DAC reference is cleaner than any analog loopback (no ADC noise,
@@ -277,7 +277,7 @@ duck-primary §5; duck demotes to fallback tier.
 - Apple AVAudioEngine setVoiceProcessingEnabled (system AEC, macOS 10.15+,
   big improvements in 14+): real and good, but requires replacing sounddevice
   capture with AVAudioEngine (PyObjC) and is Apple-locked. CONTRADICTS
-  malmazan's platform-agnostic engine directive (23:0x: "conform to any
+  owner's platform-agnostic engine directive (23:0x: "conform to any
   other platform or programming language"). Document as per-platform
   optimization: darwin build may route capture through VPIO when present,
   engine API unchanged.

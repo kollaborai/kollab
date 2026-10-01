@@ -1,0 +1,136 @@
+{
+  "name": "connect-help-surface",
+  "description": "/connect help shows the constitution's 13 commands and no advanced ones; /connect help all adds the manual-trust block; a removed Codex name prints its 'use X' line; /connect status never prints a 64-hex key (issue #121).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-help\"; mkdir -p \"$H\"; mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":true}}}\" > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "help shows the 13, not the advanced ones"
+    },
+    {
+      "action": "type",
+      "text": "/connect help",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "/connect leave",
+      "timeout": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "/connect trust open\\|agents\\|manual",
+      "description": "trust is in help"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "advanced \\(trust manual",
+      "description": "plain help hides the advanced block"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "/connect offer",
+      "description": "the removed offer is not in help"
+    },
+    {
+      "action": "section",
+      "title": "help all adds the advanced block"
+    },
+    {
+      "action": "type",
+      "text": "/connect help all",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "advanced \\(trust manual, resets\\):",
+      "timeout": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "/connect authorize <agent@device>",
+      "description": "authorize is under help all"
+    },
+    {
+      "action": "section",
+      "title": "a removed name says what to use instead"
+    },
+    {
+      "action": "type",
+      "text": "/connect offer",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "use /connect code",
+      "timeout": 8
+    },
+    {
+      "action": "type",
+      "text": "/connect peers",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "use /connect or /connect status",
+      "timeout": 8
+    },
+    {
+      "action": "section",
+      "title": "status prints names, not keys"
+    },
+    {
+      "action": "type",
+      "text": "/connect status",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "this device",
+      "timeout": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "[0-9a-f]{64}",
+      "description": "no 64-hex key in status"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "relay:[0-9a-f]",
+      "description": "no relay: address in status"
+    }
+  ]
+}

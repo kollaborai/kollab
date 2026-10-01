@@ -2,14 +2,14 @@
 
 author: zircon | revision: v4.2 (duplex receipts per contract v2.2/v2.3 — playback queue, played/disrupted acks, agent re-decide on disruption) | status: draft for merge | scope: my lane only. Peers' lanes (audio stack, VAD model choice, TTS) are referenced as interfaces, not specified here.
 
-## 0. canonical requirements (locked by malmazan — not re-litigated)
+## 0. canonical requirements (locked by owner — not re-litigated)
 
 - `/voicemode` toggles voice mode on/off.
 - faster-whisper model from Hugging Face on first run (never bundled).
 - always-on local recorder while voice mode is on.
 - continuous JSONL transcript.
 - segment finalize on silence OR 5-10s window (whichever first).
-- dispatch is AGENT-GATED by "jev": a small local decision model (from ~/dev/synthyo, shipped bundled with kollab, running continuously in the background) decides activate | converse | silence. Ambient never reaches the big LLM. jev is the always-on layer; the big LLM only wakes on real work.
+- dispatch is AGENT-GATED by "jev": a small local decision model (from ~/dev/models, shipped bundled with kollab, running continuously in the background) decides activate | converse | silence. Ambient never reaches the big LLM. jev is the always-on layer; the big LLM only wakes on real work.
 - strict always-on ambient prompt: "you are always on", "not everything is about the project", minimal acks ("uh huh", "okay", pause words) continue the conversation, never trigger work.
 - agents are ONE collective from the user's POV: the speaking agent speaks for all.
 
@@ -81,9 +81,9 @@ rules:
 states: `LISTENING → SEGMENTING → TRANSCRIBING → TRIAGE(jev) → {LLM_TURN, LOCAL_REPLY, SILENT_HOLD} → RESPONDING(cap-limited sentences) → ENQUEUE → PLAYBACK(speaking/played per sentence, mic ducked while queue non-empty) → LISTENING` — plus the disruption edge `PLAYBACK → DISRUPTED → AGENT_REDECIDE → {SILENCE, HOLD, REQUEUE_REST}`. Playback is a tracked exchange: every sentence ends in a `played` or `disrupted` receipt; the dispatch loop consumes receipts as ground truth for what the user actually heard.
 
 - LISTENING: VAD frames classify live audio (speech/silence). Empty segments (VAD says no speech) never wake anything — lapis's finding, incorporated.
-- SEGMENTING: buffer grows while speech continues. Finalize when VAD silence ≥ threshold (malmazan: 5-10s window upper bound is wall-clock, whichever first).
+- SEGMENTING: buffer grows while speech continues. Finalize when VAD silence ≥ threshold (owner: 5-10s window upper bound is wall-clock, whichever first).
 - TRANSCRIBING: flushed buffer only goes to faster-whisper. Whisper never sees live audio.
-- TRIAGE — **jev gate**: jev is a small LOCAL decision model (source: ~/dev/synthyo; ships bundled with kollab, no runtime download) that runs continuously in the background as the always-on layer. On each finalized segment it classifies into exactly FOUR decisions:
+- TRIAGE — **jev gate**: jev is a small LOCAL decision model (source: ~/dev/models; ships bundled with kollab, no runtime download) that runs continuously in the background as the always-on layer. On each finalized segment it classifies into exactly FOUR decisions:
 
 | decision | meaning | action |
 |---|---|---|
@@ -92,12 +92,12 @@ states: `LISTENING → SEGMENTING → TRANSCRIBING → TRIAGE(jev) → {LLM_TURN
 | `silence` | no response needed | emit ~2s silence, keep listening |
 | `discard` | noise / VAD leakage | no output, no transcript reply |
 
-  decision set is deliberately closed. The interface is `jev.decide(segment_text, recent_context) -> Decision`; model weights are swappable behind that signature (packaging = bismuth's lane; no *jev* file exists in ~/dev/synthyo today — only an all-MiniLM-L6-v2 onnx cache — so export/copy of the model artifact is an open item for that lane).
+  decision set is deliberately closed. The interface is `jev.decide(segment_text, recent_context) -> Decision`; model weights are swappable behind that signature (packaging = bismuth's lane; no *jev* file exists in ~/dev/models today — only an all-MiniLM-L6-v2 onnx cache — so export/copy of the model artifact is an open item for that lane).
 
 - LLM_TURN: segment text injected as a conversational turn through `pre_user_input` → LLM → `post_api_response` — reuses every existing hook (context plugins, permissions, compaction) with zero new dispatch semantics. Payload carries a voice header: session id + seq_ref so the agent can correlate with the transcript.
 
 - RESPONDING (response leg, both LLM_TURN and LOCAL_REPLY converge here): the response is constrained to ONE constructed sentence by default (first-sentence cap; user can lift the cap). The responder (big LLM or jev) emits sentences; anything beyond the cap is truncated at sentence boundary by the voice layer — the constraint belongs to the voice pipeline, not the agent's prompt, so text-mode behavior is unaffected.
-- PLAYBACK (v4.2 — queue semantics per malmazan's dictated design + contract v2.2): playback is NOT fire-and-forget. The response leg enqueues into a TTS **SentenceQueue** and plays continuously on the user's machine. Mic remains ducked while the queue is non-empty (ducking lifts only when the queue drains). Each played sentence produces a **receipt**:
+- PLAYBACK (v4.2 — queue semantics per owner's dictated design + contract v2.2): playback is NOT fire-and-forget. The response leg enqueues into a TTS **SentenceQueue** and plays continuously on the user's machine. Mic remains ducked while the queue is non-empty (ducking lifts only when the queue drains). Each played sentence produces a **receipt**:
   - `played` — the sentence finished; the engine acks with `ts_played`. **Agent ground truth = "user heard sentences 1..N (played only)."** Receipts inform the next dispatch decision (e.g. if only sentence 1 of 3 played and the user then spoke, the gate context should note the truncation).
   - `disrupted` — user interrupt ENDS the current spoken message. The interrupted sentence NEVER counts as heard. Receipts stop at the last fully-played sentence index.
 - DISRUPTION branch (v4.2): on `disrupted`, control returns to the AGENT's decision, not automatic replay: the agent re-decides **silence vs continue-holding** (standby — say nothing further and wait for the user) vs re-queue-remainder (rare; only when the remaining sentences were urgent, e.g. a warning). Default = silence-and-listen, because the user interrupted for a reason.
@@ -144,7 +144,7 @@ the gate's `silence` decision maps onto kollab's tool system as a **no-op respon
 |---|---|---|
 | dispatch target | **option A: in-session, active agent** | voice = hands-free typing into the current session; reuses pre_user_input pipeline; no hub routing needed since agents are one collective. B (hub_queue) and C (spawn-by-keyword) deferred. |
 | queue-vs-interrupt when LLM mid-response | **QUEUE next segment; interrupt only via explicit user phrase** ("stop", "wait") matched by the local gate | interrupting a stream is high-risk; explicit phrase is a cheap, recoverable escape hatch. |
-| playback model (v4.2) | **say-anything → enqueue → TTS → plays continuously; first-sentence cap by default (liftable); user interrupt ends the message** | queue matches malmazan's dictated design; cap keeps unsolicited speech short until trust is earned. |
+| playback model (v4.2) | **say-anything → enqueue → TTS → plays continuously; first-sentence cap by default (liftable); user interrupt ends the message** | queue matches owner's dictated design; cap keeps unsolicited speech short until trust is earned. |
 | receipts (v4.2) | **per-sentence played/disrupted acks; agent ground truth = played sentences only** | playback is a tracked exchange, not fire-and-forget; disrupted sentences never count as heard. |
 | on disruption (v4.2) | **AGENT re-decides: silence-and-listen (default) vs continue-holding vs re-queue-remainder (rare, urgent only)** | the user interrupted for a reason; defaulting to silence avoids talking over them. |
 | terminal vs web-ui | **parity by design (§3.1), phased rollout: TUI+CLI first, web-ui + socket next** | one shared voice-engine module; frontends implement only capture/render hooks. terminal ships first (native recorder precedent), web-ui via getUserMedia + bridge follows — same loop, no redesign. |
@@ -154,6 +154,6 @@ the gate's `silence` decision maps onto kollab's tool system as a **no-op respon
 ## 6. out of scope (my lane boundaries)
 
 - audio device capture, VAD model choice/quantization (aquamarine).
-- whisper engine packaging/wheel resolution + jev model artifact export/copy from ~/dev/synthyo (bismuth — no jev-named file exists there today, flag to him).
+- whisper engine packaging/wheel resolution + jev model artifact export/copy from ~/dev/models (bismuth — no jev-named file exists there today, flag to him).
 - TTS engine choice; the response leg spec covers the pipeline contract (one sentence → TTS → ducked playback → resume), not synthesis internals.
 - the jev gate model itself — spec defines the interface `decide() -> Decision`, not its weights.

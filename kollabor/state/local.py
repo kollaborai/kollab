@@ -31,7 +31,7 @@ from kollabor_ai.model_registry import supports_vision
 
 from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
-from .interface import StateService
+from .interface import StateService, enrollment_result
 from .snapshots import (
     ActiveOperationSnapshot,
     AgentListSnapshot,
@@ -2197,15 +2197,20 @@ class LocalStateService(StateService):
         except Exception:
             # The code must never reach logs or an RPC exception response.
             return {"error": "connect request could not be submitted"}
-        if not isinstance(result, dict):
-            return {"error": "connect request could not be submitted"}
-        status = result.get("status")
-        receipt_id = result.get("receipt_id")
-        if status == "pending" and isinstance(receipt_id, str):
-            return {"status": "pending", "receipt_id": receipt_id}
-        if isinstance(status, str) and status in {"approved", "rejected"}:
-            return {"status": status}
-        return {"error": "connect request could not be submitted"}
+        return enrollment_result(result) or {
+            "error": "connect request could not be submitted"
+        }
+
+    async def hub_enroll_status(self, receipt_id: str) -> dict[str, str]:
+        """Where a submitted join request stands, from the Hub that runs it."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_connect_enrollment_status", None)
+        if handler is None:
+            raise ValueError("connect enrollment is unavailable")
+        result = enrollment_result(await handler(receipt_id), allow_failed=True)
+        if result is None:
+            raise ValueError("connect request status is unavailable")
+        return result
 
     async def hub_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device code through the Hub that owns local identity."""
@@ -2232,10 +2237,7 @@ class LocalStateService(StateService):
             and isinstance(expires_at, str)
             and expires_at.isdigit()
             and isinstance(code, str)
-            and re.fullmatch(
-                rf"K1-{offer_id}-[0-9A-HJKMNP-TV-Z]{{4}}(?:-[0-9A-HJKMNP-TV-Z]{{4}}){{4}}",
-                code,
-            )
+            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
         ):
             return {
                 "status": "offered",
@@ -2244,6 +2246,57 @@ class LocalStateService(StateService):
                 "code": code,
             }
         return {"error": "connect offer could not be created"}
+
+    async def hub_connect_snapshot(self) -> dict[str, Any]:
+        """The Connect screen's data from the Hub that owns the relay."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_connect_snapshot", None)
+        if handler is None:
+            raise ValueError("connect screen is unavailable")
+        return (await handler()).to_wire()
+
+    async def hub_connect_decide(self, enrollment_id: str, decision: str) -> str:
+        """Accept or reject one join request through the Hub that issued the code."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_decide_join_request", None)
+        if handler is None:
+            return "connect screen is unavailable"
+        return str(await handler(enrollment_id, decision) or "")
+
+    async def hub_contact_knock(
+        self, domain: str, route: str, introduction: str
+    ) -> str:
+        """Send a knock through the Hub that owns the relay."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_send_knock", None)
+        if handler is None:
+            return "connect: knock is unavailable"
+        return str(await handler(domain, route, introduction))
+
+    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
+        """The knocks the Hub that owns the relay holds for this device."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_contact_pending", None)
+        if handler is None:
+            raise ValueError("knock review is unavailable")
+        return await handler(domain)
+
+    async def hub_contact_decide(
+        self,
+        domain: str,
+        receipt_id: str,
+        decision: str,
+        sender_key: str,
+        device_name: str,
+    ) -> str:
+        """Accept or reject one knock through the Hub that owns the relay."""
+        hub = self._resolve_hub_plugin()
+        handler = getattr(hub, "_decide_contact_request", None)
+        if handler is None:
+            return "knock review is unavailable"
+        return str(
+            await handler(domain, receipt_id, decision, sender_key, device_name) or ""
+        )
 
     async def hub_connect(self, command: str) -> str:
         hub = self._resolve_hub_plugin()

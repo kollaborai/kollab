@@ -12,6 +12,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import socket
@@ -56,10 +57,12 @@ from .peer_router import (
     verify_trace,
 )
 from .relay_client import MAX_APPLICATION_PAYLOAD, PeerSessionEvent, RelayClient
-from .relay_state import RelayError, validate_key
+from .relay_state import RelayError, failure_text, validate_key
 from .secure_conversation import SecureConversationTransport
 
 MAX_PEER_FORWARD_CONCURRENCY = 16
+# Seconds for one link exchange round trip (session open, then the request).
+PEER_EXCHANGE_TIMEOUT = 3
 MAX_PEER_FORWARD_PER_PEER_PER_MINUTE = 120
 MAX_PEER_FORWARD_TOTAL_PER_MINUTE = 600
 MAX_PEER_EXCHANGE_BYTES = 3500
@@ -76,6 +79,10 @@ MAX_PEER_LOCATORS = 256
 MAX_PEER_FORWARD_RESPONSE_BYTES = MAX_APPLICATION_PAYLOAD - 256
 MAX_DIRECT_PEER_CONNECT_ADDRESSES = 8
 DIRECT_PEER_CONNECT_TIMEOUT = 5.0
+# A direct attempt that ends this way leaves the relay path open. PeerRouteError is a ValueError:
+# a handshake the peer refused (a timeout counts), a locator that no longer resolves and a garbled
+# reply all land here.
+_DIRECT_FAILED = (ValueError, TransientPeerDeliveryError, OSError, asyncio.TimeoutError)
 _PEER_ID = re.compile(r"kollab-peer:ed25519:[0-9a-f]{64}\Z")
 _SIGNATURE = re.compile(r"[0-9a-f]{128}\Z")
 _HEX_32 = re.compile(r"[0-9a-f]{64}\Z")
@@ -102,6 +109,8 @@ _FORWARD_FIELDS = frozenset(
     {"v", "envelope", "route", "records", "links", "trace"}
 )
 _RECEIPT_FIELDS = frozenset({"v", "message_id", "ciphertext"})
+
+logger = logging.getLogger(__name__)
 
 ApplicationHandler = Callable[[str, str, dict], Awaitable[dict]]
 
@@ -206,15 +215,16 @@ def verify_peer_locator(
     ):
         return None
     if endpoint_registry is not None:
+        # The pin can only deny. A designation this device already knows must
+        # keep its key and must not be rejected; one it has never seen is
+        # vouched for by the approved relay key that signed the locator.
         try:
-            current_endpoint = endpoint_registry.resolve(designation)
+            known = endpoint_registry.resolve(designation)
         except Exception:
             return None
-        if (
-            current_endpoint is None
-            or getattr(current_endpoint, "approval_state", "") != "approved"
-            or str(getattr(current_endpoint, "public_key", "")).lower()
-            != endpoint_key
+        if known is not None and (
+            getattr(known, "approval_state", "") == "rejected"
+            or str(getattr(known, "public_key", "")).lower() != endpoint_key
         ):
             return None
     payload = {name: value[name] for name in _LOCATOR_PAYLOAD_FIELDS}
@@ -550,6 +560,8 @@ class PeerMeshRuntime:
         self.locator_store = SQLitePeerLocatorStore(
             self.state_dir / "peer-locators.sqlite3"
         )
+        # The session this node runs under while it has no relay registration.
+        self._direct_session = secrets.token_hex(16)
         self.discovery = PeerDiscoveryService(
             advertise_enabled=discovery_advertise_enabled,
             scan_enabled=discovery_scan_enabled,
@@ -569,6 +581,7 @@ class PeerMeshRuntime:
             multicast_group=discovery_multicast_group,
             port=discovery_port,
             bind_address=discovery_bind_address,
+            session_provider=self.local_session,
         )
         self._local_locator_cache: tuple[str, int, dict[str, Any]] | None = None
         self._locators: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -576,6 +589,8 @@ class PeerMeshRuntime:
         self.router: PeerRouter | None = None
         self._local_record: PeerRecord | None = None
         self._exchange_offsets: dict[str, tuple[int, int]] = {}
+        # Highest link revision this node proposed per edge, replied to or not.
+        self._proposed_revisions: dict[tuple[str, str, str], int] = {}
         self._exchange_lock = asyncio.Lock()
         self._peer_exchange_locks: dict[str, asyncio.Lock] = {}
         self._forward_semaphore = asyncio.Semaphore(MAX_PEER_FORWARD_CONCURRENCY)
@@ -618,6 +633,76 @@ class PeerMeshRuntime:
         self._locators.clear()
         self._local_locator_cache = None
 
+    def local_session(self) -> str:
+        """The session this node runs under right now.
+
+        While it is registered with the relay that is the relay session, which
+        peers on the roster verify. Without a relay it is a per-process direct
+        session, which peers learn from this node's signed locator or record.
+        """
+        status = self.client.status()
+        session = status.get("session")
+        if (
+            status.get("state") == "online"
+            and isinstance(session, str)
+            and _SESSION_ID.fullmatch(session)
+        ):
+            return session
+        return self._direct_session
+
+    def _roster_peer(self, peer_key: str) -> dict | None:
+        """The approved peer on the relay roster, if this node is registered."""
+        if self.client.status().get("state") != "online":
+            return None
+        return next(
+            (
+                item
+                for item in self.client.peers()
+                if item.get("key") == peer_key and item.get("approved")
+            ),
+            None,
+        )
+
+    def _peer_session(self, peer_key: str) -> tuple[str, str] | None:
+        """The session an approved peer runs under, and where it came from.
+
+        The relay roster wins, then the peer's signed locator (only while
+        direct links are on), then the signed record a route carried.
+        """
+        if peer_key not in self.client.state.approvals:
+            return None
+        roster = self._roster_peer(peer_key)
+        if roster is not None:
+            return "relay", roster["session"]
+        if self.direct_enabled:
+            locator = self._locator_for_peer(peer_key)
+            if locator is not None:
+                return "locator", locator["session_id"]
+        router = self._ensure_router()
+        record = self.record_store.get(peer_id_for_key(peer_key), scope=router.scope)
+        if (
+            record is None
+            or not record.session_id
+            or self.record_store.is_revoked(record.peer_id, scope=router.scope)
+        ):
+            return None
+        return "record", record.session_id
+
+    @staticmethod
+    def _own_addresses() -> frozenset[str]:
+        """The IPv4 addresses of this host's own interfaces."""
+        try:
+            import psutil
+
+            return frozenset(
+                item.address
+                for items in psutil.net_if_addrs().values()
+                for item in items
+                if item.family == socket.AF_INET
+            )
+        except Exception:
+            return frozenset()
+
     def _discovery_source_allowed(self, source: str) -> bool:
         try:
             address = ipaddress.ip_address(source)
@@ -627,17 +712,25 @@ class PeerMeshRuntime:
             return False
         if address.is_loopback or address.is_reserved:
             return False
-        if address.is_global:
+        if self.allow_private_network is not True:
             return False
-        return self.allow_private_network is True
+        # A second device on this host announces from the host's own address,
+        # which is public on a cloud machine; every other public source stays
+        # out.
+        return not address.is_global or source in self._own_addresses()
 
     def _local_locator_wire(self, session_id: str) -> dict[str, Any] | None:
-        """Create a short-lived locator only for this approved TLS endpoint."""
+        """Create a short-lived locator for this device's own TLS endpoint.
+
+        Only a device that belongs to a network advertises one, and it names
+        the session the device runs under, relay-registered or not.
+        """
         if (
             not self.direct_endpoint
             or self.endpoint_identity_manager is None
             or not self.endpoint_designation
-            or not self.client.status().get("state") == "online"
+            or not self.client.state.approvals
+            or session_id != self.local_session()
         ):
             return None
         now = int(time.time())
@@ -657,7 +750,6 @@ class PeerMeshRuntime:
             return None
         if (
             registration is None
-            or getattr(registration, "approval_state", "") != "approved"
             or str(getattr(registration, "public_key", "")).lower() != endpoint_key
             or endpoint_key == self.client.public_key
         ):
@@ -692,9 +784,7 @@ class PeerMeshRuntime:
         return dict(wire)
 
     def _verify_locator_wire(self, wire: dict[str, Any]) -> dict[str, Any] | None:
-        """Verify both signatures and the existing endpoint designation pin."""
-        if self.endpoint_registry is None:
-            return None
+        """Verify both signatures, the approved relay key and any known pin."""
         try:
             candidate = verify_peer_locator(
                 wire,
@@ -785,6 +875,46 @@ class PeerMeshRuntime:
             raise TransientPeerDeliveryError("direct peer transport is disabled")
         if self._direct_sender is not None:
             return await self._direct_sender(peer_key, frame, timeout=timeout)
+        return await self._direct_request(
+            peer_key,
+            {"action": "peer_forward", "frame": frame},
+            "peer_forward_result",
+            timeout=timeout,
+        )
+
+    async def _send_direct_secure(
+        self,
+        peer_key: str,
+        method: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Carry one end-to-end TLS record to a locator-authenticated peer.
+
+        This bootstraps a link with a peer outside the relay room: the
+        endpoint handshake authenticates the peer, its signed locator binds
+        that endpoint to the approved relay key, and the payload stays the
+        opaque TLS record the secure transport would send over the relay.
+        """
+        if not self.direct_enabled or self.endpoint_identity_manager is None:
+            raise TransientPeerDeliveryError("direct peer transport is disabled")
+        return await self._direct_request(
+            peer_key,
+            {"action": "peer_secure", "method": method, "payload": payload},
+            "peer_secure_result",
+            timeout=timeout,
+        )
+
+    async def _direct_request(
+        self,
+        peer_key: str,
+        request: dict[str, Any],
+        result_type: str,
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """One authenticated request/response line over the peer's direct endpoint."""
         locator = self._locator_for_peer(peer_key)
         if locator is None:
             raise TransientPeerDeliveryError("direct peer locator is unavailable")
@@ -800,7 +930,7 @@ class PeerMeshRuntime:
             raise TransientPeerDeliveryError("direct peer transport is unavailable") from exc
         host, port, addresses = await self._resolve_direct_endpoint(locator["endpoint"])
         ssl_context = build_client_ssl_context(self.endpoint_tls_ca)
-        request_line = rfc8785.dumps({"action": "peer_forward", "frame": frame}) + b"\n"
+        request_line = rfc8785.dumps(request) + b"\n"
         if len(request_line) > REMOTE_PEER_FORWARD_MAX_FRAME_BYTES:
             raise PeerRouteError("direct peer frame exceeds its transport bound")
         last_error: Exception | None = None
@@ -844,7 +974,7 @@ class PeerMeshRuntime:
                 if (
                     not isinstance(response, dict)
                     or set(response) != {"type", "response"}
-                    or response.get("type") != "peer_forward_result"
+                    or response.get("type") != result_type
                     or not isinstance(response.get("response"), dict)
                 ):
                     raise TransientPeerDeliveryError("direct peer returned an invalid response")
@@ -910,9 +1040,8 @@ class PeerMeshRuntime:
 
     def _ensure_local_record(self) -> PeerRecord:
         router = self._ensure_router()
-        status = self.client.status()
-        session = status.get("session", "")
-        if status.get("state") != "online" or not _SESSION_ID.fullmatch(str(session)):
+        session = self.local_session()
+        if session == self._direct_session and not self.direct_enabled:
             raise RelayError("peer mesh requires an active relay session")
         endpoint = self._relay_endpoint()
         roles = ("agent", "forwarder") if self._forwarding_enabled() is True else ("agent",)
@@ -945,54 +1074,71 @@ class PeerMeshRuntime:
         self._local_record = record
         return record
 
+    def _live_peers(self) -> dict[str, str]:
+        """Approved peers this node can reach right now, with their sessions.
+
+        Roster peers while registered with the relay, plus peers reached by a
+        live signed locator when direct links are on.
+        """
+        live: dict[str, str] = {}
+        if self.client.status().get("state") == "online":
+            live.update(
+                {
+                    peer["key"]: peer["session"]
+                    for peer in self.client.peers()
+                    if peer.get("approved")
+                }
+            )
+        if self.direct_enabled:
+            for key in tuple(self.client.state.approvals):
+                if key in live:
+                    continue
+                locator = self._locator_for_peer(key)
+                if locator is not None:
+                    live[key] = locator["session_id"]
+        return live
+
     def _refresh_online_neighbors(self) -> None:
         router = self.router
         if router is None:
             return
-        status = self.client.status()
-        if status.get("state") != "online":
-            for peer_id in router.authenticated_neighbors:
+        live = self._live_peers()
+        live_ids = {peer_id_for_key(key) for key in live}
+        for peer_id in router.authenticated_neighbors:
+            if peer_id not in live_ids:
                 try:
                     router.set_authenticated_neighbor(peer_id, False)
                 except PeerRouteError:
                     pass
-            return
-        for peer in self.client.peers():
-            if not peer.get("approved"):
-                continue
-            peer_id = peer_id_for_key(peer["key"])
+        for peer_key, session in live.items():
+            peer_id = peer_id_for_key(peer_key)
             record = self.record_store.get(peer_id, scope=router.scope)
             link = router.link_between(self.local_peer_id, peer_id)
-            tls_id = self.secure_transport.link_session_id(peer["key"])
             if (
                 record is not None
-                and record.session_id == peer["session"]
+                and record.session_id == session
                 and link is not None
-                and tls_id == link.session_id
+                and self._link_is_live(peer_key, link)
             ):
                 try:
-                    router.set_authenticated_neighbor(peer_id, True, session_id=tls_id)
+                    router.set_authenticated_neighbor(
+                        peer_id, True, session_id=link.session_id
+                    )
                 except PeerRouteError:
                     pass
 
     def binding_for(self, peer_key: str) -> tuple[str, str, str] | None:
-        """Bind TLS to signed registration sessions when no direct relay edge exists."""
+        """Bind TLS to the sessions both ends run under.
+
+        A peer on the relay roster binds to its relay session. One reached only
+        by locator or route binds to the session its signed locator or record
+        names, and this node's side is its own local session, relay or direct.
+        """
         validate_key(peer_key)
-        status = self.client.status()
-        if status.get("state") != "online" or not status.get("session"):
+        found = self._peer_session(peer_key)
+        if found is None:
             return None
-        direct = next(
-            (peer for peer in self.client.peers() if peer["key"] == peer_key), None
-        )
-        if direct is not None:
-            return peer_key, status["session"], direct["session"]
-        router = self._ensure_router()
-        record = self.record_store.get(peer_id_for_key(peer_key), scope=router.scope)
-        if record is None or not record.session_id:
-            return None
-        if self.record_store.is_revoked(record.peer_id, scope=router.scope):
-            return None
-        return peer_key, status["session"], record.session_id
+        return peer_key, self.local_session(), found[1]
 
     def _on_peer_session_event(self, event: PeerSessionEvent) -> None:
         if self._closed:
@@ -1030,9 +1176,21 @@ class PeerMeshRuntime:
                 self._ensure_local_record()
             except (RelayError, PeerRouteError, PeerRecordError):
                 return
+            strangers = getattr(self.client.state, "links", ())
             peers = [
-                peer["key"] for peer in self.client.peers() if peer.get("approved")
-            ][:MAX_PEER_EXCHANGE_RECORDS]
+                peer["key"]
+                for peer in self.client.peers()
+                if peer.get("approved") and peer["key"] not in strangers
+            ]
+            if self.direct_enabled:
+                peers += [
+                    key
+                    for key in sorted(self.client.state.approvals)
+                    if key not in peers
+                    and key not in strangers
+                    and self._locator_for_peer(key) is not None
+                ]
+            peers = peers[:MAX_PEER_EXCHANGE_RECORDS]
             if peers:
                 await asyncio.gather(
                     *(self.exchange_peer(peer) for peer in peers),
@@ -1041,7 +1199,13 @@ class PeerMeshRuntime:
             self._refresh_online_neighbors()
 
     async def exchange_peer(self, peer_key: str) -> None:
-        if self._closed or peer_key not in self.client.state.approvals:
+        # An accepted stranger is not a mesh member: it never gets this
+        # network's peer records.
+        if (
+            self._closed
+            or peer_key not in self.client.state.approvals
+            or peer_key in getattr(self.client.state, "links", ())
+        ):
             return
         lock = self._peer_exchange_locks.get(peer_key)
         if lock is None:
@@ -1061,26 +1225,43 @@ class PeerMeshRuntime:
                 peer_id_for_key(peer_key), scope=local_record.scope
             )
             for _attempt in range(2):
-                proposal = (
-                    self._make_link_signature(local_record, remote_record, peer_key)
-                    if remote_record is not None
-                    else None
-                )
+                known = remote_record is not None
+                proposal = None
+                # One node of a pair writes its link, the one with the lower peer
+                # id. Two nodes proposing at once each name their own session and
+                # revision, and end up holding two links they cannot reconcile.
+                if known and local_record.peer_id < remote_record.peer_id:
+                    # The link names this node's own outbound session: open it
+                    # first, so the id proposed is the one the peer sees arrive.
+                    await self.secure_transport.ensure_session(
+                        peer_key, timeout=PEER_EXCHANGE_TIMEOUT
+                    )
+                    proposal = self._make_link_signature(local_record, remote_record, peer_key)
                 request = self._exchange_request(peer_key, local_record, proposal)
                 response = await self.secure_transport.request(
-                    peer_key, "peer.exchange", request, timeout=3
+                    peer_key, "peer.exchange", request, timeout=PEER_EXCHANGE_TIMEOUT
                 )
                 remote_record, link = self._accept_exchange_response(
                     peer_key, response, proposal=proposal
                 )
                 if link is not None:
                     self._mark_neighbor(peer_key, link)
+                if known:
                     return
         except (RelayError, PeerRouteError, PeerRecordError, OSError, TimeoutError):
             return
 
-    def _make_link_signature(self, local: PeerRecord, remote: PeerRecord, peer_key: str) -> dict:
-        tls_id = self.secure_transport.link_session_id(peer_key)
+    def _make_link_signature(
+        self, local: PeerRecord, remote: PeerRecord, peer_key: str
+    ) -> dict | None:
+        """Sign this node's proposal for the link, or None while the held link is good.
+
+        The link names the outbound session this node opened. It is renewed with a
+        fresh timestamp and a higher revision once the session changed or half its
+        lifetime is gone; between renewals nothing is re-signed, because a restated
+        statement carries a timestamp the peer rightly refuses after a minute.
+        """
+        tls_id = self.secure_transport.outbound_link_session_id(peer_key)
         if tls_id is None:
             raise PeerRouteError("peer exchange has no authenticated TLS session")
         current_link = self._ensure_router().link_between(
@@ -1096,20 +1277,16 @@ class PeerMeshRuntime:
             and current_link.forwarding_allowed == forwarding_allowed
             and current_link.expires_at - now > PEER_RECORD_TTL_MAX // 2
         ):
-            # Re-proposing an unchanged live link must reproduce the prior
-            # statement exactly: a fresh timestamp under the same revision
-            # changes the signed digest and trips the peer's equivocation
-            # guard on the ~15 s refresh, tearing down a healthy session.
-            # Past half its lifetime the link is renewed as a new revision.
-            revision = current_link.revision
-            issued_at = current_link.issued_at
-            expires_at = current_link.expires_at
-        else:
-            revision = self.link_store.next_revision(
-                local.scope, local.peer_id, remote.peer_id
-            )
-            issued_at = now
-            expires_at = min(now + PEER_RECORD_TTL_MAX, local.expires_at, remote.expires_at)
+            return None
+        edge = (local.scope, *sorted((local.peer_id, remote.peer_id)))
+        # Revisions only move forward, past a proposal whose reply never came back.
+        revision = max(
+            self.link_store.next_revision(*edge),
+            self._proposed_revisions.get(edge, 0) + 1,
+        )
+        self._proposed_revisions[edge] = revision
+        issued_at = now
+        expires_at = min(now + PEER_RECORD_TTL_MAX, local.expires_at, remote.expires_at)
         payload = PeerLink.signing_payload(
             scope=local.scope,
             peer_a=local.peer_id,
@@ -1193,12 +1370,7 @@ class PeerMeshRuntime:
             if proposal is None:
                 raise PeerRouteError("unsolicited peer link response")
             link = PeerLink.from_wire(value["link"])
-            self._validate_pair_link(
-                link,
-                record,
-                now=now,
-                expected_revision=proposal["payload"].get("revision"),
-            )
+            self._validate_pair_link(link, record, now=now, proposed=proposal["payload"])
             router.add_link(link, now=now)
         elif proposal is not None:
             raise PeerRouteError("peer did not acknowledge the signed link proposal")
@@ -1254,21 +1426,30 @@ class PeerMeshRuntime:
         payload, signature = value["payload"], value["signature"]
         if not isinstance(payload, dict) or not isinstance(signature, str) or not _SIGNATURE.fullmatch(signature):
             raise PeerRouteError("invalid peer link signature proposal")
-        expected_session = self.secure_transport.link_session_id(peer_key)
+        # The link names the session the proposal arrived on: the proposer's
+        # outbound session, which is this node's inbound one.
+        expected_session = self.secure_transport.carrying_link_session_id()
         if expected_session is None:
             raise PeerRouteError("peer link has no authenticated TLS session")
+        if remote.peer_id > local.peer_id:
+            raise PeerRouteError("peer link proposal did not come from the proposing side")
+        revision = payload.get("revision")
         expected = {
             "v": 1,
             "scope": local.scope,
             "left": min(local.peer_id, remote.peer_id),
             "right": max(local.peer_id, remote.peer_id),
             "session_id": expected_session,
-            "revision": self._expected_link_revision(local, remote, expected_session),
+            "revision": revision,
             "issued_at": payload.get("issued_at"),
             "expires_at": payload.get("expires_at"),
             "forwarding_allowed": bool("forwarder" in local.roles and "forwarder" in remote.roles),
         }
-        if payload != expected:
+        if (
+            payload != expected
+            or type(revision) is not int
+            or revision < self.link_store.next_revision(local.scope, local.peer_id, remote.peer_id)
+        ):
             raise PeerRouteError("peer link proposal does not match the live session")
         issued_at, expires_at = payload["issued_at"], payload["expires_at"]
         if (
@@ -1294,7 +1475,7 @@ class PeerMeshRuntime:
             peer_a=local.peer_id,
             peer_b=remote.peer_id,
             session_id=expected_session,
-            revision=expected["revision"],
+            revision=revision,
             issued_at=issued_at,
             expires_at=expires_at,
             forwarding_allowed=expected["forwarding_allowed"],
@@ -1310,21 +1491,13 @@ class PeerMeshRuntime:
         )
         return link
 
-    def _expected_link_revision(
-        self, local: PeerRecord, remote: PeerRecord, tls_id: str
-    ) -> int:
-        current_link = self._ensure_router().link_between(local.peer_id, remote.peer_id)
-        if current_link is not None and current_link.session_id == tls_id:
-            return current_link.revision
-        return self.link_store.next_revision(local.scope, local.peer_id, remote.peer_id)
-
     def _validate_pair_link(
         self,
         link: PeerLink,
         remote: PeerRecord,
         *,
         now: int,
-        expected_revision: int,
+        proposed: dict,
     ) -> None:
         router = self._ensure_router()
         local = self.record_store.get(self.local_peer_id, scope=router.scope, now=now)
@@ -1332,10 +1505,10 @@ class PeerMeshRuntime:
             raise PeerRouteError("local peer record is unavailable")
         if {link.left, link.right} != {self.local_peer_id, remote.peer_id}:
             raise PeerRouteError("peer exchange returned an unrelated link")
-        tls_id = self.secure_transport.link_session_id(remote.public_key)
+        tls_id = proposed["session_id"]
         if link.session_id != tls_id:
             raise PeerRouteError("peer exchange link is bound to another TLS session")
-        if link.revision != expected_revision:
+        if link.revision != proposed["revision"]:
             raise PeerRouteError("peer exchange link revision mismatch")
         if link.forwarding_allowed != bool("forwarder" in local.roles and "forwarder" in remote.roles):
             raise PeerRouteError("peer exchange link lacks bilateral forwarding consent")
@@ -1374,6 +1547,8 @@ class PeerMeshRuntime:
                 raise PeerRouteError("peer exchange contains an out-of-scope record")
             decoded_records.append(record)
         for record in decoded_records:
+            if self._holds_newer_record(record, now):
+                continue  # a copy older than the one held, passed on by a third party
             self.record_store.accept(record, now=now)
             router.add_record(record, now=now)
         for wire in links:
@@ -1385,30 +1560,58 @@ class PeerMeshRuntime:
                 or router.records.get(link.right, scope=router.scope, now=now) is None
             ):
                 continue
+            if self._holds_newer(link):
+                continue
             router.add_link(link, now=now)
+
+    def _holds_newer_record(self, record: PeerRecord, now: int) -> bool:
+        """This node already holds a later revision of the peer's record."""
+        held = self.record_store.next_revision(record.peer_id, scope=record.scope, now=now) - 1
+        return record.revision < held
+
+    def _holds_newer(self, link: PeerLink) -> bool:
+        """This node already holds a later revision of the link's edge."""
+        held = self.link_store.next_revision(link.scope, link.left, link.right) - 1
+        return link.revision < held
+
+    def _link_is_live(self, peer_key: str, link: PeerLink) -> bool:
+        """The TLS session the link names is open with the peer, in either direction.
+
+        Each node holds its own half of a session and one half can outlive the
+        other, so two nodes never agree on "the" session by reading their own
+        tables. A link is checked by asking whether its session is among them.
+        """
+        return link.session_id in self.secure_transport.live_link_session_ids(peer_key)
 
     def _mark_neighbor(self, peer_key: str, link: PeerLink) -> None:
         router = self._ensure_router()
         peer_id = peer_id_for_key(peer_key)
-        tls_id = self.secure_transport.link_session_id(peer_key)
-        if tls_id is None or link.session_id != tls_id:
+        if not self._link_is_live(peer_key, link):
             raise PeerRouteError("peer link does not match the current TLS session")
-        router.set_authenticated_neighbor(peer_id, True, session_id=tls_id)
+        router.set_authenticated_neighbor(peer_id, True, session_id=link.session_id)
 
     def _direct_peer(self, peer_key: str) -> dict:
+        """The approved peer a signed exchange may come from or go to.
+
+        It is on the relay roster, or its live signed locator names the
+        session its records must carry.
+        """
         if peer_key not in self.client.state.approvals:
             raise PeerRouteError("peer exchange requires local approval")
-        direct = next((item for item in self.client.peers() if item["key"] == peer_key), None)
-        if direct is None or not direct.get("approved"):
+        live = self._live_peers()
+        if peer_key not in live:
             raise PeerRouteError("peer exchange requires a live direct session")
-        return direct
+        return {"key": peer_key, "session": live[peer_key], "approved": True}
 
     def _forward_frame(
         self,
         path: tuple[str, ...],
         envelope: ForwardEnvelope,
         trace: tuple,
+        links: dict[str, PeerLink] | None = None,
     ) -> dict[str, Any]:
+        """The frame for a route. A transit node passes the links it was handed:
+        its trace names those, and a copy of its own may be a revision apart."""
         router = self._ensure_router()
         records = router.record_snapshot()
         path_records = []
@@ -1419,7 +1622,11 @@ class PeerMeshRuntime:
                 raise PeerRouteError("peer route record is unavailable")
             path_records.append(record.to_wire())
         for left, right in zip(path, path[1:]):
-            link = router.link_between(left, right)
+            link = (
+                router.link_between(left, right)
+                if links is None
+                else next((item for item in links.values() if {item.left, item.right} == {left, right}), None)
+            )
             if link is None:
                 raise PeerRouteError("peer route link is unavailable")
             path_links.append(link.to_wire())
@@ -1443,7 +1650,7 @@ class PeerMeshRuntime:
                 return await self._send_direct_peer_forward(
                     peer_key, frame, timeout=timeout
                 )
-            except (TransientPeerDeliveryError, OSError, asyncio.TimeoutError):
+            except _DIRECT_FAILED:
                 # The envelope's destination replay key makes relay fallback
                 # safe if the direct peer committed but its receipt was lost.
                 pass
@@ -1562,24 +1769,42 @@ class PeerMeshRuntime:
         )
         if incoming_link is None:
             raise PeerRouteError("peer forwarding ingress link is unavailable")
-        current_session = self.secure_transport.link_session_id(ingress_peer_key)
         if (
-            current_session != incoming_link.session_id
+            not self._link_is_live(ingress_peer_key, incoming_link)
             or incoming_link.expires_at <= now
         ):
             raise PeerRouteError("peer forwarding ingress session is stale")
         # Import only after the full signed route has been validated.
         for record in records.values():
+            if self._holds_newer_record(record, now):
+                continue
             self.record_store.accept(record, now=now)
             router.add_record(record, now=now)
         for link in links.values():
+            if self._holds_newer(link):
+                continue
             self.link_store.accept(link, now=now)
             router.add_link(link, now=now)
         return envelope, route, trace, records, links, expected_local_index
 
-    async def handle_direct_forward(
-        self, designation: str, endpoint_public_key: str, frame: dict[str, Any]
-    ) -> dict[str, Any]:
+    def endpoint_key_for(self, designation: str) -> str:
+        """The endpoint key a network member's live locator gives a designation.
+
+        A claim belongs to the relay key that signed it, and `_direct_caller`
+        maps a caller back to that key alone. When two members claim one name
+        with different keys, the member approved first keeps it, so a later
+        claim cannot block the first device. An accepted stranger is not a
+        member and never claims a name.
+        """
+        if not self.direct_enabled:
+            return ""
+        for peer_key in self.client.members():
+            locator = self._locator_for_peer(peer_key)
+            if locator is not None and locator.get("endpoint_designation") == designation:
+                return str(locator.get("endpoint_public_key", "")).lower()
+        return ""
+
+    def _direct_caller(self, designation: str, endpoint_public_key: str) -> str:
         """Map a current endpoint-authenticated caller to its approved relay key."""
         candidates = [
             self._locator_for_peer(peer_key)
@@ -1594,7 +1819,50 @@ class PeerMeshRuntime:
         ]
         if len(matches) != 1:
             raise PeerRouteError("direct peer identity is not bound to one approved relay")
-        return await self.handle_forward(matches[0]["relay_public_key"], frame)
+        return matches[0]["relay_public_key"]
+
+    async def handle_direct_forward(
+        self, designation: str, endpoint_public_key: str, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        peer_key = self._direct_caller(designation, endpoint_public_key)
+        if peer_key in getattr(self.client.state, "links", ()):
+            raise PeerRouteError("an accepted stranger is not a mesh member")
+        return await self.handle_forward(peer_key, frame)
+
+    async def handle_direct_secure(
+        self,
+        designation: str,
+        endpoint_public_key: str,
+        method: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Deliver a direct TLS record exactly as a relay-carried one."""
+        if self._closed or not self.direct_enabled:
+            raise PeerRouteError("direct peer transport is disabled")
+        if method not in {"secure_identity", "secure_packet"} or not isinstance(payload, dict):
+            raise PeerRouteError("direct carrier accepts only secure conversation records")
+        peer_key = self._direct_caller(designation, endpoint_public_key)
+        result = await self.application_handler(peer_key, method, payload)
+        if not isinstance(result, dict):
+            raise PeerRouteError("secure record handler returned an invalid response")
+        return result
+
+    def _admit_transit(self, ingress_peer_key: str) -> None:
+        """Bound what this node forwards for others: per peer, in total, at once."""
+        minute = int(time.time() // 60)
+        for stale in [key for key in self._forward_counts if key[1] != minute]:
+            del self._forward_counts[stale]
+        for stale in [key for key in self._forward_total if key != minute]:
+            del self._forward_total[stale]
+        if (
+            self._forward_counts[(ingress_peer_key, minute)]
+            >= MAX_PEER_FORWARD_PER_PEER_PER_MINUTE
+            or self._forward_total[minute] >= MAX_PEER_FORWARD_TOTAL_PER_MINUTE
+            or self._forward_semaphore.locked()
+        ):
+            raise PeerRouteError("peer forwarding is over its limit")
+        self._forward_counts[(ingress_peer_key, minute)] += 1
+        self._forward_total[minute] += 1
 
     async def handle_forward(
         self, ingress_peer_key: str, frame: dict[str, Any]
@@ -1602,15 +1870,7 @@ class PeerMeshRuntime:
         """Verify and forward one opaque end-to-end encrypted application frame."""
         if self._closed or ingress_peer_key not in self.client.state.approvals:
             raise PeerRouteError("peer forwarding is not approved")
-        ingress = next(
-            (
-                item
-                for item in self.client.peers()
-                if item.get("key") == ingress_peer_key and item.get("approved")
-            ),
-            None,
-        )
-        if ingress is None:
+        if ingress_peer_key not in self._live_peers():
             raise PeerRouteError("peer forwarding ingress is offline")
         try:
             envelope, route, trace, records, links, local_index = self._route_material(
@@ -1621,6 +1881,7 @@ class PeerMeshRuntime:
                 return await self._deliver_envelope(envelope, records[envelope.origin])
             if self._forwarding_enabled() is not True:
                 raise PeerRouteError("peer forwarding is disabled")
+            self._admit_transit(ingress_peer_key)
             next_id = route[local_index + 1]
             next_record = records[next_id]
             ingress_link = next(
@@ -1631,9 +1892,8 @@ class PeerMeshRuntime:
                 link for link in links.values()
                 if {link.left, link.right} == {self.local_peer_id, next_id}
             )
-            current_session = self.secure_transport.link_session_id(next_record.public_key)
             if (
-                current_session != egress_link.session_id
+                not self._link_is_live(next_record.public_key, egress_link)
                 or egress_link.expires_at <= int(time.time())
                 or not egress_link.forwarding_allowed
             ):
@@ -1649,12 +1909,13 @@ class PeerMeshRuntime:
                 prior_records=records,
                 peer_links=links,
             )
-            next_frame = self._forward_frame(route, envelope, new_trace)
-            response = await self._send_forward_to_peer(
-                next_record.public_key,
-                next_frame,
-                timeout=max(1.0, min(envelope.expires_at - int(time.time()), MAX_PEER_FORWARD_TTL_SECONDS)),
-            )
+            next_frame = self._forward_frame(route, envelope, new_trace, links)
+            async with self._forward_semaphore:
+                response = await self._send_forward_to_peer(
+                    next_record.public_key,
+                    next_frame,
+                    timeout=max(1.0, min(envelope.expires_at - int(time.time()), MAX_PEER_FORWARD_TTL_SECONDS)),
+                )
             self.forwarded_frames += 1
             return response
         except asyncio.CancelledError:
@@ -1662,6 +1923,7 @@ class PeerMeshRuntime:
         except Exception as exc:
             if isinstance(exc, RelayError):
                 raise
+            logger.warning("peer forwarding request was rejected: %s", failure_text(exc))
             raise RelayError("peer forwarding request was rejected") from None
 
     async def _deliver_envelope(
@@ -1736,21 +1998,11 @@ class PeerMeshRuntime:
             return {"v": 1, "error": "delivery_failed"}
 
     def _peer_session_source(self, peer_key: str) -> tuple[str, str]:
-        """Return `relay` or `locator` plus the authenticated instance session."""
-        direct = next(
-            (item for item in self.client.peers() if item["key"] == peer_key), None
-        )
-        if direct is not None and direct.get("approved"):
-            return "relay", direct["session"]
-        candidate = self._locators.get(peer_key)
-        if candidate is not None and candidate["expires_at"] > int(time.time()):
-            return "locator", candidate["session_id"]
-        record = self.record_store.get(
-            peer_id_for_key(peer_key), scope=self._ensure_router().scope
-        )
-        if record is not None:
-            return "record", record.session_id
-        raise PeerRouteError("peer has no current authenticated session")
+        """Return `relay`, `locator` or `record` plus the peer's session."""
+        found = self._peer_session(peer_key)
+        if found is None:
+            raise PeerRouteError("peer has no current authenticated session")
+        return found
 
     def known_peer_keys(self, requested: str = "") -> list[tuple[str, str]]:
         router = self._ensure_router()
@@ -1781,6 +2033,16 @@ class PeerMeshRuntime:
         direct = next((item for item in self.client.peers() if item["key"] == peer_key), None)
         router = self._ensure_router()
         remote_id = peer_id_for_key(peer_key)
+        if direct is None and self.direct_enabled and self._locator_for_peer(peer_key):
+            # A peer outside the relay room but reachable on its signed
+            # locator (LAN or configured endpoint) needs no route or link:
+            # this is how the first link to it is bootstrapped.
+            try:
+                return await self._send_direct_secure(
+                    peer_key, method, payload, timeout=timeout
+                )
+            except _DIRECT_FAILED:
+                pass
         if direct is None:
             record = self.record_store.get(remote_id, scope=router.scope)
             if record is None or not router.route_candidates(remote_id):
@@ -1793,12 +2055,14 @@ class PeerMeshRuntime:
                 return await self.client.request(peer_key, method, payload, timeout=timeout)
             record = self.record_store.get(remote_id, scope=router.scope)
             link = router.link_between(self.local_peer_id, remote_id)
-            tls_id = self.secure_transport.link_session_id(peer_key)
-            if method == "secure_packet" and (
-                record is None or link is None or tls_id != link.session_id
+            # A link rides the TLS session it names. The handshake that opens a
+            # session cannot depend on one, or a link that outlived its sessions
+            # would refuse the very handshake that replaces it, on the relay too.
+            if (
+                link is None
+                or not self._link_is_live(peer_key, link)
+                or (method == "secure_packet" and record is None)
             ):
-                return await self.client.request(peer_key, method, payload, timeout=timeout)
-            if method == "secure_identity" and link is None:
                 return await self.client.request(peer_key, method, payload, timeout=timeout)
         inner = {"v": 1, "method": method, "payload": payload}
         if not isinstance(payload, dict) or _encoded_size(inner) > PEER_ENVELOPE_MAX_BYTES:
@@ -1855,6 +2119,9 @@ class PeerMeshRuntime:
                 timeout_per_path=min(float(timeout), MAX_PEER_FORWARD_TTL_SECONDS),
             )
         except PeerRouteError as exc:
+            if direct is not None:
+                # The peer is on the relay too: a stale mesh link costs one failed try.
+                return await self.client.request(peer_key, method, payload, timeout=timeout)
             raise RelayError("peer route delivery failed") from exc
         receipt = result_holder.get("receipt")
         if not isinstance(receipt, dict):

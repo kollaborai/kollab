@@ -30,14 +30,25 @@ from nacl.exceptions import CryptoError
 from nacl.public import Box
 from nacl.signing import VerifyKey
 
+from kollabor_config.managed_config import (
+    clear_managed_config,
+    managed_config_path,
+    read_managed_config,
+)
+
+from .device_names import NAME_RE, default_device_name, default_network_name, key_label
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
     KEY,
+    MAX_ANNOUNCED,
     MAX_APPROVALS,
+    MAX_REVOKED,
+    MAX_VOUCHERS,
     RelayError,
     RelayStateStore,
     canonical_origin,
+    failure_text,
     parse_invite,
     strict_json,
     validate_key,
@@ -75,9 +86,28 @@ APPLICATION_ERRORS = frozenset(
     {"busy", "not_supported", "failed", "deadline", "cancelled"}
 )
 RequestHandler = Callable[[str, str, dict], Awaitable[dict]]
+LINK_BINDING_DOMAIN = b"kollab-relay-link/1\x00"
+
+
+def link_binding(first: str, second: str) -> str:
+    """The envelope `room` value between two keys that are linked across rooms.
+
+    Both keys compute the same value, so it binds a message to this pair of
+    devices the way the room hash binds one to a room.
+    """
+    low, high = sorted((first, second))
+    return hashlib.sha256(
+        LINK_BINDING_DOMAIN + bytes.fromhex(low) + bytes.fromhex(high)
+    ).hexdigest()
+
+
+# Frames a client may send: a burst, then a steady rate (a token bucket on the real clock).
+SEND_BURST = 20.0
+SEND_RATE_PER_SECOND = 8
 
 
 @dataclass
+
 class _ApplicationPending:
     peer: str
     local_session: str
@@ -145,7 +175,7 @@ class RelayClient:
         self._closed = True
         self._first_attempt = asyncio.Event()
         self._send_lock = asyncio.Lock()
-        self._tokens = 20.0
+        self._tokens = SEND_BURST
         self._token_time = time.monotonic()
         self._counts: Counter = Counter()
         self._ws_url = ""
@@ -232,15 +262,74 @@ class RelayClient:
     def join_invite(self, token: str) -> str:
         if self._task is not None and not self._task.done():
             raise RelayError("disconnect before joining another invitation")
-        return self._store.join(token)
+        self._adopt_bridge_fields()
+        origin = self._store.join(token)
+        self._forget_stale_primary()
+        return origin
+
+    def _forget_stale_primary(self) -> None:
+        """A join names this device's primary; a managed-config record left by
+        another one (a wiped workspace, an earlier network) would refuse every
+        bundle from the new primary as other_primary, for good. The record is
+        machine-global, so only a state living in this machine's own
+        ``~/.kollab/network`` may touch it."""
+        if self.state_dir.parent != managed_config_path().parent.parent / "network":
+            return
+        stale = read_managed_config()
+        if stale is not None and stale.primary_key != self.state.inviter:
+            clear_managed_config(primary_key=stale.primary_key)
 
     def rotate_room(self):
         if self._task is not None and not self._task.done():
             raise RelayError("disconnect before rotating the invitation room")
+        self._adopt_bridge_fields()
         self.state.room = secrets.token_hex(32)
         self.state.approvals = []
         self.state.inviter = ""
+        # Every prior peer key is meaningless in the new room; keeping their
+        # device-name bindings would only block those names from reuse.
+        self.state.peer_devices = {}
+        self.state.peer_trust = {}
+        self.state.config_recipients = []
+        self.state.links = []
+        self.state.vouched_by = {}
+        self.state.revoked = []
+        self.state.knocks = {}
+        self.state.knock_requests = {}
         self._store.save()
+
+    async def leave(self) -> None:
+        """Disconnect for good: forget the directory, the room and every peer.
+
+        A device that left can then join any network by code, which needs an
+        empty origin, no inviter and no approvals.
+        """
+        await self.close(disable=True)
+        self.state.origin = ""
+        self.rotate_room()
+        self.state.network_name = ""  # rotate keeps the name; leaving forgets it
+        self._store.save()
+
+    def _adopt_bridge_fields(self) -> None:
+        """Take the fields the agent bridge writes through its own state store.
+
+        This client keeps one long-lived copy and saves all of it, so every
+        method that saves must call this first, or it writes a stale device
+        name, trust and peer bindings back over the bridge's newer ones.
+        """
+        disk = RelayStateStore(self.workspace, self.state_dir).state
+        for name in (
+            "device_name",
+            "network_name",
+            "trust",
+            "peer_devices",
+            "peer_trust",
+            "config_recipients",
+            "links",
+            "knocks",
+            "knock_requests",
+        ):
+            setattr(self.state, name, getattr(disk, name))
 
     def approve(self, key: str):
         validate_public_key(key)
@@ -248,8 +337,9 @@ class RelayClient:
             raise RelayError("cannot approve your own key")
         newly_approved = key not in self.state.approvals
         if newly_approved:
+            self._adopt_bridge_fields()
             if len(self.state.approvals) >= MAX_APPROVALS:
-                raise RelayError("local peer approval capacity reached")
+                raise RelayError("local peer approval capacity reached", "capacity")
             self.state.approvals.append(key)
             try:
                 self._store.save()
@@ -262,13 +352,173 @@ class RelayClient:
                     PeerSessionEvent("peer_appeared", key, None, session)
                 )
 
-    def revoke(self, key: str):
+    def remember_announced(self, ids: list[str]) -> None:
+        """Keep which join requests and knocks the human was already told about."""
+        ids = ids[-MAX_ANNOUNCED:]
+        if ids != self.state.announced:
+            self._adopt_bridge_fields()
+            self.state.announced = ids
+            self._store.save()
+
+    def remember_config_told(self, skipped: str, refused: bool) -> None:
+        """Keep what the sealed-config sync last told the human, so a restart repeats nothing."""
+        if (skipped, refused) != (
+            self.state.config_told_skipped,
+            self.state.config_told_refused,
+        ):
+            self._adopt_bridge_fields()
+            self.state.config_told_skipped, self.state.config_told_refused = skipped, refused
+            self._store.save()
+
+    def add_config_recipient(self, key: str) -> None:
+        """Remember a device accepted with a join code: it gets the sealed config.
+
+        A joined device is a member, not a stranger. An earlier knock left it a
+        cross-room link and agents trust, which would make the two ends bind
+        their messages to different rooms.
+        """
+        validate_public_key(key)
+        self._adopt_bridge_fields()
+        changed = False
+        if key not in self.state.config_recipients:
+            if len(self.state.config_recipients) >= MAX_APPROVALS:
+                raise RelayError("config recipient capacity reached", "capacity")
+            self.state.config_recipients.append(key)
+            changed = True
+        # A stranger that joins by code stops being a stranger.
+        if key in self.state.links:
+            self.state.links.remove(key)
+            self.state.peer_trust.pop(key, None)
+            changed = True
+        # A human just accepted this device: first-hand, and no longer revoked.
+        if self.state.vouched_by.pop(key, None) is not None:
+            changed = True
+        if key in self.state.revoked:
+            self.state.revoked.remove(key)
+            changed = True
+        if changed:
+            self._store.save()
+
+    def network_id(self) -> str:
+        """What every envelope and membership list of this network is bound to."""
+        return hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
+
+    def members(self) -> list[str]:
+        """The devices on this network: approved, and not an accepted stranger.
+
+        The relay path and the mesh path both ask this one question.
+        """
+        self._adopt_bridge_fields()  # the bridge records accepted strangers
+        strangers = set(self.state.links)
+        return [key for key in self.state.approvals if key not in strangers]
+
+    def membership(self) -> tuple[list[tuple[str, str]], list[str]]:
+        """What this device tells its members: (key, name) and its revocations.
+
+        Only first-hand members are listed: devices a human here accepted, by
+        join code or by joining through them. A device this one merely heard
+        about is never passed on, so every vouch traces back to a human's accept.
+        """
+        self._adopt_bridge_fields()
+        listed = [
+            (key, self.state.peer_devices.get(key, ""))
+            for key in self.members()
+            if key not in self.state.vouched_by
+        ]
+        return listed, list(self.state.revoked)
+
+    def accept_membership(
+        self, voucher: str, members: list[tuple[str, str]], revoked: list[str]
+    ) -> None:
+        """Take a member's word on who else is on this network.
+
+        Only a member this device already approved is heard. A device it names
+        is approved, and remembered as vouched for by that member. A device it
+        stops naming loses that vouch; one left with none is dropped. A
+        revocation is applied at once and remembered: no vouch brings that
+        device back until a human here accepts it again with a join code.
+        Accepted strangers never enter or leave this way.
+        """
+        self._adopt_bridge_fields()
+        if voucher not in self.members():
+            raise RelayError("peer is not part of this network")
+        for key in revoked:
+            if key not in (self.public_key, voucher) and key not in self.state.links:
+                self.revoke(key, announce=True)
+        named = set()
+        for key, name in members:
+            named.add(key)
+            if key == self.public_key or key in self.state.links or key in self.state.revoked:
+                continue
+            first_hand = key in self.state.approvals and key not in self.state.vouched_by
+            if key not in self.state.approvals:
+                try:
+                    self.approve(key)
+                except RelayError:
+                    continue  # at capacity: this device stays out
+                taken = {
+                    self.state.device_name or default_device_name(self.workspace),
+                    *self.state.peer_devices.values(),
+                }
+                if not NAME_RE.fullmatch(name) or name in taken:
+                    name = key_label(key)  # a name is never reused or renamed
+                self.state.peer_devices[key] = name
+                self._store.save()  # the next approval re-reads bridge fields from disk
+            if not first_hand:
+                vouchers = self.state.vouched_by.setdefault(key, [])
+                if voucher not in vouchers and len(vouchers) < MAX_VOUCHERS:
+                    vouchers.append(voucher)
+        orphans = []
+        for member, vouchers in tuple(self.state.vouched_by.items()):
+            if voucher in vouchers and member not in named:
+                vouchers.remove(voucher)
+                if not vouchers:
+                    del self.state.vouched_by[member]
+                    orphans.append(member)
+        self._store.save()
+        for orphan in orphans:
+            self.revoke(orphan)
+
+    def revoke(self, key: str, *, announce: bool = False):
+        """Drop a device. `announce` also tells the members, at their next list.
+
+        Devices whose only vouch came from `key` go with it.
+        """
         validate_key(key)
         was_approved = key in self.state.approvals
         previous_session = self._peers.get(key) if was_approved else None
+        orphans: list[str] = []
         try:
+            self._adopt_bridge_fields()
+            changed = False
+            if announce and key not in self.state.links and key not in self.state.revoked:
+                if key != self.public_key:
+                    self.state.revoked.append(key)
+                    del self.state.revoked[:-MAX_REVOKED]
+                    changed = True
+            if self.state.vouched_by.pop(key, None) is not None:
+                changed = True
+            for member, vouchers in tuple(self.state.vouched_by.items()):
+                if key in vouchers:
+                    vouchers.remove(key)
+                    changed = True
+                    if not vouchers:
+                        del self.state.vouched_by[member]
+                        orphans.append(member)
+            if key in self.state.config_recipients:
+                self.state.config_recipients.remove(key)
+                changed = True
             if key in self.state.approvals:
                 self.state.approvals.remove(key)
+                changed = True
+            if self.state.peer_devices.pop(key, None) is not None:
+                changed = True
+            if self.state.peer_trust.pop(key, None) is not None:
+                changed = True
+            if key in self.state.links:
+                self.state.links.remove(key)
+                changed = True
+            if changed:
                 self._store.save()
         finally:
             # A persistence error must not leave already-running callbacks
@@ -283,6 +533,18 @@ class RelayClient:
                 self._notify_peer_session_listeners(
                     PeerSessionEvent("peer_revoked", key, previous_session, None)
                 )
+        for orphan in orphans:
+            self.revoke(orphan)
+
+    def _binding(self, peer_key: str) -> str:
+        """What an envelope's `room` must say for this peer.
+
+        An accepted stranger lives in its own room, so its messages are bound
+        to the pair of keys instead of a room both sides share.
+        """
+        if peer_key in self.state.links:
+            return link_binding(self.public_key, peer_key)
+        return self.network_id()
 
     def _settle_application_peer(self, key: str, reason: str) -> None:
         for request_id, pending in tuple(self._application_pending.items()):
@@ -315,15 +577,19 @@ class RelayClient:
                 "verified relay endpoint must be canonical same-origin /relay/v1/ws"
             )
         if self.state.origin and self.state.origin != origin:
-            raise RelayError(
-                "disconnect and join an invitation to change the relay origin"
-            )
+            raise RelayError("run /connect leave before joining another directory")
         await self.close()
         self._ws_url, self._ca, self._private_cidrs = ws_url, ca, tuple(private_cidrs)
         # Validate operator configuration before starting any background work.
         _PublicResolver(dns.asyncresolver.Resolver(), self._private_cidrs)
         ssl.create_default_context(cafile=ca or None)
+        self._adopt_bridge_fields()
         self.state.origin, self.state.enabled = origin, True
+        if not self.state.network_name and not self.state.inviter:
+            # No one invited this device, so it is the first: it names the network.
+            self.state.network_name = default_network_name(
+                self.state.device_name or default_device_name(self.workspace)
+            )
         self._store.save()
         self._closed, self._error = False, ""
         self._state = "connecting"
@@ -335,6 +601,7 @@ class RelayClient:
     async def close(self, disable: bool = False):
         self._closed = True
         if disable:
+            self._adopt_bridge_fields()
             self.state.enabled = False
             self._store.save()
         task, self._task = self._task, None
@@ -562,7 +829,9 @@ class RelayClient:
             raise RelayError("relay frame too large")
         async with self._send_lock:
             now = time.monotonic()
-            self._tokens = min(20.0, self._tokens + (now - self._token_time) * 8)
+            self._tokens = min(
+                SEND_BURST, self._tokens + (now - self._token_time) * SEND_RATE_PER_SECOND
+            )
             self._token_time = now
             if self._tokens < 1:
                 raise RelayError("relay send rate limit reached")
@@ -764,9 +1033,10 @@ class RelayClient:
         except asyncio.CancelledError:
             # A cancelled request must never produce a successful response.
             raise
-        except Exception:
+        except Exception as exc:
             # Handler details can contain credentials, filesystem paths, or
             # prompt content; only fixed transport errors cross this boundary.
+            _LOGGER.warning("peer application request failed: %s", failure_text(exc))
             error = "failed"
         await self._application_response(
             key,
@@ -796,7 +1066,7 @@ class RelayClient:
             "to": key,
             "from_session": self._session_id,
             "to_session": self._peers[key],
-            "room": hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest(),
+            "room": self._binding(key),
             "id": message_id,
             "sent_at": now,
             "expires_at": now + 30,
@@ -898,8 +1168,7 @@ class RelayClient:
             or body["to"] != self.public_key
             or body["from_session"] != frame["session"]
             or body["to_session"] != self._session_id
-            or body["room"]
-            != hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
+            or body["room"] != self._binding(key)
             or body["id"] != frame["id"]
         ):
             raise RelayError("encrypted envelope binding mismatch")

@@ -176,25 +176,15 @@ def test_provisioning_scope_accepts_one_allowlisted_provider_credential():
 
 
 @pytest.mark.asyncio
-async def test_openai_oauth_profile_plan_keeps_reusable_tokens_out_of_offer_metadata(
-    monkeypatch,
-):
-    tokens = SimpleNamespace(
-        access_token="private-access-token",
-        refresh_token="private-refresh-token",
-        expires_at=4_102_444_800.0,
-        account_id="private-account-id",
-    )
-
+async def test_an_oauth_login_is_never_offered_to_a_joining_device(monkeypatch):
+    """Two devices sharing one refresh token sign each other out, so an OAuth
+    profile enrols network-only and each device runs its own /login."""
     token_reads = []
 
     class FakeOAuthTokenStorage:
-        async def load_tokens(self, provider, auto_refresh, *, profile_name=None):
-            assert provider == "openai"
-            assert auto_refresh is False
-            assert profile_name is None
-            token_reads.append(provider)
-            return tokens
+        async def load_tokens(self, *_args, **_kwargs):
+            token_reads.append(True)
+            raise AssertionError("an oauth login must never be read for enrollment")
 
     from kollabor_ai.oauth import token_storage
 
@@ -215,25 +205,8 @@ async def test_openai_oauth_profile_plan_keeps_reusable_tokens_out_of_offer_meta
     )
     issuer = EnrollmentIssuer(SimpleNamespace(plugin=plugin))
 
-    plan = await issuer._make_provisioning_plan("a" * 32)
-    assert plan is not None
-    assert plan.credential_category == "provider:openai:oauth_tokens"
+    assert await issuer._make_provisioning_plan("a" * 32) is None
     assert token_reads == []
-    assert "private-access-token" not in repr(plan)
-    assert "private-refresh-token" not in repr(plan)
-    assert "private-account-id" not in repr(plan)
-
-    _profile, credentials = await issuer._accepted_profile_payload(SimpleNamespace(provisioning_plan=plan))
-    assert credentials[0].secret.access_token == "private-access-token"
-    assert credentials[0].secret.refresh_token == "private-refresh-token"
-    assert credentials[0].secret.account_id == "private-account-id"
-    assert token_reads == ["openai"]
-
-    tokens.access_token = "a" * 5000
-    tokens.refresh_token = "b" * 5000
-    with pytest.raises(EnrollmentProtocolError, match="unavailable"):
-        await issuer._accepted_profile_payload(SimpleNamespace(provisioning_plan=plan))
-    assert token_reads == ["openai", "openai"]
 
 
 def test_embedded_maximum_provisioning_bundle_exceeds_decision_envelope_limit():
@@ -425,9 +398,15 @@ async def _run_enrollment(
     lose_ack_response=False,
     publisher_key=None,
     claim_other_owner=False,
+    issuer_device_name=None,
+    network_name=None,
+    submitted_probe=None,
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
+    # This helper exercises the deep pairing protocol (challenge/proof/
+    # decision/ack); FakeTransport.post below resolves the short code's
+    # lookup round trip so enroll_device can find this fixed offer id.
     code = generate_enrollment_code(offer_id)
     code_text = code.for_private_display()
     verifier = derive_enrollment_code_verifier(code)
@@ -471,6 +450,12 @@ async def _run_enrollment(
         ),
         _discover=AsyncMock(return_value=(discovery, "", (), False)),
         _relay_url=lambda _discovery: "wss://kollabor.ai/relay/v1/ws",
+        agent_bridge=SimpleNamespace(
+            bound=[],
+            bind_peer_device=lambda key, name: commands.agent_bridge.bound.append((key, name)),
+            named=[],
+            bind_network_name=lambda name: commands.agent_bridge.named.append(name),
+        ),
     )
 
     async def attach(_discovery, _ca, _cidrs):
@@ -519,6 +504,10 @@ async def _run_enrollment(
 
         async def __aexit__(self, *_args):
             return None
+
+        async def post(self, path, _frame, **_kwargs):
+            assert path == enrollment_client.ENROLLMENT_LOOKUP_PATH
+            return {"offer_id": offer_id}
 
         async def post_signed_retry(self, *args, **kwargs):
             return await self.post_signed(*args, **kwargs)
@@ -610,6 +599,8 @@ async def _run_enrollment(
                         "provisioning_bundle": base64.urlsafe_b64encode(provisioning_bundle)
                         .rstrip(b"=")
                         .decode("ascii"),
+                        **({"issuer_device_name": issuer_device_name} if issuer_device_name else {}),
+                        **({"network_name": network_name} if network_name else {}),
                     },
                 )
                 self.decision_envelope = encrypt_enrollment_envelope(self.envelope_key, decision)
@@ -647,7 +638,12 @@ async def _run_enrollment(
     )
     monkeypatch.setattr(enrollment_client.asyncio, "sleep", no_sleep)
     try:
-        result = await enroll_device(commands, "kollabor.ai", code_text)
+        result = await enroll_device(
+            commands,
+            "kollabor.ai",
+            code_text,
+            on_submitted=submitted_probe(fake_transport) if submitted_probe else None,
+        )
         return result, commands, destination, fake_transport, owner_directory
     finally:
         for secret in (code, verifier, envelope_key):
@@ -688,6 +684,24 @@ async def _restart_and_recover_destination(
 
 
 @pytest.mark.asyncio
+async def test_enrollment_reports_the_submit_once_before_waiting_for_the_decision(
+    tmp_path, monkeypatch
+):
+    """The join form says "request sent" only after the relay has the request."""
+    seen = []
+
+    def probe(transport):
+        return lambda: seen.append(
+            [path.rsplit("/", 1)[-1] for path, _ in transport.requests]
+        )
+
+    result, *_rest = await _run_enrollment(tmp_path, monkeypatch, submitted_probe=probe)
+
+    assert result == {"status": "approved"}
+    assert seen == [["request"]]
+
+
+@pytest.mark.asyncio
 async def test_device_enrollment_completes_signed_encrypted_pairing(tmp_path, monkeypatch):
     result, commands, destination, transport, owner_directory = await _run_enrollment(tmp_path, monkeypatch)
 
@@ -712,6 +726,94 @@ async def test_device_enrollment_completes_signed_encrypted_pairing(tmp_path, mo
         "reply/poll",
         "ack",
     ]
+
+
+@pytest.mark.asyncio
+async def test_joining_device_records_the_issuers_device_name(tmp_path, monkeypatch):
+    result, commands, destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="laptop-kollab"
+    )
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.bound == [(destination.state.inviter, "laptop-kollab")]
+
+
+@pytest.mark.asyncio
+async def test_joining_device_takes_the_networks_name_from_the_signed_decision(tmp_path, monkeypatch):
+    result, commands, _destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="laptop-kollab", network_name="laptop-kollab-net"
+    )
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.named == ["laptop-kollab-net"]
+
+
+@pytest.mark.asyncio
+async def test_joining_an_issuer_that_sends_no_network_name_still_completes(tmp_path, monkeypatch):
+    result, commands, _destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="laptop-kollab"
+    )
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.named == []
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_network_name_is_rejected_before_any_state_change(tmp_path, monkeypatch):
+    result, commands, destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, network_name="Not A Name"
+    )
+
+    assert result == {"error": "invalid_response"}
+    assert commands.agent_bridge.named == []
+    assert not destination.state.approvals
+
+
+def test_a_refused_network_name_never_fails_a_join_that_already_committed(caplog):
+    def refuse(_name):
+        raise RuntimeError("no")
+
+    commands = SimpleNamespace(agent_bridge=SimpleNamespace(bind_network_name=refuse))
+
+    with caplog.at_level("WARNING"):
+        enrollment_client._bind_network_name(commands, "laptop-kollab-net")
+
+    assert "could not record the network's name" in caplog.text
+    enrollment_client._bind_network_name(SimpleNamespace(), "laptop-kollab-net")  # no bridge
+    enrollment_client._bind_network_name(commands, None)  # an issuer without a name
+
+
+@pytest.mark.asyncio
+async def test_joining_an_older_issuer_without_a_name_still_completes(tmp_path, monkeypatch):
+    result, commands, _destination, _transport, _directory = await _run_enrollment(tmp_path, monkeypatch)
+
+    assert result == {"status": "approved"}
+    assert commands.agent_bridge.bound == []
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_issuer_device_name_is_rejected_before_any_state_change(tmp_path, monkeypatch):
+    result, commands, destination, _transport, _directory = await _run_enrollment(
+        tmp_path, monkeypatch, issuer_device_name="Not A Name"
+    )
+
+    assert result == {"error": "invalid_response"}
+    assert commands.agent_bridge.bound == []
+    assert not destination.state.approvals
+
+
+def test_a_refused_issuer_name_never_fails_a_join_that_already_committed(caplog):
+    def refuse(_key, _name):
+        raise RuntimeError("name taken")
+
+    commands = SimpleNamespace(agent_bridge=SimpleNamespace(bind_peer_device=refuse))
+
+    with caplog.at_level("WARNING"):
+        enrollment_client._bind_issuer_name(commands, "a" * 64, "laptop-kollab")
+
+    assert "could not record the issuer's device name" in caplog.text
+    enrollment_client._bind_issuer_name(SimpleNamespace(), "a" * 64, "laptop-kollab")  # no bridge
+    enrollment_client._bind_issuer_name(commands, "a" * 64, None)  # older issuer
 
 
 @pytest.mark.asyncio
@@ -994,10 +1096,14 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
 
     assert result["status"] == "offered"
     assert result["offer_id"] == transport.request[0]
-    parsed = enrollment_client.parse_enrollment_code(result["code"])
+    secret = enrollment_client.parse_short_enrollment_code(result["code"])
+    parsed = enrollment_client.EnrollmentCode(result["offer_id"], secret)
     verifier = derive_enrollment_code_verifier(parsed)
     try:
         assert transport.request[1]["code_verifier_hash"] == enrollment_verifier_hash(result["offer_id"], verifier)
+        assert transport.request[1]["lookup_hash"] == enrollment_client.enrollment_lookup_hash(
+            parsed.for_lookup_tag(discovery.origin)
+        )
     finally:
         parsed.wipe()
         verifier.wipe()
@@ -1164,6 +1270,8 @@ async def test_issuer_requires_explicit_decision_after_proof(
             _dns_identity=identity_manager,
         ),
         _closed=False,
+        device_name=lambda: "laptop-kollab",
+        network_name=lambda: "laptop-kollab-net",
     )
     issuer = EnrollmentIssuer(bridge)
     provisioning_plan = await issuer._make_provisioning_plan(offer_id)
@@ -1252,6 +1360,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
                         "round_id": round_id,
                         "destination_key": destination_public_key,
                         "envelope": request_envelope,
+                        "device_name": "",
                     }
                 return {
                     "status": "claimed",
@@ -1259,6 +1368,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
                     "round_id": round_id,
                     "destination_key": destination_public_key,
                     "envelope": self.proof_envelope,
+                    "device_name": "",
                 }
             if path.endswith("/challenge"):
                 challenge = decrypt_enrollment_envelope(envelope_key, fields["envelope"])
@@ -1297,6 +1407,9 @@ async def test_issuer_requires_explicit_decision_after_proof(
                 self.decision_envelope = fields["envelope"]
                 enrollment_client.verify_enrollment_payload(owner_signing_key.verify_key.encode(), self.decision)
                 if self.decision["status"] == "approved":
+                    # the joiner learns the issuer's device name from the signed decision
+                    assert self.decision["issuer_device_name"] == "laptop-kollab"
+                    assert self.decision["network_name"] == "laptop-kollab-net"
                     bundle = base64.urlsafe_b64decode(
                         self.decision["provisioning_bundle"] + "=" * (-len(self.decision["provisioning_bundle"]) % 4)
                     )
@@ -1374,7 +1487,12 @@ async def test_issuer_requires_explicit_decision_after_proof(
 
         monkeypatch.setattr(relay, "approve", fail_peer_approval)
     task = asyncio.create_task(issuer._serve_offer(offer))
-    for _ in range(100):
+    # Real wall-clock deadline, not a fixed iteration count: a fixed count of
+    # 1ms sleeps assumes the event loop gets scheduled promptly, which is not
+    # true under full-suite CPU contention and was the source of a flaky
+    # "verified proof did not become a pending request" failure (issue #121).
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
         requests = issuer.pending_requests()
         if requests:
             break
@@ -1734,3 +1852,144 @@ async def test_issuer_requires_explicit_decision_after_proof(
         assert relay.state.approvals == []
         assert owner_directory.members() == ()
         assert delegation_store.get(human_action_id).consumed_new_devices == 0
+
+
+@pytest.mark.asyncio
+async def test_lookup_enrollment_offer_resolves_via_the_lookup_route(monkeypatch):
+    client = SimpleNamespace(
+        _store=SimpleNamespace(key=SigningKey.generate()),
+        public_key="a" * 64,
+    )
+    discovery = SimpleNamespace(origin="https://kollabor.ai")
+    secret = bytearray(b"ABCD1234")
+    offer_id = "1" * 32
+    seen = {}
+
+    class FakeTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, path, frame, **_kwargs):
+            seen["path"] = path
+            seen["frame"] = frame
+            return {"offer_id": offer_id}
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: FakeTransport()
+    )
+
+    result = await enrollment_client._lookup_enrollment_offer(client, discovery, "", (), secret)
+
+    assert result == offer_id
+    assert seen["path"] == enrollment_client.ENROLLMENT_LOOKUP_PATH
+    assert seen["frame"]["destination_key"] == client.public_key
+    assert seen["frame"]["lookup"] == enrollment_client.derive_enrollment_lookup_tag(
+        secret, discovery.origin
+    )
+
+
+@pytest.mark.asyncio
+async def test_lookup_enrollment_offer_returns_none_on_a_miss_or_bad_response(monkeypatch):
+    client = SimpleNamespace(
+        _store=SimpleNamespace(key=SigningKey.generate()),
+        public_key="a" * 64,
+    )
+    discovery = SimpleNamespace(origin="https://kollabor.ai")
+    secret = bytearray(b"ABCD1234")
+
+    class MissTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, _frame, **_kwargs):
+            raise EnrollmentProtocolError("unavailable")
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: MissTransport()
+    )
+    assert await enrollment_client._lookup_enrollment_offer(
+        client, discovery, "", (), secret
+    ) is None
+
+    class MalformedTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, _frame, **_kwargs):
+            return {"offer_id": "not-hex"}
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: MalformedTransport()
+    )
+    assert await enrollment_client._lookup_enrollment_offer(
+        client, discovery, "", (), secret
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_enroll_device_short_code_looks_up_then_submits_the_request(tmp_path, monkeypatch):
+    """A short code has no offer id embedded: enroll_device must resolve one
+    through the lookup route before it can journal or submit anything."""
+    origin = "https://kollabor.ai"
+    offer_id = "2" * 32
+    code = generate_enrollment_code(offer_id)
+    code_text = code.for_private_display()
+    verifier = derive_enrollment_code_verifier(code)
+    expected_verifier = verifier.for_protocol()
+
+    destination = RelayClient(
+        tmp_path / "destination-workspace",
+        state_dir=tmp_path / "destination-network",
+        label="destination",
+    )
+    discovery = SimpleNamespace(
+        origin=origin,
+        manifest={
+            "coordinator": {"public_key": "0" * 64},
+            "endpoints": {"control": origin + "/relay/v1"},
+        },
+    )
+    commands = SimpleNamespace(
+        client=destination,
+        _discover=AsyncMock(return_value=(discovery, "", (), False)),
+        _relay_url=lambda _discovery: "wss://kollabor.ai/relay/v1/ws",
+    )
+
+    class LookupOnlyTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, path, _frame, **_kwargs):
+            assert path == enrollment_client.ENROLLMENT_LOOKUP_PATH
+            return {"offer_id": offer_id}
+
+    monkeypatch.setattr(
+        enrollment_client, "EnrollmentHTTPClient", lambda *_a, **_k: LookupOnlyTransport()
+    )
+    drive = AsyncMock(return_value={"status": "stubbed"})
+    monkeypatch.setattr(enrollment_client, "_drive_destination_enrollment", drive)
+
+    try:
+        result = await enroll_device(commands, "kollabor.ai", code_text)
+    finally:
+        code.wipe()
+        verifier.wipe()
+
+    assert result == {"status": "stubbed"}
+    drive.assert_awaited_once()
+    _commands, journaled_record, _journal, _envelope_key = drive.await_args.args
+    assert journaled_record["offer_id"] == offer_id
+    assert journaled_record["code_verifier"] == expected_verifier
+    assert journaled_record["device_name"]

@@ -307,6 +307,17 @@ class HubStateClient:
                 f"socket {socket_path} does not exist"
             )
 
+        # Shared /tmp path space: a socket another local user planted or
+        # took over must not receive peer RPC traffic.
+        from plugins.hub.messenger import require_own_socket
+
+        try:
+            require_own_socket(str(socket_path))
+        except ConnectionError as e:
+            raise HubStateClientError(
+                f"peer {peer_identity!r} socket refused: {e}"
+            ) from e
+
         # Local imports keep kollabor_rpc as an optional boundary --
         # callers get an ImportError if they invoke this without
         # kollabor_rpc installed, which is the correct signal.

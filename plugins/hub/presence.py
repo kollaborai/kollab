@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -12,6 +13,35 @@ from typing import Dict, List, Optional
 from kollabor_agent.runtime import AgentRuntime
 
 logger = logging.getLogger(__name__)
+
+# Shared /tmp path space for hub sockets (short paths for the unix socket
+# limit). Never relocated: existing installs keep their sockets here.
+SOCKET_DIR_ROOT = Path("/tmp/kollabor-hub")
+
+
+def secure_socket_dir(path: Path, *, create: bool = True) -> Path:
+    """Use ``path`` for hub sockets only when this user owns it, mode 0700.
+
+    ``mkdir(mode=0o700)`` never tightens a directory that already exists, so a
+    pre-created world-writable socket dir would leave every agent socket
+    replaceable by another local user. A dir we own gets chmod 0700; another
+    user's is refused with an error naming it. ``create=False`` only validates
+    a dir that already exists (read-side callers must not create it).
+    """
+    if create:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return path
+    if info.st_uid != os.getuid():
+        raise RuntimeError(
+            f"{path} is owned by uid {info.st_uid}, not this user; "
+            "refusing to use it for hub sockets"
+        )
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        os.chmod(path, 0o700)
+    return path
 
 
 def get_hub_dir() -> Path:
@@ -54,16 +84,15 @@ def get_socket_dir() -> Path:
 
     When project-scoped, sockets live under a per-project subdir keyed
     by a short hash of the project id (full project id would blow the
-    104-byte unix socket path limit on macOS).
+    104-byte unix socket path limit on macOS). Both levels must be owned
+    by this user with mode 0700 (see ``secure_socket_dir``).
     """
     from .project_scope import get_project_socket_key, is_project_scoped
 
     if is_project_scoped():
-        d = Path("/tmp/kollabor-hub") / get_project_socket_key()
-    else:
-        d = Path("/tmp/kollabor-hub")
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return d
+        root = secure_socket_dir(SOCKET_DIR_ROOT)
+        return secure_socket_dir(root / get_project_socket_key())
+    return secure_socket_dir(SOCKET_DIR_ROOT)
 
 
 def _atomic_write(path: Path, data: dict) -> None:

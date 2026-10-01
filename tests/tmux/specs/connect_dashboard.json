@@ -1,0 +1,102 @@
+{
+  "name": "connect-dashboard",
+  "description": "Bare /connect on a device with no network opens the private code form titled Connect with 'network none' above the code field; /connect code opens the code-only Connect screen and says so in plain words when no code can be created; neither shows a 64-hex key (issue #121, Story 1).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-dashboard\"; mkdir -p \"$H\"; mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":true}}}\" > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 80,
+    "term_height": 30
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "no network: bare /connect opens the code form"
+    },
+    {
+      "action": "type",
+      "text": "/connect",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "join code",
+      "timeout": 10
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Connect",
+      "description": "the form is titled Connect"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "network +none",
+      "description": "network none sits above the code field"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "join code",
+      "description": "the code field is there"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "first device\\? an empty code",
+      "description": "the first device is told how to start a network"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "[0-9a-f]{64}",
+      "description": "no 64-hex key on the form"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "/connect code opens the code-only screen"
+    },
+    {
+      "action": "type",
+      "text": "/connect code",
+      "delay": 0.06
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "join code",
+      "timeout": 10
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Connect code",
+      "description": "the code-only screen is titled Connect code"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "press c to try again",
+      "description": "no network: the missing code is explained in plain words"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback|Error|Exception",
+      "description": "no error text leaks into the screen"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

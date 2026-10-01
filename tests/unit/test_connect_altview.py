@@ -1,7 +1,6 @@
 """Security and input behavior for the private connect AltView."""
 
 import re
-from unittest.mock import Mock
 
 import pytest
 
@@ -9,7 +8,6 @@ from kollabor_tui.altview.session import AltViewSession
 from kollabor_tui.key_parser import KeyParser, KeyPress, KeyType
 from plugins.altview.connect_altview import (
     ConnectAltView,
-    ConnectOfferAltView,
     ConnectOutcome,
     ConnectStatus,
     ConnectSubmission,
@@ -72,28 +70,14 @@ async def test_private_code_is_masked_and_length_is_not_rendered():
     await view.render_frame(0.0)
     rendered = renderer.text()
 
-    assert "Domain: kollabor.ai" in rendered
-    assert "Private code: ********" in rendered
+    assert re.search(r"domain\s+kollabor\.ai", rendered)
+    assert re.search(r"join code\s+\*{8}(?!\*)", rendered)
     assert "s3cr3t-value" not in rendered
     assert "************" not in rendered
 
 
 @pytest.mark.asyncio
-async def test_offer_confirmation_discloses_provider_credential_copy_boundary():
-    view = ConnectOfferAltView("kollabor.ai")
-    renderer = _FakeRenderer(size=(80, 16))
-
-    await view.on_enter(renderer)
-    await view.render_frame(0.0)
-    rendered = renderer.text()
-
-    assert "one provider profile credential" in rendered
-    assert "Review its exact scope before accepting." in rendered
-    assert "Network removal does not revoke copied credentials." in rendered
-
-
-@pytest.mark.asyncio
-async def test_submit_passes_private_wrapper_then_only_pending_receipt_is_shown():
+async def test_submit_passes_private_wrapper_then_pending_request_shows_no_receipt():
     captured = {}
 
     async def submit(submission: ConnectSubmission) -> ConnectOutcome:
@@ -123,9 +107,11 @@ async def test_submit_passes_private_wrapper_then_only_pending_receipt_is_shown(
 
     await view.render_frame(0.0)
     rendered = renderer.text()
-    assert "Request pending." in rendered
-    assert "Receipt: enroll-7f2a" in rendered
-    assert "kollabor.ai" not in rendered
+    assert (
+        "request sent to kollabor.ai; waiting for approval on another device"
+        in rendered
+    )
+    assert "enroll-7f2a" not in rendered
     assert "s3cr3t-value" not in rendered
     assert "member" not in rendered.lower()
     assert "credential" not in rendered.lower()
@@ -175,16 +161,16 @@ async def test_bracketed_crlf_paste_waits_for_deliberate_enter():
     view = ConnectAltView(on_submit=submit)
     await view.on_enter(_FakeRenderer())
     view._focus = "code"
-    parsed_names = await _paste(view, "K1-AAAA\r\nBBBB")
+    parsed_names = await _paste(view, "ABCD-EFGH\r\nBBBB")
 
     assert "BracketedPasteStart" in parsed_names
     assert "BracketedPasteEnd" in parsed_names
     assert captured_codes == []
-    assert "K1-AAAA" in "".join(view._code_chars)
+    assert "ABCD-EFGH" in "".join(view._code_chars)
 
     await view.handle_input(_named("Enter"))
 
-    assert captured_codes == ["K1-AAAABBBB"]
+    assert captured_codes == ["ABCD-EFGHBBBB"]
     assert view.outcome == ConnectOutcome.pending("paste-request-1")
 
 
@@ -201,7 +187,7 @@ async def test_bracketed_paste_tab_does_not_change_focus_or_expose_code():
     await view.on_enter(renderer)
     view._focus = "code"
 
-    parsed_names = await _paste(view, "K1-AAAA\tSYNTHETIC-SECRET")
+    parsed_names = await _paste(view, "ABCD-EFGH\tSYNTHETIC-SECRET")
 
     assert "BracketedPasteStart" in parsed_names
     assert "Tab" in parsed_names
@@ -212,11 +198,11 @@ async def test_bracketed_paste_tab_does_not_change_focus_or_expose_code():
 
     await view.render_frame(0.0)
     assert "SYNTHETIC-SECRET" not in renderer.text()
-    assert "Private code: ********" in renderer.text()
+    assert re.search(r"join code\s+\*{8}(?!\*)", renderer.text())
 
     await view.handle_input(_named("Enter"))
 
-    assert captured_codes == ["K1-AAAASYNTHETIC-SECRET"]
+    assert captured_codes == ["ABCD-EFGHSYNTHETIC-SECRET"]
     assert view.domain == "kollabor.ai"
 
 
@@ -231,19 +217,19 @@ async def test_code_pasted_into_domain_field_moves_to_private_field():
     view = ConnectAltView(on_submit=submit)
     renderer = _FakeRenderer()
     await view.on_enter(renderer)
-    assert view._focus == "domain"
+    view._focus = "domain"
 
-    await _paste(view, "K1-AAAA-SYNTHETIC-SECRET")
+    await _paste(view, "ABCD-EFGH-SYNTHETIC-SECRET")
     await view.render_frame(0.0)
 
     assert view.domain == "kollabor.ai"
     assert view._focus == "code"
     assert "SYNTHETIC-SECRET" not in renderer.text()
-    assert "K1-" not in renderer.text()
+    assert "ABCD-EFGH" not in renderer.text()
 
     await view.handle_input(_named("Enter"))
 
-    assert captured_codes == ["K1-AAAA-SYNTHETIC-SECRET"]
+    assert captured_codes == ["ABCD-EFGH-SYNTHETIC-SECRET"]
 
 
 @pytest.mark.asyncio
@@ -255,11 +241,12 @@ async def test_deliberate_tab_changes_focus_outside_bracketed_paste():
 
     assert tab is not None
     assert tab.name == "Tab"
-    assert view._focus == "domain"
+    # The domain is prefilled, so the first thing typed is the code.
+    assert view._focus == "code"
 
     await view.handle_input(tab)
 
-    assert view._focus == "code"
+    assert view._focus == "domain"
 
 
 @pytest.mark.asyncio
@@ -301,7 +288,7 @@ async def test_callback_exception_is_generic_and_never_logged(caplog):
     await view.render_frame(0.0)
 
     assert view.outcome == ConnectOutcome.error()
-    assert "Could not submit the connect request." in view._renderer.text()
+    assert "could not submit the join request" in view._renderer.text()
     assert secret not in view._renderer.text()
     assert secret not in caplog.text
 
@@ -321,9 +308,9 @@ async def test_invalid_callback_result_maps_to_generic_error():
 @pytest.mark.parametrize(
     ("result", "message"),
     [
-        (ConnectOutcome.approved(), "Connection approved."),
-        (ConnectOutcome.rejected(), "Connection request rejected."),
-        (ConnectOutcome.error(), "Could not submit the connect request."),
+        (ConnectOutcome.approved(), "joined kollabor.ai"),
+        (ConnectOutcome.rejected(), "join request rejected"),
+        (ConnectOutcome.error(), "could not submit the join request"),
     ],
 )
 async def test_non_pending_statuses_are_typed_and_render_generic_copy(result, message):
@@ -372,144 +359,148 @@ async def test_domain_filters_terminal_controls_and_submit_requires_both_fields(
     await view.handle_input(_named("Enter"))
     await view.render_frame(0.0)
     assert view.outcome is None
-    assert "Enter a domain and private code." in renderer.text()
+    assert "enter a domain and join code" in renderer.text()
 
 
 @pytest.mark.asyncio
-async def test_offer_code_is_shown_only_in_private_view_and_wiped_on_destroy(
-    monkeypatch,
-):
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
-    called = []
+async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
+    captured = {}
 
-    async def create(domain):
-        called.append(domain)
-        return {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1300",
-            "code": code,
-        }
+    async def submit(submission: ConnectSubmission) -> ConnectOutcome:
+        captured["code"] = submission.code.reveal()
+        return ConnectOutcome.approved()
 
-    view = ConnectOfferAltView("example.test", on_create=create)
+    for typed in ("7qk4m2xp", "7QK4-M2XP"):
+        captured.clear()
+        view = ConnectAltView(on_submit=submit)
+        renderer = _FakeRenderer()
+        await view.on_enter(renderer)
+        await _type_code(view, typed)
+        await view.render_frame(0.0)
+
+        assert re.search(r"join code\s+\*{8}(?!\*)", renderer.text())
+        assert typed not in renderer.text()
+
+        await view.handle_input(_named("Enter"))
+        assert captured["code"] == typed
+
+
+@pytest.mark.asyncio
+async def test_join_form_is_titled_connect_with_network_none_above_the_code_field():
+    view = ConnectAltView()
+    renderer = _FakeRenderer(size=(80, 24))
+    await view.on_enter(renderer)
+    await view.render_frame(0.0)
+
+    rows = [line for _, _, line in renderer.lines]
+    assert any(line.strip() == "Connect" for line in rows)
+    network = next(i for i, line in enumerate(rows) if line.strip() == "network      none")
+    code_field = next(i for i, line in enumerate(rows) if "join code" in line)
+    assert network < code_field
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "domain",
+    ["team-share.example.com", "test-server.example.org", "backpack.dev", "mesh-data.example.net"],
+)
+async def test_a_domain_that_looks_like_a_code_stays_in_the_domain_field(domain):
+    """Typing or pasting a hyphenated or 8-letter domain must not be taken for a code."""
+    typed = ConnectAltView("")
+    await typed.on_enter(_FakeRenderer())
+    assert typed._focus == "domain"
+    for character in domain:
+        await typed.handle_input(_key(character))
+    assert typed.domain == domain
+    assert typed._code_chars == []
+
+    pasted = ConnectAltView("")
+    await pasted.on_enter(_FakeRenderer())
+    await _paste(pasted, domain)
+    assert pasted.domain == domain
+    assert pasted._code_chars == []
+    assert pasted._focus == "domain"
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_code_leaves_the_prefilled_domain_alone():
+    view = ConnectAltView()
+    await view.on_enter(_FakeRenderer())
+    view._focus = "domain"
+
+    await _paste(view, "7QK4-M2XP")
+
+    assert view.domain == "kollabor.ai"
+    assert "".join(view._code_chars) == "7QK4-M2XP"
+    assert view._focus == "code"
+
+
+@pytest.mark.asyncio
+async def test_empty_code_starts_a_network_on_the_domain_when_attach_is_offered():
+    attached = []
+
+    async def attach(domain: str) -> bool:
+        attached.append(domain)
+        return True
+
+    view = ConnectAltView(on_attach=attach)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    assert attached == ["kollabor.ai"]
+    assert view.outcome == ConnectOutcome.connected()
+    assert "connected to kollabor.ai" in renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_empty_code_without_attach_is_a_validation_error_and_a_failed_attach_is_generic():
+    view = ConnectAltView()
     renderer = _FakeRenderer()
     await view.on_enter(renderer)
     await view.handle_input(_named("Enter"))
-    await view.render_frame(0.0)
+    assert view.outcome is None
 
-    assert called == ["example.test"]
-    assert code in renderer.text()
-    assert "send it only to the new device" in renderer.text()
-    private_code = view._private_code
-    assert private_code is not None
-    assert repr(private_code) == "PrivateCode(<redacted>)"
-    await view.on_complete()
-    with pytest.raises(RuntimeError, match="cleared"):
-        private_code.reveal()
+    async def refuse(_domain: str) -> bool:
+        return False
+
+    failing = ConnectAltView(on_attach=refuse)
+    await failing.on_enter(_FakeRenderer())
+    await failing.handle_input(_named("Enter"))
+    assert failing.outcome == ConnectOutcome.error()
 
 
 @pytest.mark.asyncio
-async def test_offer_code_is_cleared_on_real_session_exit(monkeypatch):
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
-    view = ConnectOfferAltView(
-        on_create=lambda _domain: {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1300",
-            "code": code,
-        }
-    )
-    session = AltViewSession(view, event_bus=None, session_name="connect-offer")
-    invalidate_render_cache = Mock(wraps=session.renderer.invalidate_render_cache)
-    session.renderer.invalidate_render_cache = invalidate_render_cache
-    await view.on_enter(session.renderer)
-    await view.handle_input(_named("Enter"))
-    private_code = view._private_code
-    assert private_code is not None
-
-    # AltViewStackManager's reusable close path calls session.exit(), which
-    # suspends the view but does not destroy the session.
-    await session.exit()
-
-    assert view._private_code is None
-    invalidate_render_cache.assert_called_once_with()
-    with pytest.raises(RuntimeError, match="cleared"):
-        private_code.reveal()
-
-
-@pytest.mark.asyncio
-async def test_offer_code_wraps_to_narrow_terminal_without_losing_characters(
-    monkeypatch,
-):
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1_000)
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
-    view = ConnectOfferAltView(
-        on_create=lambda _domain: {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1300",
-            "code": code,
-        }
-    )
-    renderer = _FakeRenderer(size=(24, 18))
-    await view.on_enter(renderer)
-    await view.handle_input(_named("Enter"))
-    await view.render_frame(0.0)
-
-    code_rows = [
-        line
-        for x, _, line in renderer.lines
-        if x == 2 and re.fullmatch(r"[A-Za-z0-9-]+", line)
-    ]
-    assert "".join(code_rows) == code
-
-
-@pytest.mark.asyncio
-async def test_offer_code_is_cleared_from_view_after_expiry(monkeypatch):
-    offer_id = "0123456789abcdef0123456789abcdef"
-    code = f"K1-{offer_id}-ABCD-EFGH-JKMN-PQRS-TVWX"
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 900)
-    view = ConnectOfferAltView(
-        on_create=lambda _domain: {
-            "status": "offered",
-            "offer_id": offer_id,
-            "expires_at": "1000",
-            "code": code,
-        }
-    )
+async def test_an_approved_join_shows_the_joined_line_the_caller_supplies():
+    line = "joined marco-home as home-server. trust: open"
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.approved(line))
     renderer = _FakeRenderer()
     await view.on_enter(renderer)
+    await _type_code(view, "7QK4-M2XP")
     await view.handle_input(_named("Enter"))
     await view.render_frame(0.0)
-    assert code in renderer.text()
 
-    monkeypatch.setattr("plugins.altview.connect_altview.time.time", lambda: 1001)
-    await view.render_frame(0.0)
-
-    assert "This code has expired." in renderer.text()
-    assert code not in renderer.text()
-    assert view._private_code is None
+    assert line in renderer.text()
+    with pytest.raises(ValueError):
+        ConnectOutcome.approved("two\nlines")
+    with pytest.raises(ValueError):
+        ConnectOutcome(ConnectStatus.REJECTED, detail="not allowed here")
 
 
 @pytest.mark.asyncio
-async def test_offer_callback_failure_never_renders_exception_text(caplog):
-    secret = "K1-private-error-detail"
+async def test_the_form_hints_wrap_instead_of_being_cut_off_on_a_narrow_terminal():
+    async def attach(_domain: str) -> bool:
+        return True
 
-    def fail(_domain):
-        raise RuntimeError(secret)
-
-    view = ConnectOfferAltView(on_create=fail)
-    renderer = _FakeRenderer()
+    view = ConnectAltView(on_attach=attach)
+    renderer = _FakeRenderer(size=(40, 30))
     await view.on_enter(renderer)
-    await view.handle_input(_named("Enter"))
     await view.render_frame(0.0)
 
-    assert "Could not create a device code." in renderer.text()
-    assert "/connect status shows kollabor.ai online" in renderer.text()
-    assert secret not in renderer.text()
-    assert secret not in caplog.text
+    rows = [line for _, _, line in renderer.lines]
+    assert all(len(line) <= 40 for line in rows if not line.startswith("\u2584"))
+    flat = " ".join(" ".join(rows).split())
+    assert "an empty code plus enter starts a network on kollabor.ai" in flat
+    assert "run /connect code on a device already on the network" in flat

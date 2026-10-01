@@ -70,7 +70,7 @@ class DiscoveryResult:
             [
                 f"discovery: verified ({self.identity_evidence})",
                 f"authority: {self.requested_authority}",
-                f"publisher: {coord['designation']} / {self.publisher_principal_id}",
+                f"publisher: {coord['designation']}",
                 f"document: {self.discovery_url}",
                 f"service: {service}",
                 "membership: none; messaging: not authorized; reachability: untested",

@@ -1,31 +1,34 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import FrozenInstanceError
 
 import pytest
 
 from plugins.hub import enrollment_codes as codes
 
 OFFER_ID = "00112233445566778899aabbccddeeff"
-SECRET = "0123456789ABCDEFGHJK"  # gitleaks:allow (test fixture)
-DISPLAY_CODE = f"K1-{OFFER_ID}-0123-4567-89AB-CDEF-GHJK"
+SECRET = "01234567"  # gitleaks:allow (test fixture)
+DISPLAY_CODE = "0123-4567"
 
 
-def test_k1_verifier_and_stored_hash_match_deterministic_vector():
-    code = codes.parse_enrollment_code(DISPLAY_CODE)
+def _code(offer_id: str = OFFER_ID, secret: str = SECRET) -> codes.EnrollmentCode:
+    return codes.EnrollmentCode(offer_id, bytearray(secret.encode("ascii")))
+
+
+def test_short_code_verifier_and_stored_hash_match_deterministic_vector():
+    code = _code()
 
     verifier = codes.derive_enrollment_code_verifier(code)
 
-    assert verifier.for_protocol() == "2GO0HHubpyw2yIa1hfcjyFzSdvcIK4X8PLMln7_CW1g"
+    assert verifier.for_protocol() == "FDavhKFRSk45WkGeXKzPgMJ1Yn3sxZ87r4gXY58ccYQ"
     assert (
         codes.enrollment_verifier_hash(OFFER_ID, verifier)
-        == "3fe8b5fe492ec526cd03d1942fe96e33c541c0a5fe27d15383fb4cdb7a7af78d"
+        == "9d71c3663bef297b65dfe12bdb4652e337f84b04eec3d72c11d5b2228e4ca97c"
     )
 
 
 def test_envelope_key_matches_hkdf_vector_and_is_distinct_from_relay_verifier():
-    code = codes.parse_enrollment_code(DISPLAY_CODE)
+    code = _code()
 
     envelope_key = codes.derive_enrollment_envelope_key(code)
     verifier = codes.derive_enrollment_code_verifier(code)
@@ -33,7 +36,7 @@ def test_envelope_key_matches_hkdf_vector_and_is_distinct_from_relay_verifier():
 
     assert (
         envelope_key.for_envelope_encryption().hex()
-        == "da74cd8ccbd6dee29b783d12db0d8459820eff18081bcf00a27e448ac83e2f01"
+        == "b87de635b3ca1c5aaab847a17710d82a4c089f1a4f87daad063e4ff72f22b9d5"
     )
     assert envelope_key.for_envelope_encryption() != verifier_bytes
 
@@ -56,7 +59,7 @@ def test_hkdf_sha256_matches_rfc5869_extract_expand_vector():
 def test_envelope_key_is_deterministic_and_does_not_derive_from_relay_scrypt(
     monkeypatch,
 ):
-    code = codes.parse_enrollment_code(DISPLAY_CODE)
+    code = _code()
 
     def fail_if_relay_scrypt_is_used(*args, **kwargs):
         raise AssertionError("envelope derivation must use the raw code secret")
@@ -64,45 +67,10 @@ def test_envelope_key_is_deterministic_and_does_not_derive_from_relay_scrypt(
     monkeypatch.setattr(codes.hashlib, "scrypt", fail_if_relay_scrypt_is_used)
     first = codes.derive_enrollment_envelope_key(code)
     second = codes.derive_enrollment_envelope_key(code)
-    another_offer = codes.parse_enrollment_code(
-        f"K1-{'f' * 32}-0123-4567-89AB-CDEF-GHJK"
-    )
-    other_offer_key = codes.derive_enrollment_envelope_key(another_offer)
+    other_offer_key = codes.derive_enrollment_envelope_key(_code(offer_id="f" * 32))
 
     assert first.for_envelope_encryption() == second.for_envelope_encryption()
     assert first.for_envelope_encryption() != other_offer_key.for_envelope_encryption()
-
-
-def test_parse_normalizes_only_secret_letter_case_and_formats_canonically():
-    entered = DISPLAY_CODE.rsplit("-", 1)[0] + "-ghjk"
-    code = codes.parse_enrollment_code(entered)
-
-    assert code.offer_id == OFFER_ID
-    assert code.for_private_display() == DISPLAY_CODE
-    with pytest.raises(FrozenInstanceError):
-        code.offer_id = "f" * 32  # type: ignore[misc]
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    [
-        "k1-" + DISPLAY_CODE[3:],
-        DISPLAY_CODE.replace(OFFER_ID, OFFER_ID.upper()),
-        DISPLAY_CODE.replace(OFFER_ID, OFFER_ID[:-1]),
-        DISPLAY_CODE.replace(OFFER_ID, "g" + OFFER_ID[1:]),
-        DISPLAY_CODE.replace("0123", "012"),
-        DISPLAY_CODE.replace("0123", "01234"),
-        DISPLAY_CODE.replace("AB", "AI"),
-        DISPLAY_CODE.replace("AB", "AL"),
-        DISPLAY_CODE.replace("AB", "AO"),
-        DISPLAY_CODE.replace("AB", "AU"),
-        DISPLAY_CODE.replace("0123", "01ß3"),
-        DISPLAY_CODE.replace("-", "", 1),
-    ],
-)
-def test_parse_rejects_noncanonical_or_invalid_codes(invalid: str):
-    with pytest.raises(ValueError, match="^invalid enrollment code$"):
-        codes.parse_enrollment_code(invalid)
 
 
 @pytest.mark.parametrize(
@@ -121,7 +89,7 @@ def test_generation_rejects_invalid_offer_ids(offer_id: str):
         codes.generate_enrollment_code(offer_id)
 
 
-def test_generation_uses_100_bits_and_formats_secret_in_crockford_groups(monkeypatch):
+def test_generation_uses_40_bits_and_formats_secret_as_a_short_code(monkeypatch):
     requested_lengths: list[int] = []
 
     def fixed_random_bytes(length: int) -> bytes:
@@ -131,18 +99,20 @@ def test_generation_uses_100_bits_and_formats_secret_in_crockford_groups(monkeyp
     monkeypatch.setattr(codes.secrets, "token_bytes", fixed_random_bytes)
     code = codes.generate_enrollment_code(OFFER_ID)
 
-    assert requested_lengths == [13]
-    assert code.for_private_display() == (f"K1-{OFFER_ID}-000G-40R4-0M30-E209-185G")
-    assert codes.parse_enrollment_code(
-        code.for_private_display()
-    ).for_private_display() == (code.for_private_display())
+    assert requested_lengths == [5]
+    assert code.for_private_display() == "000G-40R4"
+    assert codes.is_short_enrollment_code(code.for_private_display())
+    assert (
+        codes.parse_short_enrollment_code(code.for_private_display())
+        == b"000G40R4"
+    )
 
 
 def test_code_and_verifier_string_representations_redact_values():
-    code = codes.parse_enrollment_code(DISPLAY_CODE)
+    code = _code()
     verifier = codes.derive_enrollment_code_verifier(code)
     envelope_key = codes.derive_enrollment_envelope_key(code)
-    code_secret = DISPLAY_CODE.rsplit("-", 5)[-5:]
+    code_secret = DISPLAY_CODE.split("-")
     full_code = code.for_private_display()
     full_verifier = verifier.for_protocol()
     full_envelope_key = envelope_key.for_envelope_encryption()
@@ -165,16 +135,14 @@ def test_code_and_verifier_string_representations_redact_values():
 
 
 def test_verifier_hash_rejects_a_different_offer_id():
-    verifier = codes.derive_enrollment_code_verifier(
-        codes.parse_enrollment_code(DISPLAY_CODE)
-    )
+    verifier = codes.derive_enrollment_code_verifier(_code())
 
     with pytest.raises(ValueError, match="^verifier belongs to a different offer$"):
         codes.enrollment_verifier_hash("f" * 32, verifier)
 
 
 def test_explicit_wipe_clears_code_and_verifier_buffers():
-    code = codes.parse_enrollment_code(DISPLAY_CODE)
+    code = _code()
     verifier = codes.derive_enrollment_code_verifier(code)
     envelope_key = codes.derive_enrollment_envelope_key(code)
     code.wipe()
@@ -187,3 +155,72 @@ def test_explicit_wipe_clears_code_and_verifier_buffers():
         verifier.for_protocol()
     with pytest.raises(ValueError, match="^enrollment envelope key has been cleared$"):
         envelope_key.for_envelope_encryption()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["ABCD-1234", "abcd-1234", "AbCd-1234", "ABCD1234", "abcd1234", "  ABCD-1234  "],
+)
+def test_short_code_parses_either_case_dashless_and_padded(value: str):
+    assert codes.is_short_enrollment_code(value)
+    assert codes.parse_short_enrollment_code(value) == b"ABCD1234"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ABC-1234",  # too short
+        "ABCDE-1234",  # too long
+        "ABCI-1234",  # I is not in the alphabet
+        "ABCD_1234",  # wrong separator
+        "ABCD-1234-5678",  # a differently shaped code, not a short one
+        "",
+    ],
+)
+def test_short_code_rejects_malformed_input(value: str):
+    assert not codes.is_short_enrollment_code(value)
+    with pytest.raises(ValueError, match="^invalid enrollment code$"):
+        codes.parse_short_enrollment_code(value)
+
+
+def test_lookup_tag_is_deterministic_and_bound_to_the_origin():
+    secret = codes.parse_short_enrollment_code("ABCD-1234")
+
+    tag = codes.derive_enrollment_lookup_tag(secret, "https://relay.example")
+
+    assert tag == codes.derive_enrollment_lookup_tag(secret, "https://relay.example")
+    assert tag != codes.derive_enrollment_lookup_tag(secret, "https://other.example")
+    assert tag != codes.derive_enrollment_lookup_tag(b"WXYZ5678", "https://relay.example")
+
+
+def test_lookup_hash_is_deterministic_and_never_reverses_to_the_tag():
+    secret = codes.parse_short_enrollment_code("ABCD-1234")
+    tag = codes.derive_enrollment_lookup_tag(secret, "https://relay.example")
+
+    hashed = codes.enrollment_lookup_hash(tag)
+
+    assert hashed == codes.enrollment_lookup_hash(tag)
+    assert tag not in hashed
+    with pytest.raises(ValueError, match="^invalid lookup tag$"):
+        codes.enrollment_lookup_hash("not-base64url-!!")
+
+
+def test_code_for_lookup_tag_matches_the_free_function():
+    code = codes.generate_enrollment_code(OFFER_ID)
+
+    tag = code.for_lookup_tag("https://relay.example")
+
+    assert tag == codes.derive_enrollment_lookup_tag(
+        codes.parse_short_enrollment_code(code.for_private_display()),
+        "https://relay.example",
+    )
+
+
+def test_looks_like_join_code_catches_codes_not_device_names():
+    from plugins.hub.enrollment_codes import looks_like_join_code
+
+    assert looks_like_join_code("7QK4-M2XP")
+    assert not looks_like_join_code("mac-home")
+    assert not looks_like_join_code("home-server")
+    assert not looks_like_join_code("kollabor.ai")
+    assert not looks_like_join_code("7qk4-m2xp")  # lower case is left to the private form

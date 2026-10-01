@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import secrets
 import sys
 import time
@@ -20,6 +21,10 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
+
+from .device_names import contact_route_hex
+
+logger = logging.getLogger(__name__)
 
 LEASE_SECONDS = 35
 LEASE_RENEW_SECONDS = 10
@@ -35,13 +40,21 @@ ENROLLMENT_RATE_LIMIT = 10
 ENROLLMENT_RATE_WINDOW_MS = 60_000
 ENROLLMENT_MAX_RATE_SOURCES = 65_536
 ENROLLMENT_INDEX_CLEANUP_BATCH = 256
-ENROLLMENT_MAX_FAILED_CODES = 8
+ENROLLMENT_MAX_FAILED_CODES = 5
 ENROLLMENT_MAX_NONCES_PER_PRINCIPAL = 4096
 ENROLLMENT_MAX_NONCES = 131_072
 MAX_ACTIVE_CONTACT_REQUESTS = 4096
 MAX_CONTACT_REQUESTS_PER_RECIPIENT = 32
 CONTACT_REQUEST_TTL_MS = 24 * 60 * 60 * 1000
 CONTACT_INDEX_CLEANUP_BATCH = 256
+# Cross-room links: each key declares which other keys it consents to reach;
+# a link is active only when both sides declared each other.
+MAX_LINK_PEERS = 64
+MAX_ACTIVE_LINK_DECLARATIONS = 8192
+LINK_TTL_SECONDS = 24 * 60 * 60
+# A withdrawal keeps its timestamp this long (past the request clock skew), so a
+# delayed older declaration cannot undo it.
+LINK_WITHDRAWAL_SECONDS = 5 * 60
 
 
 class RelayBackendError(RuntimeError):
@@ -89,7 +102,7 @@ class PeerRecord:
 
 
 class InMemoryBackend:
-    """Single-process backend, available only with explicit development mode."""
+    """Single-process backend: explicit development mode, and `kollab relay serve --domain` (one worker)."""
 
     def __init__(self, node_id: str, limits: RelayLimits):
         self.node_id = node_id
@@ -98,10 +111,21 @@ class InMemoryBackend:
         self.source_counts: Counter[str] = Counter()
         self.rooms: dict[str, dict[str, PeerRecord]] = {}
         self.enrollment_offers: dict[str, dict[str, Any]] = {}
+        self.enrollment_lookup_index: dict[str, str] = {}
         self.enrollment_rate: dict[str, tuple[int, float]] = {}
         self.enrollment_nonces: dict[str, dict[str, float]] = {}
         self.enrollment_nonce_count = 0
         self.contact_requests: dict[str, dict[str, dict[str, Any]]] = {}
+        # route hex -> keys currently registered in any room under it. A
+        # normal key has exactly one entry; more than one is a (practically
+        # impossible) hash collision, reported to callers as "ambiguous"
+        # rather than silently picking one.
+        self.contact_routes: dict[str, set[str]] = {}
+        # key -> (issued_at, the keys it consents to link with, expiry). A
+        # link between two keys exists only while each names the other.
+        self.link_declarations: dict[str, tuple[int, frozenset[str], float]] = {}
+        # key -> the room of its latest registration (the Redis presence index)
+        self.presence: dict[str, str] = {}
         self.state: Any = None
 
     async def start(self, state: Any) -> None:
@@ -148,6 +172,10 @@ class InMemoryBackend:
         if len(room) >= self.limits.max_connections_per_room:
             return "room_capacity", []
         room[member.key] = member
+        self.presence[member.key] = room_hash
+        self.contact_routes.setdefault(contact_route_hex(member.key), set()).add(
+            member.key
+        )
         return None, list(room.values())
 
     async def list_room(self, room_hash: str) -> tuple[list[PeerRecord], bool]:
@@ -162,8 +190,74 @@ class InMemoryBackend:
         del room[member.key]
         if not room:
             del self.rooms[room_hash]
-            return True, []
+        if self.presence.get(member.key) == room_hash:
+            del self.presence[member.key]
+        if not any(member.key in other for other in self.rooms.values()):
+            self._discard_contact_route(member.key)
         return True, list(room.values())
+
+    def _discard_contact_route(self, key: str) -> None:
+        route = contact_route_hex(key)
+        keys = self.contact_routes.get(route)
+        if keys is None:
+            return
+        keys.discard(key)
+        if not keys:
+            del self.contact_routes[route]
+
+    async def lookup_contact_route(self, route_hex: str) -> list[str]:
+        """Keys currently registered under this route (0, 1, or >1 = ambiguous)."""
+        return sorted(self.contact_routes.get(route_hex, ()))
+
+    def _declared(self, key: str) -> frozenset[str]:
+        now = time.monotonic()
+        for other, (_, _, expires) in list(self.link_declarations.items()):
+            if expires <= now:
+                del self.link_declarations[other]
+        row = self.link_declarations.get(key)
+        return row[1] if row else frozenset()
+
+    async def sync_links(
+        self, key: str, peers: list[str], *, issued_at: int, ttl_ms: int
+    ) -> tuple[str, list[str]]:
+        """Replace what `key` consents to link with; return the peers that changed.
+
+        A declaration older than the stored one is refused, so a delayed
+        request cannot undo a later withdrawal.
+        """
+        before = self._declared(key)
+        stored = self.link_declarations.get(key)
+        if stored is not None and stored[0] > issued_at:
+            return "stale", []
+        if not peers:
+            self.link_declarations[key] = (
+                issued_at,
+                frozenset(),
+                time.monotonic() + LINK_WITHDRAWAL_SECONDS,
+            )
+            return "stored", sorted(before)
+        live = sum(1 for _, declared, _ in self.link_declarations.values() if declared)
+        if not before and live >= MAX_ACTIVE_LINK_DECLARATIONS:
+            return "capacity", []
+        self.link_declarations[key] = (
+            issued_at,
+            frozenset(peers),
+            time.monotonic() + ttl_ms / 1000,
+        )
+        return "stored", sorted(before ^ frozenset(peers))
+
+    async def linked_keys(self, key: str) -> list[str]:
+        """Keys that mutually consented to link with `key`."""
+        return sorted(other for other in self._declared(key) if key in self._declared(other))
+
+    async def is_linked(self, first: str, second: str) -> bool:
+        return second in self._declared(first) and first in self._declared(second)
+
+    async def locate(self, key: str) -> tuple[PeerRecord, str] | None:
+        """The live record and room of a key, wherever it is registered."""
+        room_hash = self.presence.get(key)
+        record = self.rooms.get(room_hash, {}).get(key) if room_hash else None
+        return (record, room_hash) if record is not None else None
 
     async def renew(
         self,
@@ -203,7 +297,13 @@ class InMemoryBackend:
             if float(offer["_expires_monotonic"]) <= now
         ]
         for offer_id in expired:
-            self.enrollment_offers.pop(offer_id, None)
+            self._delete_enrollment_offer(offer_id)
+
+    def _delete_enrollment_offer(self, offer_id: str) -> None:
+        offer = self.enrollment_offers.pop(offer_id, None)
+        lookup_hash = offer.get("lookup_hash") if offer else None
+        if lookup_hash:
+            self.enrollment_lookup_index.pop(lookup_hash, None)
 
     def _prune_enrollment_nonces(
         self, now: float, principal_hash: str | None = None
@@ -305,11 +405,27 @@ class InMemoryBackend:
             {
                 "state": "open",
                 "failed_codes": "0",
+                "device_name": "",
                 "_expires_monotonic": now + ttl_ms / 1000,
             }
         )
         self.enrollment_offers[offer_id] = record
+        lookup_hash = fields.get("lookup_hash")
+        if lookup_hash:
+            self.enrollment_lookup_index[lookup_hash] = offer_id
         return "created"
+
+    async def find_enrollment_offer_by_lookup(self, lookup_hash: str) -> str | None:
+        """Resolve a short code's lookup hash to an unexpired, unused offer id."""
+        now = time.monotonic()
+        self._prune_enrollment_offers(now)
+        offer_id = self.enrollment_lookup_index.get(lookup_hash)
+        if offer_id is None:
+            return None
+        offer = self.enrollment_offers.get(offer_id)
+        if offer is None or offer.get("state") != "open":
+            return None
+        return offer_id
 
     async def submit_enrollment_request(
         self,
@@ -320,6 +436,7 @@ class InMemoryBackend:
         candidate_hash: str,
         envelope: str,
         content_digest: str,
+        device_name: str = "",
     ) -> str:
         now = time.monotonic()
         self._prune_enrollment_offers(now)
@@ -339,15 +456,15 @@ class InMemoryBackend:
             return "unavailable"
         failures = int(offer.get("failed_codes", "0"))
         if failures >= ENROLLMENT_MAX_FAILED_CODES:
-            return "rate_limited"
+            self._delete_enrollment_offer(offer_id)
+            return "unavailable"
         if not hmac.compare_digest(offer["code_verifier_hash"], candidate_hash):
             failures += 1
             offer["failed_codes"] = str(failures)
-            return (
-                "rate_limited"
-                if failures >= ENROLLMENT_MAX_FAILED_CODES
-                else "invalid_code"
-            )
+            if failures >= ENROLLMENT_MAX_FAILED_CODES:
+                self._delete_enrollment_offer(offer_id)
+                return "unavailable"
+            return "invalid_code"
         offer.update(
             {
                 "state": "request_pending",
@@ -356,6 +473,7 @@ class InMemoryBackend:
                 "request_digest": content_digest,
                 "request_envelope": envelope,
                 "request_claim_id": "",
+                "device_name": device_name,
             }
         )
         return "accepted"
@@ -387,6 +505,7 @@ class InMemoryBackend:
             "round_id": offer[f"{phase}_round_id"],
             "destination_key": offer["destination_key"],
             "envelope": offer[f"{phase}_envelope"],
+            "device_name": offer.get("device_name", ""),
         }
 
     async def publish_enrollment_challenge(
@@ -621,6 +740,16 @@ class InMemoryBackend:
         row["decision"] = decision
         return "stored"
 
+    async def contact_request_status(
+        self, recipient_hash: str, request_id: str, sender_key: str
+    ) -> str:
+        """The decision on one request, only for the key that sent it."""
+        self._prune_contact_requests(time.monotonic())
+        row = self.contact_requests.get(recipient_hash, {}).get(request_id)
+        if row is None or row["frame"]["sender_key"] != sender_key:
+            return "unavailable"
+        return row["decision"]
+
 
 _RESERVE_LEASE = """
 local t = redis.call('TIME')
@@ -699,6 +828,48 @@ local roster = redis.call('HGETALL', KEYS[1])
 local result = {1}
 for _, value in ipairs(roster) do table.insert(result, value) end
 return result
+"""
+
+# One key, one script: the route set can never exist without its TTL.
+_TOUCH_CONTACT_ROUTE = """
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+"""
+
+# Which room a key is registered in, so a linked device can be found from
+# another room. Only a hint: the room's own member hash stays authoritative.
+_DISCARD_PRESENCE = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0
+"""
+
+# Replace one key's consent set. An older request than the stored one is
+# refused, so a delayed post cannot undo a later withdrawal (a withdrawal is
+# stored as an empty set for a while). Returns the status and the previous peers.
+_SYNC_LINKS = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local ttl = tonumber(ARGV[1])
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[5]))
+for _, member in ipairs(expired) do redis.call('ZREM', KEYS[2], member) end
+local previous = redis.call('GET', KEYS[1])
+local before = {}
+if previous then
+  local decoded = cjson.decode(previous)
+  if tonumber(decoded['at']) > tonumber(ARGV[2]) then return {'stale'} end
+  before = decoded['peers']
+end
+if tonumber(ARGV[7]) == 0 then
+  redis.call('SET', KEYS[1], ARGV[6], 'PX', tonumber(ARGV[8]))
+  redis.call('ZREM', KEYS[2], ARGV[3])
+  return {'stored', unpack(before)}
+end
+if #before == 0 and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return {'capacity'} end
+redis.call('SET', KEYS[1], ARGV[6], 'PX', ttl)
+redis.call('ZADD', KEYS[2], now + ttl, ARGV[3])
+redis.call('PEXPIRE', KEYS[2], ttl * 2)
+return {'stored', unpack(before)}
 """
 
 _RENEW_ROOM = """
@@ -829,6 +1000,16 @@ redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
 return 'stored'
 """
 
+_CONTACT_REQUEST_STATUS = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local expiry = redis.call('ZSCORE', KEYS[2], ARGV[1])
+local payload = redis.call('HGET', KEYS[1], ARGV[1])
+if not expiry or tonumber(expiry) <= now or not payload then return 'unavailable' end
+if cjson.decode(payload)['frame']['sender_key'] ~= ARGV[2] then return 'unavailable' end
+return redis.call('HGET', KEYS[3], ARGV[1]) or 'pending'
+"""
+
 _CREATE_ENROLLMENT_OFFER = """
 local existing = redis.call('HGET', KEYS[1], 'create_digest')
 if existing then
@@ -839,13 +1020,17 @@ local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[3]) then return 0 end
-for i = 6, #ARGV, 2 do
+for i = 7, #ARGV, 2 do
   redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
 end
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[1]))
 redis.call('ZADD', KEYS[2], now + tonumber(ARGV[1]), ARGV[2])
 -- Keep the active index alive longer than every service-enforced offer TTL.
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[5]))
+if ARGV[6] ~= '' then
+  redis.call('SET', KEYS[3], ARGV[2])
+  redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[1]))
+end
 return 1
 """
 
@@ -861,8 +1046,18 @@ if existing then
   return 'bound'
 end
 if redis.call('HGET', KEYS[1], 'state') ~= 'open' then return 'unavailable' end
+local function burn()
+  local lookup_hash = redis.call('HGET', KEYS[1], 'lookup_hash')
+  redis.call('DEL', KEYS[1])
+  if lookup_hash and lookup_hash ~= '' then
+    redis.call('DEL', 'kollab:relay:enrollment:{mailbox}:lookup:' .. lookup_hash)
+  end
+end
 local failed = tonumber(redis.call('HGET', KEYS[1], 'failed_codes') or '0')
-if failed >= tonumber(ARGV[6]) then return 'rate_limited' end
+if failed >= tonumber(ARGV[6]) then
+  burn()
+  return 'unavailable'
+end
 local stored = redis.call('HGET', KEYS[1], 'code_verifier_hash') or ''
 local difference = 0
 for i = 1, 64 do
@@ -870,7 +1065,10 @@ for i = 1, 64 do
 end
 if #stored ~= 64 or #ARGV[3] ~= 64 or difference ~= 0 then
   failed = redis.call('HINCRBY', KEYS[1], 'failed_codes', 1)
-  if failed >= tonumber(ARGV[6]) then return 'rate_limited' end
+  if failed >= tonumber(ARGV[6]) then
+    burn()
+    return 'unavailable'
+  end
   return 'invalid_code'
 end
 redis.call('HSET', KEYS[1],
@@ -879,8 +1077,17 @@ redis.call('HSET', KEYS[1],
   'request_round_id', ARGV[1],
   'request_digest', ARGV[5],
   'request_envelope', ARGV[4],
-  'request_claim_id', '')
+  'request_claim_id', '',
+  'device_name', ARGV[7])
 return 'accepted'
+"""
+
+_FIND_ENROLLMENT_OFFER_BY_LOOKUP = """
+local offer_id = redis.call('GET', KEYS[1])
+if not offer_id then return false end
+local offer_key = 'kollab:relay:enrollment:{mailbox}:offer:' .. offer_id
+if redis.call('HGET', offer_key, 'state') ~= 'open' then return false end
+return offer_id
 """
 
 _CLAIM_ENROLLMENT_ROUND = """
@@ -907,7 +1114,8 @@ return {
   'claimed', phase,
   redis.call('HGET', KEYS[1], phase .. '_round_id') or '',
   redis.call('HGET', KEYS[1], 'destination_key') or '',
-  redis.call('HGET', KEYS[1], phase .. '_envelope') or ''
+  redis.call('HGET', KEYS[1], phase .. '_envelope') or '',
+  redis.call('HGET', KEYS[1], 'device_name') or ''
 }
 """
 
@@ -1416,6 +1624,8 @@ class RedisRelayBackend:
             status = str(result[0])
             if status != "ok":
                 return status, []
+            await self._touch_contact_route(member.key)
+            await self._touch_presence(member.key, room_hash)
             return None, self._parse_hgetall(result[2:])
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
@@ -1444,11 +1654,154 @@ class RedisRelayBackend:
                 member.key,
                 member.as_json(),
             )
-            return int(result[0]) == 1, self._parse_hgetall(result[1:])
+            removed = int(result[0]) == 1
+            if removed:
+                await self._discard_contact_route(member.key, room_hash)
+                await self._discard_presence(member.key, room_hash)
+            return removed, self._parse_hgetall(result[1:])
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
                 raise
             raise RelayBackendError("shared peer removal is unavailable") from exc
+
+    async def _touch_contact_route(self, key: str) -> None:
+        # The route index sits beside the atomic room scripts, not inside
+        # them (its key lives in another hash slot), so a knock lookup can be
+        # briefly stale after a room change. A failure is logged, never
+        # raised: it only ages the entry out within LEASE_SECONDS.
+        try:
+            await self._redis.eval(
+                _TOUCH_CONTACT_ROUTE,
+                1,
+                self._contact_route_key(contact_route_hex(key)),
+                key,
+                LEASE_SECONDS,
+            )
+        except Exception:
+            logger.warning("contact route index could not be updated")
+
+    async def _discard_contact_route(self, key: str, room_hash: str) -> None:
+        """Unlist a key whose room membership just ended, unless it is back.
+
+        A reconnect can register the key between the room removal and this
+        call; the membership check after the SREM lists it again instead of
+        leaving a live device unreachable until its next renewal.
+        """
+        try:
+            await self._redis.srem(self._contact_route_key(contact_route_hex(key)), key)
+            if await self._redis.hexists(self._room_keys(room_hash)[0], key):
+                await self._touch_contact_route(key)
+        except Exception:
+            logger.warning("contact route index could not be updated")
+
+    async def lookup_contact_route(self, route_hex: str) -> list[str]:
+        """Keys currently registered under this route (0, 1, or >1 = ambiguous)."""
+        try:
+            members = await self._redis.smembers(self._contact_route_key(route_hex))
+        except Exception as exc:
+            raise RelayBackendError("contact route lookup is unavailable") from exc
+        return sorted(members)
+
+    async def _touch_presence(self, key: str, room_hash: str) -> None:
+        # Best effort like the route index: a miss only hides the device from
+        # its linked peers until the next lease renewal.
+        try:
+            await self._redis.set(
+                self._presence_key(key), room_hash, px=LEASE_SECONDS * 1000
+            )
+        except Exception:
+            logger.warning("link presence index could not be updated")
+
+    async def _discard_presence(self, key: str, room_hash: str) -> None:
+        try:
+            await self._redis.eval(
+                _DISCARD_PRESENCE, 1, self._presence_key(key), room_hash
+            )
+        except Exception:
+            logger.warning("link presence index could not be updated")
+
+    async def sync_links(
+        self, key: str, peers: list[str], *, issued_at: int, ttl_ms: int
+    ) -> tuple[str, list[str]]:
+        """Replace what `key` consents to link with; return the peers that changed."""
+        try:
+            encoded = json.dumps(
+                {"at": issued_at, "peers": peers}, sort_keys=True, separators=(",", ":")
+            )
+            result = await self._redis.eval(
+                _SYNC_LINKS,
+                2,
+                self._link_key(key),
+                self._link_index_key(),
+                ttl_ms,
+                issued_at,
+                key,
+                MAX_ACTIVE_LINK_DECLARATIONS,
+                CONTACT_INDEX_CLEANUP_BATCH,
+                encoded,
+                len(peers),
+                LINK_WITHDRAWAL_SECONDS * 1000,
+            )
+            status = str(result[0])
+            if status != "stored":
+                return status, []
+            before = {str(item) for item in result[1:]}
+            return "stored", sorted(before ^ set(peers))
+        except Exception as exc:
+            raise RelayBackendError("link storage is unavailable") from exc
+
+    async def _declared(self, keys: list[str]) -> list[frozenset[str]]:
+        try:
+            rows = await self._redis.mget([self._link_key(key) for key in keys])
+            return [self._parse_link_row(row) for row in rows]
+        except RelayBackendError:
+            raise
+        except Exception as exc:
+            raise RelayBackendError("link lookup is unavailable") from exc
+
+    @staticmethod
+    def _parse_link_row(raw: Any) -> frozenset[str]:
+        if raw is None:
+            return frozenset()
+        try:
+            value = json.loads(raw, object_pairs_hook=_unique_pairs)
+        except (TypeError, ValueError):
+            raise RelayBackendError("stored link declaration is malformed") from None
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"at", "peers"}
+            or not isinstance(value["peers"], list)
+            or not all(_is_public_key(peer) for peer in value["peers"])
+        ):
+            raise RelayBackendError("stored link declaration is malformed")
+        return frozenset(value["peers"])
+
+    async def linked_keys(self, key: str) -> list[str]:
+        """Keys that mutually consented to link with `key`."""
+        (mine,) = await self._declared([key])
+        if not mine:
+            return []
+        candidates = sorted(mine)
+        theirs = await self._declared(candidates)
+        return [
+            other for other, declared in zip(candidates, theirs) if key in declared
+        ]
+
+    async def is_linked(self, first: str, second: str) -> bool:
+        mine, theirs = await self._declared([first, second])
+        return second in mine and first in theirs
+
+    async def locate(self, key: str) -> tuple[PeerRecord, str] | None:
+        """The live record and room of a key, wherever it is registered."""
+        try:
+            room_hash = await self._redis.get(self._presence_key(key))
+        except Exception as exc:
+            raise RelayBackendError("link presence lookup is unavailable") from exc
+        if not _is_room_hash(room_hash):
+            return None
+        records, _ = await self.list_room(room_hash)
+        record = next((item for item in records if item.key == key), None)
+        return (record, room_hash) if record is not None else None
 
     async def renew(
         self,
@@ -1491,7 +1844,11 @@ class RedisRelayBackend:
                 member.as_json(),
                 LEASE_SECONDS * 1000,
             )
-            return int(room_result) == 1
+            renewed = int(room_result) == 1
+            if renewed:
+                await self._touch_contact_route(member.key)
+                await self._touch_presence(member.key, room_hash)
+            return renewed
         except Exception as exc:
             if isinstance(exc, RelayBackendError):
                 raise
@@ -1566,22 +1923,35 @@ class RedisRelayBackend:
         self, offer_id: str, fields: dict[str, str], *, ttl_ms: int, capacity: int
     ) -> str:
         try:
-            stored_fields = {"state": "open", "failed_codes": "0", **fields}
+            lookup_hash = fields.get("lookup_hash", "")
+            stored_fields = {
+                "state": "open",
+                "failed_codes": "0",
+                "device_name": "",
+                **fields,
+            }
             args: list[str | int] = [
                 ttl_ms,
                 offer_id,
                 capacity,
                 fields["create_digest"],
                 ENROLLMENT_CAPACITY_INDEX_TTL_MS,
+                lookup_hash,
             ]
             for key, value in sorted(stored_fields.items()):
                 args.extend((key, value))
+            lookup_key = (
+                self._enrollment_lookup_key(lookup_hash)
+                if lookup_hash
+                else self._enrollment_key(offer_id)
+            )
             result = int(
                 await self._redis.eval(
                     _CREATE_ENROLLMENT_OFFER,
-                    2,
+                    3,
                     self._enrollment_key(offer_id),
                     self._enrollment_capacity_key(),
+                    lookup_key,
                     *args,
                 )
             )
@@ -1597,6 +1967,17 @@ class RedisRelayBackend:
                 raise
             raise RelayBackendError("enrollment offer storage is unavailable") from exc
 
+    async def find_enrollment_offer_by_lookup(self, lookup_hash: str) -> str | None:
+        try:
+            result = await self._redis.eval(
+                _FIND_ENROLLMENT_OFFER_BY_LOOKUP,
+                1,
+                self._enrollment_lookup_key(lookup_hash),
+            )
+            return str(result) if result else None
+        except Exception as exc:
+            raise RelayBackendError("enrollment lookup storage is unavailable") from exc
+
     async def submit_enrollment_request(
         self,
         offer_id: str,
@@ -1606,6 +1987,7 @@ class RedisRelayBackend:
         candidate_hash: str,
         envelope: str,
         content_digest: str,
+        device_name: str = "",
     ) -> str:
         try:
             result = await self._redis.eval(
@@ -1618,6 +2000,7 @@ class RedisRelayBackend:
                 envelope,
                 content_digest,
                 ENROLLMENT_MAX_FAILED_CODES,
+                device_name,
             )
             return str(result)
         except Exception as exc:
@@ -1637,7 +2020,7 @@ class RedisRelayBackend:
                 claim_id,
             )
             values = [str(value) for value in result]
-            if values[0] != "claimed" or len(values) != 5:
+            if values[0] != "claimed" or len(values) != 6:
                 return {"status": values[0]}
             return {
                 "status": values[0],
@@ -1645,6 +2028,7 @@ class RedisRelayBackend:
                 "round_id": values[2],
                 "destination_key": values[3],
                 "envelope": values[4],
+                "device_name": values[5],
             }
         except Exception as exc:
             raise RelayBackendError("enrollment claim is unavailable") from exc
@@ -1889,6 +2273,23 @@ class RedisRelayBackend:
             return str(result)
         except Exception as exc:
             raise RelayBackendError("contact request decision is unavailable") from exc
+
+    async def contact_request_status(
+        self, recipient_hash: str, request_id: str, sender_key: str
+    ) -> str:
+        try:
+            result = await self._redis.eval(
+                _CONTACT_REQUEST_STATUS,
+                3,
+                self._contact_data_key(recipient_hash),
+                self._contact_recipient_index_key(recipient_hash),
+                self._contact_decisions_key(recipient_hash),
+                request_id,
+                sender_key,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError("contact request status is unavailable") from exc
 
     async def notify_room_change(self, room_hash: str, node_ids: set[str]) -> None:
         payload = {"type": "room_changed", "room_hash": room_hash}
@@ -2228,6 +2629,10 @@ class RedisRelayBackend:
         return f"kollab:relay:enrollment:{{mailbox}}:offer:{offer_id}"
 
     @staticmethod
+    def _enrollment_lookup_key(lookup_hash: str) -> str:
+        return f"kollab:relay:enrollment:{{mailbox}}:lookup:{lookup_hash}"
+
+    @staticmethod
     def _enrollment_capacity_key() -> str:
         return "kollab:relay:enrollment:{mailbox}:active-offers"
 
@@ -2262,6 +2667,22 @@ class RedisRelayBackend:
     @staticmethod
     def _contact_global_index_key() -> str:
         return "kollab:relay:contact:{mailbox}:active-requests"
+
+    @staticmethod
+    def _contact_route_key(route_hex: str) -> str:
+        return f"kollab:relay:contact:{{mailbox}}:route:{route_hex}"
+
+    @staticmethod
+    def _link_key(key: str) -> str:
+        return f"kollab:relay:link:{{mailbox}}:declared:{key}"
+
+    @staticmethod
+    def _link_index_key() -> str:
+        return "kollab:relay:link:{mailbox}:declarers"
+
+    @staticmethod
+    def _presence_key(key: str) -> str:
+        return f"kollab:relay:link:{{mailbox}}:presence:{key}"
 
     @staticmethod
     def _node_channel_for(node_id: str) -> str:
