@@ -20,6 +20,7 @@ from kollabor_config.managed_config import read_managed_config
 from plugins.hub import config_sync as cs
 from plugins.hub.config_sync_service import ConfigSyncService
 from plugins.hub.relay_client import RelayClient
+from plugins.hub.relay_state import RelayStateStore
 
 FAKE_KEY = "sk-fake-anthropic-key-7f3a"
 FAKE_MCP = "fake-mcp-token-91c2"
@@ -461,7 +462,7 @@ def core_call(snapshot, primary, secondary, revision):
     return {"v": 1, "op": "core", "bundle": base64.b64encode(sealed).decode()}
 
 
-def secondary_service(secondary, primary, notices, root=None):
+def secondary_service(secondary, primary, notices, root=None, **extra):
     return ConfigSyncService(
         key=secondary,
         transport=None,
@@ -472,6 +473,7 @@ def secondary_service(secondary, primary, notices, root=None):
         peer_name=lambda _key: "mac-kollab",
         notice=notices.append,
         root=root,
+        **extra,
     )
 
 
@@ -561,3 +563,84 @@ async def test_the_relay_agent_shows_config_sync_notices_in_the_main_pane(networ
 
     assert lines == ["Skipped MCP servers not installed here: ghost"]
 
+
+
+@pytest.mark.asyncio
+async def test_a_restart_stays_quiet_until_the_set_of_skipped_servers_changes(tmp_path):
+    primary, secondary = SigningKey.generate(), SigningKey.generate()
+    mac, server = tmp_path / "mac-kollab", tmp_path / "server-kollab"
+    kept = [("", False)]  # the network state: what was last said
+
+    async def launch_and_receive(revision, servers):
+        """One launch of the app: a new service that starts from what the state kept."""
+        lines = []
+        service = secondary_service(
+            secondary,
+            primary,
+            lines,
+            root=server,
+            told=kept[-1],
+            remember_told=lambda skipped, refused: kept.append((skipped, refused)),
+        )
+        write_json(mac / "config.json", primary_settings(model=f"model-{revision}"))
+        write_json(mac / "mcp" / "mcp_settings.json", {"servers": servers})
+        snapshot = cs.SnapshotBuilder(root=mac, keyring_get={}.get).build()
+        call = core_call(snapshot, primary, secondary, revision)
+        assert await service.receive(bytes(primary.verify_key).hex(), call) == {"ok": True}
+        return lines
+
+    here, gone = {"command": sys.executable}, {"command": "no-such-mcp-server-xyz"}
+    said = "Skipped MCP servers not installed here: "
+    assert await launch_and_receive(1, {"here": here, "gone": gone}) == [said + "gone"]
+    assert await launch_and_receive(2, {"here": here, "gone": gone}) == []  # same set after a restart
+    assert await launch_and_receive(3, {"here": here, "gone": gone, "lost": gone}) == [
+        said + "gone, lost"
+    ]
+    assert await launch_and_receive(4, {"here": here}) == []  # nothing skipped any more
+    assert await launch_and_receive(5, {"here": here, "gone": gone}) == [said + "gone"]
+
+
+def test_the_refusal_is_said_once_across_restarts_and_again_after_it_clears(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    kept = [("", False)]
+
+    def launch(lines):
+        return secondary_service(
+            SigningKey.generate(),
+            SigningKey.generate(),
+            lines,
+            told=kept[-1],
+            remember_told=lambda skipped, refused: kept.append((skipped, refused)),
+        )
+
+    refused = {"error": "other_primary"}
+    first, second, third = [], [], []
+    service = launch(first)
+    service._tell(refused, None)
+    service._tell(refused, None)
+    assert first == [SYNC_IS_OFF]
+    service = launch(second)  # a restart that is still refused stays quiet
+    service._tell(refused, None)
+    assert second == []
+    service._tell({"ok": True}, None)  # sync works again here
+    service = launch(third)
+    service._tell(refused, None)  # refused anew: it speaks again
+    assert third == [SYNC_IS_OFF]
+
+
+@pytest.mark.asyncio
+async def test_the_relay_agent_keeps_what_the_service_said_in_the_network_state(network):
+    net = network
+    net["right"].plugin.show_network_notice = lambda _text: None
+    write_json(
+        net["mac"] / "mcp" / "mcp_settings.json",
+        {"servers": {"ghost": {"command": "no-such-mcp-server-xyz"}}},
+    )
+
+    await sync_once(net)
+
+    client = net["right"].commands.client
+    kept = RelayStateStore(client.workspace, client.state_dir).state  # what a restart loads
+    assert kept.config_told_skipped and "ghost" not in kept.config_told_skipped
+    restarted = net["right"].make_config_sync()
+    assert restarted._told_skipped == kept.config_told_skipped

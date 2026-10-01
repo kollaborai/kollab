@@ -2607,8 +2607,9 @@ class RelayAgentBridge:
 
     def make_config_sync(self, root=None) -> ConfigSyncService:
         """The sealed-config service for this device (started by the owner)."""
+        client = self.commands.client
         self.config_sync = ConfigSyncService(
-            key=self.commands.client._store.key,
+            key=client._store.key,
             transport=self.secure_transport,
             online=self._config_online_peers,
             recipients=lambda: list(self._state().state.config_recipients),
@@ -2617,6 +2618,8 @@ class RelayAgentBridge:
             peer_name=self._peer_name,
             after_apply=self._config_applied,
             notice=self._config_notice,
+            told=(client.state.config_told_skipped, client.state.config_told_refused),
+            remember_told=client.remember_config_told,
             root=root,
         )
         return self.config_sync

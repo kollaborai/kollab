@@ -82,6 +82,8 @@ class ConfigSyncService:
         peer_name: Callable[[str], str],
         after_apply: Callable[[Applied], Awaitable[None]] | None = None,
         notice: Callable[[str], None] | None = None,
+        told: tuple[str, bool] = ("", False),
+        remember_told: Callable[[str, bool], None] | None = None,
         builder: SnapshotBuilder | None = None,
         root: Path | None = None,
         poll_seconds: float = POLL_SECONDS,
@@ -96,6 +98,11 @@ class ConfigSyncService:
         self._peer_name = peer_name
         self._after_apply = after_apply
         self._notice = notice
+        # What the human was last told, kept by `remember_told` so a restart repeats
+        # nothing: a digest of the skipped MCP server names, and whether the
+        # "sync is off here" refusal was said.
+        self._told_skipped, self._told_refused = told
+        self._remember_told = remember_told
         self._root = root
         self._builder = builder or SnapshotBuilder(root=root)
         self._poll = poll_seconds
@@ -116,8 +123,6 @@ class ConfigSyncService:
         self._seen: set[tuple[str, str]] = set()
         self._task: asyncio.Task | None = None
         self._closed = False
-        self._told_skipped: tuple[str, ...] = ()
-        self._told_refused = False
 
     # ---- lifecycle ----
 
@@ -356,23 +361,38 @@ class ConfigSyncService:
         return reply
 
     def _tell(self, reply: dict, applied: Applied | None) -> None:
-        """Tell the human once per cause, never once per bundle."""
+        """Tell the human once per cause, never once per bundle or per launch."""
         if self._notice is None:
             return
-        if reply.get("error") == "other_primary" and not self._told_refused:
-            # Another workspace on this machine joined a different network last and
-            # took the machine's one managed-config record; every bundle is refused.
-            self._told_refused = True
-            self._notice(
-                "Settings sync is off in this workspace: another workspace on this "
-                "machine joined a different network last."
-            )
-        if applied is None or applied.skipped_mcp == self._told_skipped:
-            return
-        self._told_skipped = applied.skipped_mcp
-        if applied.skipped_mcp:
-            names = ", ".join(applied.skipped_mcp)
-            self._notice(f"Skipped MCP servers not installed here: {names}")
+        before = (self._told_skipped, self._told_refused)
+        if reply.get("error") == "other_primary":
+            if not self._told_refused:
+                # Another workspace on this machine joined a different network last
+                # and took the machine's one managed-config record; every bundle is
+                # refused.
+                self._told_refused = True
+                self._notice(
+                    "Settings sync is off in this workspace: another workspace on this "
+                    "machine joined a different network last."
+                )
+        elif "error" not in reply:
+            self._told_refused = False  # sync works again; a later refusal speaks anew
+        if applied is not None and _digest(applied.skipped_mcp) != self._told_skipped:
+            self._told_skipped = _digest(applied.skipped_mcp)
+            if applied.skipped_mcp:
+                names = ", ".join(applied.skipped_mcp)
+                self._notice(f"Skipped MCP servers not installed here: {names}")
+        if self._remember_told is not None and (
+            self._told_skipped,
+            self._told_refused,
+        ) != before:
+            self._remember_told(self._told_skipped, self._told_refused)
+
+
+def _digest(names: tuple[str, ...]) -> str:
+    """A short fingerprint of a set of names; the state keeps this, never the names."""
+    joined = "\n".join(sorted(names)).encode()
+    return hashlib.sha256(joined).hexdigest()[:16] if names else ""
 
 
 def _batches(entries: list[FileEntry]) -> list[list[FileEntry]]:

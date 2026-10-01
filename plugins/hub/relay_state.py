@@ -175,6 +175,11 @@ class RelayState:
     # human was already told about in the main pane, pruned to what is still
     # pending, so a restart announces only what is new.
     announced: list[str] = field(default_factory=list)
+    # What the sealed-config sync last told the human in the main pane, so a
+    # restart repeats nothing: a digest of the skipped MCP server names ("" for
+    # none) and whether the "settings sync is off here" refusal was said.
+    config_told_skipped: str = ""
+    config_told_refused: bool = False
 
 
 class RelayStateStore:
@@ -324,6 +329,12 @@ class RelayStateStore:
             or any(not isinstance(item, str) or not 0 < len(item) <= 96 for item in value.announced)
         ):
             raise RelayError("invalid announced requests")
+        if (
+            not isinstance(value.config_told_skipped, str)
+            or len(value.config_told_skipped) > 64
+            or type(value.config_told_refused) is not bool
+        ):
+            raise RelayError("invalid config sync notices")
         try:
             if value.device_name:
                 validate_device_name(value.device_name)

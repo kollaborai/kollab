@@ -354,6 +354,16 @@ class RelayClient:
             self.state.announced = ids
             self._store.save()
 
+    def remember_config_told(self, skipped: str, refused: bool) -> None:
+        """Keep what the sealed-config sync last told the human, so a restart repeats nothing."""
+        if (skipped, refused) != (
+            self.state.config_told_skipped,
+            self.state.config_told_refused,
+        ):
+            self._adopt_bridge_fields()
+            self.state.config_told_skipped, self.state.config_told_refused = skipped, refused
+            self._store.save()
+
     def add_config_recipient(self, key: str) -> None:
         """Remember a device accepted with a join code: it gets the sealed config.
 
