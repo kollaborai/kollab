@@ -636,11 +636,14 @@ async def test_codes_and_typos_in_connect_commands_never_reach_the_daemon():
 def test_log_lines_never_carry_enrollment_codes():
     import logging
 
-    from kollabor.logging.setup import CompactFormatter
+    from kollabor.logging.setup import CompactFormatter, JoinCodeRedactionFilter
 
     code = "ABCD-EFGH"
     message = "Executing highlighted menu command: %s"
     record = logging.LogRecord("t", logging.INFO, __file__, 1, message, (f"/connect approve {code}",), None)
+    # The filter rewrites the record before any formatter runs, so compact,
+    # standard and custom formats all emit the redacted line.
+    assert JoinCodeRedactionFilter().filter(record) is True
     line = CompactFormatter("%(message)s").format(record)
 
     assert code not in line

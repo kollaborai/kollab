@@ -135,7 +135,12 @@ class RpcClient:
         """
         request_id = msg_data.get("request_id")
         if not request_id:
-            logger.warning("rpc reply missing request_id: %r", msg_data)
+            # Reply values can carry secrets (an enrollment-offer reply holds
+            # its join code), so log the reply's shape, never its contents.
+            logger.warning(
+                "rpc reply missing request_id: keys=%s",
+                sorted(str(key) for key in msg_data),
+            )
             return
 
         fut = self._pending.get(request_id)
