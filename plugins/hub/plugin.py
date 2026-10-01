@@ -8604,6 +8604,11 @@ class HubPlugin(BasePlugin):
                     kind=relay_kind,
                 )
                 message.metadata["relay_receipt"] = receipt
+                logger.info(
+                    "network send result: path=relay kind=%s state=%s",
+                    relay_kind,
+                    receipt.get("state"),
+                )
                 if receipt["state"] in {
                     "rejected",
                     "failed",
@@ -8616,6 +8621,7 @@ class HubPlugin(BasePlugin):
                 )
                 return []
             except (RelayError, OSError, TimeoutError) as exc:
+                logger.info("network send result: path=relay refused=%s", type(exc).__name__)
                 if str(exc) in {
                     "initial message must match the human-authorized request exactly",
                     "a human communication grant is required; use /connect authorize or /connect send",
