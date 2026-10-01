@@ -158,8 +158,9 @@ deleting data not listed here or changing a decision.
 ### Work order
 A. Decisions 3, 5 and 6 (the code parts), each with tests.
 B. The guided setup.
-C. A live round on a branch build: m1, m2, m3, m4, story5, story7, plus a guided-setup proof.
-   Then the PR, CI and merge.
+C. Live checks for NEW work only, on a branch build: story7 and the guided setup. Do NOT rerun
+   m1, m2, m3, m4 or story5: they passed on 0.11.0.dev6 (see Final state). Then the PR, CI and
+   merge.
 D. The release, per CLAUDE.md "Cutting a Release":
    - a prep PR that sets 0.11.0 in all 11 pyproject files, the `kollabor-*>=` pins and
      `uv lock`, and moves CHANGELOG [Unreleased] to [0.11.0] in both copies (byte-identical);
@@ -176,7 +177,8 @@ F. Marco's path, proven on throwaway installs only:
    - launch, and the update notice shows;
    - the user's upgrade command brings 0.11.0;
    - the guided setup runs on the Mac, and the other computer joins by following its steps;
-   - agents talk both ways, with a clean transcript.
+   - one message each way, as a smoke check of the published package (not a rerun of the
+     proofs), with a clean transcript.
    - Also prove the source-install path on a throwaway clone at the old `main`:
      `kollab --upgrade` reaches 0.11.0.
 G. Marco's real installs, left ready, not upgraded:
