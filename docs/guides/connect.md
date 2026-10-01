@@ -126,7 +126,7 @@ Enter sets it up now; Esc for later (/connect any time).
   *Start* keeps its own network and *Join with a code* replaces it, and a network
   with another computer on it is never replaced. Starting a network opens the Connect screen
   with the join code and an "On your other computer" box: run
-  `kollab --upgrade` (or `pip install -U kollab`), run `kollab` and press Enter
+  `kollab --upgrade` (it knows how kollab was installed), run `kollab` and press Enter
   on the same notice, choose *Join with a code* and type the code. Joining opens
   the private code form, as `/connect` does.
 - **Enter, on a computer that shares a network with another computer.** Opens the Connect screen, with a join code and the same "On your other computer" steps.

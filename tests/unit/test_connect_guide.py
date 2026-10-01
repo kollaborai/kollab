@@ -329,7 +329,7 @@ def test_other_computer_box_on_the_new_network_screen(width):
     lines = connect_screen_lines(state, width)
     text = "\n".join(lines)
     assert "On your other computer" in text
-    assert "1) kollab --upgrade (or pip install -U kollab)" in text
+    assert "1) kollab --upgrade" in text
     assert "2) run kollab and press Enter on the same notice" in text
     assert "3) choose Join with a code and type the code" in text
     assert all(len(line) <= width for line in lines)

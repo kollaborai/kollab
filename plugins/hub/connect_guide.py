@@ -39,7 +39,7 @@ CHOICES = (CHOICE_NEW_NETWORK, CHOICE_JOIN)
 
 OTHER_COMPUTER_TITLE = "On your other computer"
 OTHER_COMPUTER_STEPS = (
-    "1) kollab --upgrade (or pip install -U kollab)",
+    "1) kollab --upgrade",
     "2) run kollab and press Enter on the same notice",
     "3) choose Join with a code and type the code",
 )

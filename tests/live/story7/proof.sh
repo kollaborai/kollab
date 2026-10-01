@@ -260,7 +260,7 @@ sleep 2
 capscreen mac g3-mac-connect-screen 1
 S=$LAST
 missing=""
-for t in "On your other computer" "1) kollab --upgrade (or pip install -U kollab)" "2) run kollab and press Enter on the same notice" "3) choose Join with a code and type the code"; do
+for t in "On your other computer" "1) kollab --upgrade" "2) run kollab and press Enter on the same notice" "3) choose Join with a code and type the code"; do
   grep -Fq -- "$t" <<<"$S" || missing="$missing [$t]"
 done
 if [ -z "$missing" ]; then

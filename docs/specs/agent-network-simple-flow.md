@@ -238,7 +238,7 @@ notice, once per machine, before anyone has typed `/connect`.
 
 ```
  On your other computer
-   1) kollab --upgrade (or pip install -U kollab)
+   1) kollab --upgrade
    2) run kollab and press Enter on the same notice
    3) choose Join with a code and type the code
 ```
