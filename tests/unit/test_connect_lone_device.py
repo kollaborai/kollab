@@ -134,6 +134,33 @@ def test_lone_check_reads_the_attached_daemons_snapshot(extra, has_network):
 # ------------------------------------------------------------ Start
 
 
+def test_half_set_up_lone_device_leaves_it_and_starts_fresh():
+    # A 0.10.7 room with no domain and networking off cannot be re-attached:
+    # Start leaves it, as Join does, then starts a network on kollabor.ai.
+    plugin = _plugin()
+    plugin._relay_network_domain = lambda: ""
+    plugin._start_connect_network = AsyncMock(side_effect=[False, True])
+    plugin._connect_has_network = AsyncMock(return_value=False)
+    plugin._attached = lambda: True
+    plugin._attached_connect = AsyncMock(return_value="")
+    plugin._open_connect_screen = AsyncMock(return_value="")
+    assert asyncio.run(plugin._guided_new_network()) == ""
+    plugin._attached_connect.assert_awaited_once_with("leave")
+    plugin._open_connect_screen.assert_awaited_once_with("kollabor.ai", guide=True)
+
+
+def test_start_never_leaves_a_network_with_another_device():
+    plugin = _plugin()
+    plugin._relay_network_domain = lambda: ""
+    plugin._start_connect_network = AsyncMock(return_value=False)
+    plugin._connect_has_network = AsyncMock(return_value=True)
+    plugin._attached = lambda: True
+    plugin._attached_connect = AsyncMock(return_value="")
+    plugin._open_connect_screen = AsyncMock(return_value="")
+    assert "could not start" in asyncio.run(plugin._guided_new_network())
+    plugin._attached_connect.assert_not_awaited()
+
+
 def test_lone_start_targets_the_devices_own_network():
     plugin = _plugin()
     plugin._relay_network_domain = lambda: "relay.example.com"

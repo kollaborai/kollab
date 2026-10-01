@@ -9432,7 +9432,21 @@ class HubPlugin(BasePlugin):
         # room (naming it if it has no name), so there is no second network.
         domain = self._relay_network_domain() or DEFAULT_DOMAIN
         if not await self._start_connect_network(domain):
-            return f"connect: could not start a network on {domain}; try /connect"
+            # A half-set-up network of one (a 0.10.7 room with no domain and
+            # networking off) cannot be re-attached: leave it, as Join does, and
+            # start fresh. Never a network that has another device on it.
+            if await self._connect_has_network():
+                return f"connect: could not start a network on {domain}; try /connect"
+            try:
+                if self._attached():
+                    await self._attached_connect("leave")
+                else:
+                    await self._run_connect_command("leave")
+            except Exception:
+                logger.debug("guided setup: leaving a lone network failed")
+            domain = DEFAULT_DOMAIN
+            if not await self._start_connect_network(domain):
+                return f"connect: could not start a network on {domain}; try /connect"
         return await self._open_connect_screen(
             self._relay_network_domain() or domain, guide=True
         )

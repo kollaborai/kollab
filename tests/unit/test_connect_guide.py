@@ -301,7 +301,11 @@ def test_new_network_creates_then_opens_the_screen_with_the_steps():
     plugin._start_connect_network.assert_awaited_once_with("kollabor.ai")
     plugin._open_connect_screen.assert_awaited_once_with("kollabor.ai", guide=True)
 
+    # Starting fails even after leaving a network of one: say so, open nothing.
     plugin._start_connect_network = AsyncMock(return_value=False)
+    plugin._connect_has_network = AsyncMock(return_value=False)
+    plugin._attached = lambda: False
+    plugin._run_connect_command = AsyncMock(return_value="")
     plugin._open_connect_screen = AsyncMock()
     assert "could not start a network" in asyncio.run(plugin._guided_new_network())
     plugin._open_connect_screen.assert_not_awaited()
