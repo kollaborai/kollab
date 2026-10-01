@@ -6111,7 +6111,8 @@ class HubPlugin(BasePlugin):
 
         if handle:
             job.last_error = ""
-            self._display_outgoing_message(target, msg.content)
+            # One dim line per fire: a 30 s job must not draw a message box every 30 s.
+            self.show_network_notice(f"cron {job.id} -> {target}")
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
 

@@ -349,10 +349,6 @@ install both, every proof, cleanup that keeps the selfhost one command running).
   `<trender>hostname</trender>` and logs an ERROR every turn (the bundled
   prompt uses `uname -n` since 0.10.4).
 
-## Small follow-ups (not started)
-
-- A remote cron fire draws one `agent -> agent@device` box per fire; a 30 s job draws one every 30 s. Not seen on a real screen yet.
-
 ## Gotchas
 
 - Claude agent worktrees start at `main`: every agent prompt begins with

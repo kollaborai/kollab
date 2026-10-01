@@ -165,6 +165,15 @@ def _warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
 
 
+def _drawn(plugin):
+    """The message coordinator's display_message_sequence, the only way a line reaches the pane."""
+    return plugin.event_bus.get_service.return_value.message_coordinator.display_message_sequence
+
+
+def _notices(plugin) -> list[str]:
+    return [call.args[0][0][1] for call in _drawn(plugin).call_args_list]
+
+
 # --- adding a job ---------------------------------------------------------------
 
 
@@ -353,6 +362,7 @@ async def test_firing_to_a_local_agent_is_unchanged(caplog):
     )
     assert sent == [] and job.last_error == ""  # a local refusal stays quiet, as before
     plugin._display_outgoing_message.assert_not_called()
+    assert _notices(plugin) == []
     assert _warnings(caplog) == []
 
 
@@ -385,9 +395,8 @@ async def test_firing_to_an_agent_at_device_goes_through_the_network_send(caplog
         (_address(PEER), "[cron abc12345] check the tunnel", "message")
     ]
     assert job.last_error == ""
-    plugin._display_outgoing_message.assert_called_once_with(
-        PEER, "[cron abc12345] check the tunnel"
-    )
+    plugin._display_outgoing_message.assert_not_called()  # no box
+    assert _notices(plugin) == [f"cron abc12345 -> {PEER}"]  # one dim line
     assert f"hub cron fired: abc12345 -> {PEER}" in caplog.text
     assert _warnings(caplog) == []
 
@@ -438,6 +447,7 @@ async def test_an_undeliverable_fire_is_logged_with_its_reason_and_the_job_is_ke
     assert job.last_error == reason
     assert f"last fire failed: {reason}" in plugin._cron_list()
     plugin._display_outgoing_message.assert_not_called()
+    assert _notices(plugin) == []
 
 
 @pytest.mark.asyncio
@@ -712,3 +722,18 @@ async def test_a_device_is_gone_only_when_no_bound_name_or_roster_row_matches(br
     assert await left_hub._cron_device_gone(left.device_name())  # not another device
     left.commands.client._state = "offline"
     assert not await left_hub._cron_device_gone("never-joined")  # relay unreachable
+
+
+@pytest.mark.asyncio
+async def test_every_fire_to_a_device_is_one_dim_line_never_a_box():
+    """A 30 s job must not draw a message box every 30 s."""
+    plugin, _ = _plugin(on_roster=[PEER])
+    job = _job(plugin, PEER)
+
+    await plugin._fire_cron_job(job)
+    await plugin._fire_cron_job(job)
+
+    plugin._display_outgoing_message.assert_not_called()
+    assert _notices(plugin) == [f"cron abc12345 -> {PEER}"] * 2
+    kind, _text, options = _drawn(plugin).call_args.args[0][0]
+    assert (kind, options) == ("system", {"display_type": "info"})  # the dim info row
