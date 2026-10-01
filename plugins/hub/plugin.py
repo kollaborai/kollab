@@ -7559,7 +7559,9 @@ class HubPlugin(BasePlugin):
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
                         {
-                            "source": f"hub:{message.from_identity}",
+                            # A relay: address is routing state (it holds a key):
+                            # name the sender as its handle, never the address.
+                            "source": f"hub:{self._outgoing_label(message.from_identity or '')}",
                             "content": message.content,
                             "hub_message_id": message.id,
                             "hub_wake_mode": wake_decision.mode,

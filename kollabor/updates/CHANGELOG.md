@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The stale Codex live-acceptance script under `scripts/relay/` and its unit test are gone; manual trust (Story 7) gets a short live proof instead, refs #121
 
 ### Fixed
+- A request that runs as a task no longer writes its sender's relay address, which holds a device key, to the log: the wake line names the sender as agent@device.
 - The guided setup's Start on a half-set-up network of one (a 0.10.7 room with no domain and networking off) leaves it and starts fresh on kollabor.ai, as Join already did, instead of saying it could not start a network.
 - A request from a device on manual trust now runs as a task on a device set to open. The sender marks its first message as a task (`task` on the wire) and the receiver runs it as a remote task turn, answers it as the task's result, and takes `/connect task` and `/connect cancel` for it, with no receiving grant while it stays open; before, the open device ran it as a plain hub turn whose reply the manual device refused, so no result ever came back and cancel had nothing to stop.
 - A message queued under open trust no longer goes out after `/connect trust manual`: raising the trust level revokes it, so the outbox retry cannot deliver it with no human grant.

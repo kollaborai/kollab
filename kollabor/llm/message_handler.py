@@ -7,6 +7,7 @@ orchestration methods.
 
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -412,7 +413,11 @@ class MessageHandler:
         """
         source = data.get("source", "unknown")
         coord = self._coordinator
-        logger.info(f"TRIGGER_LLM_CONTINUE: Received from {source}")
+        # Never log a relay: address (it carries a device key), whoever sent it.
+        logger.info(
+            "TRIGGER_LLM_CONTINUE: Received from %s",
+            re.sub(r"relay:\S+", "relay:<address>", str(source)),
+        )
 
         # Don't trigger in pipe mode (would interfere with normal flow)
         renderer = coord.renderer

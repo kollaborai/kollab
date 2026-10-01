@@ -214,8 +214,8 @@ rec pre-fresh-workspaces PASS - "no network state and no guide marker for either
 m1_ssh "[ -s \"\$HOME/.kollab/oauth/openai.json\" ]" || abort pre-llm-login "no ChatGPT login at ~/.kollab/oauth/openai.json on $M1_HOST (kollab --login there)"
 rec pre-llm-login PASS - "both hosts have an openai oauth login; both agents run --llm openai-oauth"
 
-REAL_MARK_MAC=$([ -e "$HOME/.kollab/connect-guide-seen" ] && echo yes || echo no)
-REAL_MARK_SRV=$(m1_ssh '[ -e "$HOME/.kollab/connect-guide-seen" ] && echo yes || echo no')
+REAL_MARK_MAC=$(stat -f %m "$HOME/.kollab/connect-guide-seen" 2>/dev/null || echo none)
+REAL_MARK_SRV=$(m1_ssh 'stat -c %Y "$HOME/.kollab/connect-guide-seen" 2>/dev/null || echo none')
 m1_ssh "mkdir -p '$M1_SRV_ROOT/bin' '$M1_SRV_WS'"
 mkdir -p "$M1_MAC_WS"
 scp -q "${M1_SSH_OPTS[@]}" "$M1_DIR/scan.py" "$M1_DIR/tmuxtype.py" "$M1_HOST:$M1_SRV_ROOT/bin/"
@@ -551,10 +551,11 @@ for h in mac srv; do
 done
 
 # The real marker must never be written by this run (the runs set KOLLAB_CONNECT_GUIDE_MARKER).
-REAL_MARK_MAC_END=$([ -e "$HOME/.kollab/connect-guide-seen" ] && echo yes || echo no)
-REAL_MARK_SRV_END=$(m1_ssh '[ -e "$HOME/.kollab/connect-guide-seen" ] && echo yes || echo no')
-if [ "$REAL_MARK_MAC_END" = no ] && [ "$REAL_MARK_SRV_END" = no ]; then
-  rec z-real-marker-absent PASS - "~/.kollab/connect-guide-seen does not exist on the Mac or $M1_HOST"
+REAL_MARK_MAC_END=$(stat -f %m "$HOME/.kollab/connect-guide-seen" 2>/dev/null || echo none)
+REAL_MARK_SRV_END=$(m1_ssh 'stat -c %Y "$HOME/.kollab/connect-guide-seen" 2>/dev/null || echo none')
+# The owner's own kollab may write it (its notice is real); the proof only fails if THIS run changed it.
+if [ "$REAL_MARK_MAC_END" = "$REAL_MARK_MAC" ] && [ "$REAL_MARK_SRV_END" = "$REAL_MARK_SRV" ]; then
+  rec z-real-marker-absent PASS - "this run did not create or change ~/.kollab/connect-guide-seen on the Mac or $M1_HOST"
 else
   rec z-real-marker-absent FAIL - "~/.kollab/connect-guide-seen exists: mac=$REAL_MARK_MAC_END srv=$REAL_MARK_SRV_END (before this run: mac=$REAL_MARK_MAC srv=$REAL_MARK_SRV)"
 fi
