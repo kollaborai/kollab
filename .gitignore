@@ -236,3 +236,6 @@ docs/scratchpad/
 
 # Live proof evidence (captures, logs) stays local
 tests/live/*/evidence/
+
+# Agent network handoff: local only (Codex reads it from this checkout); never public.
+docs/handoff/agent-network/

@@ -1,7 +1,0 @@
-size=290010
-code=0
-hex64=0
-relay=0
-errhits=0
-envhits=9
-shell_ok=3

@@ -1,2 +1,0 @@
-exit=0
-koordinator@alzan-prod-kollab-m1-server7: /var has 47G free (183G total, 128G used, 74%).
