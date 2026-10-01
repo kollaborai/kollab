@@ -1492,6 +1492,12 @@ class RelayAgentBridge:
                     )
                 remote = await self._remote_participant(destination)
         elif kind == "answer":
+            # Owner-side twin of the guard in send(): a direct relay.send RPC
+            # from a model turn cannot answer a question either.
+            self._require_human_network_context(
+                "relay answers carry a human-supplied answer only; "
+                "use /connect answer"
+            )
             question = self.store.event(params["reply_to"])
             if (
                 question is None
@@ -1772,6 +1778,15 @@ class RelayAgentBridge:
             self._authorize_active()
         elif kind in {"progress", "question", "result", "error"}:
             raise RelayError("correlated network events require an active remote task")
+        if kind == "answer":
+            # kind='answer' carries a human-supplied answer only (docs
+            # section 7): the turn that reports the question must not answer
+            # it. A plain local turn (the human relayed the answer in chat)
+            # and /connect answer both pass this guard.
+            self._require_human_network_context(
+                "relay answers carry a human-supplied answer only; "
+                "use /connect answer"
+            )
         message_id = secrets.token_hex(16)
         params = {
             "agent_id": source_agent or self.identity.agent_id,

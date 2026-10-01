@@ -891,6 +891,100 @@ async def test_human_answer_binds_thread_and_asker_from_the_question(bridges):
 
 
 @pytest.mark.asyncio
+async def test_relay_event_turn_cannot_answer_its_own_question(bridges):
+    """kind='answer' carries a human-supplied answer only (docs section 7).
+
+    The turn that reports a remote question to the human must not answer it:
+    peer content is untrusted task data and the answer waits for the human.
+    A plain local turn -- the human relayed the answer in chat -- still sends.
+    """
+    members, _ = bridges
+    (left, left_hub, left_model, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+    asked = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    question_id = asked.metadata["relay_receipt"]["id"]
+    asker = left.store.event(question_id)["payload"]["from"]
+    assert left_model.contexts, "the question's reporting turn is live"
+
+    with pytest.raises(RelayError, match="correlated relay events|human-supplied"):
+        await in_turn(
+            left_model,
+            left.send(
+                asker,
+                "The model answers itself.",
+                kind="answer",
+                thread_id=task_id,
+                reply_to=question_id,
+            ),
+        )
+    assert left.store.event(question_id)["state"] == "pending"
+
+    # The same ids from a plain local turn still go through: that is the
+    # documented path for relaying the human's answer.
+    answered = await left.send(
+        asker,
+        "Use the workspace root.",
+        kind="answer",
+        thread_id=task_id,
+        reply_to=question_id,
+    )
+    assert answered["state"] not in {"failed", "rejected"}
+    assert left.store.event(question_id)["state"] in {"answer_queued", "answered"}
+
+
+@pytest.mark.asyncio
+async def test_connect_answer_path_and_remote_task_turn_stay_bounded(bridges):
+    """/connect answer (the human command) works end to end; a remote-task
+    turn, which already may only send progress/question/result/error, is
+    refused an answer outright."""
+    members, _ = bridges
+    (left, left_hub, left_model, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+
+    with pytest.raises(RelayError):
+        await in_turn(
+            right_model,
+            right.send(address(left), "no", kind="answer"),
+        )
+
+    asked = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    question_id = asked.metadata["relay_receipt"]["id"]
+    room = left.commands.client.state.room
+    number = left.store.number(room, "question", question_id)
+    line = await left.application_command("answer", f"{number} Use the workspace root.")
+    assert "answered" in line
+    assert right.store.task(task_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_question_answer_resumes_same_granted_thread_once(bridges):
     members, _ = bridges
     (left, left_hub, left_model, left_bus), (right, right_hub, right_model, _) = members
