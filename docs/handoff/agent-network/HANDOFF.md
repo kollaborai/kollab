@@ -209,9 +209,12 @@ I. Update this file and the memory, run the Done Gate, and send one short report
 
 Found while preparing: PR #120 is already merged (2026-09-29), so K only closes issue #99 and
 deletes `mesh-direct-bootstrap` (its tip e02e761 is in no other branch; the local ref stays).
-L candidates: clean worktrees whose HEAD is in origin/main or a pushed branch (25); keep
-`kollab-connect-codes` (1 dirty file), `kollab-agent-pacing` (4 dirty, unpushed) and
-`kollab-m2-finish` (unpushed). The `~/.codex/worktrees/<id>/mentiko` dirs belong to mentiko,
+L done 2026-09-30: removed 23 clean worktrees whose HEAD is in origin/main or a pushed
+branch (~/dev/kollab-release-v0.7.1 (main), codex/kollab-0.10.3 (pushed), codex/kollab-0.10.4 (pushed), codex/kollab-0.10.5 (pushed), codex/kollab-0.10.6 (pushed), codex/kollab-0.10.7 (pushed), codex/kollab-attach-exit (pushed), codex/kollab-connect-guide (pushed), codex/kollab-connect-palette (pushed), codex/kollab-docs (pushed), codex/kollab-quit (pushed), codex/kollab-receiver-reply (pushed), codex/kollab-rescue (main), codex/kollab-upgrade (pushed), codex/kollab-upgrade-restart (pushed), codex/kollab-voice (pushed), codex/kollab-release/kollab (pushed), superpowers/attach-cleanup (pushed), superpowers/compact-preview-finish (pushed), superpowers/hub-cockpit (pushed), superpowers/hub-runtime-split (pushed), superpowers/runtime-smoke (pushed), superpowers/tool-timeline-ui (pushed)).
+Kept, not deleted: `~/.codex/worktrees/kollab-connect-codes` (1 uncommitted file),
+`~/.codex/worktrees/kollab-agent-pacing` (4 uncommitted files, commits not pushed) and
+`~/.codex/worktrees/kollab-m2-finish` (commits not pushed). Also removed: the five old
+relay-deploy worktrees in the session scratchpad. The `~/.codex/worktrees/<id>/mentiko` dirs belong to mentiko,
 not kollab: untouched. Release prep script: scratchpad `release_prep.sh <version> <date>`.
 
 ### After the release, part of the same goal
