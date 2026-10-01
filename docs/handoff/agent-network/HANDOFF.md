@@ -199,10 +199,13 @@ I. Update this file and the memory, run the Done Gate, and send one short report
 |---|---|---|
 | A: decisions 3, 5, 6 + cron dim line | agent-reports/a-decisions.md | merged e5cbb77 |
 | M: knock 7-day expiry, announced ids kept | agent-reports/m-knock-announce.md | merged 4b82429 (5311 unit pass) |
-| M: knock cleared on rejection | agent-reports/m-knock-reject.md | running: sender-signed `contact/status` route + knocker poll; the 7-day expiry stays the fallback on old directories |
-| M: chain exit failed flag, keyring retry per reconnect | agent-reports/m-chain-keyring.md | running |
+| M: knock cleared on rejection | agent-reports/m-knock-reject.md | merged b1ff6d7: sender-signed `contact/status` route (needs the relay redeploy in E) + knocker poll; old directories fall back to the 7-day expiry |
+| M: chain exit failed flag, keyring retry per reconnect | agent-reports/m-chain-keyring.md | merged 801f141; watchdog heal ends failed too (a148c60) |
 | B: guided setup | agent-reports/b-guided-setup.md | merged c55351f; marker `~/.kollab/connect-guide-seen` (env `KOLLAB_CONNECT_GUIDE_MARKER` moves it) |
-| B/A polish: primary named in the post-join line, the line in the main pane, notices quiet across restarts | agent-reports/b-polish.md | running |
+| B/A polish: primary named in the post-join line, the line in the main pane, notices quiet across restarts | agent-reports/b-polish.md | merged 936ebab; unit suite 5283 passed |
+| C: guided setup live proof (tests/live/guided) on 0.11.0.dev7 | agent-reports/live-guided.md | running (venv root `kollab-gs`, sessions gs-mac/gs-srv) |
+| C: Story 7 live proof (tests/live/story7) | (after live-guided: both would take the server's machine-wide config record) | to do |
+| J: website docs, written and built, not deployed | agent-reports/site-docs.md | running (worktree ~/dev/kollabor.ai-network-docs) |
 
 Found while preparing: PR #120 is already merged (2026-09-29), so K only closes issue #99 and
 deletes `mesh-direct-bootstrap` (its tip e02e761 is in no other branch; the local ref stays).
