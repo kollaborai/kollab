@@ -11,7 +11,8 @@
 # GS_INSTALL=pypi-upgrade first installs kollab==$GS_PYPI_FROM from PyPI into
 # ~/kollab-gs-pypi/venv on both hosts, launches it and expects its "Update available"
 # notice, runs `kollab --upgrade`, expects `kollab --version` to say $GS_PYPI_TO, then
-# runs g1-g9 on that upgraded venv. GS_STOP_AFTER=launch stops once 0.10.7 is installed
+# runs g1-g9 on that upgraded venv. GS_UPGRADE_FROM_WHEELS=<dir> (with GS_PYPI_TO=<their version>)
+# upgrades to local wheels instead, before a release. GS_STOP_AFTER=launch stops once 0.10.7 is installed
 # and launched (the part that can run before 0.11.0 is on PyPI).
 #
 # The join code lives only in the shell variable CODE: read from a pane capture, typed
@@ -267,7 +268,12 @@ pypi_phase() {
 
   re="Update available.*${GS_PYPI_TO//./\\.}"
   up_ok=1
-  for h in mac srv; do
+  hosts="mac srv"
+  if [ -n "${GS_UPGRADE_FROM_WHEELS:-}" ]; then
+    hosts=""  # pre-release: GitHub Releases has no $GS_PYPI_TO yet; the notice is checked after the release
+    say "pre-release run: upgrading to the local wheels in $GS_UPGRADE_FROM_WHEELS instead of kollab --upgrade"
+  fi
+  for h in $hosts; do
     if wait_for "$h" "$re" "$( [ -n "$GS_STOP_AFTER" ] && echo 5 || echo 90 )"; then
       cap "$h" "p1-$h-update-notice"
       rec "p1-update-notice-$h" PASS "p1-$h-update-notice.txt" "$GS_PYPI_FROM showed 'Update available' for $GS_PYPI_TO"
@@ -283,8 +289,15 @@ pypi_phase() {
 
   say "pypi-upgrade: stopping $GS_PYPI_FROM, running kollab --upgrade in the pypi venvs"
   bash "$GS_DIR/teardown.sh" >"$EVID/p2-teardown.txt" 2>&1 || true
-  (cd "$M1_MAC_WS" && perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 600 "$M1_MAC_VENV/bin/kollab" --upgrade) >"$EVID/p2-upgrade-mac.txt" 2>&1 || true
-  m1_ssh "cd '$M1_SRV_WS' && '$M1_SRV_VENV/bin/kollab' --upgrade" >"$EVID/p2-upgrade-srv.txt" 2>&1 || true
+  if [ -n "${GS_UPGRADE_FROM_WHEELS:-}" ]; then
+    # in place over the 0.10.7 venvs (install_both reuses a venv that exists); the workspaces keep 0.10.7's state
+    ( export M1_ROOT_NAME M1_MAC_WS M1_SRV_WS_NAME M1_MAC_SESSION M1_SRV_SESSION M1_VERSION="$GS_PYPI_TO"
+      bash "$GS_DIR/../m1/install_both.sh" "$GS_UPGRADE_FROM_WHEELS" ) >"$EVID/p2-upgrade-mac.txt" 2>&1 || true
+    cp "$EVID/p2-upgrade-mac.txt" "$EVID/p2-upgrade-srv.txt"
+  else
+    (cd "$M1_MAC_WS" && perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 600 "$M1_MAC_VENV/bin/kollab" --upgrade) >"$EVID/p2-upgrade-mac.txt" 2>&1 || true
+    m1_ssh "cd '$M1_SRV_WS' && '$M1_SRV_VENV/bin/kollab' --upgrade" >"$EVID/p2-upgrade-srv.txt" 2>&1 || true
+  fi
   for h in mac srv; do
     v=$(version_of "$h")
     case "$v" in
