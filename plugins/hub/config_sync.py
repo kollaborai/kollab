@@ -854,11 +854,15 @@ class Receiver:
         ):
             raise ConfigSyncError("invalid")
         kept = {tuple(path) for path in keep}  # the primary could not read these
-        # The primary already filters; a secondary never trusts that.
+        # The primary already filters; a secondary never trusts that. Its own
+        # OAuth logins are its alone, so an oauth profile's api_key is refused
+        # here even signed by it.
+        profiles = _dig(config, "kollabor", "llm", "profiles")
         leaves = {
             path: value
             for path, value in walk_leaves(config)
             if not is_local_only(path)
+            and not (path[-1] == "api_key" and _is_oauth_profile(profiles, path))
         }
         applied = Applied()
         config_path = kollab_root(self._root) / "config.json"

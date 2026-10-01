@@ -703,6 +703,46 @@ def test_a_secondary_refuses_local_only_keys_even_from_its_primary(homes, keys):
     assert config == {"terminal": {"render_fps": 12}}
 
 
+def test_a_secondary_refuses_an_oauth_api_key_even_from_its_primary(homes, keys):
+    primary, secondary = keys
+    hostile = cs.pack_json(
+        {
+            "config": {
+                "kollabor": {
+                    "llm": {
+                        "profiles": {
+                            "chatgpt": {
+                                "provider": "openai_responses",
+                                "auth_type": "oauth",
+                                "api_key": OAUTH_TEXT,
+                            }
+                        }
+                    }
+                },
+                "terminal": {"render_fps": 12},
+            },
+            "mcp": {},
+            "primary_name": "laptop-kollab",
+        }
+    )
+    sealed = cs.seal(
+        "core", {"digest": "a" * 64, "files_digest": "b" * 64}, hostile,
+        issuer_key=primary, recipient_public_key=bytes(secondary.verify_key), revision=1,
+    )  # fmt: skip
+    with homes("server") as server:
+        reply, _ = cs.Receiver(secondary).core(
+            sealed,
+            primary_key=bytes(primary.verify_key).hex(),
+            primary_name="laptop-kollab",
+        )
+        assert reply == {"ok": True}
+        config = json.loads((server / "config.json").read_text())
+    profile = config["kollabor"]["llm"]["profiles"]["chatgpt"]
+    assert "api_key" not in profile  # the token never lands, even signed
+    assert profile["auth_type"] == "oauth"  # the rest of the profile does
+    assert config["terminal"] == {"render_fps": 12}
+
+
 def test_stale_bundles_and_a_second_primary_are_refused_with_the_floor(homes, keys):
     primary, secondary = keys
     rival = SigningKey.generate()
