@@ -11,6 +11,7 @@ import os
 import random
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 from nacl.signing import SigningKey
@@ -18,6 +19,7 @@ from nacl.signing import SigningKey
 from kollabor_config.managed_config import read_managed_config
 from plugins.hub import config_sync as cs
 from plugins.hub.config_sync_service import ConfigSyncService
+from plugins.hub.relay_client import RelayClient
 
 FAKE_KEY = "sk-fake-anthropic-key-7f3a"
 FAKE_MCP = "fake-mcp-token-91c2"
@@ -496,3 +498,51 @@ async def test_skipped_mcp_servers_are_named_once_per_distinct_set(tmp_path):
 
     await push(3, {"here": here, "gone": gone, "lost": gone})  # a different set speaks again
     assert notices[1:] == ["Skipped MCP servers not installed here: gone, lost"]
+
+
+SYNC_IS_OFF = (
+    "Settings sync is off in this workspace: "
+    "another workspace on this machine joined a different network last."
+)
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_that_lost_the_machines_record_to_a_later_join_says_so_once(
+    tmp_path, monkeypatch
+):
+    """Two workspaces on one machine share one managed-config record; the latest join wins."""
+    machine = tmp_path / "machine"
+    monkeypatch.setenv("HOME", str(machine))
+    mac_a, mac_b = tmp_path / "mac-a", tmp_path / "mac-b"  # the two primaries
+    primary_a, primary_b = SigningKey.generate(), SigningKey.generate()
+    secondary_a, secondary_b = SigningKey.generate(), SigningKey.generate()
+    key_a, key_b = bytes(primary_a.verify_key).hex(), bytes(primary_b.verify_key).hex()
+    lines_a, lines_b = [], []
+    first = secondary_service(secondary_a, primary_a, lines_a)  # no root: this machine's ~/.kollab
+    second = secondary_service(secondary_b, primary_b, lines_b)
+
+    def bundle(mac, primary, secondary, revision):
+        write_json(mac / "config.json", primary_settings(model=f"model-{revision}"))
+        snapshot = cs.SnapshotBuilder(root=mac, keyring_get={}.get).build()
+        return core_call(snapshot, primary, secondary, revision)
+
+    assert await first.receive(key_a, bundle(mac_a, primary_a, secondary_a, 1)) == {"ok": True}
+    assert read_managed_config().primary_key == key_a
+
+    # The second workspace joins its own network: the latest join takes the record.
+    RelayClient._forget_stale_primary(
+        SimpleNamespace(
+            state_dir=machine / ".kollab" / "network" / "workspace-b",
+            state=SimpleNamespace(inviter=key_b),
+        )
+    )
+    assert await second.receive(key_b, bundle(mac_b, primary_b, secondary_b, 1)) == {"ok": True}
+    assert read_managed_config().primary_key == key_b
+
+    for revision in (2, 3):  # the first workspace is refused on every bundle
+        reply = await first.receive(key_a, bundle(mac_a, primary_a, secondary_a, revision))
+        assert reply == {"error": "other_primary"}
+
+    assert lines_a == [SYNC_IS_OFF]  # said once, not once per bundle
+    assert lines_b == []  # the workspace that won has nothing to report
+

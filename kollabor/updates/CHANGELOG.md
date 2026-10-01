@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mesh links between network members stay valid across refreshes and renewals. One device of a pair, the one with the lower peer id, writes the link on the secure session it opened, with a fresh timestamp at each renewal and revisions that only move forward; the other accepts it on the session it arrived on, and every device checks a link by whether the session it names is still open. A gossiped or forwarded record or link older than the one a device holds is skipped instead of failing the exchange, a transit hop forwards the links it was handed, and a request whose mesh route fails falls back to the relay when the peer is on it. Links used to break about a minute after they formed ("peer link proposal does not match the live session", "invalid lifetime", "revision rollback", "peer route delivery failed").
 - A reply always goes on the thread of the request its turn is handling, and a send to an agent that is no longer listed says `unknown agent@device`.
 - A cron job aimed at `agent@device` now draws one dim line per fire (`cron <id> -> infra@alzan-prod-home`) instead of a message box every time it runs, refs #121
+- A workspace whose settings sync was taken over by another workspace on the same machine (the latest join owns the machine's managed-config record) now says so once, `Settings sync is off in this workspace: another workspace on this machine joined a different network last.`, instead of refusing every bundle silently, refs #121
 
 ## [0.10.7] - 2026-09-28
 

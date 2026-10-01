@@ -704,6 +704,10 @@ How it stays secure with 40 bits:
   skipped: it is never written and a local server of the same name stays. The
   secondary shows one line, `Skipped MCP servers not installed here: a, b`, once
   per distinct set. URL servers have no command and always sync.
+- Several workspaces on one machine share the one managed-config record: the
+  latest join takes it. A workspace whose primary is then refused shows one
+  line, `Settings sync is off in this workspace: another workspace on this
+  machine joined a different network last.`, once, instead of failing silently.
 - On a secondary, `/config` shows each synced key as a read-only line
   `<label>: <value>   managed by <primary>`; a secret shows as `set`. The
   Loadout and Model rows lead LLM Settings on every device. They are read-only

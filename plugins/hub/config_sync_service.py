@@ -115,6 +115,7 @@ class ConfigSyncService:
         self._task: asyncio.Task | None = None
         self._closed = False
         self._told_skipped: tuple[str, ...] = ()
+        self._told_refused = False
 
     # ---- lifecycle ----
 
@@ -331,7 +332,7 @@ class ConfigSyncService:
                     "config sync: could not apply a bundle (%s)", type(error).__name__
                 )
                 return {"error": "failed"}
-        self._tell(applied)
+        self._tell(reply, applied)
         if (
             applied is not None
             and self._after_apply is not None
@@ -345,11 +346,19 @@ class ConfigSyncService:
                 )
         return reply
 
-    def _tell(self, applied: Applied | None) -> None:
-        """One line for each distinct set of skipped MCP servers, never one per bundle."""
-        if applied is None or self._notice is None:
+    def _tell(self, reply: dict, applied: Applied | None) -> None:
+        """Tell the human once per cause, never once per bundle."""
+        if self._notice is None:
             return
-        if applied.skipped_mcp == self._told_skipped:
+        if reply.get("error") == "other_primary" and not self._told_refused:
+            # Another workspace on this machine joined a different network last and
+            # took the machine's one managed-config record; every bundle is refused.
+            self._told_refused = True
+            self._notice(
+                "Settings sync is off in this workspace: another workspace on this "
+                "machine joined a different network last."
+            )
+        if applied is None or applied.skipped_mcp == self._told_skipped:
             return
         self._told_skipped = applied.skipped_mcp
         if applied.skipped_mcp:
