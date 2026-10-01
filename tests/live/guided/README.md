@@ -2,7 +2,7 @@
 
 Drives the first-launch notice and the guided setup (Story 1 of
 `docs/specs/agent-network-simple-flow.md`) on INSTALLED builds, through tmux like a
-user, on this Mac (`gs-mac`) and `alzan-prod` (`gs-srv`): 120 columns, default (daemon)
+user, on this Mac (`gs-mac`) and `server` (`gs-srv`): 120 columns, default (daemon)
 launch, fresh workspaces. Same plumbing as `m1/` (`tmuxtype.py`, `scan.py`).
 
 ## Order
@@ -15,7 +15,7 @@ bash guided/teardown.sh     # only gs-* sessions and processes from ~/kollab-gs(
 ```
 
 Preconditions are m1's: relay lookup route live, ChatGPT login on both hosts (`--llm openai-oauth`),
-`ssh alzan-prod` without a password, nobody attached to the `gs-*` sessions. Never run with `bash -x`.
+`ssh server` without a password, nobody attached to the `gs-*` sessions. Never run with `bash -x`.
 
 ## Rows
 

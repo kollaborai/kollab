@@ -1,14 +1,15 @@
 # m1: live proof for agent network milestone 1 (#121)
 
 Proves Stories 1, 2 and 3 of `docs/specs/agent-network-simple-flow.md` on
-installed packages, driven through tmux like a user, on this Mac and `alzan-prod`.
+installed packages, driven through tmux like a user, on this Mac and `server`.
 
 ## Preconditions (check these first)
 
 - The final `issue-121-network-simple-flow` commit is merged (or is the ref you build). Build the exact commit you mean to ship.
 - The relay on kollabor.ai already serves `POST /relay/v1/enrollment/lookup`. `proof.sh` probes it first and stops on 404/405/5xx.
 - ChatGPT login exists on both hosts: `~/.kollab/oauth/openai.json` (both agents run `--llm openai-oauth`).
-- `uv`, `tmux`, `python3` >= 3.12 on the Mac. `ssh alzan-prod` works with no password. tmux and python3 >= 3.12 on the server.
+- Your real hosts and addresses go in `tests/live/local.env` (untracked; copy `local.env.example`).
+- `uv`, `tmux`, `python3` >= 3.12 on the Mac. `ssh server` works with no password. tmux and python3 >= 3.12 on the server.
 - Nobody is attached to the `m1-*` tmux sessions while it runs (keys vanish).
 - Do not run with `bash -x`: it would print the join code.
 
@@ -36,7 +37,7 @@ Shared, so watch it: both hosts' `~/.kollab/config.json`, `oauth/`, `agents/` (a
 Network identity is keyed by workspace path. `proof.sh` refuses a workspace that
 already has state. For another run: `mkdir ~/kollab-m1-mac2`, then
 `M1_MAC_WS=$HOME/kollab-m1-mac2 M1_SRV_WS_NAME=kollab-m1-server2 bash m1/proof.sh`
-(create the server dir first: `ssh alzan-prod mkdir kollab-m1-server2`; the script also creates it).
+(create the server dir first: `ssh server mkdir kollab-m1-server2`; the script also creates it).
 
 ## What a pass looks like
 

@@ -131,7 +131,7 @@ Hub cron lets you send messages to agents on a schedule:
 ```
 /hub cron add lapis 5m "status update: what are you working on?"
 /hub cron add all 1h "run the test suite and report results"
-/hub cron add infra@alzan-prod-home 1h "check the wireguard tunnel and report"
+/hub cron add infra@home-server 1h "check the wireguard tunnel and report"
 ```
 
 An `agent@device` target sends to an agent on another machine of your

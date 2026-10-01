@@ -189,7 +189,7 @@ auto-discovered from `plugins/` — no manual registration.
 ## agent conversations across computers
 
 Use normal `hub_msg` with the `agent@device` name shown by `/connect status`,
-e.g. `infra@alzan-prod-home`. Agent names may repeat across machines; the
+e.g. `infra@home-server`. Agent names may repeat across machines; the
 device name tells them apart.
 
 Only contact an agent when the human has directed that communication. Seeing a

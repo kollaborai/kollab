@@ -12,7 +12,7 @@
     {
       "action": "shell",
       "description": "throwaway HOME with two workspaces; ws is on an offline network, ws2 is on none",
-      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\" \"$H/ws2\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; ln -sfn \"$R/plugins\" \"$H/ws2/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'mac-kollab'; s.save()\""
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\" \"$H/ws2\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; ln -sfn \"$R/plugins\" \"$H/ws2/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'laptop-kollab'; s.save()\""
     },
     {
       "action": "shell",
@@ -56,7 +56,7 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "this device +mac-kollab",
+      "pattern": "this device +laptop-kollab",
       "description": "it shows this device"
     },
     {

@@ -1,7 +1,7 @@
 # story5: live proof for a stranger's agents reaching an allowed agent (#121)
 
 Proves Story 5 of `docs/specs/agent-network-simple-flow.md` on installed packages,
-driven through tmux like a user, on this Mac and `alzan-prod`: two devices in two
+driven through tmux like a user, on this Mac and `server`: two devices in two
 networks of their own on kollabor.ai, one knock, one accept, one allowed agent.
 The main session runs it (and redeploys the relay first); this directory only holds
 the tooling.
@@ -21,7 +21,7 @@ the tooling.
 
 - The commit you mean to ship is what `m1/build_wheels.sh` built and `m1/install_both.sh` installed on both hosts (fresh venvs at `~/kollab-m1/venv`). The relay on kollabor.ai is a build of the same commit; `proof.sh` probes `POST /relay/v1/contact/links` first and stops unless it answers 400 (the `deploy_relay*.sh` scripts print the same probe).
 - ChatGPT login on both hosts (`~/.kollab/oauth/openai.json`); every agent runs `--llm openai-oauth`.
-- `uv`, `tmux`, `python3` >= 3.12 on the Mac; `ssh alzan-prod` works with no password.
+- `uv`, `tmux`, `python3` >= 3.12 on the Mac; `ssh server` works with no password.
 - Nobody is attached to the `s5-*` tmux sessions while it runs (keys vanish). Do not run with `bash -x`.
 
 ## Order

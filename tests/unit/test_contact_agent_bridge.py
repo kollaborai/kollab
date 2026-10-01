@@ -115,13 +115,13 @@ async def test_contact_methods_are_allowlisted_local_and_receipt_scoped(tmp_path
             "domain": "relay.example",
             "route": "e" * 16,
             "introduction": "private introduction",
-            "device_name": "mac-kollab",
+            "device_name": "laptop-kollab",
         }
     )
     assert submitted == {"status": "queued", "receipt_id": "a" * 32}
     assert bridge.commands.resolved_routes == [("relay.example", "e" * 16)]
     assert bridge.commands.submissions == [
-        ("relay.example", "d" * 64, "private introduction", "mac-kollab")
+        ("relay.example", "d" * 64, "private introduction", "laptop-kollab")
     ]
 
     pending = await bridge._rpc_contact_pending(
@@ -354,21 +354,21 @@ async def test_every_failing_step_of_an_accept_leaves_a_known_peer_as_it_was(tmp
 @pytest.mark.asyncio
 async def test_a_knock_cannot_take_a_name_from_this_device_or_a_device_in_the_roster(tmp_path):
     _plugin, bridge = _bridge(tmp_path)
-    bridge.set_device_name("mac-kollab")
+    bridge.set_device_name("laptop-kollab")
     peer = SigningKey.generate().verify_key.encode().hex()
     bridge._cache[("session", peer, "peer-session")] = (
         time.monotonic(),
-        [{"name": "ops", "device": "alzan-prod-home", "handle": "ops@alzan-prod-home"}],
+        [{"name": "ops", "device": "home-server", "handle": "ops@home-server"}],
     )
 
-    own = await bridge._rpc_contact_decide(_decision("accept", "mac-kollab"))
-    roster = await bridge._rpc_contact_decide(_decision("accept", "alzan-prod-home"))
+    own = await bridge._rpc_contact_decide(_decision("accept", "laptop-kollab"))
+    roster = await bridge._rpc_contact_decide(_decision("accept", "home-server"))
 
     assert own == {"error": "name_taken"} and roster == {"error": "name_taken"}
     assert _state_of(tmp_path) == ([], {}, {})
     assert bridge.commands.decisions == []  # the relay never recorded either accept
     with pytest.raises(RelayError, match="already on this network"):
-        bridge.set_device_name("alzan-prod-home")
+        bridge.set_device_name("home-server")
     await bridge.close()
 
 
@@ -434,7 +434,7 @@ async def test_remote_model_turn_cannot_submit_review_or_decide_contact(tmp_path
                     "domain": "relay.example",
                     "route": "e" * 16,
                     "introduction": "private introduction",
-                    "device_name": "mac-kollab",
+                    "device_name": "laptop-kollab",
                 }
             ),
             bridge._rpc_contact_pending(
@@ -481,7 +481,7 @@ async def test_contact_rpc_rejects_surrogate_text_and_untyped_decision(tmp_path)
                 "domain": "relay.example",
                 "route": "e" * 16,
                 "introduction": "\ud800",
-                "device_name": "mac-kollab",
+                "device_name": "laptop-kollab",
             }
         )
     with pytest.raises(RelayError, match="invalid local contact decision"):
@@ -520,7 +520,7 @@ async def test_contact_rpc_rejects_a_route_that_is_not_16_hex(tmp_path):
                 "domain": "relay.example",
                 "route": "not-hex",
                 "introduction": "hello",
-                "device_name": "mac-kollab",
+                "device_name": "laptop-kollab",
             }
         )
     assert bridge.commands.resolved_routes == []

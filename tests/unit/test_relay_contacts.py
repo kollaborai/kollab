@@ -340,10 +340,10 @@ async def test_device_name_round_trips_in_the_sealed_envelope(monkeypatch, relay
         "relay.example",
         recipient_key.verify_key.encode().hex(),
         "hello",
-        "mac-kollab",
+        "laptop-kollab",
     )
     pending = await receiver.pending("relay.example")
-    assert pending[0].device_name == "mac-kollab"
+    assert pending[0].device_name == "laptop-kollab"
 
 
 @pytest.mark.asyncio

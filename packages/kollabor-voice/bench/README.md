@@ -56,7 +56,7 @@ deferred cases or physical talk-over recognition.
 
 Local measurements separate startup from inference: see the report for cold
 import/model load, first inference and warm mean. These cannot be compared to a
-hosted provider's warm latency as one combined number. The reference Synthyo
+hosted provider's warm latency as one combined number. The reference
 integration uses the same persistent-worker principle; Kollab owns its worker,
 isolated dependencies, verified cache, transcript admission and selection state.
 

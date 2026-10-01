@@ -44,10 +44,10 @@ manage agents from CLI (no TUI needed):
   kollab --hub status                             list online agents, plus the network
                                                    section (agent@device, one per line)
   kollab --hub msg ruby "hello"                   send message to a local agent
-  kollab --hub msg infra@alzan-prod-home "hi"     send to a remote agent, print each
+  kollab --hub msg infra@home-server "hi"     send to a remote agent, print each
                                                    reply as it arrives, exit 0 when
                                                    its turn ends (waits up to 600s)
-  kollab --hub msg infra@alzan-prod-home "hi" --no-wait   send and return immediately
+  kollab --hub msg infra@home-server "hi" --no-wait   send and return immediately
   kollab --hub capture ruby 50           read last 50 output lines
   kollab --hub stop ruby                 send shutdown signal
   kollab --hub stop all                  stop all agents
@@ -240,17 +240,17 @@ Removed. Each prints its redirect for one release instead of running:
 
 ```text
  Connect
- network      mac-kollab-net  via kollabor.ai   trust: open
- this device  mac-kollab
+ network      laptop-kollab-net  via kollabor.ai   trust: open
+ this device  laptop-kollab
  join code    7QK4-M2XP   one device, expires in 4:58
- requests     alzan-prod-home wants to join   fingerprint 4d04…9f2e   [a]ccept [r]eject
+ requests     home-server wants to join   fingerprint abcd…ef01   [a]ccept [r]eject
  knocks       1 waiting   /connect knocks
  online       koordinator (this device)
-              koordinator@alzan-prod-home
+              koordinator@home-server
 ```
 
 - The network is named `<first device name>-net` by the device that starts it
-  (`mac-kollab-net`); a device that joins takes that name. `/connect leave`
+  (`laptop-kollab-net`); a device that joins takes that name. `/connect leave`
   forgets it.
 - The join code is created when the screen opens and counts down. A code works
   for one device: once you accept or reject a request the line reads
@@ -304,16 +304,16 @@ waits for `/connect answer`; that is what the `help all` commands are for.
 
 `/connect accept` and `/connect reject` take a device name; when two pending
 requests share a name, add the start of the fingerprint the Connect screen
-shows (`/connect accept ana-laptop 4d04`). `/connect allow`, `/connect deny`,
+shows (`/connect accept ana-laptop abcd`). `/connect allow`, `/connect deny`,
 and `/connect revoke` take a device name (see `/connect status`). Under `open`
 trust `allow` and `deny` have no effect and say so.
 
 A stranger outside your network knocks. `/connect status` shows this device's
 contact route, `<domain>/c/<16 hex>`, derived from its key; hand it out
 (copied, never typed). A stranger runs `/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60
-"Ana from Webceive. Can your ops agent review a config?"`, and the sealed
+"Ana from Acme. Can your ops agent review a config?"`, and the sealed
 introduction carries the sender's device name. `/connect knocks` lists what you
-received as `1. ana-laptop  fingerprint 91c0…77ab  "Ana from Webceive. Can your
+received as `1. ana-laptop  fingerprint 1234…5678  "Ana from Acme. Can your
 ops agent…"  [a]ccept [r]eject`. Accepting makes that device a peer with
 `agents` trust and nothing allowed until `/connect allow ana-laptop <agent>`;
 it is never `open`. A name already on the network fails the accept with
@@ -345,7 +345,7 @@ Once a device is on your network, its agents appear in your roster as
 exactly like a local agent:
 
 ```
-<hub_msg to="infra@alzan-prod-home">check the wireguard tunnel</hub_msg>
+<hub_msg to="infra@home-server">check the wireguard tunnel</hub_msg>
 ```
 
 The receiving device runs it with its own tools under its own permissions and
@@ -883,7 +883,7 @@ executed by: plugins/agent_orchestrator/plugin.py
 
 parsed by: plugins/hub/plugin.py (response hook)
 These tags reach local Hub peers by identity. An agent on another device of the
-network is named `agent@device` (for example `infra@alzan-prod-home`) and is
+network is named `agent@device` (for example `infra@home-server`) and is
 messaged with the same tag. Under trust `manual` the send also needs a human
 grant (see below).
 

@@ -139,5 +139,5 @@ def test_hub_msg_tool_addresses_a_remote_agent_as_agent_at_device():
     assert "agent@device" in to.description
     assert "agent@device" in rules
     assert "end your turn with wait='true'" in rules
-    assert any('to="infra@alzan-prod-home"' in line for line in hub_msg.examples)
+    assert any('to="infra@home-server"' in line for line in hub_msg.examples)
     assert "authorized remote relay agent" not in hub_msg.description

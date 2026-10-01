@@ -43,11 +43,11 @@ def test_remote_agents_are_merged_as_agent_at_device():
     hub = SimpleNamespace(
         _presence=SimpleNamespace(get_cached_agents=lambda: [_agent("koordinator", is_coordinator=True)]),
         _remote_agent_rows=lambda: [
-                {"name": "infra", "device": "alzan-prod-home", "handle": "infra@alzan-prod-home", "state": "idle"},
+                {"name": "infra", "device": "home-server", "handle": "infra@home-server", "state": "idle"},
                 {
                     "name": "ops",
-                    "device": "alzan-prod-home",
-                    "handle": "ops@alzan-prod-home",
+                    "device": "home-server",
+                    "handle": "ops@home-server",
                     "state": "working",
                     "task": "rotating logs",
                 },
@@ -58,22 +58,22 @@ def test_remote_agents_are_merged_as_agent_at_device():
     roster = renderer._render_hub_roster()
 
     assert "koordinator (coordinator)" in roster
-    assert "infra@alzan-prod-home - idle" in roster
-    assert "ops@alzan-prod-home - working: rotating logs" in roster
+    assert "infra@home-server - idle" in roster
+    assert "ops@home-server - working: rotating logs" in roster
 
 
 def test_remote_agents_alone_still_render_a_roster():
     """No local peers, but the network has agents -- still not 'no peers online'."""
     hub = SimpleNamespace(
         _presence=SimpleNamespace(get_cached_agents=lambda: []),
-        _remote_agent_rows=lambda: [{"handle": "infra@alzan-prod-home", "state": "idle"}],
+        _remote_agent_rows=lambda: [{"handle": "infra@home-server", "state": "idle"}],
     )
     renderer = _renderer_with_hub(hub)
 
     roster = renderer._render_hub_roster()
 
     assert "no peers online." not in roster
-    assert "infra@alzan-prod-home - idle" in roster
+    assert "infra@home-server - idle" in roster
 
 
 def test_missing_remote_agents_method_degrades_gracefully():

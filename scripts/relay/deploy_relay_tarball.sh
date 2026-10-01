@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Deploy an already-built relay tarball: deploy_relay_tarball.sh <tarball> <short-sha>
 set -euo pipefail
-HOST=alzan-prod
+HOST=server
 OUT="$1"
 TAG="$(date +%Y%m%d)-$2"
-REL="/home/almazan/.local/share/kollab-relay/releases/$TAG"
+REL="/home/me/.local/share/kollab-relay/releases/$TAG"
 LOCAL_SHA=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
 echo "tag=$TAG sha256=$LOCAL_SHA"
 
@@ -32,12 +32,12 @@ PY
 KOLLAB_NO_KEYRING=1 .venv/bin/python -c "import sys; sys.path.insert(0,'.'); import plugins.hub.relay_service, plugins.hub.relay_runtime; print('import ok')"
 
 # The relay binds the private interface from runtime.json, not loopback.
-HEALTH_URL=$(python3 -c "import json;c=json.load(open('/home/almazan/.config/kollab-relay/runtime.json'));print('http://%s:%s/relay/v1/health' % (c['bind_host'], c['health_port']))")
+HEALTH_URL=$(python3 -c "import json;c=json.load(open('/home/me/.config/kollab-relay/runtime.json'));print('http://%s:%s/relay/v1/health' % (c['bind_host'], c['health_port']))")
 echo "health check: $HEALTH_URL"
 DROPIN=/etc/systemd/system/kollab-relay.service.d/source-v2.conf
-BACKUP="/home/almazan/.local/share/kollab-relay/dropin-backup-$(date +%Y%m%d-%H%M%S)"
+BACKUP="/home/me/.local/share/kollab-relay/dropin-backup-$(date +%Y%m%d-%H%M%S)"
 sudo -n cp "$DROPIN" "$BACKUP"
-printf '[Service]\nWorkingDirectory=%s\nExecStart=\nExecStart=%s/.venv/bin/python kollabor_cli_main.py relay run --config /home/almazan/.config/kollab-relay/runtime.json\n' "$REL" "$REL" | sudo -n tee "$DROPIN" >/dev/null
+printf '[Service]\nWorkingDirectory=%s\nExecStart=\nExecStart=%s/.venv/bin/python kollabor_cli_main.py relay run --config /home/me/.config/kollab-relay/runtime.json\n' "$REL" "$REL" | sudo -n tee "$DROPIN" >/dev/null
 sudo -n systemctl daemon-reload
 sudo -n systemctl restart kollab-relay.service
 for i in $(seq 1 20); do

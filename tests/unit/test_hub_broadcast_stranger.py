@@ -41,13 +41,13 @@ async def test_a_network_broadcast_skips_agents_of_accepted_strangers():
 
     hub._relay_agent = SimpleNamespace(
         remote_agents=lambda: [
-            _row("infra", "alzan-prod-home", MEMBER),
-            _row("ops", "mac-kollab", STRANGER),
+            _row("infra", "home-server", MEMBER),
+            _row("ops", "laptop-kollab", STRANGER),
         ],
         trust_level=lambda: "open",
         resolve_handle=lambda handle: {
-            "infra@alzan-prod-home": MEMBER,
-            "ops@mac-kollab": STRANGER,
+            "infra@home-server": MEMBER,
+            "ops@laptop-kollab": STRANGER,
         }[handle],
         send=fake_send,
         is_stranger=lambda address: address == STRANGER,

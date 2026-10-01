@@ -22,7 +22,7 @@ bismuth's vault (crys-001) and the koordinator relay of 2026-09-25 22:30.
 - From the user's point of view there is ONE agent/collective — never expose
   multi-agent internals through voice.
 - A tiny LOCAL decision model gates LLM activation, running in the
-  background. (AMENDED 23:35 — malmazan ruled jev/synthyo OUT: no waiting
+  background. (AMENDED 23:35 — owner ruled jev/models OUT: no waiting
   for it, no bundling. Gate model is a fresh local pick, downloaded at
   first run like everything else.)
 
@@ -108,7 +108,7 @@ If a conflict ever appears, the fix is capping the *conflicting package*,
 never pinning numpy globally in core.
 ## 3. Gatekeeper: tiny local decision model on ONNX Runtime
 
-malmazan's delta: a tiny local model decides act|converse|silence so the
+owner's delta: a tiny local model decides act|converse|silence so the
 big LLM is only paid for when warranted. Runtime options I evaluated for
 serving a small (~0.5-1B) decision model on arm64:
 
@@ -154,7 +154,7 @@ plus the gate. The response path enforces the one-sentence rule:
   tiny gate model itself drafts the one-sentence reply (it already read
   the segment; generating ~15 tokens is within its budget). LLM only if
   the tiny model's confidence is low. This is the "agent decides whether
-  to do anything" behavior malmazan asked for, at near-zero cost.
+  to do anything" behavior owner asked for, at near-zero cost.
 - Gate says `silence` — nothing dispatched, nothing said, nothing logged
   except the transcript line.
 

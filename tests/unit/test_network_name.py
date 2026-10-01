@@ -2,7 +2,7 @@
 
 The first device names it once, when it starts the network; a device that joins
 takes the name it is given in the signed decision; leaving forgets it. The
-screens show it as `network      mac-kollab-net  via kollabor.ai`.
+screens show it as `network      laptop-kollab-net  via kollabor.ai`.
 """
 
 import json
@@ -45,8 +45,8 @@ async def _connect(client, monkeypatch):
 
 
 def test_the_default_name_is_the_first_device_name_and_net():
-    assert default_network_name("mac-kollab") == "mac-kollab-net"
-    assert validate_network_name(default_network_name("mac-kollab")) == "mac-kollab-net"
+    assert default_network_name("laptop-kollab") == "laptop-kollab-net"
+    assert validate_network_name(default_network_name("laptop-kollab")) == "laptop-kollab-net"
 
 
 def test_the_default_name_stays_a_valid_name_for_the_longest_device_name():
@@ -78,9 +78,9 @@ def test_the_name_round_trips_and_an_older_state_file_loads_without_one(tmp_path
     state_dir = tmp_path / "state"
     first = RelayStateStore(workspace, state_dir)
     assert first.state.network_name == ""
-    first.state.network_name = "mac-kollab-net"
+    first.state.network_name = "laptop-kollab-net"
     first.save()
-    assert RelayStateStore(workspace, state_dir).state.network_name == "mac-kollab-net"
+    assert RelayStateStore(workspace, state_dir).state.network_name == "laptop-kollab-net"
 
     old = {k: v for k, v in json.loads(first.state_path.read_text()).items() if k != "network_name"}
     first.state_path.write_text(json.dumps(old))
@@ -112,12 +112,12 @@ async def test_the_first_device_names_the_network_after_itself(tmp_path, monkeyp
 async def test_a_renamed_device_names_the_network_after_its_current_name(tmp_path, monkeypatch):
     client, workspace, state_dir = _client(tmp_path)
     bridge_store = RelayStateStore(workspace, state_dir)
-    bridge_store.state.device_name = "mac-kollab"  # /connect name, before the network exists
+    bridge_store.state.device_name = "laptop-kollab"  # /connect name, before the network exists
     bridge_store.save()
 
     await _connect(client, monkeypatch)
 
-    assert RelayStateStore(workspace, state_dir).state.network_name == "mac-kollab-net"
+    assert RelayStateStore(workspace, state_dir).state.network_name == "laptop-kollab-net"
     await client.close()
 
 
@@ -125,7 +125,7 @@ async def test_a_renamed_device_names_the_network_after_its_current_name(tmp_pat
 async def test_the_name_is_chosen_once_and_survives_a_rename_and_a_reconnect(tmp_path, monkeypatch):
     client, workspace, state_dir = _client(tmp_path)
     bridge_store = RelayStateStore(workspace, state_dir)
-    bridge_store.state.device_name = "mac-kollab"
+    bridge_store.state.device_name = "laptop-kollab"
     bridge_store.save()
     await _connect(client, monkeypatch)
     await client.close()
@@ -135,7 +135,7 @@ async def test_the_name_is_chosen_once_and_survives_a_rename_and_a_reconnect(tmp
 
     await _connect(client, monkeypatch)  # what RelayCommands.resume does at every start
 
-    assert RelayStateStore(workspace, state_dir).state.network_name == "mac-kollab-net"
+    assert RelayStateStore(workspace, state_dir).state.network_name == "laptop-kollab-net"
     await client.close()
 
 
@@ -158,12 +158,12 @@ async def test_the_client_keeps_a_name_the_bridge_saved_when_it_saves_its_own_co
     client.state.inviter = PEER_KEY
     client._store.save()
     bridge_store = RelayStateStore(workspace, state_dir)
-    bridge_store.state.network_name = "mac-kollab-net"
+    bridge_store.state.network_name = "laptop-kollab-net"
     bridge_store.save()
 
     await _connect(client, monkeypatch)
 
-    assert RelayStateStore(workspace, state_dir).state.network_name == "mac-kollab-net"
+    assert RelayStateStore(workspace, state_dir).state.network_name == "laptop-kollab-net"
     await client.close()
 
 
@@ -193,26 +193,26 @@ async def test_the_bridge_reads_the_name_and_a_joining_device_takes_the_first_on
     (left, *_), _ = members
     assert left.network_name() == ""
 
-    assert left.bind_network_name("mac-kollab-net") is True
-    assert left.network_name() == "mac-kollab-net"
-    assert left.bind_network_name("mac-kollab-net") is True  # repeating is harmless
+    assert left.bind_network_name("laptop-kollab-net") is True
+    assert left.network_name() == "laptop-kollab-net"
+    assert left.bind_network_name("laptop-kollab-net") is True  # repeating is harmless
     assert left.bind_network_name("other-net") is False  # the first name wins
     assert left.bind_network_name("Not Valid!") is False
-    assert left.network_name() == "mac-kollab-net"
+    assert left.network_name() == "laptop-kollab-net"
 
 
 @pytest.mark.asyncio
 async def test_the_status_and_the_screen_show_the_name_with_the_directory(bridges):
     members, _ = bridges
     (left, *_), _ = members
-    left.bind_network_name("mac-kollab-net")
+    left.bind_network_name("laptop-kollab-net")
     left.commands.client.state.origin = DIRECTORY
 
     status = await left.commands.format_status()
     snapshot = await left.commands.connect_snapshot()
 
-    assert status.splitlines()[0].startswith("network mac-kollab-net  via kollabor.ai")
-    assert (snapshot.network, snapshot.domain) == ("mac-kollab-net", "kollabor.ai")
+    assert status.splitlines()[0].startswith("network laptop-kollab-net  via kollabor.ai")
+    assert (snapshot.network, snapshot.domain) == ("laptop-kollab-net", "kollabor.ai")
 
 
 def test_commands_without_a_name_fall_back_to_the_directory(tmp_path):

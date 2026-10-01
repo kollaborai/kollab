@@ -37,7 +37,7 @@ kollab's existing engine surfaces without inventing new plumbing.
 ## reference: how dsh does it
 
 reviewed `packages/client/ui-trajectory/` in the dsh checkout
-(`/Users/malmazan/dev/deepseek-harness`).
+(`/Users/me/dev/deepseek-harness`).
 
 ### structure
 

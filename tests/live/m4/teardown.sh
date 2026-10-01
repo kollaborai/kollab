@@ -6,7 +6,7 @@
 #                that is the new steady state of selfhost.kollabor.ai. The manual stack's own processes
 #                (relay run --config, discovery_publish), if serve_up.sh restored them, are left alone too.
 # --restore-old  put the manual stack back: stop m4-serve (Ctrl-C, then TERM, then KILL; nothing else moves until it
-#                is gone), run ~/kollab-m4/restore-old-stack.sh on alzan-prod (tmux sh-relay, sh-pub, sh-static as
+#                is gone), run ~/kollab-m4/restore-old-stack.sh on server (tmux sh-relay, sh-pub, sh-static as
 #                serve_up.sh recorded them, skipping any that already run), then edge_vhost.sh restore so the edge
 #                points at the old ports again, then wait for the public health route. Exits non-zero, naming what
 #                failed, if any of that did not work.

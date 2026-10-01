@@ -51,7 +51,7 @@ def _snapshot(**overrides) -> ConnectSnapshot:
         network="marco-home",
         domain="kollabor.ai",
         trust="open",
-        device="mac-kollab",
+        device="laptop-kollab",
         relay_online=True,
         local_agents=("koordinator",),
     )
@@ -59,11 +59,11 @@ def _snapshot(**overrides) -> ConnectSnapshot:
     return ConnectSnapshot(**base)
 
 
-def _row(device="alzan-prod-home", categories=("conversation:send", "provider:openai:api_key")):
+def _row(device="home-server", categories=("conversation:send", "provider:openai:api_key")):
     return JoinRequestRow(
         enrollment_id="a" * 32,
         device=device,
-        fingerprint="4d04…9f2e",
+        fingerprint="abcd…ef01",
         categories=categories,
     )
 
@@ -128,29 +128,29 @@ async def _text(view, renderer) -> str:
 
 
 def test_screen_matches_story_one_with_no_requests():
-    snapshot = _snapshot(remote_agents=("koordinator@alzan-prod-home",))
+    snapshot = _snapshot(remote_agents=("koordinator@home-server",))
 
     lines = connect_screen_lines(_state(snapshot=snapshot), 120)
 
     assert lines[:7] == [
         " Connect",
         " network      marco-home  via kollabor.ai   trust: open",
-        " this device  mac-kollab",
+        " this device  laptop-kollab",
         " join code    7QK4-M2XP   one device, expires in 4:58",
         " requests     none",
         " online       koordinator (this device)",
-        "              koordinator@alzan-prod-home",
+        "              koordinator@home-server",
     ]
 
 
 def test_a_managed_device_says_where_its_config_came_from():
-    snapshot = _snapshot(config_from="mac-kollab", device="alzan-prod-home")
+    snapshot = _snapshot(config_from="laptop-kollab", device="home-server")
 
     lines = connect_screen_lines(_state(snapshot=snapshot), 120)
 
     assert lines[2:4] == [
-        " this device  alzan-prod-home",
-        " config       received from mac-kollab   managed by mac-kollab in /config",
+        " this device  home-server",
+        " config       received from laptop-kollab   managed by laptop-kollab in /config",
     ]
 
 
@@ -173,7 +173,7 @@ def test_one_request_is_one_row_with_name_fingerprint_and_keys():
     lines = connect_screen_lines(_state(snapshot=_snapshot(requests=(_row(),))), 120)
 
     assert (
-        " requests     alzan-prod-home wants to join   fingerprint 4d04…9f2e"
+        " requests     home-server wants to join   fingerprint abcd…ef01"
         "   [a]ccept [r]eject"
     ) in lines
 
@@ -204,15 +204,15 @@ def test_expired_code_says_how_to_get_a_new_one():
     [(False, "relay unreachable"), (True, "could not create a code")],
 )
 def test_failed_code_says_why_and_the_rest_of_the_screen_still_renders(online, words):
-    snapshot = _snapshot(relay_online=online, remote_agents=("ops@alzan-prod-home",))
+    snapshot = _snapshot(relay_online=online, remote_agents=("ops@home-server",))
 
     lines = connect_screen_lines(
         _state(snapshot=snapshot, code="", code_status="failed"), 120
     )
 
     assert f" join code    {words}   press c to try again" in lines
-    assert " this device  mac-kollab" in lines
-    assert "              ops@alzan-prod-home" in lines
+    assert " this device  laptop-kollab" in lines
+    assert "              ops@home-server" in lines
 
 
 def test_knocks_offline_devices_and_notice_lines():
@@ -342,7 +342,7 @@ async def test_opening_creates_the_code_and_shows_the_live_screen(monkeypatch):
 
     assert calls["create"] == 1
     assert "7QK4-M2XP   one device, expires in 5:00" in text
-    assert "alzan-prod-home wants to join" in text
+    assert "home-server wants to join" in text
     assert "marco-home  via kollabor.ai" in text
     await view.on_complete()
 
@@ -415,20 +415,20 @@ async def test_failed_creation_shows_plain_words_and_c_retries(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_accepts_the_selected_request_and_says_what_was_sent(monkeypatch):
     monkeypatch.setattr(_TIME, lambda: 1_000)
-    requests = (_row("ana-laptop"), _row("alzan-prod-home"))
+    requests = (_row("ana-laptop"), _row("home-server"))
     view, renderer, calls = await _open(_snapshot(requests=requests))
     await view.handle_input(_named("ArrowDown"))
 
     await view.handle_input(_key("a"))
     text = await _text(view, renderer)
 
-    assert calls["decide"] == [("alzan-prod-home", "accept")]
-    assert "accepted alzan-prod-home. it is now a trusted device on marco-home." in text
+    assert calls["decide"] == [("home-server", "accept")]
+    assert "accepted home-server. it is now a trusted device on marco-home." in text
     assert (
         "sealed config queued: settings, agents, skills, mcp, api keys; not oauth logins"
         in text
     )
-    assert "alzan-prod-home wants to join" not in text
+    assert "home-server wants to join" not in text
     assert "ana-laptop wants to join" in text
     await view.on_complete()
 
@@ -437,7 +437,7 @@ async def test_a_accepts_the_selected_request_and_says_what_was_sent(monkeypatch
 async def test_a_held_key_cannot_decide_the_next_request_unseen(monkeypatch):
     """A second keypress handled before the redraw must not accept the next stranger."""
     monkeypatch.setattr(_TIME, lambda: 1_000)
-    requests = (_row("ana-laptop"), _row("alzan-prod-home"))
+    requests = (_row("ana-laptop"), _row("home-server"))
     view, renderer, calls = await _open(_snapshot(requests=requests))
 
     await view.handle_input(_key("a"))
@@ -448,7 +448,7 @@ async def test_a_held_key_cannot_decide_the_next_request_unseen(monkeypatch):
     await _text(view, renderer)  # the redraw shows the next request
     await view.handle_input(_key("a"))
 
-    assert calls["decide"] == [("ana-laptop", "accept"), ("alzan-prod-home", "accept")]
+    assert calls["decide"] == [("ana-laptop", "accept"), ("home-server", "accept")]
     await view.on_complete()
 
 
@@ -462,7 +462,7 @@ async def test_every_accepted_device_is_promised_the_sealed_config(monkeypatch):
     await view.handle_input(_key("a"))
     text = await _text(view, renderer)
 
-    assert "accepted alzan-prod-home." in text
+    assert "accepted home-server." in text
     assert "sealed config queued: settings, agents, skills, mcp, api keys;" in text
     assert "profile settings and one api key" not in text
     await view.on_complete()
@@ -476,8 +476,8 @@ async def test_r_rejects_the_selected_request(monkeypatch):
     await view.handle_input(_key("r"))
     text = await _text(view, renderer)
 
-    assert calls["decide"] == [("alzan-prod-home", "reject")]
-    assert "rejected alzan-prod-home." in text
+    assert calls["decide"] == [("home-server", "reject")]
+    assert "rejected home-server." in text
     assert "wants to join" not in text
     await view.on_complete()
 
@@ -487,7 +487,7 @@ async def test_a_failed_decision_shows_the_reason_and_keeps_the_request(monkeypa
     monkeypatch.setattr(_TIME, lambda: 1_000)
 
     async def decide(_row, _decision):
-        return "device name 'alzan-prod-home' is already on this network"
+        return "device name 'home-server' is already on this network"
 
     view, renderer, _ = await _open(_snapshot(requests=(_row(),)), decide=decide)
 
@@ -495,10 +495,10 @@ async def test_a_failed_decision_shows_the_reason_and_keeps_the_request(monkeypa
     text = await _text(view, renderer)
 
     assert (
-        "could not accept alzan-prod-home: device name 'alzan-prod-home' is "
+        "could not accept home-server: device name 'home-server' is "
         "already on this network"
     ) in text
-    assert "alzan-prod-home wants to join" in text
+    assert "home-server wants to join" in text
     await view.on_complete()
 
 
@@ -514,7 +514,7 @@ async def test_a_raising_decision_shows_try_again_without_the_error(monkeypatch)
     await view.handle_input(_key("r"))
     text = await _text(view, renderer)
 
-    assert "could not reject alzan-prod-home: try again" in text
+    assert "could not reject home-server: try again" in text
     assert "private-detail-token" not in text
     await view.on_complete()
 
@@ -565,10 +565,10 @@ async def test_refresh_picks_up_new_requests_and_survives_load_failures(monkeypa
     assert "requests     none" in await _text(view, renderer)
 
     await view._refresh()
-    assert "alzan-prod-home wants to join" in await _text(view, renderer)
+    assert "home-server wants to join" in await _text(view, renderer)
 
     await view._refresh()  # the load raises; the screen keeps the last snapshot
-    assert "alzan-prod-home wants to join" in await _text(view, renderer)
+    assert "home-server wants to join" in await _text(view, renderer)
     await view.on_complete()
 
 

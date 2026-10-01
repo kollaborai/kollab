@@ -1,8 +1,12 @@
 # Shared settings for the m1 scripts. Sourced, never run.
 M1_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Real hosts and addresses stay out of git: put them in tests/live/local.env (copy local.env.example).
+# Anything it leaves unset falls back to the placeholders below.
+# shellcheck source=/dev/null
+if [ -f "$M1_DIR/../local.env" ]; then . "$M1_DIR/../local.env"; fi
 M1_VERSION=${M1_VERSION:-0.11.0.dev1}
-M1_REPO=${M1_REPO:-/Users/malmazan/dev/kollab}
-M1_HOST=${M1_HOST:-alzan-prod}
+M1_REPO=${M1_REPO:-$HOME/dev/kollab}
+M1_HOST=${M1_HOST:-server}
 M1_EXPECT_WHEELS=11
 
 # M1_ROOT_NAME gives a proof its own venv root on both hosts, so two proofs never stop each other's processes.

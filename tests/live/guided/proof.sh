@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # proof.sh: live proof of the guided network setup (issue #121, release 0.11.0).
 # INSTALLED builds, driven through tmux like a user on this Mac (gs-mac) and on
-# alzan-prod (gs-srv), 120x40, default (daemon) launch, fresh workspaces.
+# server (gs-srv), 120x40, default (daemon) launch, fresh workspaces.
 #   g1 Mac notice            g2 Enter shows the two choices
 #   g3 new network on kollabor.ai: join code + "On your other computer" box
 #   g4 server: notice, Join with a code, private form, code typed

@@ -79,7 +79,7 @@ dedup. `wait="true"` to stop after a message.
 
 **Network.** The same thing across machines. A network has a name, a
 directory (kollabor.ai or your own), a trust level, and devices. The name is
-`<first device name>-net`, for example `mac-kollab-net`: the device that starts
+`<first device name>-net`, for example `laptop-kollab-net`: the device that starts
 the network gives it once, and each device that joins takes it from the signed
 decision that admits it. A device is a workspace identity with a human name. Its agents appear in every other
 device's roster as `agent@device`. A hub message to `agent@device` is
@@ -119,12 +119,12 @@ adds one DNS TXT record. See section 11.
 
 Every screen below is **target output**. It is what the finished build shows,
 not what 0.10.7 shows today. Device names in the stories: Marco's Mac
-workspace is `mac-kollab`, the server's home workspace is `alzan-prod-home`,
-and the network, named by the Mac, is `mac-kollab-net`.
+workspace is `laptop-kollab`, the server's home workspace is `home-server`,
+and the network, named by the Mac, is `laptop-kollab-net`.
 
 ### Story 1: Marco joins the server to his network
 
-Marco runs kollab on his Mac. He has SSH to alzan-prod, where kollab is
+Marco runs kollab on his Mac. He has SSH to server, where kollab is
 installed but has never been on a network.
 
 Mac, in kollab:
@@ -135,8 +135,8 @@ Mac, in kollab:
 
 ```
  Connect
- network      mac-kollab-net  via kollabor.ai   trust: open
- this device  mac-kollab
+ network      laptop-kollab-net  via kollabor.ai   trust: open
+ this device  laptop-kollab
  join code    7QK4-M2XP   one device, expires in 4:58
  requests     none
  online       koordinator (this device)
@@ -161,22 +161,22 @@ Server, over SSH, in kollab:
 Mac, five seconds later, same screen refreshes:
 
 ```
- requests     alzan-prod-home wants to join   fingerprint 4d04…9f2e   [a]ccept [r]eject
+ requests     home-server wants to join   fingerprint abcd…ef01   [a]ccept [r]eject
 ```
 
 Marco presses `a`.
 
 ```
- accepted alzan-prod-home. it is now a trusted device on mac-kollab-net.
+ accepted home-server. it is now a trusted device on laptop-kollab-net.
  sealed config queued: settings, agents, skills, mcp, api keys; not oauth logins
  online       koordinator (this device)
-              koordinator@alzan-prod-home
+              koordinator@home-server
 ```
 
 Server:
 
 ```
- joined mac-kollab-net as alzan-prod-home. trust: open
+ joined laptop-kollab-net as home-server. trust: open
 ```
 
 A few seconds later, once the sealed config has landed, `/connect` on the
@@ -184,9 +184,9 @@ server shows a `config` row under this device:
 
 ```
  Connect
- network      mac-kollab-net  via kollabor.ai   trust: open
- this device  alzan-prod-home
- config       received from mac-kollab   managed by mac-kollab in /config
+ network      laptop-kollab-net  via kollabor.ai   trust: open
+ this device  home-server
+ config       received from laptop-kollab   managed by laptop-kollab in /config
 ```
 
 That is the whole join. No `/connect kollabor.ai` first: with no network,
@@ -264,35 +264,35 @@ notice, once per machine, before anyone has typed `/connect`.
 Mac, in chat with his agent lapis:
 
 ```
-ask infra@alzan-prod-home to check the wireguard tunnel and tell me the handshake age
+ask infra@home-server to check the wireguard tunnel and tell me the handshake age
 ```
 
 lapis, in its reply:
 
 ```
-<hub_msg to="infra@alzan-prod-home">Check the WireGuard tunnel on your machine and
+<hub_msg to="infra@home-server">Check the WireGuard tunnel on your machine and
 report the latest handshake age for each peer.</hub_msg>
 ```
 
 Mac screen:
 
 ```
- > lapis -> infra@alzan-prod-home: Check the WireGuard tunnel on your machine and report…
+ > lapis -> infra@home-server: Check the WireGuard tunnel on your machine and report…
 ```
 
 Server screen, where infra wakes and runs its own shell tool under its own
 permissions:
 
 ```
- > lapis@mac-kollab -> infra: Check the WireGuard tunnel on your machine and report…
+ > lapis@laptop-kollab -> infra: Check the WireGuard tunnel on your machine and report…
  [infra runs: sudo wg show]
- > infra -> lapis@mac-kollab: wg0 peer 10.0.0.1: latest handshake 38 seconds ago. Healthy.
+ > infra -> lapis@laptop-kollab: wg0 peer 10.0.0.2: latest handshake 38 seconds ago. Healthy.
 ```
 
 Mac screen:
 
 ```
- > infra@alzan-prod-home -> lapis: wg0 peer 10.0.0.1: latest handshake 38 seconds ago. Healthy.
+ > infra@home-server -> lapis: wg0 peer 10.0.0.2: latest handshake 38 seconds ago. Healthy.
 ```
 
 lapis wakes on that message, like it would for a local agent, and tells Marco.
@@ -304,14 +304,14 @@ woken. There was no `/connect` command, no key, no address, no grant.
 On the Mac, `crontab -e`:
 
 ```
-0 3 * * * cd ~/dev/kollab && kollab --hub msg infra@alzan-prod-home "rotate the nginx logs and report the freed space" >> ~/cron-infra.log 2>&1
+0 3 * * * cd ~/dev/kollab && kollab --hub msg infra@home-server "rotate the nginx logs and report the freed space" >> ~/cron-infra.log 2>&1
 ```
 
-At 03:00 the command uses the `mac-kollab` identity, delivers the message,
+At 03:00 the command uses the `laptop-kollab` identity, delivers the message,
 waits for infra's reply, prints it, and exits:
 
 ```
-infra@alzan-prod-home: rotated 3 files, freed 412 MB.
+infra@home-server: rotated 3 files, freed 412 MB.
 ```
 
 Same command, same identity, whether a human or cron typed it. `kollab --hub
@@ -323,7 +323,7 @@ Under `open` trust an agent may start a conversation when its task needs it.
 infra is running a task from Marco and cannot reach a host:
 
 ```
-<hub_msg to="lapis@mac-kollab">I can't reach 10.0.0.1 from alzan-prod-home; ping
+<hub_msg to="lapis@laptop-kollab">I can't reach 10.0.0.2 from home-server; ping
 times out. Is the tunnel up on your side?</hub_msg>
 ```
 
@@ -346,7 +346,7 @@ copied, never typed, so it is long enough that two devices never share one):
 He gives Ana that route. Ana:
 
 ```
-/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Webceive. Can your ops agent review a nginx config for me this week?"
+/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Acme. Can your ops agent review a nginx config for me this week?"
 ```
 
 Marco:
@@ -356,7 +356,7 @@ Marco:
 ```
 
 ```
- 1. ana-laptop  fingerprint 91c0…77ab   "Ana from Webceive. Can your ops agent…"   [a]ccept [r]eject
+ 1. ana-laptop  fingerprint 1234…5678   "Ana from Acme. Can your ops agent…"   [a]ccept [r]eject
 ```
 
 He accepts. Ana's device becomes a peer with `agents` trust and nothing
@@ -366,7 +366,7 @@ allowed. Marco:
 /connect allow ana-laptop ops
 ```
 
-Now Ana's agents can message `ops@mac-kollab` and nothing else. Marco can
+Now Ana's agents can message `ops@laptop-kollab` and nothing else. Marco can
 `/connect deny ana-laptop` at any time, and `/connect revoke ana-laptop` to
 remove the peer.
 
@@ -389,7 +389,7 @@ prepared, unless the link is live both ways or Marco's device has ever reached
 hers.
 
 What each side sees. Ana's roster lists exactly the agents Marco allowed, as
-`ops@mac-kollab`; a message to any other agent on his device does not resolve.
+`ops@laptop-kollab`; a message to any other agent on his device does not resolve.
 Marco's device refuses a message to an agent he did not allow even if Ana
 names it (`not_authorized`), and `/connect deny` takes effect on the next
 message. `ops` answers with `hub_msg` to `lapis@ana-laptop`: the agent that
@@ -404,32 +404,32 @@ A knock shows in the main pane, once, as `<device> knocked. /connect knocks to r
 
 ### Story 6: a company runs its own directory
 
-Webceive's admin has SSH to a server with `pip install kollab`. One command:
+Acme's admin has SSH to a server with `pip install kollab`. One command:
 
 ```
-kollab relay serve --domain agents.webceive.com
+kollab relay serve --domain agents.acme.com
 ```
 
 ```
-kollab relay serve: agents.webceive.com
-  state    /home/ops/.kollab/relay/agents.webceive.com
+kollab relay serve: agents.acme.com
+  state    /home/ops/.kollab/relay/agents.acme.com
            new signing key created; back this directory up
   listen   http://127.0.0.1:9078  (plain HTTP, behind your TLS proxy)
   proxies  X-Real-IP trusted from 127.0.0.1 ::1
 
 still to do, once:
   1. DNS: add this TXT record
-       _agent.agents.webceive.com  TXT  "v=aid1;u=https://agents.webceive.com/.well-known/agent-keys.json"
-  2. TLS proxy: terminate TLS for agents.webceive.com and forward only these routes to 127.0.0.1:9078
+       _agent.agents.acme.com  TXT  "v=aid1;u=https://agents.acme.com/.well-known/agent-keys.json"
+  2. TLS proxy: terminate TLS for agents.acme.com and forward only these routes to 127.0.0.1:9078
        GET   /.well-known/agent-keys.json     key file
        GET   /relay/v1/health                 health
        WS    /relay/v1/ws                     websocket
        POST  /relay/v1/enrollment/*           join codes
        POST  /relay/v1/contact/*              knocks
-     paste-ready: kollab relay serve --domain agents.webceive.com --print nginx   (or --print caddy)
-  3. keep it running: kollab relay serve --domain agents.webceive.com --print systemd
+     paste-ready: kollab relay serve --domain agents.acme.com --print nginx   (or --print caddy)
+  3. keep it running: kollab relay serve --domain agents.acme.com --print systemd
 
-then devices connect with /connect agents.webceive.com
+then devices connect with /connect agents.acme.com
 
 ready: relay up, key file published (revision 2)
 ```
@@ -438,7 +438,7 @@ The admin adds the record, pastes the proxy config and installs the unit; the
 command prints them, it never installs anything itself. Every employee then runs:
 
 ```
-/connect agents.webceive.com
+/connect agents.acme.com
 ```
 
 and joins with a code from a device already on the company network. Nothing
@@ -456,33 +456,33 @@ published identity is the same and every joined device reconnects on its own.
 From then on, on that network, a first message to a remote agent needs:
 
 ```
-/connect authorize infra@alzan-prod-home "check the tunnel"
-communication authorized: request 1; expires at 14:05; recipient infra@alzan-prod-home
+/connect authorize infra@home-server "check the tunnel"
+communication authorized: request 1; expires at 14:05; recipient infra@home-server
 ```
 
 then "send the authorized request" to the agent, or `/connect send …` to send
-it yourself (`request 2 to infra@alzan-prod-home: queued`). Everything after
-that names the request by its number: `/connect task infra@alzan-prod-home 2`
-asks how it is going, `/connect cancel infra@alzan-prod-home 2` stops it,
+it yourself (`request 2 to infra@home-server: queued`). Everything after
+that names the request by its number: `/connect task infra@home-server 2`
+asks how it is going, `/connect cancel infra@home-server 2` stops it,
 `/connect withdraw 1` takes back an authorization nobody used. Replies come
 back through the task envelope; a remote question waits for the human's
-`/connect answer`, shown as `infra@alzan-prod-home -> lapis` and ending
+`/connect answer`, shown as `infra@home-server -> lapis` and ending
 `(answer with /connect answer 3 <text>)`. This is the Codex model, unchanged
 apart from the numbers, and it is only reachable through this setting.
 
 ### Story 8: the sealed config follows Marco
 
 On the Mac, Marco switches his loadout with `/llm` to `anthropic/claude-opus-5-5`.
-Within a minute, `/config` on alzan-prod-home shows the same loadout in the
+Within a minute, `/config` on home-server shows the same loadout in the
 Loadout and Model rows that lead LLM Settings, read-only and marked
-`managed by mac-kollab`:
+`managed by laptop-kollab`:
 
 ```
- Loadout: anthropic   managed by mac-kollab
- Model: claude-opus-5-5   managed by mac-kollab
+ Loadout: anthropic   managed by laptop-kollab
+ Model: claude-opus-5-5   managed by laptop-kollab
 ```
 
-The API key travelled sealed to alzan-prod-home's key; the relay never saw it,
+The API key travelled sealed to home-server's key; the relay never saw it,
 and `/config` shows it only as `set`. His ChatGPT OAuth login did not travel:
 the server keeps its own `/login`, because two devices sharing one refresh
 token sign each other out.
@@ -567,18 +567,18 @@ list:
 ```
 --- hub context ---
 you are "lapis" on the kollabor hub.
-network: mac-kollab-net via kollabor.ai (trust: open)
-this device: mac-kollab
+network: laptop-kollab-net via kollabor.ai (trust: open)
+this device: laptop-kollab
 active agents:
   koordinator (coordinator) - idle
-  infra@alzan-prod-home - idle
-  ops@alzan-prod-home - working: rotating logs (3m)
+  infra@home-server - idle
+  ops@home-server - working: rotating logs (3m)
 offline devices: laptop-kollab
 Only contact other agents when directed by the human or an authorized task.
 to message an agent, ALWAYS use this exact format:
 <hub_msg to="identity">your message</hub_msg>
 remote agents use the same tag with their full name:
-<hub_msg to="infra@alzan-prod-home">your message</hub_msg>
+<hub_msg to="infra@home-server">your message</hub_msg>
 a remote agent runs your message with its own tools on its own machine
 and answers with the same tag.
 ```
@@ -780,7 +780,7 @@ approved first.
 Proof: `tests/unit/test_mesh_network.py` (three real bridges, A and B on one wire, C on
 none) covers the route, the sealing, C's own trust, the session invariant, the limits,
 the defaults, both switches and the locator pin. `tests/live/m3/` proves it on installed
-packages: A (Mac) -> B (alzan-prod) -> C (a second device on alzan-prod with no relay,
+packages: A (Mac) -> B (server) -> C (a second device on server with no relay,
 reachable only through B), clean transcript. Written, not yet run live; the run order
 and how C is made relay-less are in `tests/live/m3/README.md`.
 
@@ -816,9 +816,9 @@ prints both. Operator detail is in
 ## 12. Milestones and the proof bar
 
 1. **Simple flow, 0.11.0.** Sections 4 to 8. Proven as a user on installed
-   packages on the Mac and alzan-prod: Story 1, Story 2 and Story 3 exactly as
+   packages on the Mac and server: Story 1, Story 2 and Story 3 exactly as
    written, transcript clean on both sides, at 80 and 120 columns.
-2. **Sealed config sync.** Section 9. Story 8. Proven on the Mac and alzan-prod
+2. **Sealed config sync.** Section 9. Story 8. Proven on the Mac and server
    from installed packages, on the network the milestone 1 proof joins: the Mac
    switches its loadout and, within 60 seconds, `/config` on the server shows
    the same loadout marked `managed by <mac device>`; the API key exists on
@@ -827,7 +827,7 @@ prints both. Operator detail is in
    deleted on the Mac appears and disappears on the server (`tests/live/m2`).
 3. **Mesh.** Section 10.
 4. **One-command self-host.** Section 11. Proven on selfhost.kollabor.ai
-   (alzan-prod) with the one command in place of the relay, the publisher and the
+   (server) with the one command in place of the relay, the publisher and the
    static server: two devices join a network on that domain and exchange a
    message, a restart of the command keeps the published key and both devices
    come back, and nothing touches kollabor.ai (`tests/live/m4`).

@@ -753,7 +753,7 @@ async def test_tool_progress_is_bounded_and_does_not_forward_tool_arguments(brid
 
     await right._flush_outbound()
     # Progress is shown to the human but never starts a sender model turn: in
-    # the live Mac/alzan-prod run each event produced a filler reply.
+    # the live Mac/server run each event produced a filler reply.
     assert left_model.contexts == []
     assert not any(
         "[relay progress]" in str(item.content) for item in left_model.conversation_history
@@ -808,7 +808,7 @@ async def test_remote_task_reply_binds_sender_with_drifted_agent_segment(bridges
 
 @pytest.mark.asyncio
 async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
-    # Live Mac/alzan-prod run: the receiving model sent its final answer with
+    # Live Mac/server run: the receiving model sent its final answer with
     # hub_msg three times and got only a generic "not accepted" error.
     members, _ = bridges
     (left, _, _, _), (right, right_hub, right_model, _) = members

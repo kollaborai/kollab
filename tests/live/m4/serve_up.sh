@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# serve_up.sh [plan|up]: replace the manual selfhost.kollabor.ai stack on alzan-prod (relay supervisor,
+# serve_up.sh [plan|up]: replace the manual selfhost.kollabor.ai stack on server (relay supervisor,
 # standalone publisher and static file server, tmux sh-relay / sh-pub / sh-static) with the one command,
 # `kollab relay serve --domain selfhost.kollabor.ai`, run from the m1 venv.
 #
 #   plan (default)  read-only: what runs today, what would be stopped, the command that would start.
-#   up              do it. Records the old stack first and writes, on alzan-prod, in ~/kollab-m4/:
+#   up              do it. Records the old stack first and writes, on server, in ~/kollab-m4/:
 #                     serve.env, serve-cmd.sh   how the one command is started (also used to restart it)
 #                     restore-old-stack.sh      brings the three old tmux sessions back
 #                   and here, in m4/evidence/: old-stack.json, pre-manifest.json, pre.env, serve-banner.txt.
@@ -21,7 +21,7 @@ EVID=$M4_DIR/evidence
 mkdir -p "$EVID"
 m4_srv_paths
 KOLLAB=$M1_SRV_VENV/bin/kollab
-EDGE_WG_IP=${M4_EDGE_WG_IP:-10.0.0.1}   # alzan-edge on the WireGuard mesh; used only when the old config trusts no proxy
+EDGE_WG_IP=${M4_EDGE_WG_IP:-10.0.0.2}   # edge on the WireGuard mesh; used only when the old config trusts no proxy
 
 # ---- the installed build has the command --------------------------------------------------------
 help_out=$(m1_ssh "cd \"\$HOME\" && '$KOLLAB' relay serve --help 2>&1" || true)

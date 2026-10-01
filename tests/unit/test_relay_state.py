@@ -90,12 +90,12 @@ def test_device_name_and_trust_round_trip_through_save_and_reload(tmp_path):
     workspace.mkdir()
     state_dir = tmp_path / "state"
     first = RelayStateStore(workspace, state_dir)
-    first.state.device_name = "mac-kollab"
+    first.state.device_name = "laptop-kollab"
     first.state.trust = "agents"
     first.save()
 
     reloaded = RelayStateStore(workspace, state_dir)
-    assert reloaded.state.device_name == "mac-kollab"
+    assert reloaded.state.device_name == "laptop-kollab"
     assert reloaded.state.trust == "agents"
 
 
@@ -156,14 +156,14 @@ def test_client_approve_and_revoke_keep_names_written_by_another_store(tmp_path)
     bridge_store = RelayStateStore(workspace, state_dir)
     bridge_store.state.peer_devices = {PEER_KEY: "laptop-kollab"}
     bridge_store.state.peer_trust = {PEER_KEY: "agents"}
-    bridge_store.state.device_name = "mac-kollab"
+    bridge_store.state.device_name = "laptop-kollab"
     bridge_store.save()
 
     client.approve(other)
     saved = RelayStateStore(workspace, state_dir).state
     assert saved.peer_devices == {PEER_KEY: "laptop-kollab"}
     assert saved.peer_trust == {PEER_KEY: "agents"}
-    assert saved.device_name == "mac-kollab"
+    assert saved.device_name == "laptop-kollab"
 
     client.revoke(PEER_KEY)
     saved = RelayStateStore(workspace, state_dir).state

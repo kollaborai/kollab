@@ -338,14 +338,14 @@ def test_other_computer_box_on_the_new_network_screen(width):
 
 
 def test_post_join_line_names_the_primary_and_the_login():
-    line = post_join_line("mac-kollab")
-    assert "Settings arrive sealed from mac-kollab" in line
+    line = post_join_line("laptop-kollab")
+    assert "Settings arrive sealed from laptop-kollab" in line
     assert "Run /login on this computer: a ChatGPT login does not travel." in line
     assert "the device that issued the code" in post_join_line("")
 
 
 def test_join_outcome_shows_the_note_under_the_joined_line():
-    note = post_join_line("mac-kollab")
+    note = post_join_line("laptop-kollab")
     outcome = ConnectOutcome.approved("joined mac-net as box. trust: open", note)
     assert outcome.note == note
     view = ConnectAltView()
@@ -354,7 +354,7 @@ def test_join_outcome_shows_the_note_under_the_joined_line():
     view._render_outcome(4, 80)
     text = " ".join(row for _, row in sorted(pane.rows))
     assert "joined mac-net as box. trust: open" in text
-    assert "Settings arrive sealed from mac-kollab" in text
+    assert "Settings arrive sealed from laptop-kollab" in text
     assert "Run /login on this computer:" in text
     assert "enter/esc close" in text
     with pytest.raises(ValueError):
@@ -371,8 +371,8 @@ def test_join_line_waits_for_the_name_then_falls_back_after_the_patience():
     assert line.text() == ""  # the name may still come
     now[0] = 29.0
     assert line.text() == ""
-    name[0] = "mac-kollab"
-    assert line.text() == post_join_line("mac-kollab")
+    name[0] = "laptop-kollab"
+    assert line.text() == post_join_line("laptop-kollab")
     name[0], now[0] = "", 30.0
     assert line.text() == post_join_line("")  # about 30 s without a name
 
@@ -381,15 +381,15 @@ def test_join_line_waits_for_the_name_then_falls_back_after_the_patience():
 async def test_join_line_is_said_once_with_the_name_as_soon_as_it_is_known():
     from plugins.hub.connect_guide import JoinLine
 
-    names, said = iter(["", "", "mac-kollab"]), []
+    names, said = iter(["", "", "laptop-kollab"]), []
 
     async def sleep(_seconds):
         return None
 
-    line = JoinLine(lambda: next(names, "mac-kollab"), patience=30.0)
+    line = JoinLine(lambda: next(names, "laptop-kollab"), patience=30.0)
     await line.say(said.append, poll=0.0, sleep=sleep)
     await line.say(said.append, poll=0.0, sleep=sleep)  # asking again says nothing more
-    assert said == [post_join_line("mac-kollab")]
+    assert said == [post_join_line("laptop-kollab")]
 
 
 @pytest.mark.asyncio

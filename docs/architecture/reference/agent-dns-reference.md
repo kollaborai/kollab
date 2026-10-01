@@ -31,9 +31,9 @@ identity documents with `Cache-Control: no-store`.
 The persistent service signer is independent of workspace coordinator elections.
 A separate systemd publisher on Arch renews the document every 60 seconds; each
 signature expires after 300 seconds. nginx on the VPS forwards only these public
-paths to the static listener at `10.0.0.5:9077` over WireGuard. The listener binds
+paths to the static listener at `10.0.0.3:9077` over WireGuard. The listener binds
 to that WireGuard address. Actual public output is under
-`/home/almazan/.kollabor-cli/hub/dns/well-known`; private keys remain outside the
+`/home/me/.kollabor-cli/hub/dns/well-known`; private keys remain outside the
 served directory.
 
 Lookup verifies TXT selection, HTTPS origin, the full document signature, expiry

@@ -1592,7 +1592,7 @@ class HubPlugin(BasePlugin):
 
         # hub_cron_add
         # Matches: <hub_cron_add interval="5m">msg</hub_cron_add>
-        #          <hub_cron_add to="infra@alzan-prod-home" interval="1h">msg</hub_cron_add>
+        #          <hub_cron_add to="infra@home-server" interval="1h">msg</hub_cron_add>
         # `to` (`target` is the older spelling) names who gets the reminder;
         # without it the reminder comes back to the sender. The handler reports
         # a missing interval, so the tag is not left on screen for it.
@@ -7810,7 +7810,7 @@ class HubPlugin(BasePlugin):
         lines.append("to message an agent, ALWAYS use this exact format:")
         lines.append('<hub_msg to="identity">your message</hub_msg>')
         lines.append("remote agents use the same tag with their full name:")
-        lines.append('<hub_msg to="infra@alzan-prod-home">your message</hub_msg>')
+        lines.append('<hub_msg to="infra@home-server">your message</hub_msg>')
         lines.append(
             "a remote agent runs your message with its own tools on its own machine "
             "and answers with the same tag."

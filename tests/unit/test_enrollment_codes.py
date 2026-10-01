@@ -221,6 +221,6 @@ def test_looks_like_join_code_catches_codes_not_device_names():
 
     assert looks_like_join_code("7QK4-M2XP")
     assert not looks_like_join_code("mac-home")
-    assert not looks_like_join_code("alzan-prod-home")
+    assert not looks_like_join_code("home-server")
     assert not looks_like_join_code("kollabor.ai")
     assert not looks_like_join_code("7qk4-m2xp")  # lower case is left to the private form

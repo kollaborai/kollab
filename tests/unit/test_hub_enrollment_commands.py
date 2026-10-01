@@ -306,13 +306,13 @@ async def test_accept_without_a_device_name_falls_back_to_the_key_prefix(tmp_pat
 @pytest.mark.asyncio
 async def test_accept_rejects_a_joiner_name_matching_this_devices_own_name(tmp_path):
     hub, bridge = _local_hub(tmp_path)
-    bridge.set_device_name("mac-kollab")
+    bridge.set_device_name("laptop-kollab")
     issuer = EnrollmentIssuer(bridge)
     bridge._enrollment_issuer = issuer
     now = int(time.time())
     round_id = "9" * 32
     store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
-    live.device_name = "mac-kollab"
+    live.device_name = "laptop-kollab"
 
     result = await hub._handle_connect_command(f"accept {round_id}")
 
@@ -355,10 +355,10 @@ async def test_accept_refuses_a_joiner_name_held_by_a_device_in_the_roster(tmp_p
     now = int(time.time())
     round_id = "6" * 32
     _store, live, _ = _add_pending(bridge, issuer, round_id=round_id, now=now)
-    live.device_name = "alzan-prod-home"
+    live.device_name = "home-server"
     bridge._cache[("session", "e" * 64, "peer-session")] = (
         time.monotonic(),
-        [{"name": "ops", "device": "alzan-prod-home", "handle": "ops@alzan-prod-home"}],
+        [{"name": "ops", "device": "home-server", "handle": "ops@home-server"}],
     )
 
     result = await hub._handle_connect_command(f"accept {round_id}")

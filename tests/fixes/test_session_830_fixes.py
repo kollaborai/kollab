@@ -172,12 +172,12 @@ class TestHubStatusProjectDisplay(unittest.TestCase):
         role = " (koordinator)"
         me = " (you)"
         state_str = "coordinating"
-        project = "webceive"
+        project = "acme"
         task = ""
 
         proj = f" [{project}]" if project else ""
         line = f"  {identity}{role}{me}: {state_str}{proj}{task}"
-        self.assertEqual(line, "  ruby (koordinator) (you): coordinating [webceive]")
+        self.assertEqual(line, "  ruby (koordinator) (you): coordinating [acme]")
 
 
 if __name__ == "__main__":

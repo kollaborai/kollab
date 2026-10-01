@@ -743,7 +743,7 @@ capacity, server saturation or production topology.
 Root applied only the three guidance-file hunks to a copy of snapshot2942.
 New manifest SHA-256 is
 `c39f5ba7d4b0c9c5d7386637b39acf28609105ee897d4412b323878e861d001b`;
-all 860 files were hash-verified locally and on alzan-prod. The isolated source
+all 860 files were hash-verified locally and on server. The isolated source
 passed 177 focused tests with imported production paths asserted inside that
 source. Mac proof PID 47512 and VPS proof PID 346501 shut down gracefully;
 replacement PIDs are 37779 and 1048045. Existing keys and workspace IDs stayed
@@ -828,7 +828,7 @@ regression selection passed (4 passed), then the complete verifier-plus-bridge
 run passed. This is source-level evidence only: no listener was started and no
 direct, LAN, relay-mesh, or multihop live acceptance result is claimed. Peer
 transport lifecycle, route-specific coverage, enrollment recovery, the real
-Mac-to-alzan-prod flow on the integrated source, capacity bounds and PyPI
+Mac-to-server flow on the integrated source, capacity bounds and PyPI
 verification remain open.
 
 ### Peer routing regression suite

@@ -237,5 +237,8 @@ docs/scratchpad/
 # Live proof evidence (captures, logs) stays local
 tests/live/*/evidence/
 
+# Real hosts and addresses for the live proofs: private, never committed (template: tests/live/local.env.example)
+tests/live/local.env
+
 # Agent network handoff: local only (Codex reads it from this checkout); never public.
 docs/handoff/agent-network/

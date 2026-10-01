@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Deploy the packaged relay from the current ~/dev/kollab HEAD to kollabor.ai (alzan-prod).
+# Deploy the packaged relay from the current ~/dev/kollab HEAD to kollabor.ai (server).
 # Layout on the server (see memory): ~/.local/share/kollab-relay/releases/<tag>/{source.tar.gz,extracted tree,.venv}
 # systemd: /etc/systemd/system/kollab-relay.service + drop-in source-v2.conf (WorkingDirectory/ExecStart -> release dir)
 # Rollback: restore the drop-in backup, daemon-reload, restart.
 set -euo pipefail
-REPO=/Users/malmazan/dev/kollab
-HOST=alzan-prod
+REPO=/Users/me/dev/kollab
+HOST=server
 TAG="$(date +%Y%m%d)-$(git -C "$REPO" rev-parse --short HEAD)"
-REL="/home/almazan/.local/share/kollab-relay/releases/$TAG"
+REL="/home/me/.local/share/kollab-relay/releases/$TAG"
 OUT="$(mktemp -d)/source.tar.gz"
 
 cd "$REPO"
@@ -40,12 +40,12 @@ PY
 KOLLAB_NO_KEYRING=1 .venv/bin/python -c "import sys; sys.path.insert(0,'.'); import plugins.hub.relay_service, plugins.hub.relay_runtime; print('import ok')"
 
 # The relay binds the private interface from runtime.json, not loopback.
-HEALTH_URL=$(python3 -c "import json;c=json.load(open('/home/almazan/.config/kollab-relay/runtime.json'));print('http://%s:%s/relay/v1/health' % (c['bind_host'], c['health_port']))")
+HEALTH_URL=$(python3 -c "import json;c=json.load(open('/home/me/.config/kollab-relay/runtime.json'));print('http://%s:%s/relay/v1/health' % (c['bind_host'], c['health_port']))")
 echo "health check: $HEALTH_URL"
 DROPIN=/etc/systemd/system/kollab-relay.service.d/source-v2.conf
-BACKUP="/home/almazan/.local/share/kollab-relay/dropin-backup-$(date +%Y%m%d-%H%M%S)"
+BACKUP="/home/me/.local/share/kollab-relay/dropin-backup-$(date +%Y%m%d-%H%M%S)"
 sudo -n cp "$DROPIN" "$BACKUP"
-printf '[Service]\nWorkingDirectory=%s\nExecStart=\nExecStart=%s/.venv/bin/python kollabor_cli_main.py relay run --config /home/almazan/.config/kollab-relay/runtime.json\n' "$REL" "$REL" | sudo -n tee "$DROPIN" >/dev/null
+printf '[Service]\nWorkingDirectory=%s\nExecStart=\nExecStart=%s/.venv/bin/python kollabor_cli_main.py relay run --config /home/me/.config/kollab-relay/runtime.json\n' "$REL" "$REL" | sudo -n tee "$DROPIN" >/dev/null
 sudo -n systemctl daemon-reload
 sudo -n systemctl restart kollab-relay.service
 for i in $(seq 1 20); do

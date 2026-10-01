@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # proof.sh: live proof of Story 7, manual trust (issue #121, release 0.11.0).
-# INSTALLED builds, driven through tmux like a user on this Mac (s7-mac) and on alzan-prod
+# INSTALLED builds, driven through tmux like a user on this Mac (s7-mac) and on server
 # (s7-srv), 120x40, default (daemon) launch, fresh workspaces. Setup rows first (the guided
 # g1-g5 flow: network started on the Mac, server joined), then:
 #   s1 /connect trust manual (Mac)   s2 first message blocked, the screen says how to authorize

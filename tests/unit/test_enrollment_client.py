@@ -731,27 +731,27 @@ async def test_device_enrollment_completes_signed_encrypted_pairing(tmp_path, mo
 @pytest.mark.asyncio
 async def test_joining_device_records_the_issuers_device_name(tmp_path, monkeypatch):
     result, commands, destination, _transport, _directory = await _run_enrollment(
-        tmp_path, monkeypatch, issuer_device_name="mac-kollab"
+        tmp_path, monkeypatch, issuer_device_name="laptop-kollab"
     )
 
     assert result == {"status": "approved"}
-    assert commands.agent_bridge.bound == [(destination.state.inviter, "mac-kollab")]
+    assert commands.agent_bridge.bound == [(destination.state.inviter, "laptop-kollab")]
 
 
 @pytest.mark.asyncio
 async def test_joining_device_takes_the_networks_name_from_the_signed_decision(tmp_path, monkeypatch):
     result, commands, _destination, _transport, _directory = await _run_enrollment(
-        tmp_path, monkeypatch, issuer_device_name="mac-kollab", network_name="mac-kollab-net"
+        tmp_path, monkeypatch, issuer_device_name="laptop-kollab", network_name="laptop-kollab-net"
     )
 
     assert result == {"status": "approved"}
-    assert commands.agent_bridge.named == ["mac-kollab-net"]
+    assert commands.agent_bridge.named == ["laptop-kollab-net"]
 
 
 @pytest.mark.asyncio
 async def test_joining_an_issuer_that_sends_no_network_name_still_completes(tmp_path, monkeypatch):
     result, commands, _destination, _transport, _directory = await _run_enrollment(
-        tmp_path, monkeypatch, issuer_device_name="mac-kollab"
+        tmp_path, monkeypatch, issuer_device_name="laptop-kollab"
     )
 
     assert result == {"status": "approved"}
@@ -776,10 +776,10 @@ def test_a_refused_network_name_never_fails_a_join_that_already_committed(caplog
     commands = SimpleNamespace(agent_bridge=SimpleNamespace(bind_network_name=refuse))
 
     with caplog.at_level("WARNING"):
-        enrollment_client._bind_network_name(commands, "mac-kollab-net")
+        enrollment_client._bind_network_name(commands, "laptop-kollab-net")
 
     assert "could not record the network's name" in caplog.text
-    enrollment_client._bind_network_name(SimpleNamespace(), "mac-kollab-net")  # no bridge
+    enrollment_client._bind_network_name(SimpleNamespace(), "laptop-kollab-net")  # no bridge
     enrollment_client._bind_network_name(commands, None)  # an issuer without a name
 
 
@@ -809,10 +809,10 @@ def test_a_refused_issuer_name_never_fails_a_join_that_already_committed(caplog)
     commands = SimpleNamespace(agent_bridge=SimpleNamespace(bind_peer_device=refuse))
 
     with caplog.at_level("WARNING"):
-        enrollment_client._bind_issuer_name(commands, "a" * 64, "mac-kollab")
+        enrollment_client._bind_issuer_name(commands, "a" * 64, "laptop-kollab")
 
     assert "could not record the issuer's device name" in caplog.text
-    enrollment_client._bind_issuer_name(SimpleNamespace(), "a" * 64, "mac-kollab")  # no bridge
+    enrollment_client._bind_issuer_name(SimpleNamespace(), "a" * 64, "laptop-kollab")  # no bridge
     enrollment_client._bind_issuer_name(commands, "a" * 64, None)  # older issuer
 
 
@@ -1270,8 +1270,8 @@ async def test_issuer_requires_explicit_decision_after_proof(
             _dns_identity=identity_manager,
         ),
         _closed=False,
-        device_name=lambda: "mac-kollab",
-        network_name=lambda: "mac-kollab-net",
+        device_name=lambda: "laptop-kollab",
+        network_name=lambda: "laptop-kollab-net",
     )
     issuer = EnrollmentIssuer(bridge)
     provisioning_plan = await issuer._make_provisioning_plan(offer_id)
@@ -1408,8 +1408,8 @@ async def test_issuer_requires_explicit_decision_after_proof(
                 enrollment_client.verify_enrollment_payload(owner_signing_key.verify_key.encode(), self.decision)
                 if self.decision["status"] == "approved":
                     # the joiner learns the issuer's device name from the signed decision
-                    assert self.decision["issuer_device_name"] == "mac-kollab"
-                    assert self.decision["network_name"] == "mac-kollab-net"
+                    assert self.decision["issuer_device_name"] == "laptop-kollab"
+                    assert self.decision["network_name"] == "laptop-kollab-net"
                     bundle = base64.urlsafe_b64decode(
                         self.decision["provisioning_bundle"] + "=" * (-len(self.decision["provisioning_bundle"]) % 4)
                     )

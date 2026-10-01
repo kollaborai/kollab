@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # edge_vhost.sh [show|apply|restore|check HOST:PORT]: point the edge nginx vhost for selfhost.kollabor.ai at the one command.
 #
-# Today the vhost forwards to three things on alzan-prod (10.0.0.5): the relay workers (9178, 9179), the
+# Today the vhost forwards to three things on server (10.0.0.3): the relay workers (9178, 9179), the
 # supervisor's health port (9180) and a static server for the key file (9177). `kollab relay serve` answers
 # all five routes on one port, so the vhost must name that port instead. serve_up.sh wrote it to
-# ~/kollab-m4/serve.env on alzan-prod. This changes ONLY the upstream server lines and the direct proxy_pass
+# ~/kollab-m4/serve.env on server. This changes ONLY the upstream server lines and the direct proxy_pass
 # lines (repoint_vhost.py refuses anything it does not understand, and any file that serves another name than
-# the domain). It runs on alzan-edge over ssh with sudo -n.
+# the domain). It runs on edge over ssh with sudo -n.
 #
 #   show     (default) read-only: the vhost as it is, and the diff apply would make.
 #   apply    back the vhost up to /etc/nginx/m4-backups/, write the change, `nginx -t`, reload, then check

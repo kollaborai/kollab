@@ -89,7 +89,7 @@ def network(bridges, tmp_path):
     members, wire = bridges
     (left, _lhub, _lmodel, _lbus), (right, rhub, _rmodel, rbus) = members
     left_client, right_client = left.commands.client, right.commands.client
-    macs, servers = tmp_path / "mac-kollab", tmp_path / "server-kollab"
+    macs, servers = tmp_path / "laptop-kollab", tmp_path / "server-kollab"
     macs.mkdir()
     servers.mkdir()
     write_json(macs / "config.json", primary_settings())
@@ -104,10 +104,10 @@ def network(bridges, tmp_path):
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(skill_text(index))
 
-    left_client.state.device_name = "mac-kollab"
+    left_client.state.device_name = "laptop-kollab"
     left_client._store.save()
     right_client.state.inviter = left_client.public_key
-    right_client.state.peer_devices[left_client.public_key] = "mac-kollab"
+    right_client.state.peer_devices[left_client.public_key] = "laptop-kollab"
     right_client._store.save()
     left_client.add_config_recipient(right_client.public_key)
 
@@ -186,7 +186,7 @@ async def test_an_accepted_device_gets_everything_sealed(network):
     ).read_text() == "be the coder\n"
     assert len(list((net["server"] / "skills").glob("skill-*/SKILL.md"))) == 30
     record = read_managed_config(net["server"] / "private" / "managed-config.json")
-    assert record.primary_name == "mac-kollab" and len(record.files) == 31
+    assert record.primary_name == "laptop-kollab" and len(record.files) == 31
     # only ciphertext crossed the relay
     wire_text = json.dumps(net["wire"].sent)
     for secret in (
@@ -454,7 +454,7 @@ def core_call(snapshot, primary, secondary, revision):
     sealed = cs.seal(
         "core",
         {"digest": snapshot.digest, "files_digest": snapshot.files_digest},
-        cs.core_blob(snapshot, "mac-kollab"),
+        cs.core_blob(snapshot, "laptop-kollab"),
         issuer_key=primary,
         recipient_public_key=bytes(secondary.verify_key),
         revision=revision,
@@ -470,7 +470,7 @@ def secondary_service(secondary, primary, notices, root=None, **extra):
         recipients=list,
         primary=lambda: bytes(primary.verify_key).hex(),
         device_name=lambda: "server-kollab",
-        peer_name=lambda _key: "mac-kollab",
+        peer_name=lambda _key: "laptop-kollab",
         notice=notices.append,
         root=root,
         **extra,
@@ -480,7 +480,7 @@ def secondary_service(secondary, primary, notices, root=None, **extra):
 @pytest.mark.asyncio
 async def test_skipped_mcp_servers_are_named_once_per_distinct_set(tmp_path):
     primary, secondary = SigningKey.generate(), SigningKey.generate()
-    mac, server, notices = tmp_path / "mac-kollab", tmp_path / "server-kollab", []
+    mac, server, notices = tmp_path / "laptop-kollab", tmp_path / "server-kollab", []
     service = secondary_service(secondary, primary, notices, root=server)
 
     async def push(revision, servers, model="claude-opus-5-5"):
@@ -568,7 +568,7 @@ async def test_the_relay_agent_shows_config_sync_notices_in_the_main_pane(networ
 @pytest.mark.asyncio
 async def test_a_restart_stays_quiet_until_the_set_of_skipped_servers_changes(tmp_path):
     primary, secondary = SigningKey.generate(), SigningKey.generate()
-    mac, server = tmp_path / "mac-kollab", tmp_path / "server-kollab"
+    mac, server = tmp_path / "laptop-kollab", tmp_path / "server-kollab"
     kept = [("", False)]  # the network state: what was last said
 
     async def launch_and_receive(revision, servers):

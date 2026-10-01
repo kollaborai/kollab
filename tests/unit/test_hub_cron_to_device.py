@@ -29,7 +29,7 @@ from plugins.hub.relay_state import RelayError
 from tests.unit.test_relay_agent_bridge import handle as roster_handle
 from tests.unit.test_relay_network_trust import set_trust, warm_directory
 
-DEVICE = "alzan-prod-home"
+DEVICE = "home-server"
 PEER = f"infra@{DEVICE}"
 UNKNOWN_WORDING = "unknown agent@device: run /connect status to see who is online"
 NOT_AUTHORIZED = "peer has no conversation grant for this agent"
@@ -80,7 +80,7 @@ def _plugin(
     }
     network = SimpleNamespace(
         remote_agents=AsyncMock(return_value=rows if online else []),
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         _owner_call=AsyncMock(
             return_value={"state": "online" if online else "offline"}
         ),
@@ -181,12 +181,12 @@ def _notices(plugin) -> list[str]:
 @pytest.mark.parametrize(
     "text",
     [
-        '<hub_cron_add to="infra@alzan-prod-home" interval="5m">check the tunnel</hub_cron_add>',
-        '<hub_cron_add interval="5m" to="infra@alzan-prod-home">check the tunnel</hub_cron_add>',
-        "<hub_cron_add to='infra@alzan-prod-home' interval='5m'>check the tunnel</hub_cron_add>",
-        "<hub_cron_add interval='5m' to='infra@alzan-prod-home'>check the tunnel</hub_cron_add>",
+        '<hub_cron_add to="infra@home-server" interval="5m">check the tunnel</hub_cron_add>',
+        '<hub_cron_add interval="5m" to="infra@home-server">check the tunnel</hub_cron_add>',
+        "<hub_cron_add to='infra@home-server' interval='5m'>check the tunnel</hub_cron_add>",
+        "<hub_cron_add interval='5m' to='infra@home-server'>check the tunnel</hub_cron_add>",
         # The roster help text used to say target="name", which nothing read.
-        '<hub_cron_add target="infra@alzan-prod-home" interval="5m">check the tunnel</hub_cron_add>',
+        '<hub_cron_add target="infra@home-server" interval="5m">check the tunnel</hub_cron_add>',
     ],
 )
 async def test_the_tag_carries_to_into_the_job_in_any_order_and_quote_style(text):
@@ -212,7 +212,7 @@ def test_a_shuffled_cron_tag_is_run_and_hidden_not_left_on_screen():
     )
 
     parsed = parser.parse_response(
-        'Scheduling. <hub_cron_add interval="1h" to="infra@alzan-prod-home">rotate logs</hub_cron_add> Done.'
+        'Scheduling. <hub_cron_add interval="1h" to="infra@home-server">rotate logs</hub_cron_add> Done.'
     )
     tools = parser.get_all_tools(parsed)
 
@@ -233,7 +233,7 @@ async def test_the_native_call_takes_to_and_the_definition_offers_it():
     assert "to" in schema["properties"] and "to" not in schema["required"]
     assert "to" in hub_cron_add.xml_attributes
     assert any(
-        'to="infra@alzan-prod-home"' in example for example in hub_cron_add.examples
+        'to="infra@home-server"' in example for example in hub_cron_add.examples
     )
 
 
@@ -290,10 +290,10 @@ async def test_a_tag_without_an_interval_is_answered_by_the_handler_not_left_on_
     "target",
     [
         "infra@",
-        "@alzan-prod-home",
+        "@home-server",
         "a@b@c",
-        "infra@alzan_prod_home",
-        "infra@alzan prod home",
+        "infra@home_server",
+        "infra@home server",
         "relay:" + "a" * 64 + ":" + "9" * 32 + ":infra-1",
     ],
 )
@@ -312,7 +312,7 @@ async def test_a_malformed_target_is_refused_when_the_job_is_added(target):
 async def test_an_offline_remote_is_accepted_and_its_handle_normalized():
     plugin, sent = _plugin(on_roster=[], known=())
 
-    result = await _add(plugin, to="Infra@Alzan-Prod-Home")
+    result = await _add(plugin, to="Infra@Home-Server")
 
     assert result.success, result.error
     assert plugin._hub_cron_jobs[0].target == PEER
@@ -502,7 +502,7 @@ async def test_an_unnamed_offline_device_might_be_the_target_so_the_job_is_kept(
 async def test_a_handle_on_this_device_is_dropped_because_the_router_cannot_resolve_it():
     plugin, _ = _plugin(on_roster=[], known=())
 
-    assert await plugin._fire_cron_job(_job(plugin, "lapis@mac-kollab")) is True
+    assert await plugin._fire_cron_job(_job(plugin, "lapis@laptop-kollab")) is True
 
 
 @pytest.mark.asyncio
@@ -595,7 +595,7 @@ async def test_one_tick_drops_the_dead_job_keeps_the_rest_and_does_not_retry_eve
         )  # rescheduled a full interval out, not retried at the next beat
     assert [w.split(":")[0] for w in _warnings(caplog)] == [
         "hub cron gone0001 dropped",
-        "hub cron fail0001 not delivered to infra@alzan-prod-home",
+        "hub cron fail0001 not delivered to infra@home-server",
     ]
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """inspect_old.py <domain>: find the manual stack for <domain> on this host and print it as JSON.
 
-Run on alzan-prod over ssh (stdin), stdlib only, read-only. It looks for the three processes
+Run on server over ssh (stdin), stdlib only, read-only. It looks for the three processes
 `kollab relay serve --domain` replaces, by what they are configured to do, not by tmux name:
 
   relay      `... relay run --config <file>` whose config file has "origin": "https://<domain>"

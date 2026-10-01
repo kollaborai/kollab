@@ -94,7 +94,7 @@ def device_key_fingerprint(public_key_hex: str) -> str:
 
 
 def short_fingerprint(fingerprint_hex: str) -> str:
-    """`4d04...9f2e`: first 4 and last 4 hex of a fingerprint, for screens."""
+    """`abcd...ef01`: first 4 and last 4 hex of a fingerprint, for screens."""
     return f"{fingerprint_hex[:4]}\u2026{fingerprint_hex[-4:]}"
 
 

@@ -16,8 +16,8 @@ from plugins.hub.device_names import (
 
 
 def test_slug_and_validation():
-    assert slug("Alzan Prod!!") == "alzan-prod"
-    assert validate_device_name("mac-kollab") == "mac-kollab"
+    assert slug("Home Server!!") == "home-server"
+    assert validate_device_name("laptop-kollab") == "laptop-kollab"
     with pytest.raises(ValueError):
         validate_device_name("Mac Kollab")
     with pytest.raises(ValueError):
@@ -30,10 +30,10 @@ def test_default_device_name_home_and_folder(tmp_path):
 
 
 def test_handles():
-    assert parse_handle("Infra@Alzan-Prod-Home") == ("infra", "alzan-prod-home")
+    assert parse_handle("Infra@Home-Server") == ("infra", "home-server")
     assert parse_handle("lapis") is None
     assert parse_handle("relay:abc") is None
-    assert format_handle("infra", "alzan-prod-home") == "infra@alzan-prod-home"
+    assert format_handle("infra", "home-server") == "infra@home-server"
 
 
 def test_trust():
@@ -43,7 +43,7 @@ def test_trust():
 
 
 def test_short_fingerprint_is_first_4_and_last_4_hex():
-    assert short_fingerprint("4d04" + "0" * 56 + "9f2e") == "4d04\u20269f2e"
+    assert short_fingerprint("abcd" + "0" * 56 + "ef01") == "abcd\u2026ef01"
 
 
 def test_contact_route_is_16_lowercase_hex_and_fingerprint_is_a_full_digest():

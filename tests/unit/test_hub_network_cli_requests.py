@@ -29,7 +29,7 @@ from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_state import RelayError
 
-HANDLE = "infra@alzan-prod-home"
+HANDLE = "infra@home-server"
 DONE = "The receiving agent finished this request."
 
 
@@ -96,9 +96,9 @@ def _end(plugin: HubPlugin, thread_id: str, replies: int, *, failed: bool = Fals
 
 @pytest.mark.asyncio
 async def test_network_status_returns_device_trust_and_remote_rows():
-    rows = [{"handle": "infra@alzan-prod-home", "state": "idle", "online": True}]
+    rows = [{"handle": "infra@home-server", "state": "idle", "online": True}]
     relay = SimpleNamespace(
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         trust_level=lambda: "open",
         remote_agents=AsyncMock(return_value=rows),
     )
@@ -106,7 +106,7 @@ async def test_network_status_returns_device_trust_and_remote_rows():
 
     result = await plugin._handle_network_status_request()
 
-    assert result == {"device": "mac-kollab", "trust": "open", "agents": rows}
+    assert result == {"device": "laptop-kollab", "trust": "open", "agents": rows}
     plugin._start_relay_agent.assert_not_awaited()
 
 
@@ -530,10 +530,10 @@ def test_network_status_frame_round_trips_over_a_real_socket():
     async def run():
         async def on_status():
             return {
-                "device": "mac-kollab",
+                "device": "laptop-kollab",
                 "trust": "open",
                 "agents": [
-                    {"handle": "infra@alzan-prod-home", "state": "idle", "online": True}
+                    {"handle": "infra@home-server", "state": "idle", "online": True}
                 ],
             }
 
@@ -551,10 +551,10 @@ def test_network_status_frame_round_trips_over_a_real_socket():
 
         assert result == {
             "type": "network_status",
-            "device": "mac-kollab",
+            "device": "laptop-kollab",
             "trust": "open",
             "agents": [
-                {"handle": "infra@alzan-prod-home", "state": "idle", "online": True}
+                {"handle": "infra@home-server", "state": "idle", "online": True}
             ],
         }
 
@@ -613,7 +613,7 @@ def test_network_send_streams_replies_to_the_client_then_returns_the_terminal_fr
         try:
             result = await AgentMessenger.request_network_send(
                 sock_path,
-                "infra@alzan-prod-home",
+                "infra@home-server",
                 "check the tunnel",
                 wait_seconds=5,
                 on_reply=on_reply,
@@ -625,7 +625,7 @@ def test_network_send_streams_replies_to_the_client_then_returns_the_terminal_fr
         assert [r["content"] for r in replies] == ["on it", "handshake ok"]
         assert stamps[1] - stamps[0] >= 0.04  # arrived as sent, not batched
         assert seen == {
-            "to": "infra@alzan-prod-home",
+            "to": "infra@home-server",
             "content": "check the tunnel",
             "wait_seconds": 5,
         }
@@ -648,12 +648,12 @@ def test_network_send_with_a_single_frame_handler_still_round_trips():
         sock_path = await server.start()
         try:
             return await AgentMessenger.request_network_send(
-                sock_path, "infra@alzan-prod-home", "hi", wait_seconds=0
+                sock_path, "infra@home-server", "hi", wait_seconds=0
             )
         finally:
             await server.stop()
 
-    assert asyncio.run(run()) == {"type": "network_sent", "to": "infra@alzan-prod-home"}
+    assert asyncio.run(run()) == {"type": "network_sent", "to": "infra@home-server"}
 
 
 def test_a_handler_that_fails_midway_ends_the_stream_with_an_error_frame():
@@ -673,7 +673,7 @@ def test_a_handler_that_fails_midway_ends_the_stream_with_an_error_frame():
         try:
             result = await AgentMessenger.request_network_send(
                 sock_path,
-                "infra@alzan-prod-home",
+                "infra@home-server",
                 "hi",
                 wait_seconds=5,
                 on_reply=replies.append,
@@ -697,7 +697,7 @@ def test_network_send_with_no_handler_is_a_clean_error():
         sock_path = await server.start()
         try:
             return await AgentMessenger.request_network_send(
-                sock_path, "infra@alzan-prod-home", "hi", wait_seconds=1
+                sock_path, "infra@home-server", "hi", wait_seconds=1
             )
         finally:
             await server.stop()

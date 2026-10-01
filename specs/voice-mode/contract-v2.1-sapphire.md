@@ -1,6 +1,6 @@
 # Voice Engine Contract — v2.1 addendum to v2-sapphire (sapphire)
 
-malmazan directive: the voice engine powers MULTIPLE PLATFORMS (CLI, native app, web,
+owner directive: the voice engine powers MULTIPLE PLATFORMS (CLI, native app, web,
 anything) and its logic must be solid, efficient, and DUPLICATABLE in any programming
 language. This document is the normative contract. The Python package
 (packages/kollabor-voice/) is the REFERENCE IMPLEMENTATION. Any team (rust, swift, go)
@@ -32,7 +32,7 @@ Transitions:
                  fallback; entering error requires operator action
   listening    -> off           on disable (drain, flush partial, close stream)
 
-Verdict enum (wire): "silence" | "converse" | "act". NOTE: malmazan's latest direction
+Verdict enum (wire): "silence" | "converse" | "act". NOTE: owner's latest direction
 (2026-09-25 stream) treats converse+act as one combined flow — "first converse, then act
 immediately, or silence." Pending merge confirmation the enum stays 3-valued but the
 escalation path is unified: every escalated segment ALWAYS returns one sentence to the

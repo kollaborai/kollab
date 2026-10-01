@@ -1010,7 +1010,7 @@ async def test_submit_request_carries_validates_and_defaults_device_name(relay_c
         round_id="5" * 32,
         code_verifier=verifier,
         envelope=b64url(b"req"),
-        device_name="mac-kollab",
+        device_name="laptop-kollab",
     )
     status, _ = await post_json(relay_client, request_path, request)
     assert status == 202
@@ -1019,7 +1019,7 @@ async def test_submit_request_carries_validates_and_defaults_device_name(relay_c
         relay_client, poll_path, _issuer_fields(issuer, offer_id, poll_path, claim_id="6" * 32)
     )
     assert status == 200
-    assert claimed["device_name"] == "mac-kollab"
+    assert claimed["device_name"] == "laptop-kollab"
 
     # An invalid name is rejected outright.
     offer_id = "7" * 32

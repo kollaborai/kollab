@@ -993,7 +993,7 @@ Identity column width is 12 chars (left-aligned). Source:
 
 ```xml
 <hub_cron_add to="monitor" interval="30s">check api health</hub_cron_add>
-<hub_cron_add to="infra@alzan-prod-home" interval="1h">check the tunnel</hub_cron_add>
+<hub_cron_add to="infra@home-server" interval="1h">check the tunnel</hub_cron_add>
 <hub_cron_list/>
 <hub_cron_delete>job-abc123</hub_cron_delete>
 ```

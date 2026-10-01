@@ -179,7 +179,7 @@ def send_files(snapshot, revision, receiver, primary, secondary, use, primary_ho
 
 
 def push_core(
-    snapshot, revision, receiver, primary, secondary, use, *, name="mac-kollab"
+    snapshot, revision, receiver, primary, secondary, use, *, name="laptop-kollab"
 ):
     blob = cs.core_blob(snapshot, name)
     body = {"digest": snapshot.digest, "files_digest": snapshot.files_digest}
@@ -586,7 +586,7 @@ def test_secondary_applies_settings_keeps_its_own_and_marks_them_managed(homes, 
         mcp = json.loads((server / "mcp" / "mcp_settings.json").read_text())
         assert mcp["servers"]["mentiko"]["command"] == sys.executable
         record = read_managed_config()
-        assert record.primary_name == "mac-kollab" and record.revision == 10
+        assert record.primary_name == "laptop-kollab" and record.revision == 10
         assert ("kollabor", "llm", "active_profile") in record.keys
         assert ("terminal", "local_only") not in record.keys
         assert record.mcp_servers == ("mentiko",)
@@ -660,7 +660,7 @@ def test_a_secondary_refuses_local_only_keys_even_from_its_primary(homes, keys):
                 "terminal": {"render_fps": 12},
             },
             "mcp": {},
-            "primary_name": "mac-kollab",
+            "primary_name": "laptop-kollab",
         }
     )
     sealed = cs.seal(
@@ -671,7 +671,7 @@ def test_a_secondary_refuses_local_only_keys_even_from_its_primary(homes, keys):
         reply, _ = cs.Receiver(secondary).core(
             sealed,
             primary_key=bytes(primary.verify_key).hex(),
-            primary_name="mac-kollab",
+            primary_name="laptop-kollab",
         )
         assert reply == {"ok": True}
         config = json.loads((server / "config.json").read_text())
@@ -928,13 +928,13 @@ def test_a_keyring_key_the_primary_cannot_read_stays_on_the_secondary(homes, key
 
     def push(snapshot, revision):
         sealed = cs.seal(
-            "core", {"digest": snapshot.digest}, cs.core_blob(snapshot, "mac-kollab"),
+            "core", {"digest": snapshot.digest}, cs.core_blob(snapshot, "laptop-kollab"),
             issuer_key=primary, recipient_public_key=bytes(secondary.verify_key),
             revision=revision,
         )  # fmt: skip
         with homes("server") as kollab:
             reply, _ = receiver.core(
-                sealed, primary_key=bytes(primary.verify_key).hex(), primary_name="mac-kollab"
+                sealed, primary_key=bytes(primary.verify_key).hex(), primary_name="laptop-kollab"
             )
             managed = {tuple(key) for key in cs.read_managed_config().keys}
             return reply, dict(cs.walk_leaves(json.loads((kollab / "config.json").read_text()))), managed

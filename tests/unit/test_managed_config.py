@@ -18,7 +18,7 @@ PRIMARY = "a" * 64
 def record(**overrides):
     values = {
         "primary_key": PRIMARY,
-        "primary_name": "mac-kollab",
+        "primary_name": "laptop-kollab",
         "revision": 5,
         "digest": "d" * 64,
         "keys": (
@@ -54,11 +54,11 @@ def test_managed_by_names_the_primary_for_synced_keys_only(tmp_path, monkeypatch
     monkeypatch.setenv("HOME", str(tmp_path))
     write_managed_config(record())
 
-    assert managed_by("kollabor.llm.active_profile") == "mac-kollab"
+    assert managed_by("kollabor.llm.active_profile") == "laptop-kollab"
     # a profile name with a dot is one path segment, and still matches its dotted form
-    assert managed_by("kollabor.llm.profiles.gpt-5.4.model") == "mac-kollab"
+    assert managed_by("kollabor.llm.profiles.gpt-5.4.model") == "laptop-kollab"
     # a section that holds a managed key is marked; a sibling key is not
-    assert managed_by("kollabor.llm") == "mac-kollab"
+    assert managed_by("kollabor.llm") == "laptop-kollab"
     assert managed_by("kollabor.llm.max_history") is None
     assert managed_by("terminal.render_fps") is None
     assert managed_by("") is None

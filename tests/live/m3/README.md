@@ -1,10 +1,10 @@
 # m3: live proof for agent network milestone 3, the mesh (#121)
 
 Proves section 10 of `docs/specs/agent-network-simple-flow.md` on installed packages, driven
-through tmux, on this Mac and `alzan-prod`: **A** (the Mac) reaches **C** through **B**.
+through tmux, on this Mac and `server`: **A** (the Mac) reaches **C** through **B**.
 
-- A is the Mac, tmux `m1-mac`. B is the server device, tmux `m1-srv` on alzan-prod. Both are the devices `m1/proof.sh` left joined.
-- C is a second device on alzan-prod: own workspace `~/kollab-m3-c`, own tmux `m3-c`, own hub identity (`--as peridot`; two devices on one home need distinct identities).
+- A is the Mac, tmux `m1-mac`. B is the server device, tmux `m1-srv` on server. Both are the devices `m1/proof.sh` left joined.
+- C is a second device on server: own workspace `~/kollab-m3-c`, own tmux `m3-c`, own hub identity (`--as peridot`; two devices on one home need distinct identities).
 - C is on **no relay**. Its only reachable door is B's loopback TLS endpoint, `127.0.0.1` on the same host, which the Mac cannot reach. A gets to C only if B forwards, and B can forward only opaque, end-to-end sealed frames.
 
 Written, not yet run live.
@@ -13,7 +13,7 @@ Written, not yet run live.
 
 - The wheels come from a ref that contains milestone 3 (`feac607` or newer) **and** the change "every network member approves every other member". Without it step `c3-members` fails: B and C only approve their inviter after a join by code. The proof does not seed B<->C approvals; that is deliberate, do not add any.
 - `m1/proof.sh` passed on that build and its sessions `m1-mac` and `m1-srv` are still up. Do not run `m1/teardown.sh` first. `m2/proof.sh` may run before this; it leaves the sessions up.
-- alzan-prod has the `openssl` CLI and `certifi` in the m1 venv, tcp `8801`/`8802` and udp `39531` free (`ss -lntu`), and nobody attached to the three sessions. Do not run with `bash -x`.
+- server has the `openssl` CLI and `certifi` in the m1 venv, tcp `8801`/`8802` and udp `39531` free (`ss -lntu`), and nobody attached to the three sessions. Do not run with `bash -x`.
 - The Mac and the server need no `peer_direct_enabled` / `peer_forward_enabled` keys. Both default on; `c8-defaults-on` fails if any config sets one.
 
 ## Order

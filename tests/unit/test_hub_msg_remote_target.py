@@ -23,7 +23,7 @@ from plugins.hub.relay_state import RelayError
 
 # Keys, receipt ids and relay: addresses never reach a human or the model.
 LEAK = re.compile(r"[0-9a-f]{32,}|ed25519:|relay:|receipt", re.IGNORECASE)
-PEER = "koordinator@alzan-prod-kollab-m1-server5"
+PEER = "koordinator@server-kollab-m1-server5"
 UNKNOWN_WORDING = "unknown agent@device: run /connect status to see who is online"
 
 
@@ -120,7 +120,7 @@ async def test_a_failed_remote_send_can_be_retried_once_the_agent_is_on_the_rost
                 return_value=[
                     {
                         "name": "koordinator",
-                        "device": "alzan-prod-kollab-m1-server5",
+                        "device": "server-kollab-m1-server5",
                         "address": "relay:x",
                     }
                 ]
@@ -179,7 +179,7 @@ async def test_an_answer_on_a_received_request_thread_stays_plain_sent_to():
     )
     plugin._open_network_turn(request, "wake")
 
-    result = await plugin._handle_hub_msg_tool(_call(PEER, "alzan-prod"))
+    result = await plugin._handle_hub_msg_tool(_call(PEER, "server"))
 
     assert result.success and result.output == f"sent to {PEER}"
     assert sent[0]["thread_id"] == request.thread_id

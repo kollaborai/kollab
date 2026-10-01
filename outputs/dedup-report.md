@@ -175,7 +175,7 @@ Proposed home: packages/kollabor-plugins/src/kollabor_plugins/plugin_utils.py:10
 
 _Byte-identical override-or-registry `llm_service` property copy-pasted across sibling subclasses of BaseCommandHandler (model.py + login.py here; also profile/skills/agent in a defensive variant; system.py registry-only). Not coincidental — base.py:45-48 explicitly comments that subclasses define this accessor, and base.py:38-43 already implements the identical pattern for config_manager. So it's a genuine dupe that belongs pulled up. NOT safe_util: this is an instance property coupled to self._llm_service_override and self.event_bus, not a stateless helper, and consolidation is non-trivial (must add `self._llm_service_override = None` default to base __init__ or SystemCommandHandler — which never sets that attr — would AttributeError; plus the bare model/login form vs the hasattr-guarded profile/skills/agent form must be reconciled). Multi-file, behavioral-init gotcha -> risky_other, autofix false._
 
-Proposed home: /Users/malmazan/dev/kollab/kollabor/commands/system_commands/base.py (add `llm_service` property to BaseCommandHandler next to existing config_manager property at lines 38-43; set self._llm_service_override = None in base __init__ so SystemCommandHandler's registry-only path keeps working)
+Proposed home: /Users/me/dev/kollab/kollabor/commands/system_commands/base.py (add `llm_service` property to BaseCommandHandler next to existing config_manager property at lines 38-43; set self._llm_service_override = None in base __init__ so SystemCommandHandler's registry-only path keeps working)
 
 **#22 — `_fg, fg`** (3 copies)
   - `packages/kollabor-tui/src/kollabor_tui/design_system/inline_widgets.py:29` `_fg()`

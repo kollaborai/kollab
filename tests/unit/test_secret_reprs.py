@@ -70,7 +70,7 @@ def test_connect_submission_repr_hides_the_code():
 
 
 def test_join_request_row_repr_hides_the_receipt():
-    row = JoinRequestRow(RECEIPT, "ana-laptop", "4d04…9f2e", ("conversation:send",))
+    row = JoinRequestRow(RECEIPT, "ana-laptop", "abcd…ef01", ("conversation:send",))
 
     text = _assert_clean(row, RECEIPT)
 
@@ -82,9 +82,9 @@ def test_connect_screen_state_repr_hides_the_join_code_and_nested_receipts():
         network="marco-home",
         domain="kollabor.ai",
         trust="open",
-        device="mac-kollab",
+        device="laptop-kollab",
         relay_online=True,
-        requests=(JoinRequestRow(RECEIPT, "ana-laptop", "4d04…9f2e"),),
+        requests=(JoinRequestRow(RECEIPT, "ana-laptop", "abcd…ef01"),),
     )
     state = ConnectScreenState(
         snapshot=snapshot, code=CODE, code_remaining=200, code_status="active"

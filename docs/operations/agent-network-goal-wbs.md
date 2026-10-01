@@ -3,7 +3,7 @@
 Updated: 2026-09-28
 
 This is the execution tracker for the complete networking goal in
-`/Users/malmazan/.codex/attachments/1ab030ab-9bc6-415e-9822-e3c55a121d3c/goal-objective.md`.
+`/Users/me/.codex/attachments/1ab030ab-9bc6-415e-9822-e3c55a121d3c/goal-objective.md`.
 It records evidence boundaries as well as implementation status. “Partial” and
 “in progress” are not completion claims.
 
@@ -21,7 +21,7 @@ identity, pairing, authorization and revocation; real model-to-model
 conversations and remote workspace tools; local/direct/forwarded routing and
 recovery; measured production limits; synchronized operator documentation; a
 published release; and clean installed-package acceptance on the Mac and
-`alzan-prod`.
+`server`.
 
 ## Work breakdown
 
@@ -36,17 +36,17 @@ published release; and clean installed-package acceptance on the Mac and
 | 2.5 | Discovery, presence and reconnect reliability | Partial. Live: public and self-hosted discovery (kollabor.ai and selfhost.kollabor.ai), quiet same-user roster across workspaces, reconnect. Open: LAN household discovery without a relay | Public/self-hosted DNS contract and quiet local discovery; authenticated expiring records, bounded propagation, truthful offline/revoked status, route changes and restart recovery. |
 | 2.6 | Shared-state and capacity limits | Measured 2026-09-28 on the production topology (2 workers + managed Valkey, same host), see Capacity below; prior 1,024-connection errors classified | Classify prior load errors; measure the final topology, recovery and resource/backpressure limits; publish only demonstrated operating limits. |
 | 3 | Focused regressions and candidate verification | Full unit suite green on the branch; CI (security-scan, standards-check, tests) green on PR #87  | Run focused and cross-cutting suites for touched behavior; retain exact commands and results. Unit and simulated transport evidence remain separate from live proof. |
-| 4 | Source-level two-host acceptance | Passed 2026-09-28: run `0428cb8f` through `https://kollabor.ai`, all eleven checks, current source on the Mac and `alzan-prod`  | Current source on Mac and `alzan-prod`: actual models, remote file operation, artifact/hash, correlated reply consumed by sender, follow-up answer, cancellation/reconnect and negative authorization cases. |
+| 4 | Source-level two-host acceptance | Passed 2026-09-28: run `0428cb8f` through `https://kollabor.ai`, all eleven checks, current source on the Mac and `server`  | Current source on Mac and `server`: actual models, remote file operation, artifact/hash, correlated reply consumed by sender, follow-up answer, cancellation/reconnect and negative authorization cases. |
 | 5 | Synchronize canonical docs and operator guidance | Seven walkthroughs exact and code-checked (PR #96); ledger and tracker updated with installed, self-hosted and capacity evidence | Specs, implementation ledger, walkthroughs, command help, harness and development skill match the implementation and verified limits. |
 | 6 | Prepare and publish a corrected release | Done: Kollab 0.10.0 and 0.10.1 published to PyPI and GitHub Releases (tags `v0.10.0`, `v0.10.1`) | Version all packages consistently, changelog and CI pass, normal tag/release/PyPI workflow completes. |
-| 7 | Installed-package acceptance | Done: clean `pip install kollab==0.10.1` on both hosts; runs `c947b361` (kollabor.ai) and `dbcd34d6` (selfhost.kollabor.ai) passed every check; enrollment from a fresh non-operator issuer passed | Clean `pip install kollab` environments on Mac and `alzan-prod`; repeat cross-network model/tool/reply flow and required recovery/negative cases. |
+| 7 | Installed-package acceptance | Done: clean `pip install kollab==0.10.1` on both hosts; runs `c947b361` (kollabor.ai) and `dbcd34d6` (selfhost.kollabor.ai) passed every check; enrollment from a fresh non-operator issuer passed | Clean `pip install kollab` environments on Mac and `server`; repeat cross-network model/tool/reply flow and required recovery/negative cases. |
 | 8 | Final completion report | Open | Release identifiers, exact working commands, source and installed evidence, and measured limits; all unverified items named. |
 
 ## Live acceptance on current source (2026-09-28)
 
 Runs `0428cb8fb09a47ea821fe673e9930093` and `b42ec1abb234489b9c0be37d3a762fac`
 both passed every check of
-the old live verifier script (since deleted) between the Mac and `alzan-prod`
+the old live verifier script (since deleted) between the Mac and `server`
 through `https://kollabor.ai`: pairing, attached `/connect status` on both
 hosts, the core model/tool/file exchange, question/answer, follow-up,
 cancellation, reconnect, and receiver-guard rejection of unauthorized,
@@ -87,7 +87,7 @@ wrong-workspace requests, and replay deduplication.
 0.10.0 let only the discovery domain's coordinator issue codes, so the live run
 used the #89 source instead. A brand-new issuer on the Mac (fresh home, one
 profile with a fake API key, no real credentials anywhere) ran
-`/connect kollabor.ai` and `/connect offer`; a brand-new device on `alzan-prod`
+`/connect kollabor.ai` and `/connect offer`; a brand-new device on `server`
 received the code by bracketed paste into bare `/connect`. The issuer listed
 the redacted request (device fingerprint, workspace, profile and credential
 category) and accepted it. Result: the device reported `beacon: online` with one
@@ -104,7 +104,7 @@ code field, and the second attempt exercised that path.
 - Both hosts reinstalled from PyPI (`pip install kollab==0.10.1`, fresh venvs);
   run `c947b361acf84fe09c2eeb58b2f6c329` passed every conversation check.
 - Enrollment from the installed package: a brand-new Mac issuer holding only a
-  fake API key issued a code, a brand-new device on `alzan-prod` enrolled, the
+  fake API key issued a code, a brand-new device on `server` enrolled, the
   issuer approved it, and the sealed profile landed under the issuer's own
   network ID.
 - Device restart while its request was pending: the device process was killed
@@ -184,7 +184,7 @@ supervisor both workers exited and a restart was ready in 5 s.
 
 - The 0.9.0 deployment proved encrypted relay ping/pong, not an agent
   conversation.
-- Two unreleased source-pilot runs recorded an actual Mac-to-`alzan-prod`
+- Two unreleased source-pilot runs recorded an actual Mac-to-`server`
   model/tool/file exchange and a correlated result reaching the sender model.
   The second artifact was 56 bytes with SHA-256
   `8d86a7603e25e9f0200219afbf8d207c88ff23911e8598b371b5e358e6da5008`.
@@ -208,7 +208,7 @@ supervisor both workers exited and a restart was ready in 5 s.
 
 ## Previous source slice: 2.1
 
-Worktree: `/Users/malmazan/.codex/worktrees/kollab-release/kollab`, branch
+Worktree: `/Users/me/.codex/worktrees/kollab-release/kollab`, branch
 `codex/relay-agent-messaging`, base `ee60e38`. The checkout already contains
 extensive shared dirty work. Preserve it; do not reset, stash, switch branches,
 commit broadly, push or publish as part of this slice. The shared owner-reserved
@@ -257,7 +257,7 @@ Validation evidence:
   `cryptography`; the pre-existing locked environment has the required test
   dependencies. No packages were installed.
 - These are focused local tests with a fake HTTP transport. They do not prove
-  a real separate-process restart, live relay recovery, or Mac↔`alzan-prod`
+  a real separate-process restart, live relay recovery, or Mac↔`server`
   acceptance.
 
 ## Current execution slice: 2.2
@@ -319,7 +319,7 @@ Validation evidence:
 - The restart test creates a new `RelayClient` on the persisted state directory
   with a fake relay. It verifies exact ACK-envelope replay after the fake relay
   accepts the ACK but loses the response. This is not a real subprocess or
-  deployed-relay restart. Mac↔`alzan-prod` live acceptance remains open.
+  deployed-relay restart. Mac↔`server` live acceptance remains open.
 - Code-graph MCP requests returned `Transport closed`; source discovery in this
   update used targeted `rg` searches and direct reads of the enrollment worker,
   status command, and relevant tests. No graph/index-backed impact result is
@@ -332,7 +332,7 @@ Next actions:
 2. Continue source-level two-host acceptance, then synchronize the remaining
    canonical docs and walkthroughs against verified behavior.
 3. Prepare and publish the corrected release, then repeat the scenario from
-   clean installs on the Mac and `alzan-prod`.
+   clean installs on the Mac and `server`.
 
 ## Stop conditions
 

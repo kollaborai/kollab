@@ -130,10 +130,10 @@ CONVERTED = {
     ),
     "hub_cron_add": (
         "<hub_cron_add {attrs}>check the tunnel</hub_cron_add>",
-        {"interval": "5m", "to": "infra@alzan-prod-home"},
+        {"interval": "5m", "to": "infra@home-server"},
         {
             "interval": "5m",
-            "target": "infra@alzan-prod-home",
+            "target": "infra@home-server",
             "message": "check the tunnel",
         },
     ),
@@ -447,7 +447,7 @@ def test_embedded_attrs_reads_a_tag_jammed_into_one_argument(text, attrs, body):
     "text",
     [
         "lapis",
-        "koordinator@synthyo-kollab-m1-mac6",
+        "koordinator@laptop-kollab-m1-mac6",
         "relay:abc123:workspace:agent",
         "",
     ],

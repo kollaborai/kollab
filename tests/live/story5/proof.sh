@@ -2,7 +2,7 @@
 # proof.sh: drive Story 5 of docs/specs/agent-network-simple-flow.md (a stranger
 # knocks, is accepted, and reaches only the agent it was allowed) the way a user
 # would, on the INSTALLED m1 builds, in tmux on this Mac (s5-mac, plus s5-mac2 for a
-# second agent) and on alzan-prod (s5-srv), 120x40. Evidence lands in
+# second agent) and on server (s5-srv), 120x40. Evidence lands in
 # story5/evidence/.
 #
 # Two devices, two networks, one directory: the Mac and the server each start a
@@ -275,7 +275,7 @@ capscreen mac s2-01-mac-status
 if [ -z "$ROUTE" ]; then abort s2-mac-contact-route "the Mac's /connect status shows no contact route" s2-01-mac-status.txt; fi
 rec s2-mac-contact-route PASS s2-01-mac-status.txt "route $ROUTE"
 
-INTRO="Ana from Webceive. Can your ops agent run uname for me?"
+INTRO="Ana from Acme. Can your ops agent run uname for me?"
 b=$(count_pat srv 'knock sent to')
 cmd srv "/connect knock $ROUTE \"$INTRO\""
 if wait_for srv 'knock sent to' 45 "$b"; then

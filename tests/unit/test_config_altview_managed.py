@@ -58,7 +58,7 @@ def sync_to(tmp_path, monkeypatch, settings, keys):
     write_managed_config(
         ManagedConfig(
             primary_key="a" * 64,
-            primary_name="mac-kollab",
+            primary_name="laptop-kollab",
             revision=3,
             digest="d" * 64,
             keys=tuple(tuple(k.split(".")) for k in keys),
@@ -108,8 +108,8 @@ def test_a_synced_loadout_shows_managed_by_the_primary_with_the_value_from_disk(
     assert "old-loadout" not in text_of(
         loadout
     )  # the stale in-memory value is not shown
-    assert "managed by mac-kollab" in text_of(loadout)
-    assert "claude-opus-5-5" in text_of(model) and "managed by mac-kollab" in text_of(
+    assert "managed by laptop-kollab" in text_of(loadout)
+    assert "claude-opus-5-5" in text_of(model) and "managed by laptop-kollab" in text_of(
         model
     )
 
@@ -123,7 +123,7 @@ def test_other_synced_settings_become_read_only_labels_and_the_rest_still_edit(
 
     (history,) = find(view, "kollabor.llm.max_history")
     assert isinstance(history, LabelWidget)
-    assert "50" in text_of(history) and "managed by mac-kollab" in text_of(history)
+    assert "50" in text_of(history) and "managed by laptop-kollab" in text_of(history)
     (streaming,) = find(view, "kollabor.llm.enable_streaming")  # not synced
     assert not isinstance(streaming, LabelWidget)
     assert "managed by" not in text_of(streaming)
@@ -154,7 +154,7 @@ def test_a_synced_secret_is_never_drawn():
     view = ConfigAltView()
     view._managed = ManagedConfig(
         primary_key="a" * 64,
-        primary_name="mac-kollab",
+        primary_name="laptop-kollab",
         keys=(("kollabor", "llm", "profiles", "anthropic", "api_key"),),
     )
     view._global_settings = SYNCED
@@ -164,12 +164,12 @@ def test_a_synced_secret_is_never_drawn():
             "label": "API Key",
             "config_path": "kollabor.llm.profiles.anthropic.api_key",
         },
-        "mac-kollab",
+        "laptop-kollab",
     )
 
     rendered = text_of(widget)
 
-    assert "set" in rendered and "managed by mac-kollab" in rendered
+    assert "set" in rendered and "managed by laptop-kollab" in rendered
     assert FAKE_KEY not in rendered
 
 

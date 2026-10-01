@@ -38,7 +38,7 @@ WIDTHS = [60, 80, 120]
 LONGEST = "-".join(["lab"] * 16)
 # name (up to 63 characters), introduction
 HOSTILE = [
-    ("x" * 63, "Ana from Webceive. Can your ops agent review a config? " * 8),
+    ("x" * 63, "Ana from Acme. Can your ops agent review a config? " * 8),
     ("日本語" * 21, "日本語の紹介文" * 40),
     ("tab\tby\t" + "y" * 50, "\t\t\thello\tworld " * 30),
     ("ana-laptop", "short"),
@@ -116,7 +116,7 @@ def test_display_name_drops_tabs_and_controls_and_never_cuts_a_valid_name():
 def test_request_row_never_exceeds_width_and_the_hint_is_whole_or_absent(width, quote):
     lines = request_row(
         "> 1. " + display_name("x" * 63),
-        "fingerprint 91c0…77ab",
+        "fingerprint 1234…5678",
         width,
         hint=HINT,
         quote=quote,
@@ -130,19 +130,19 @@ def test_request_row_never_exceeds_width_and_the_hint_is_whole_or_absent(width, 
 
 
 def test_request_row_stays_on_one_line_when_it_fits():
-    (line,) = request_row("ana-laptop wants to join", "fingerprint 4d04…9f2e", 120, hint=HINT)
+    (line,) = request_row("ana-laptop wants to join", "fingerprint abcd…ef01", 120, hint=HINT)
 
-    assert line == "ana-laptop wants to join   fingerprint 4d04…9f2e   " + HINT
+    assert line == "ana-laptop wants to join   fingerprint abcd…ef01   " + HINT
 
 
 def test_request_row_splits_instead_of_wrapping_when_narrow():
     lines = request_row(
-        "ana-laptop wants to join", "fingerprint 4d04…9f2e", 50, hint=HINT, indent="  "
+        "ana-laptop wants to join", "fingerprint abcd…ef01", 50, hint=HINT, indent="  "
     )
 
     assert lines == [
         "ana-laptop wants to join",
-        "  fingerprint 4d04…9f2e   " + HINT,
+        "  fingerprint abcd…ef01   " + HINT,
     ]
 
 
@@ -227,7 +227,7 @@ def _join_row(device):
     return JoinRequestRow(
         enrollment_id="a" * 32,
         device=device,
-        fingerprint="4d04…9f2e",
+        fingerprint="abcd…ef01",
         categories=("conversation:send",),
     )
 
@@ -239,7 +239,7 @@ def test_connect_request_rows_fit_the_width_with_a_hostile_name(width, name):
         network="marco-home",
         domain="kollabor.ai",
         trust="open",
-        device="mac-kollab",
+        device="laptop-kollab",
         relay_online=True,
         requests=(_join_row(name), _join_row("ana-laptop"), _join_row(name)),
     )
@@ -268,7 +268,7 @@ async def test_the_connect_screen_notice_caps_a_sender_chosen_name(width):
         network="marco-home",
         domain="kollabor.ai",
         trust="open",
-        device="mac-kollab",
+        device="laptop-kollab",
         relay_online=True,
         requests=(_join_row(name),),
     )
@@ -312,7 +312,7 @@ def _screen(*names, width, selected=0):
         network="marco-home",
         domain="kollabor.ai",
         trust="open",
-        device="mac-kollab",
+        device="laptop-kollab",
         relay_online=True,
         requests=tuple(_join_row(name) for name in names),
     )
@@ -336,7 +336,7 @@ def test_the_longest_name_shows_in_full_on_the_request_row_at_120_columns():
 
     assert _heads(lines) == [f"{_VALUE}{LONGEST}{_WORDS}"]
     assert all(display_width(line) <= 120 for line in lines)
-    assert f"fingerprint 4d04…9f2e   {HINT}" in "\n".join(lines)
+    assert f"fingerprint abcd…ef01   {HINT}" in "\n".join(lines)
 
 
 def test_the_longest_name_is_cut_with_an_ellipsis_at_80_columns_and_the_words_stay():
@@ -348,7 +348,7 @@ def test_the_longest_name_is_cut_with_an_ellipsis_at_80_columns_and_the_words_st
     assert display_width(head) == 80  # the name takes everything the row has
     assert LONGEST not in "\n".join(lines)
     assert all(display_width(line) <= 80 for line in lines)
-    assert f"fingerprint 4d04…9f2e   {HINT}" in "\n".join(lines)
+    assert f"fingerprint abcd…ef01   {HINT}" in "\n".join(lines)
 
 
 @pytest.mark.parametrize("width", [80, 120])
@@ -383,7 +383,7 @@ async def test_the_accept_notice_names_the_longest_device_in_full_when_it_fits(w
         network="marco-home",
         domain="kollabor.ai",
         trust="open",
-        device="mac-kollab",
+        device="laptop-kollab",
         relay_online=True,
         requests=(_join_row(LONGEST),),
     )

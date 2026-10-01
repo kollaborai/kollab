@@ -22,7 +22,7 @@ rows = [
     SimpleNamespace(
         enrollment_id=f"{number:032x}",
         device_name=name,
-        device_key_fingerprint="4d04" + "0" * 56 + "9f2e",
+        device_key_fingerprint="abcd" + "0" * 56 + "ef01",
         credential_categories=(),
     )
     for number, name in enumerate(sys.argv[1:], start=1)

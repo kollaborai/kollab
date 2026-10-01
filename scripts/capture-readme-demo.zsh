@@ -4,8 +4,8 @@ set -u
 set -o pipefail
 
 SESSION="kollab_readme_demo"
-KOLLAB_REPO="/Users/malmazan/dev/kollab"
-DEMO_REPO="/Users/malmazan/dev/kdex"
+KOLLAB_REPO="/Users/me/dev/kollab"
+DEMO_REPO="/Users/me/dev/kdex"
 CAST_PATH="$KOLLAB_REPO/docs/assets/demo.cast"
 GIF_PATH="$KOLLAB_REPO/docs/assets/kollab-demo.gif"
 RENDER_CAST_PATH="/tmp/kollab-demo-render.cast"

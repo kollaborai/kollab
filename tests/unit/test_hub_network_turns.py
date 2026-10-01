@@ -34,8 +34,8 @@ from plugins.hub.relay_conversations import (
 from plugins.hub.relay_state import RelayError
 from tests.unit.test_relay_network_trust import set_trust, warm_directory
 
-ASKER = "lapis@mac-kollab"
-OPS = "ops@alzan-prod-home"
+ASKER = "lapis@laptop-kollab"
+OPS = "ops@home-server"
 T1, T2, T3 = "1" * 32, "2" * 32, "3" * 32  # request threads
 W1, W2, W3 = "a" * 32, "b" * 32, "c" * 32  # request message ids
 DONE = "The receiving agent finished this request."
@@ -102,7 +102,7 @@ def _request(thread_id: str, wire_id: str, content: str = "check the tunnel", *,
         to="infra",
         content=content,
         thread_id=thread_id,
-        metadata={"network": {"from_device": "mac-kollab", "trust": "open"}},
+        metadata={"network": {"from_device": "laptop-kollab", "trust": "open"}},
     )
 
 
@@ -509,7 +509,7 @@ def _wire_payload(**overrides) -> dict:
         "content": DONE,
         "kind": "message",
         "expires_at": int(time.time()) + 300,
-        "from_device": "alzan-prod-home",
+        "from_device": "home-server",
         "turn_end": {"replies": 2, "failed": False},
     }
     payload.update(overrides)

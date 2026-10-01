@@ -30,7 +30,7 @@ mic ──> VAD ──> faster-whisper ──> transcript (JSONL)
                                      TTS out (one-sentence units)
 ```
 
-## 2. Canonical requirements (fixed, from malmazan via koordinator)
+## 2. Canonical requirements (fixed, from owner via koordinator)
 
 - `/voicemode` slash command toggles voice mode on/off.
 - Whisper runs locally via faster-whisper; weights downloaded from Hugging
@@ -49,7 +49,7 @@ mic ──> VAD ──> faster-whisper ──> transcript (JSONL)
 
 ### 3.1 STT: primary = whisper-large-v3-turbo (license-cleaned 2026-09-25)
 
-License sweep verdict (malmazan: engine software, MIT/Apache-2.0 only):
+License sweep verdict (owner: engine software, MIT/Apache-2.0 only):
 parakeet v3 DISQUALIFIED — cc-by-4.0 weights (verified HF API tags),
 not distributable in a package. Fastest license-clean pick is turbo.
 
@@ -120,7 +120,7 @@ Whisper tier (faster-whisper) — still the fallback engine:
 
 ### 3.3 The gatekeeper: tiny LOCAL decision model
 
-malmazan's delta: the gate runs on a tiny local model, so ambient/no-op
+owner's delta: the gate runs on a tiny local model, so ambient/no-op
 turns cost one cheap inference, and the big LLM is never woken for "uh
 huh"-tier utterances.
 
@@ -135,7 +135,7 @@ Candidate runtimes (all on-device, no server), license-cleaned:
      0.6B-ONNX — newest license-clean small instruct with a live ONNX
      conversion, conversational, 40K ctx, JSON-verdict-capable. Replaces
      the earlier Qwen2.5-0.5B pick (older, same family, apache-2.0).
-  B. (retired) jev — malmazan's synthyo decision model; declined before
+  B. (retired) jev — owner's local decision model; declined before
      ever being located. voice.gate_model stays as a generic user-override
      hook for ANY local GGUF/ONNX.
   C. classifier head / rule+embedding hybrid — cheapest, least flexible;
@@ -174,7 +174,7 @@ LLM tiers after the gate:
 - ENGINE: microsoft/VibeVoice-Realtime-0.5B (MIT, 2025-12) — newest
   license-clean realtime TTS; streaming text input matches our sentence-
   unit atomic flow natively; robust long-form generation for act-reports;
-  already present in malmazan's HF cache; onnx-community ONNX conversion
+  already present in owner's HF cache; onnx-community ONNX conversion
   published 2026-09. One integration check owed: diff the conversion
   repo's VIBEVOICE_LICENSE file vs MIT before shipping.
 - RUNNER-UP: Kokoro-82M (apache-2.0, 2025-04; 82M, ~330MB RAM, sub-second
@@ -222,7 +222,7 @@ LLM tiers after the gate:
                               goal/insight pipelines by default.
   [R5] Gatekeeper model     : Qwen3-0.6B (apache-2.0, ONNX), local,
                               background-resident, HF-download on first
-                              run. jev retired (malmazan opted out);
+                              run. jev retired (owner opted out);
                               voice.gate_model = override hook. Never a
                               cloud call; never the big LLM.
 
@@ -232,7 +232,7 @@ LLM tiers after the gate:
 - Wake-word ("hey kollab") — optional future; VAD+gate makes it unnecessary.
 - Translation, multi-language UX polish — whisper is multilingual but
   prompts/UI are English-first v1.
-- RESOLVED: gatekeeper identity — malmazan opted out of jev entirely;
+- RESOLVED: gatekeeper identity — owner opted out of jev entirely;
   new local default picked (Qwen2.5-0.5B-Instruct int4), see 3.3.
 - RESOLVED (was open): TTS engine — picked Kokoro 82M, see 3.5.
 - OPEN: whether `act` verdicts should carry an audio ack ("on it") via

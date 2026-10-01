@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # proof.sh: drive section 10 of docs/specs/agent-network-simple-flow.md (the mesh) on the
 # INSTALLED m1 builds. A is the Mac (tmux m1-mac), B is the server device (tmux m1-srv, on
-# alzan-prod), C is a second device on alzan-prod (tmux m3-c, own workspace, own hub identity)
+# server), C is a second device on server (tmux m3-c, own workspace, own hub identity)
 # with NO relay: it is reachable only through B's loopback TLS endpoint. A must reach C through B.
 #
 # Order: build_wheels.sh, install_both.sh, m1/proof.sh, (m2/proof.sh), THIS, m3/teardown.sh,

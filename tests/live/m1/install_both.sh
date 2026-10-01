@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install_both.sh <wheeldir>
 # Fresh venv + the eleven local wheels on the Mac (~/kollab-m1/venv, workspace
-# ~/kollab-m1-mac) and on alzan-prod (~/kollab-m1/venv, workspace
+# ~/kollab-m1-mac) and on server (~/kollab-m1/venv, workspace
 # ~/kollab-m1-server). Third-party dependencies come from PyPI. Touches nothing
 # else: not the uv tool install, not ~/kollab-e2e-*, not any tmux session.
 # Re-running reinstalls the same wheels into the same venvs.
@@ -23,7 +23,7 @@ mkdir -p "$M1_MAC_ROOT" "$M1_MAC_WS"
 say "mac: pip install of ${#WHEELS[@]} local wheels into $M1_MAC_VENV"
 "$M1_MAC_VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir --force-reinstall "${WHEELS[@]}"
 
-# ---- alzan-prod --------------------------------------------------------------
+# ---- server --------------------------------------------------------------
 m1_srv_paths
 say "srv: $M1_HOST home is $M1_SRV_HOME"
 m1_ssh "python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'" || die "python3 on $M1_HOST is older than 3.12"

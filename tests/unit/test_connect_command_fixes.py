@@ -62,7 +62,7 @@ def _accepting_bridge(rows, decided):
 @pytest.mark.asyncio
 async def test_accept_and_reject_name_the_device_and_never_print_a_receipt(tmp_path):
     decided = []
-    rows = [_row("ana-laptop", "4d04" + "0" * 60, "a" * 32)]
+    rows = [_row("ana-laptop", "abcd" + "0" * 60, "a" * 32)]
     commands = _relay_commands(tmp_path, agent_bridge=_accepting_bridge(rows, decided))
 
     accepted = await commands._run("accept ana-laptop", source_agent="k1")
@@ -79,8 +79,8 @@ async def test_accept_and_reject_name_the_device_and_never_print_a_receipt(tmp_p
 async def test_two_requests_with_one_name_are_told_apart_by_fingerprint_not_receipt(tmp_path):
     decided = []
     rows = [
-        _row("ana-laptop", "4d04" + "0" * 60, "a" * 32),
-        _row("ana-laptop", "91c0" + "0" * 60, "b" * 32),
+        _row("ana-laptop", "abcd" + "0" * 60, "a" * 32),
+        _row("ana-laptop", "1234" + "0" * 60, "b" * 32),
     ]
     commands = _relay_commands(tmp_path, agent_bridge=_accepting_bridge(rows, decided))
 
@@ -90,7 +90,7 @@ async def test_two_requests_with_one_name_are_told_apart_by_fingerprint_not_rece
     assert "fingerprint" in ambiguous and "receipt" not in ambiguous
     assert decided == []
 
-    accepted = await commands._run("accept ana-laptop 91c0", source_agent="k1")
+    accepted = await commands._run("accept ana-laptop 1234", source_agent="k1")
 
     assert accepted.startswith("accepted ana-laptop.")
     assert decided == [("b" * 32, "accept")]
@@ -111,14 +111,14 @@ async def test_accept_usage_names_the_device_not_a_receipt(tmp_path):
 @pytest.mark.asyncio
 async def test_a_nameless_request_is_accepted_by_its_fingerprint_prefix(tmp_path):
     decided = []
-    rows = [_row("", "4d04" + "0" * 60, "a" * 32)]
+    rows = [_row("", "abcd" + "0" * 60, "a" * 32)]
     commands = _relay_commands(tmp_path, agent_bridge=_accepting_bridge(rows, decided))
 
     status_lines = commands._pending_request_lines()
-    accepted = await commands._run("accept 4d04", source_agent="k1")
+    accepted = await commands._run("accept abcd", source_agent="k1")
 
     assert "unknown device wants to join" in status_lines[1]
-    assert "/connect accept 4d04" in status_lines[1]
+    assert "/connect accept abcd" in status_lines[1]
     assert "a" * 8 not in status_lines[1]
     assert accepted == "accepted that device. it is now a trusted device on marco-home."
     assert decided == [("a" * 32, "accept")]
@@ -214,9 +214,9 @@ async def test_leave_with_a_domain_only_leaves_that_network(tmp_path):
     bridge = SimpleNamespace(remote_agents=lambda: [], trust_level=lambda: "open")
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
 
-    refused = await commands._run("leave agents.webceive.com", source_agent=None)
+    refused = await commands._run("leave agents.acme.com", source_agent=None)
 
-    assert refused == "connect: this device is not on agents.webceive.com"
+    assert refused == "connect: this device is not on agents.acme.com"
     assert commands.client.state.origin == "https://kollabor.ai"
 
     left = await commands._run("leave kollabor.ai", source_agent=None)
@@ -230,7 +230,7 @@ async def test_leave_after_a_rotate_still_ends_the_old_primarys_say_over_setting
     bridge = SimpleNamespace(remote_agents=lambda: [], trust_level=lambda: "open")
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
     commands.client.state.inviter = KEY
-    write_managed_config(ManagedConfig(primary_key=KEY, primary_name="mac-kollab"))
+    write_managed_config(ManagedConfig(primary_key=KEY, primary_name="laptop-kollab"))
     commands.client.rotate_room()  # blanks the inviter
     assert commands.client.state.inviter == ""
 
@@ -246,7 +246,7 @@ async def test_leave_after_a_rotate_still_ends_the_old_primarys_say_over_setting
 async def test_status_uses_the_screens_labels_and_folds_offline_devices_into_online(tmp_path):
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         network_name=lambda: "marco-home",
         remote_agents=lambda: [],
         plugin=SimpleNamespace(_presence=None, _identity=None),
@@ -291,13 +291,13 @@ def _named(peer_devices, peer_trust=None, links=()):
 def test_nobody_is_offline_while_the_relay_itself_is_unreachable():
     client = _client(state="reconnecting", approvals=[KEY])
 
-    assert offline_device_names(_named({KEY: "alzan-prod-home"}), [], client) == []
+    assert offline_device_names(_named({KEY: "home-server"}), [], client) == []
 
 
 def test_a_peer_in_the_relay_roster_is_never_offline_even_before_its_directory_arrives():
     client = _client(online=[KEY], approvals=[KEY])
 
-    assert offline_device_names(_named({KEY: "alzan-prod-home"}), [], client) == []
+    assert offline_device_names(_named({KEY: "home-server"}), [], client) == []
 
 
 def test_an_accepted_stranger_is_listed_offline_by_its_name_like_any_device():
@@ -369,14 +369,14 @@ def _plugin(*, origin="", attach=False, owner=True):
 
 @pytest.mark.asyncio
 async def test_bare_knocks_reads_the_joined_directory_not_kollabor_ai():
-    plugin = _plugin(origin="https://agents.webceive.com")
+    plugin = _plugin(origin="https://agents.acme.com")
     plugin._open_contact_review_altview = AsyncMock(return_value="")
 
     await plugin._handle_connect_command("knocks")
     await plugin._handle_connect_command("knocks other.example")
 
     assert [call.args for call in plugin._open_contact_review_altview.await_args_list] == [
-        ("agents.webceive.com",),
+        ("agents.acme.com",),
         ("other.example",),
     ]
 
@@ -393,15 +393,15 @@ async def test_bare_knocks_with_no_network_falls_back_to_kollabor_ai():
 
 @pytest.mark.asyncio
 async def test_a_follower_window_knows_the_workspaces_network_from_the_shared_state():
-    follower = _plugin(origin="https://agents.webceive.com", owner=False)
+    follower = _plugin(origin="https://agents.acme.com", owner=False)
 
-    assert follower._relay_network_domain() == "agents.webceive.com"
+    assert follower._relay_network_domain() == "agents.acme.com"
 
 
 @pytest.mark.asyncio
 async def test_bare_connect_in_a_follower_window_opens_the_screen_not_the_status_text():
     follower = _plugin(origin="https://kollabor.ai", owner=False)
-    status = "network marco-home  via kollabor.ai  trust: open\nthis device alzan-prod-home"
+    status = "network marco-home  via kollabor.ai  trust: open\nthis device home-server"
     follower._run_connect_command = AsyncMock(return_value=status)
     follower._open_connect_altview = AsyncMock(return_value="")
     follower._open_connect_screen = AsyncMock(return_value="")
@@ -445,12 +445,12 @@ async def test_bare_connect_in_the_owner_window_still_opens_the_screen():
 @pytest.mark.asyncio
 async def test_capture_stop_and_spawn_refuse_a_remote_target_with_a_hint():
     hub = HubPlugin.__new__(HubPlugin)
-    expected = "not allowed on a remote device; ask infra@alzan-prod-home to do it"
+    expected = "not allowed on a remote device; ask infra@home-server to do it"
 
-    assert await hub._handle_capture_command("infra@alzan-prod-home 20") == expected
-    assert await hub._handle_stop_command("infra@alzan-prod-home") == expected
-    assert await hub._handle_spawn_command("infra@alzan-prod-home check the tunnel") == expected
+    assert await hub._handle_capture_command("infra@home-server 20") == expected
+    assert await hub._handle_stop_command("infra@home-server") == expected
+    assert await hub._handle_spawn_command("infra@home-server check the tunnel") == expected
     assert (
-        await hub._handle_spawn_command({"name": "infra@alzan-prod-home", "task": "x"})
+        await hub._handle_spawn_command({"name": "infra@home-server", "task": "x"})
         == expected
     )

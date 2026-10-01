@@ -3,7 +3,7 @@
 Status: accepted replacement contract; implementation and verification are recorded
 in [implementation-status.md](implementation-status.md). Sections 2–3 preserve the
 pre-replacement audit, including source paths subsequently retired.
-Date: September 26, 2026. Checkout: `/Users/malmazan/dev/kollab`, branch `main`,
+Date: September 26, 2026. Checkout: `/Users/owner/dev/kollab`, branch `main`,
 HEAD `9bb8085dc5592972f5a35eb72156821ca475e28e` plus pre-existing uncommitted voice work.
 
 ## 1. Product contract
@@ -121,7 +121,7 @@ Checks used:
   tests/unit/test_voice_plugin_lifecycle.py -q
 ```
 
-Logs examined: `~/.kollab/projects/Users_malmazan_dev_kollab/logs/kollab.log`.
+Logs examined: `~/.kollab/projects/Users_owner_dev_kollab/logs/kollab.log`.
 At 12:49:37 on September 26 it reports voice startup twice for the same
 minute-derived session ID. Source shows process-local ownership and no device
 singleton; the log alone does not establish how many simultaneous microphones

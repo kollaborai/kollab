@@ -197,7 +197,7 @@ async def until(predicate, timeout: float = 5.0) -> None:
 @pytest_asyncio.fixture
 async def people(relay, tmp_path):
     ana = await make_member(tmp_path, "ana", "ana-laptop")
-    marco = await make_member(tmp_path, "marco", "mac-kollab")
+    marco = await make_member(tmp_path, "marco", "laptop-kollab")
     # a second agent on Marco's device that nobody allowed
     marco.directory.rows.append(
         LocalAgent(
@@ -221,7 +221,7 @@ async def people(relay, tmp_path):
             await person.bridge.close()
 
 
-async def knock(ana: Member, marco: Member, text: str = "Ana from Webceive") -> dict:
+async def knock(ana: Member, marco: Member, text: str = "Ana from Acme") -> dict:
     return await ana.bridge._rpc_contact_submit(
         {
             "agent_id": ana.bridge.identity.agent_id,
@@ -327,7 +327,7 @@ async def test_the_allowed_agent_is_reachable_answers_and_others_are_not(people)
     assert "ana-laptop -> sapphire" in text
 
     # Ana's roster names only the agent Marco allowed, as agent@device.
-    assert await roster(ana) == ["sapphire@mac-kollab"]
+    assert await roster(ana) == ["sapphire@laptop-kollab"]
 
     sent = await ana.bridge.send(marco.agent_address(), "check the tunnel")
     assert sent["state"] == "queued"
@@ -358,7 +358,7 @@ async def test_deny_stops_delivery_to_the_agent_at_once(people):
     ana, marco = people
     await open_path(ana, marco)
     await allow(marco, ana)
-    assert await roster(ana) == ["sapphire@mac-kollab"]
+    assert await roster(ana) == ["sapphire@laptop-kollab"]
     assert (await ana.bridge.send(marco.agent_address(), "first"))["state"] == "queued"
 
     await marco.bridge.application_command(
@@ -394,7 +394,7 @@ async def test_a_send_to_a_denied_agent_gone_from_the_roster_says_unknown_agent(
     ana, marco = people
     await open_path(ana, marco)
     await allow(marco, ana)
-    assert await roster(ana) == ["sapphire@mac-kollab"]
+    assert await roster(ana) == ["sapphire@laptop-kollab"]
     await marco.bridge.application_command(
         "deny", f"{ana.key} sapphire", source_agent=marco.bridge.identity.agent_id
     )

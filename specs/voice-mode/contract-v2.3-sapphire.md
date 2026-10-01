@@ -1,6 +1,6 @@
 # Voice Engine Contract — v2.3 amendment (sapphire)
 
-Amends contract-v2.2. §§1-14 remain in force except as marked. malmazan's echo ruling (2026-09-25 stream): mic stays OPEN during playback; the agent must never hear itself speak. Echo defense = three layers: acoustic cancellation, event flag, prompt defense.
+Amends contract-v2.2. §§1-14 remain in force except as marked. owner's echo ruling (2026-09-25 stream): mic stays OPEN during playback; the agent must never hear itself speak. Echo defense = three layers: acoustic cancellation, event flag, prompt defense.
 
 ## 15. Playback reference & AEC (normative) [AMENDS v2.2 §10 implicitly]
 

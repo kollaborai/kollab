@@ -23,7 +23,7 @@ from kollabor_agent.tool_executor import ToolExecutor
 from kollabor_ai.response_parser import ResponseParser
 from plugins.hub.plugin import HubPlugin
 
-PEER = "koordinator@synthyo-kollab-m1-mac6"
+PEER = "koordinator@laptop-kollab-m1-mac6"
 
 
 class _Bus:
@@ -112,7 +112,7 @@ async def test_one_hub_msg_tag_is_one_handler_call_and_one_send(order, tmp_path)
     results = await _run_response(
         parser,
         executor,
-        f'Sending it.\n<hub_msg to="{PEER}">Exact output:\nalzan-prod</hub_msg>',
+        f'Sending it.\n<hub_msg to="{PEER}">Exact output:\nserver</hub_msg>',
     )
 
     assert len(plugin.calls) == 1

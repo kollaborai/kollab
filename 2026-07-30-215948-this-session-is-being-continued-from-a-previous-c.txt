@@ -136,7 +136,7 @@
        267:    async def handle_input(self, key_press: KeyPress) -> bool:       
        335:        then saved profiles, then catalog).                          
                                                                                 
-  ⏺ Read(/Users/malmazan/dev/kollab/packages/kollabor-ai/src/kollabor_ai/model_ 
+  ⏺ Read(/Users/me/dev/kollab/packages/kollabor-ai/src/kollabor_ai/model_ 
   catalog.py)                                                                   
     ⎿  Read 161 lines                                                           
     ⎿  Interrupted · What should Claude do instead?                             
@@ -530,9 +530,9 @@
 ⏺ Bash(ls -la ~/.kollab/oauth* 2>/dev/null; ls -la ~/.kollab/ | head -20; python
       - <<'PY'
       import asyncio, sys…)
-  ⎿  .rw-------@ 2.1k malmazan 29 Jul 22:16 openai.json
-     .rw-r--r--@ 6.1k malmazan 13 May 20:32 .DS_Store
-     .rw-r--r--@  30k malmazan 28 Jul 23:42 agent_metadata.cache
+  ⎿  .rw-------@ 2.1k me 29 Jul 22:16 openai.json
+     .rw-r--r--@ 6.1k me 13 May 20:32 .DS_Store
+     .rw-r--r--@  30k me 28 Jul 23:42 agent_metadata.cache
      … +21 lines (ctrl+o to expand)
 
   Searched for 1 pattern (ctrl+o to expand)
@@ -2746,15 +2746,15 @@
   ⎿  Error: Exit code 1
      Traceback (most recent call last):
        File "<stdin>", line 30, in <module>
-       File "/Users/malmazan/.local/share/uv/python/cpython-3.12.8-macos-aarch64
+       File "/Users/me/.local/share/uv/python/cpython-3.12.8-macos-aarch64
      -none/lib/python3.12/asyncio/runners.py", line 194, in run
          return runner.run(main)
                 ^^^^^^^^^^^^^^^^
-       File "/Users/malmazan/.local/share/uv/python/cpython-3.12.8-macos-aarch64
+       File "/Users/me/.local/share/uv/python/cpython-3.12.8-macos-aarch64
      -none/lib/python3.12/asyncio/runners.py", line 118, in run
          return self._loop.run_until_complete(task)
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-       File "/Users/malmazan/.local/share/uv/python/cpython-3.12.8-macos-aarch64
+       File "/Users/me/.local/share/uv/python/cpython-3.12.8-macos-aarch64
      -none/lib/python3.12/asyncio/base_events.py", line 686, in 
      run_until_complete
      … +4 lines (ctrl+o to expand)
@@ -2768,11 +2768,11 @@
      config.effort: xhigh
      Traceback (most recent call last):
        File "<stdin>", line 25, in <module>
-       File "/Users/malmazan/.local/share/uv/python/cpython-3.12.8-macos-aarch64
+       File "/Users/me/.local/share/uv/python/cpython-3.12.8-macos-aarch64
      -none/lib/python3.12/asyncio/runners.py", line 194, in run
          return runner.run(main)
                 ^^^^^^^^^^^^^^^^
-       File "/Users/malmazan/.local/share/uv/python/cpython-3.12.8-macos-aarch64
+       File "/Users/me/.local/share/uv/python/cpython-3.12.8-macos-aarch64
      -none/lib/python3.12/asyncio/runners.py", line 118, in run
          return self._loop.run_until_complete(task)
      … +6 lines (ctrl+o to expand)
@@ -5102,11 +5102,11 @@
       # inner single-quoted so the pane's shell cannot pre-expand it…)
   ⎿  GOT:
 
-⏺ Bash(cd /private/tmp/claude-501/-Users-malmazan-dev-kollab/d847d660-2383-496f-
+⏺ Bash(cd /private/tmp/claude-501/-Users-me-dev-kollab/d847d660-2383-496f-
       a141-59bd611d7d7d/scratchpad && cat > envprobe.sh <<'EOF'
       #!/bin/sh…)
   ⎿  GOT:7
-  ⎿  Shell cwd was reset to /Users/malmazan/dev/kollab
+  ⎿  Shell cwd was reset to /Users/me/dev/kollab
 
 ⏺ Bash(timeout 420 tests/tmux/lib/test_runner.sh
       tests/tmux/specs/model_picker_and_effort.json 2>&1 | tail -10)
@@ -5193,7 +5193,7 @@
 ⏺ Bash(python -m pytest
       "tests/unit/test_provider_registry.py::TestRegisterProviderDecorator" test
       s/integration/test_end_to_end.py::TestApplicationBoot::test_provider_…)
-  ⎿  ERROR: not found: /Users/malmazan/dev/kollab/tests/unit/test_provider_
+  ⎿  ERROR: not found: /Users/me/dev/kollab/tests/unit/test_provider_
      registry.py::TestRegisterProviderDecorator
      (no match in any of [<Module test_provider_registry.py>])
      … +3 lines (ctrl+o to expand)

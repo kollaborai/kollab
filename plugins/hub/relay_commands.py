@@ -812,7 +812,7 @@ class RelayCommands:
             if len(matches) > 1:
                 return (
                     f"connect: more than one pending request is named '{token}'; "
-                    f"add the start of its fingerprint: /connect {head} {token} 4d04"
+                    f"add the start of its fingerprint: /connect {head} {token} abcd"
                 )
             if not matches:
                 return f"connect: no pending request matches '{token}'"

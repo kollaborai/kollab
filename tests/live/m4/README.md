@@ -1,7 +1,7 @@
 # m4: live proof for agent network milestone 4 (#121)
 
 Proves Story 6 of `docs/specs/agent-network-simple-flow.md` on installed packages: one command,
-`kollab relay serve --domain selfhost.kollabor.ai`, replaces the manual stack on `alzan-prod`, and two
+`kollab relay serve --domain selfhost.kollabor.ai`, replaces the manual stack on `server`, and two
 devices join a network on that domain and exchange a message. It builds on m1: same `env.sh`, the same
 wheels and venvs (`~/kollab-m1/venv` on both hosts), the same `scan.py` / `tmuxtype.py`, the same fresh-workspace
 rule. Nothing here has been run yet.
@@ -10,8 +10,8 @@ rule. Nothing here has been run yet.
 
 | Where | What |
 |---|---|
-| alzan-prod | Stops the manual selfhost stack (relay supervisor, standalone publisher, static server; tmux `sh-relay`, `sh-pub`, `sh-static`). State stays. Starts tmux `m4-serve` running the one command from the m1 venv, on the old relay config's bind address (10.0.0.5) and trusted proxy (the edge), at port 9178 (`M4_PORT`): the old first worker's port, so the edge's firewall path already exists. Writes `~/kollab-m4/` (`serve.env`, `serve-cmd.sh`, `restore-old-stack.sh`). |
-| alzan-edge | Rewrites the `selfhost.kollabor.ai` nginx vhost so its five routes reach the one port instead of three (`edge_vhost.sh`, `sudo -n`, backup in `/etc/nginx/m4-backups/`, `nginx -t` before the reload, automatic put-back on failure). |
+| server | Stops the manual selfhost stack (relay supervisor, standalone publisher, static server; tmux `sh-relay`, `sh-pub`, `sh-static`). State stays. Starts tmux `m4-serve` running the one command from the m1 venv, on the old relay config's bind address (10.0.0.3) and trusted proxy (the edge), at port 9178 (`M4_PORT`): the old first worker's port, so the edge's firewall path already exists. Writes `~/kollab-m4/` (`serve.env`, `serve-cmd.sh`, `restore-old-stack.sh`). |
+| edge | Rewrites the `selfhost.kollabor.ai` nginx vhost so its five routes reach the one port instead of three (`edge_vhost.sh`, `sudo -n`, backup in `/etc/nginx/m4-backups/`, `nginx -t` before the reload, automatic put-back on failure). |
 | this Mac | tmux `m4-mac`, workspace `~/kollab-m4-mac`, evidence in `m4/evidence/` (git-ignored). |
 | kollabor.ai | Nothing. The proof asserts that no screen and no log names it. |
 
@@ -20,9 +20,9 @@ rule. Nothing here has been run yet.
 ## Preconditions
 
 - The commit you build contains `kollab relay serve --domain`. Build exactly what you mean to ship.
-- The m1 preconditions: `uv`, `tmux`, Python >= 3.12, `ssh alzan-prod` with no password, ChatGPT logins on both hosts
+- The m1 preconditions: `uv`, `tmux`, Python >= 3.12, `ssh server` with no password, ChatGPT logins on both hosts
   (`~/.kollab/oauth/openai.json`), nobody attached to the `m4-*` tmux sessions while it runs, no `bash -x` (it would print the join code).
-- `ssh alzan-edge` works with no password and `sudo -n` works there.
+- `ssh edge` works with no password and `sudo -n` works there.
 - DNS `selfhost.kollabor.ai`, its `_agent` TXT record, the certificate and the edge vhost exist (they do today) and the
   manual stack is running, so `serve_up.sh` can read its settings (bind address, trusted proxy, publisher state directory).
 - `dig` on this Mac.
@@ -69,7 +69,7 @@ anything else 404, both lookup routes answering 400 to an empty body, and the we
   `/connect selfhost.kollabor.ai` fails with `key_changed`. `serve_up.sh up` stops before touching the edge when the key differs.
 - `bash m4/teardown.sh --restore-old` stops `m4-serve`, runs `~/kollab-m4/restore-old-stack.sh` (the three tmux sessions with the
   command lines `serve_up.sh` recorded in `evidence/old-stack.json`) and runs `edge_vhost.sh restore`.
-- By hand: `ssh alzan-edge 'sudo cat /etc/nginx/m4-backups/LATEST'` names the vhost backup to copy back.
+- By hand: `ssh edge 'sudo cat /etc/nginx/m4-backups/LATEST'` names the vhost backup to copy back.
 
 ## Not covered on purpose
 

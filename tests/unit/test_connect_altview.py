@@ -474,7 +474,7 @@ async def test_empty_code_without_attach_is_a_validation_error_and_a_failed_atta
 
 @pytest.mark.asyncio
 async def test_an_approved_join_shows_the_joined_line_the_caller_supplies():
-    line = "joined marco-home as alzan-prod-home. trust: open"
+    line = "joined marco-home as home-server. trust: open"
     view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.approved(line))
     renderer = _FakeRenderer()
     await view.on_enter(renderer)

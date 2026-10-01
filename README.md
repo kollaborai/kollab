@@ -198,9 +198,9 @@ the network observes it, like the local hub. Start with the
 # on the new machine
 /connect                        # type the code into the private form
 # back on the first machine, the request shows up on the screen: press a, or
-/connect accept alzan-prod-home
+/connect accept home-server
 # then, from any agent or a shell
-kollab --hub msg ops@alzan-prod-home "check the tunnel"
+kollab --hub msg ops@home-server "check the tunnel"
 ```
 
 Run your own directory on your own domain with one command, `kollab relay serve

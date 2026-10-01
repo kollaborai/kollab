@@ -37,7 +37,7 @@ def _key(char: str) -> KeyPress:
 
 @pytest.mark.asyncio
 async def test_knock_review_row_has_name_fingerprint_and_no_key_or_receipt():
-    introduction = "Ana from Webceive."
+    introduction = "Ana from Acme."
     sender_key = "c" * 64
     request = PendingContactRequest(
         "b" * 32,

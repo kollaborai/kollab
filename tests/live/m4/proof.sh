@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # proof.sh: Story 6 of docs/specs/agent-network-simple-flow.md on the INSTALLED m1 builds, in tmux on this Mac
-# (m4-mac) and on alzan-prod (m4-srv), 120x40, against the self-hosted directory https://selfhost.kollabor.ai
+# (m4-mac) and on server (m4-srv), 120x40, against the self-hosted directory https://selfhost.kollabor.ai
 # that `kollab relay serve` runs (serve_up.sh up, edge_vhost.sh apply and verify_serve.sh come first).
 #
 #   1. the Mac starts a network on the company directory:      /connect selfhost.kollabor.ai

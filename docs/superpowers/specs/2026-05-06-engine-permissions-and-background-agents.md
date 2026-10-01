@@ -272,7 +272,7 @@ Spawn request:
   "identity": "lapis",
   "type": "research",
   "task": "inspect engine permissions contract",
-  "workspace": "/Users/malmazan/dev/kollab",
+  "workspace": "/Users/me/dev/kollab",
   "metadata": {"source": "engine-api"}
 }
 ```

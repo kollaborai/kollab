@@ -2,7 +2,7 @@
 
 Proves Story 8 of `docs/specs/agent-network-simple-flow.md` (the sealed config
 follows Marco) on installed packages, driven through tmux, on this Mac and
-`alzan-prod`. It runs on the network `m1/proof.sh` builds: the Mac issued the
+`server`. It runs on the network `m1/proof.sh` builds: the Mac issued the
 join code, so the Mac is the primary and the server is the secondary.
 
 Written, not yet run live.

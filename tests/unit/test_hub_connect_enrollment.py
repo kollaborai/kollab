@@ -386,7 +386,7 @@ async def test_screen_decisions_go_to_the_issuer_and_report_why_they_failed():
     plugin = _connected_plugin(altview_stack_manager=view_stack)
     await plugin._handle_connect_command("")
     view, _ = view_stack.push.await_args.args
-    row = JoinRequestRow("a" * 32, "alzan-prod-home", "4d04…9f2e")
+    row = JoinRequestRow("a" * 32, "home-server", "abcd…ef01")
     decide = plugin._relay_agent.decide_enrollment_request
 
     assert await view._on_decide(row, "accept") is None
@@ -415,7 +415,7 @@ async def test_the_form_starts_a_network_when_no_code_is_entered():
     plugin = HubPlugin.__new__(HubPlugin)
     plugin._cli_args = SimpleNamespace(attach=False)
     plugin._run_connect_command = AsyncMock(
-        return_value="network kollabor.ai  trust: open\nthis device mac-kollab"
+        return_value="network kollabor.ai  trust: open\nthis device laptop-kollab"
     )
     view = await _form_view(plugin)
 
@@ -436,7 +436,7 @@ async def test_an_approved_join_reports_the_network_device_and_trust():
     plugin._run_connect_enrollment = AsyncMock(return_value={"status": "approved"})
     plugin._relay_agent = SimpleNamespace(
         network_name=lambda: "marco-home",
-        device_name=lambda: "alzan-prod-home",
+        device_name=lambda: "home-server",
         trust_level=lambda: "open",
     )
     plugin._relay_commands = SimpleNamespace(
@@ -450,4 +450,4 @@ async def test_an_approved_join_reports_the_network_device_and_trust():
         submission.code.clear()
 
     assert outcome.status.value == "approved"  # the altview module may be reloaded
-    assert outcome.detail == "joined marco-home as alzan-prod-home. trust: open"
+    assert outcome.detail == "joined marco-home as home-server. trust: open"

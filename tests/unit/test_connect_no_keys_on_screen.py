@@ -69,7 +69,7 @@ def _row(name: str, device: str, key: str, state: str = "idle", task: str = "") 
 
 def _rows() -> list[dict]:
     return [
-        _row("infra", "alzan-prod-home", ONLINE_NAMED),
+        _row("infra", "home-server", ONLINE_NAMED),
         _row("ops", key_label(ONLINE_UNNAMED), ONLINE_UNNAMED, "working", "rotating logs"),
     ]
 
@@ -82,7 +82,7 @@ def _bridge():
         SimpleNamespace(
             enrollment_id="e" * 32,
             device_name="ana-laptop",
-            device_key_fingerprint="4d04" + "0" * 56 + "9f2e",
+            device_key_fingerprint="abcd" + "0" * 56 + "ef01",
             credential_categories=("provider:openai:api_key",),
         ),
         SimpleNamespace(
@@ -94,7 +94,7 @@ def _bridge():
     ]
     return SimpleNamespace(
         trust_level=lambda: "agents",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=remote_agents,
         effective_trust=lambda key: "open" if key == ONLINE_UNNAMED else "agents",
         plugin=SimpleNamespace(
@@ -104,7 +104,7 @@ def _bridge():
         _enrollment_issuer=None,
         _state=lambda: SimpleNamespace(
             state=SimpleNamespace(
-                peer_devices={ONLINE_NAMED: "alzan-prod-home", OFFLINE_NAMED: "laptop-kollab"},
+                peer_devices={ONLINE_NAMED: "home-server", OFFLINE_NAMED: "laptop-kollab"},
                 peer_trust={},
             )
         ),
@@ -161,7 +161,7 @@ def _hub() -> HubPlugin:
     hub._relay_agent = SimpleNamespace(
         remote_agents=remote_agents,
         trust_level=lambda: "agents",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         harness_context=harness_context,
         _state=lambda: SimpleNamespace(
             state=SimpleNamespace(peer_devices={OFFLINE_NAMED: "laptop-kollab"})
@@ -261,9 +261,9 @@ async def test_no_key_receipt_or_relay_address_on_any_connect_surface(
     assert "unknown device wants to join" in status
     assert "laptop-kollab (offline)" in status
     assert f"{key_label(OFFLINE_UNNAMED)} (offline)" in status
-    assert "infra@alzan-prod-home" in status
+    assert "infra@home-server" in status
     assert "1 waiting" in surfaces["connect screen 100 False"]
-    assert "mac-kollab" in surfaces["kollab --hub status"]
+    assert "laptop-kollab" in surfaces["kollab --hub status"]
     offline_line = next(
         line for line in surfaces["hub context"].splitlines() if line.startswith("offline devices:")
     )
@@ -380,7 +380,7 @@ async def test_arrivals_print_one_named_line_each_and_never_again(tmp_path):
     }
     for line in lines:
         assert not LEAK.search(line)
-        assert not re.search(r"4d04|9f2e|7a7a|1b1b", line)
+        assert not re.search(r"abcd|ef01|7a7a|1b1b", line)
     assert await commands.new_arrivals() == []
     assert await commands.new_arrivals() == []
 

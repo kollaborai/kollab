@@ -122,8 +122,8 @@ def test_export_filters_explicit_workspace_and_strips_private_fields(directory):
 def test_export_uses_explicit_device_name_over_the_derived_default(directory):
     view, publish = directory
     _, _, workspace = publish("one")
-    rows = view.publishable_agents(workspace, "b" * 32, "mac-kollab")
-    assert rows[0]["device"] == "mac-kollab"
+    rows = view.publishable_agents(workspace, "b" * 32, "laptop-kollab")
+    assert rows[0]["device"] == "laptop-kollab"
 
 
 def test_existing_relay_workspace_identity_used_without_key_read(directory):

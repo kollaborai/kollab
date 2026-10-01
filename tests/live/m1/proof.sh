@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # proof.sh: drive Stories 1, 2 and 3 of docs/specs/agent-network-simple-flow.md
 # the way a user would, on the INSTALLED m1 builds, in tmux on this Mac
-# (m1-mac) and on alzan-prod (m1-srv), 120x40. Evidence lands in m1/evidence/.
+# (m1-mac) and on server (m1-srv), 120x40. Evidence lands in m1/evidence/.
 #
 # The join code lives only in the shell variable CODE: it is read out of a pane
 # capture, typed into the other pane through a pipe, compared inside python, and

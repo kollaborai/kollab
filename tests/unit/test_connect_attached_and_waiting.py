@@ -42,7 +42,7 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _ENROLLMENT_ID = "e" * 32
 _OFFER = "0123456789abcdef0123456789abcdef"
 _SYNTHETIC_CODE = "ABCD-EFGH"
-_JOINED = "joined marco-home as alzan-prod-home. trust: open"
+_JOINED = "joined marco-home as home-server. trust: open"
 
 
 class _FakeRenderer:
@@ -81,18 +81,18 @@ def _snapshot(**overrides) -> ConnectSnapshot:
         network="marco-home",
         domain="kollabor.ai",
         trust="open",
-        device="mac-kollab",
+        device="laptop-kollab",
         relay_online=True,
         requests=(
             JoinRequestRow(
                 enrollment_id=_ENROLLMENT_ID,
-                device="alzan-prod-home",
-                fingerprint="4d04…9f2e",
+                device="home-server",
+                fingerprint="abcd…ef01",
                 categories=("provider:openai:api_key",),
             ),
         ),
         local_agents=("koordinator",),
-        remote_agents=("ops@alzan-prod-home",),
+        remote_agents=("ops@home-server",),
         offline_devices=("ana-laptop",),
         knocks=1,
     )
@@ -143,7 +143,7 @@ class _Rig:
             decide_enrollment_request=self.decisions,
             enroll_device=enroll_device,
             network_name=lambda: "marco-home",
-            device_name=lambda: "alzan-prod-home",
+            device_name=lambda: "home-server",
             trust_level=lambda: "open",
         )
         self.daemon = daemon
@@ -254,9 +254,9 @@ async def test_attached_screen_renders_the_daemons_rows_without_the_request_id()
 
     text = renderer.text()
 
-    assert "alzan-prod-home wants to join" in text
-    assert "fingerprint 4d04…9f2e" in text
-    assert "ops@alzan-prod-home" in text
+    assert "home-server wants to join" in text
+    assert "fingerprint abcd…ef01" in text
+    assert "ops@home-server" in text
     assert "ana-laptop (offline)" in text
     assert _ENROLLMENT_ID not in text
     await view.on_complete()
@@ -309,7 +309,7 @@ async def test_attached_screen_accept_key_decides_on_the_daemon_and_notifies():
 
     rig.decisions.assert_awaited_once()
     text = renderer.text()
-    assert "accepted alzan-prod-home. it is now a trusted device on marco-home." in text
+    assert "accepted home-server. it is now a trusted device on marco-home." in text
     assert _ENROLLMENT_ID not in text
     await view.on_complete()
 
@@ -373,7 +373,7 @@ async def test_attached_bare_connect_in_a_daemon_that_is_not_the_owner_opens_the
     view, name, text = await _rendered(rig)
     assert name == "connect-screen" and type(view) is ConnectScreenAltView
     assert "network      marco-home  via kollabor.ai   trust: open" in text
-    assert "this device  alzan-prod-home" in text
+    assert "this device  home-server" in text
     assert CONNECT_OWNED_ELSEWHERE in text
     assert "join code" not in text and "requests" not in text and "online" not in text
     rig.remote.hub_connect.assert_not_awaited()  # not the status text
@@ -632,7 +632,7 @@ async def test_attached_join_form_shows_the_line_with_the_primarys_name_from_the
     rig = _Rig(_snapshot(domain="", network="", requests=()))
     monkeypatch.setattr("kollabor_config.managed_config.read_managed_config", lambda: None)
     rig.daemon._relay_agent._state = lambda: SimpleNamespace(
-        state=SimpleNamespace(inviter=_ISSUER, peer_devices={_ISSUER: "mac-kollab"})
+        state=SimpleNamespace(inviter=_ISSUER, peer_devices={_ISSUER: "laptop-kollab"})
     )
     said: list[str] = []
     rig.daemon.show_network_notice = said.append
@@ -644,9 +644,9 @@ async def test_attached_join_form_shows_the_line_with_the_primarys_name_from_the
     await view.render_frame(0.0)
 
     assert _JOINED in renderer.text()
-    assert "Settings arrive sealed from mac-kollab" in renderer.text()
+    assert "Settings arrive sealed from laptop-kollab" in renderer.text()
     assert "the device that issued the code" not in renderer.text()
-    assert said == [post_join_line("mac-kollab")]  # the daemon's main pane, once
+    assert said == [post_join_line("laptop-kollab")]  # the daemon's main pane, once
     await view.on_complete()
 
 
@@ -849,7 +849,7 @@ def _daemon(enroll):
     plugin._relay_agent = SimpleNamespace(
         enroll_device=enroll,
         network_name=lambda: "marco-home",
-        device_name=lambda: "alzan-prod-home",
+        device_name=lambda: "home-server",
         trust_level=lambda: "open",
     )
     return plugin
@@ -1042,12 +1042,12 @@ async def test_the_join_line_names_the_issuer_and_reaches_the_main_pane_once(mon
         await gate.wait()
         return {"status": "approved"}
 
-    plugin, said = _joined_daemon(enroll, monkeypatch, {_ISSUER: "mac-kollab"})
+    plugin, said = _joined_daemon(enroll, monkeypatch, {_ISSUER: "laptop-kollab"})
     started = await plugin._run_connect_enrollment("kollabor.ai", _SYNTHETIC_CODE)
     gate.set()
     await _settle()
 
-    named = post_join_line("mac-kollab")
+    named = post_join_line("laptop-kollab")
     assert said == [named]  # nobody had the form open, and the main pane still got it
     for _ in range(3):  # a form that polls again changes nothing
         assert (await plugin._connect_enrollment_status(started["receipt_id"]))["note"] == named
@@ -1073,9 +1073,9 @@ async def test_the_join_line_waits_for_the_issuers_name_then_says_it_once(monkey
     assert said == []  # not the stand-in: the name may still come
     status = await plugin._connect_enrollment_status(started["receipt_id"])
     assert status["status"] == "approved" and status["note"] == ""
-    names[_ISSUER] = "mac-kollab"  # the first directory refresh or sealed config named it
+    names[_ISSUER] = "laptop-kollab"  # the first directory refresh or sealed config named it
     await _settle()
-    assert said == [post_join_line("mac-kollab")]
+    assert said == [post_join_line("laptop-kollab")]
 
 
 @pytest.mark.asyncio
@@ -1126,9 +1126,9 @@ async def test_the_form_shows_no_stand_in_while_the_issuers_name_is_still_coming
 
     assert _JOINED in renderer.text()
     assert "the device that issued the code" not in renderer.text()
-    names[_ISSUER] = "mac-kollab"
+    names[_ISSUER] = "laptop-kollab"
     await _settle()
-    assert said == [post_join_line("mac-kollab")]
+    assert said == [post_join_line("laptop-kollab")]
     await view.on_complete()
 
 
@@ -1140,7 +1140,7 @@ def test_the_approved_result_carries_the_note_so_a_window_never_guesses_it():
     named = {
         "status": "approved",
         "detail": _JOINED,
-        "note": post_join_line("mac-kollab"),
+        "note": post_join_line("laptop-kollab"),
     }
     assert enrollment_result(named) == named
     # "" is an answer too: the daemon is still waiting for the name
@@ -1227,7 +1227,7 @@ async def test_a_refused_accept_keeps_the_code_on_screen():
     await view.render_frame(0.0)
 
     assert "7QK4-M2XP" in renderer.text()
-    assert "could not accept alzan-prod-home: try again" in renderer.text()
+    assert "could not accept home-server: try again" in renderer.text()
     await view.on_complete()
 
 
@@ -1248,7 +1248,7 @@ def test_used_code_line_uses_the_expired_line_style_and_fits_eighty_columns():
 # --------------------------------------------------------------------- #
 
 _ROUTE = "8f3a2c1d9e4b5061"
-_INTRO = "Ana from Webceive. Can your ops agent review a nginx config?"
+_INTRO = "Ana from Acme. Can your ops agent review a nginx config?"
 _RECEIPT = "b" * 32
 _SENDER = "c" * 64
 _NO_DAEMON_SUPPORT = (
@@ -1270,7 +1270,7 @@ def _knock_row(**overrides) -> dict:
 
 def _relay_with_knocks(rig: _Rig, rows=None):
     """The relay end of the daemon: a stranger's knock in, decisions out."""
-    rig.daemon._relay_commands.client.state.origin = "https://agents.webceive.com"
+    rig.daemon._relay_commands.client.state.origin = "https://agents.acme.com"
     agent = rig.daemon._relay_agent
     agent.submit_contact_request = AsyncMock(
         return_value={"status": "queued", "receipt_id": "a" * 32}
@@ -1379,11 +1379,11 @@ async def test_attached_knocks_opens_the_review_with_the_daemons_pending_knocks(
     text = renderer.text()
     assert "ana-laptop" in text
     assert "fingerprint" in text
-    assert "Ana from Webceive." in text
+    assert "Ana from Acme." in text
     assert _SENDER not in text and "relay:" not in text
     # The window never guesses the network: the daemon fills in its own, once.
     agent.pending_contact_requests.assert_awaited_once_with(
-        "agents.webceive.com", source_agent="agent-1"
+        "agents.acme.com", source_agent="agent-1"
     )
     assert rig.wire_calls == [("state.hub_contact_pending", {"domain": ""})]
     await view.on_complete()
@@ -1424,7 +1424,7 @@ async def test_attached_knock_review_decides_on_the_daemon(key, decision, said):
     await view.render_frame(0.0)
 
     agent.decide_contact_request.assert_awaited_once_with(
-        "agents.webceive.com",
+        "agents.acme.com",
         _RECEIPT,
         decision=decision,
         source_agent="agent-1",

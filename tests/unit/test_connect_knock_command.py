@@ -68,13 +68,13 @@ async def test_knock_strips_one_pair_of_surrounding_quotes_and_sends():
     plugin._relay_agent = SimpleNamespace(submit_contact_request=submit)
 
     result = await plugin._run_connect_knock(
-        'kollabor.ai/c/8f3a2c1d9e4b5061 "Ana from Webceive. Can you help?"'
+        'kollabor.ai/c/8f3a2c1d9e4b5061 "Ana from Acme. Can you help?"'
     )
 
     submit.assert_awaited_once_with(
         "kollabor.ai",
         "8f3a2c1d9e4b5061",
-        "Ana from Webceive. Can you help?",
+        "Ana from Acme. Can you help?",
         source_agent="local-agent",
     )
     assert result == "knock sent to kollabor.ai/c/8f3a2c1d9e4b5061"

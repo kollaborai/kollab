@@ -227,12 +227,12 @@ async def test_a_send_to_a_remote_agent_follows_the_same_rule(
     turn, message, wait, ends
 ):
     ended = await turn.respond(
-        f'<hub_msg to="infra@alzan-prod-home"{wait}>{message}</hub_msg>'
+        f'<hub_msg to="infra@home-server"{wait}>{message}</hub_msg>'
     )
 
     assert ended is ends
-    assert turn.sends[0].to == "infra@alzan-prod-home"
-    assert "sent to infra@alzan-prod-home" in turn.history[-1].content
+    assert turn.sends[0].to == "infra@home-server"
+    assert "sent to infra@home-server" in turn.history[-1].content
 
 
 @pytest.mark.asyncio

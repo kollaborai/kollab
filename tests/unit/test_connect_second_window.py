@@ -25,7 +25,7 @@ from plugins.hub.relay_owner import WorkspaceRelayOwner
 from tests.unit.test_connect_screen import _FakeRenderer, _key, _named, _snapshot
 
 NOTE = " " + CONNECT_OWNED_ELSEWHERE
-STATUS = "network kollabor.ai  trust: open\nthis device mac-kollab"
+STATUS = "network kollabor.ai  trust: open\nthis device laptop-kollab"
 
 
 def _read_only(snapshot, **overrides) -> ConnectScreenState:
@@ -45,7 +45,7 @@ def test_the_screen_of_a_window_that_cannot_act_says_so_in_one_line():
     assert lines == [
         " Connect",
         " network      marco-home  via kollabor.ai   trust: open",
-        " this device  mac-kollab",
+        " this device  laptop-kollab",
         "",
         NOTE,
         "",
@@ -57,7 +57,7 @@ def test_a_window_on_no_network_says_none_and_still_names_its_device():
     lines = connect_screen_lines(_read_only(_snapshot(network="", domain="")), 80)
 
     assert " network      none" in lines
-    assert " this device  mac-kollab" in lines
+    assert " this device  laptop-kollab" in lines
     assert NOTE in lines
 
 
@@ -143,7 +143,7 @@ def _window(
     plugin._relay_agent = SimpleNamespace(
         _state=lambda: SimpleNamespace(state=SimpleNamespace(origin=origin)),
         owner=SimpleNamespace(owner=lambda: {"pid": 4242} if owned_elsewhere else None),
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         trust_level=lambda: "agents",
     )
     stack = SimpleNamespace(push=AsyncMock())
@@ -172,7 +172,7 @@ async def test_bare_connect_in_a_second_window_opens_the_read_only_screen():
     view, name, text = await _rendered(stack)
     assert name == "connect-screen" and type(view) is ConnectScreenAltView
     assert "network      kollabor.ai   trust: agents" in text
-    assert "this device  mac-kollab" in text
+    assert "this device  laptop-kollab" in text
     assert CONNECT_OWNED_ELSEWHERE in text
     assert "join code" not in text and "requests" not in text and "online" not in text
     plugin._open_connect_altview.assert_not_awaited()  # no code form either

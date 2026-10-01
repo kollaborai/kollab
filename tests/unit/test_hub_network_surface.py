@@ -24,8 +24,8 @@ from plugins.hub.relay_commands import RelayCommands
 REMOTE_ROWS = [
     {
         "name": "infra",
-        "device": "alzan-prod-home",
-        "handle": "infra@alzan-prod-home",
+        "device": "home-server",
+        "handle": "infra@home-server",
         "state": "idle",
         "address": "relay:" + "a" * 64 + ":" + "b" * 32 + ":infra-1",
         "online": True,
@@ -34,8 +34,8 @@ REMOTE_ROWS = [
     },
     {
         "name": "ops",
-        "device": "alzan-prod-home",
-        "handle": "ops@alzan-prod-home",
+        "device": "home-server",
+        "handle": "ops@home-server",
         "state": "working",
         "task": "rotating logs",
         "address": "relay:" + "c" * 64 + ":" + "d" * 32 + ":ops-1",
@@ -68,7 +68,7 @@ def _relay_commands(tmp_path, *, agent_bridge):
 async def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=lambda: REMOTE_ROWS,
         plugin=SimpleNamespace(_presence=None, _identity=SimpleNamespace(identity="koordinator", agent_id="k1")),
         _enrollment_issuer=None,
@@ -78,10 +78,10 @@ async def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
     status = await commands.format_status()
 
     assert "network kollabor.ai  trust: open" in status
-    assert "this device mac-kollab" in status
-    assert "infra@alzan-prod-home - idle" in status
-    assert "ops@alzan-prod-home" not in status
-    assert "  alzan-prod-home (offline)" in status
+    assert "this device laptop-kollab" in status
+    assert "infra@home-server - idle" in status
+    assert "ops@home-server" not in status
+    assert "  home-server (offline)" in status
     assert "koordinator (this device)" in status
     assert "join code run /connect code" in status
     # No keys, workspace ids, or relay: addresses by default.
@@ -92,7 +92,7 @@ async def test_status_shows_network_and_remote_rows_without_keys(tmp_path):
 
 @pytest.mark.asyncio
 async def test_status_shows_a_16_hex_contact_route_and_a_short_join_fingerprint(tmp_path):
-    fingerprint = "4d04" + "0" * 56 + "9f2e"
+    fingerprint = "abcd" + "0" * 56 + "ef01"
     row = SimpleNamespace(
         enrollment_id="a" * 32,
         device_name="ana-laptop",
@@ -100,7 +100,7 @@ async def test_status_shows_a_16_hex_contact_route_and_a_short_join_fingerprint(
     )
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=lambda: [],
         plugin=SimpleNamespace(_presence=None, _identity=None),
         _enrollment_issuer=None,
@@ -116,8 +116,8 @@ async def test_status_shows_a_16_hex_contact_route_and_a_short_join_fingerprint(
     route = contact_route_hex(commands.client.public_key)
     assert len(route) == 16
     assert f"contact route kollabor.ai/c/{route}" in status
-    assert "ana-laptop wants to join   fingerprint 4d04\u20269f2e" in status
-    assert short_fingerprint(fingerprint) == "4d04\u20269f2e"
+    assert "ana-laptop wants to join   fingerprint abcd\u2026ef01" in status
+    assert short_fingerprint(fingerprint) == "abcd\u2026ef01"
     assert fingerprint not in status
     assert "a" * 32 not in status
 
@@ -128,7 +128,7 @@ async def _async_remote_agents():
 
 @pytest.mark.asyncio
 async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_path):
-    fingerprint = "4d04" + "0" * 56 + "9f2e"
+    fingerprint = "abcd" + "0" * 56 + "ef01"
     row = SimpleNamespace(
         enrollment_id="a" * 32,
         device_name="ana-laptop",
@@ -138,7 +138,7 @@ async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_pa
     offline_key = "b" * 64
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         network_name=lambda: "marco-home",
         remote_agents=_async_remote_agents,
         identity=SimpleNamespace(agent_id="k1"),
@@ -165,10 +165,10 @@ async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_pa
         "kollabor.ai",
         "open",
     )
-    assert snapshot.device == "mac-kollab"
+    assert snapshot.device == "laptop-kollab"
     assert snapshot.relay_online is True
     assert snapshot.local_agents == ("koordinator",)
-    assert snapshot.remote_agents == ("infra@alzan-prod-home",)
+    assert snapshot.remote_agents == ("infra@home-server",)
     assert "laptop-kollab" in snapshot.offline_devices
     [request] = snapshot.requests
     assert request.device == "ana-laptop"
@@ -184,7 +184,7 @@ async def test_connect_snapshot_counts_knocks_at_most_every_few_seconds(tmp_path
 
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=_async_remote_agents,
         plugin=SimpleNamespace(_presence=None, _identity=None),
     )
@@ -223,7 +223,7 @@ async def test_connect_snapshot_counts_knocks_at_most_every_few_seconds(tmp_path
 async def test_connect_snapshot_with_the_relay_down_still_returns_and_skips_knocks(tmp_path):
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=_async_remote_agents,
         plugin=SimpleNamespace(_presence=None, _identity=None),
     )
@@ -239,7 +239,7 @@ async def test_connect_snapshot_with_the_relay_down_still_returns_and_skips_knoc
 
     assert snapshot.relay_online is False
     assert snapshot.knocks == 0
-    assert snapshot.device == "mac-kollab"
+    assert snapshot.device == "laptop-kollab"
 
 
 @pytest.mark.asyncio
@@ -252,7 +252,7 @@ async def test_connect_snapshot_names_the_primary_once_its_config_arrived(tmp_pa
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "alzan-prod-home",
+        device_name=lambda: "home-server",
         remote_agents=_async_remote_agents,
         plugin=SimpleNamespace(_presence=None, _identity=None),
     )
@@ -263,10 +263,10 @@ async def test_connect_snapshot_names_the_primary_once_its_config_arrived(tmp_pa
 
     assert (await commands.connect_snapshot()).config_from == ""  # nothing has arrived
 
-    write_managed_config(ManagedConfig(primary_key=primary, primary_name="mac-kollab"))
+    write_managed_config(ManagedConfig(primary_key=primary, primary_name="laptop-kollab"))
     snapshot = await commands.connect_snapshot()
-    assert snapshot.config_from == "mac-kollab"
-    assert ConnectSnapshot.from_wire(snapshot.to_wire()).config_from == "mac-kollab"
+    assert snapshot.config_from == "laptop-kollab"
+    assert ConnectSnapshot.from_wire(snapshot.to_wire()).config_from == "laptop-kollab"
 
     write_managed_config(ManagedConfig(primary_key="f" * 64, primary_name="someone-else"))
     assert (await commands.connect_snapshot()).config_from == ""  # not this device's primary
@@ -277,7 +277,7 @@ async def test_status_lists_offline_devices_for_approved_keys_with_no_online_age
     offline_key = "b" * 64
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=lambda: [],
         plugin=SimpleNamespace(_presence=None, _identity=None),
         _enrollment_issuer=None,
@@ -298,7 +298,7 @@ async def test_status_offline_device_without_a_recorded_name_shows_a_hash_label_
     offline_key = "c" * 64
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=lambda: [],
         plugin=SimpleNamespace(_presence=None, _identity=None),
         _enrollment_issuer=None,
@@ -317,7 +317,7 @@ async def test_status_offline_device_without_a_recorded_name_shows_a_hash_label_
 async def test_status_shows_trust_suffix_when_peer_override_differs_from_network(tmp_path):
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=lambda: REMOTE_ROWS,
         plugin=SimpleNamespace(
             _presence=None, _identity=SimpleNamespace(identity="koordinator", agent_id="k1")
@@ -329,7 +329,7 @@ async def test_status_shows_trust_suffix_when_peer_override_differs_from_network
 
     status = await commands.format_status()
 
-    assert "infra@alzan-prod-home - idle  trust agents" in status
+    assert "infra@home-server - idle  trust agents" in status
 
 
 # --------------------------------------------------------------------- #
@@ -343,10 +343,10 @@ async def test_connect_name_validates_and_calls_set_device_name(tmp_path):
     bridge = SimpleNamespace(set_device_name=lambda name: calls.append(name) or name)
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
 
-    result = await commands._run("name mac-kollab", source_agent=None)
+    result = await commands._run("name laptop-kollab", source_agent=None)
 
-    assert result == "this device is now mac-kollab"
-    assert calls == ["mac-kollab"]
+    assert result == "this device is now laptop-kollab"
+    assert calls == ["laptop-kollab"]
 
 
 @pytest.mark.asyncio
@@ -409,7 +409,7 @@ async def test_connect_allow_resolves_a_device_name_to_its_peer_key(tmp_path):
     )
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
 
-    result = await commands._run("allow alzan-prod-home ops", source_agent="me")
+    result = await commands._run("allow home-server ops", source_agent="me")
 
     assert result == "ok"
     assert seen["head"] == "allow"
@@ -470,7 +470,7 @@ async def test_route_message_resolves_a_handle_and_sends_with_no_grant():
         action="message",
         from_agent="lapis-1",
         from_identity="lapis",
-        to="infra@alzan-prod-home",
+        to="infra@home-server",
         content="check the tunnel",
         scope=MessageScope.DIRECT.value,
     )
@@ -478,11 +478,11 @@ async def test_route_message_resolves_a_handle_and_sends_with_no_grant():
     rejections = await hub._route_message(msg)
 
     assert rejections == []
-    assert sent["address"] == "relay:resolved:infra@alzan-prod-home"
+    assert sent["address"] == "relay:resolved:infra@home-server"
     assert sent["content"] == "check the tunnel"
     # The message's own thread rides along so an answer can name it.
     assert sent["kwargs"] == {"kind": "message", "thread_id": msg.thread_id, "reply_to": ""}
-    assert msg.metadata["network"] == {"to": "relay:resolved:infra@alzan-prod-home"}
+    assert msg.metadata["network"] == {"to": "relay:resolved:infra@home-server"}
 
 
 @pytest.mark.asyncio
@@ -545,7 +545,7 @@ async def test_broadcast_scope_network_reaches_online_remote_agents_under_open_t
 
     # Only the online row (infra) is reached; the offline row (ops) is not.
     assert sent == [
-        ("relay:resolved:infra@alzan-prod-home", "shipped phase B", {"kind": "message"})
+        ("relay:resolved:infra@home-server", "shipped phase B", {"kind": "message"})
     ]
     assert "1 network agent(s)" in result
 
@@ -596,8 +596,8 @@ async def test_format_status_lists_remote_agents_with_device_online_state():
     await hub._refresh_remote_agent_rows()
     status = hub._format_status()
 
-    assert "infra@alzan-prod-home - idle (device online)" in status
-    assert "ops@alzan-prod-home - working (device offline)" in status
+    assert "infra@home-server - idle (device online)" in status
+    assert "ops@home-server - working (device offline)" in status
 
 
 # --------------------------------------------------------------------- #
@@ -623,7 +623,7 @@ async def test_roster_context_includes_network_line_and_remote_rows():
     hub._relay_agent = SimpleNamespace(
         remote_agents=lambda: online_rows,
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         harness_context=_async_empty_list,
         _state=lambda: SimpleNamespace(
             state=SimpleNamespace(peer_devices={offline_peer_key: "laptop-kollab"})
@@ -651,12 +651,12 @@ async def test_roster_context_includes_network_line_and_remote_rows():
 
     content = llm_service.conversation_history[0].content
     assert "network: kollabor.ai via kollabor.ai (trust: open)" in content
-    assert "this device: mac-kollab" in content
-    assert "infra@alzan-prod-home - idle" in content
-    assert "ops@alzan-prod-home - working: rotating logs" in content
+    assert "this device: laptop-kollab" in content
+    assert "infra@home-server - idle" in content
+    assert "ops@home-server - working: rotating logs" in content
     assert "offline devices: laptop-kollab" in content
     assert "remote agents use the same tag with their full name:" in content
-    assert '<hub_msg to="infra@alzan-prod-home">your message</hub_msg>' in content
+    assert '<hub_msg to="infra@home-server">your message</hub_msg>' in content
 
 
 async def _async_empty_list(*_args, **_kwargs):
@@ -677,7 +677,7 @@ async def test_status_awaits_an_async_bridge(tmp_path):
 
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
-        device_name=lambda: "mac-kollab",
+        device_name=lambda: "laptop-kollab",
         remote_agents=remote_agents,
         plugin=SimpleNamespace(_presence=None, _identity=SimpleNamespace(identity="koordinator", agent_id="k1")),
         _enrollment_issuer=None,
@@ -687,9 +687,9 @@ async def test_status_awaits_an_async_bridge(tmp_path):
     status = await commands.format_status()
 
     assert "  koordinator (this device)" in status
-    assert "  infra@alzan-prod-home - idle" in status
-    assert status.index("koordinator (this device)") < status.index("infra@alzan-prod-home")
-    assert "offline devices" not in status or "alzan-prod-home" in status
+    assert "  infra@home-server - idle" in status
+    assert status.index("koordinator (this device)") < status.index("infra@home-server")
+    assert "offline devices" not in status or "home-server" in status
 
 
 @pytest.mark.asyncio
@@ -698,7 +698,7 @@ async def test_route_message_awaits_resolve_handle():
     sent = []
 
     async def resolve_handle(handle):
-        assert handle == "infra@alzan-prod-home"
+        assert handle == "infra@home-server"
         return REMOTE_ROWS[0]["address"]
 
     async def send(address, content, kind="message", thread_id="", reply_to=""):
@@ -706,7 +706,7 @@ async def test_route_message_awaits_resolve_handle():
 
     hub._relay_agent = SimpleNamespace(resolve_handle=resolve_handle, send=send, trust_level=lambda: "open")
     hub._trace_delivery = lambda *a, **k: None
-    message = HubMessage(from_identity="lapis", to="infra@alzan-prod-home", content="check the tunnel")
+    message = HubMessage(from_identity="lapis", to="infra@home-server", content="check the tunnel")
 
     rejections = await hub._route_message(message)
 
@@ -726,7 +726,7 @@ async def test_refresh_remote_agent_rows_awaits_and_snapshots():
 
     assert hub._remote_agent_rows() == []
     rows = await hub._refresh_remote_agent_rows()
-    assert [r["handle"] for r in rows] == ["infra@alzan-prod-home", "ops@alzan-prod-home"]
+    assert [r["handle"] for r in rows] == ["infra@home-server", "ops@home-server"]
     assert hub._remote_agent_rows() == rows
 
 
@@ -749,10 +749,10 @@ def _outgoing_box(target, rows):
 
 def test_an_outgoing_box_never_draws_a_relay_address():
     address = "relay:" + "a" * 64 + ":" + "9" * 32 + ":infra-1"
-    row = {"name": "infra", "device": "alzan-prod-home", "address": address}
+    row = {"name": "infra", "device": "home-server", "address": address}
 
     assert _outgoing_box(address, [row]).startswith(
-        "sapphire -> infra@alzan-prod-home\n"
+        "sapphire -> infra@home-server\n"
     )
     assert _outgoing_box(address, []).startswith("sapphire -> a remote agent\n")
     assert _outgoing_box("lapis", [row]).startswith("sapphire -> lapis\n")
