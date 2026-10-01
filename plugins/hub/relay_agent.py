@@ -2552,6 +2552,7 @@ class RelayAgentBridge:
             device_name=self.device_name,
             peer_name=self._peer_name,
             after_apply=self._config_applied,
+            notice=self._config_notice,
             root=root,
         )
         return self.config_sync
@@ -2579,6 +2580,12 @@ class RelayAgentBridge:
             return {}
         approved = set(client.state.approvals)
         return {p["key"]: p["session"] for p in client.peers() if p["key"] in approved}
+
+    def _config_notice(self, text: str) -> None:
+        """One system line in the main pane about settings sync."""
+        show = getattr(self.plugin, "show_network_notice", None)
+        if show is not None:
+            show(text)
 
     async def _config_applied(self, applied: Applied) -> None:
         """Make the running app follow settings its primary just wrote to disk."""

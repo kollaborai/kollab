@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 import zlib
@@ -629,6 +630,7 @@ class Applied:
     config_changed: bool = False
     profiles_changed: bool = False
     mcp_changed: bool = False
+    skipped_mcp: tuple[str, ...] = ()  # servers whose command is not installed here
 
 
 def safe_parts(rel: Any) -> tuple[str, ...] | None:
@@ -730,6 +732,13 @@ def parse_manifest(value: Any) -> list[tuple[str, str, int, bool]]:
     if total > MAX_TOTAL_BYTES:
         raise ConfigSyncError("invalid")
     return entries
+
+
+def _mcp_missing(server: dict) -> bool:
+    """A server whose command is not installed here: a bare name that ``shutil.which``
+    cannot find, or a path that is missing or not executable. URL servers have none."""
+    command = server.get("command")
+    return isinstance(command, str) and bool(command) and shutil.which(command) is None
 
 
 class Receiver:
@@ -834,11 +843,17 @@ class Receiver:
         existing = settings.get("servers")
         existing = existing if isinstance(existing, dict) else {}
         merged = dict(existing)
-        for name in set(record.mcp_servers if record else ()) - servers.keys():
+        synced_mcp = set(record.mcp_servers) if record else set()
+        for name in synced_mcp - servers.keys():
             merged.pop(name, None)
+        skipped = set()
         for name, server in servers.items():
             if isinstance(name, str) and isinstance(server, dict):
-                merged[name] = copy.deepcopy(server)
+                if _mcp_missing(server):  # never written, never a reason to touch a local one
+                    skipped.add(name)
+                else:
+                    merged[name] = copy.deepcopy(server)
+        applied.skipped_mcp = tuple(sorted(skipped))
         if merged != existing:
             settings["servers"] = merged
             _write_json(mcp_path, settings)
@@ -850,7 +865,13 @@ class Receiver:
                 revision=revision,
                 digest=digest,
                 keys=tuple(sorted(leaves.keys() | (previous & kept))),
-                mcp_servers=tuple(sorted(n for n in servers if isinstance(n, str))),
+                mcp_servers=tuple(
+                    sorted(
+                        n
+                        for n in servers
+                        if isinstance(n, str) and (n not in skipped or n in synced_mcp)
+                    )
+                ),
                 files=dict(record.files) if record else {},
             ),
             record_path(self._root),

@@ -5,9 +5,11 @@ exactly what the relay carries. Each "machine" is its own ~/.kollab folder
 passed as a root, so the primary reads one and the secondary writes another.
 """
 
+import base64
 import json
 import os
 import random
+import sys
 import time
 
 import pytest
@@ -90,7 +92,7 @@ def network(bridges, tmp_path):
     write_json(macs / "config.json", primary_settings())
     write_json(
         macs / "mcp" / "mcp_settings.json",
-        {"servers": {"mentiko": {"command": "node", "env": {"T": FAKE_MCP}}}},
+        {"servers": {"mentiko": {"command": sys.executable, "env": {"T": FAKE_MCP}}}},
     )
     (macs / "agents" / "coder").mkdir(parents=True)
     (macs / "agents" / "coder" / "system_prompt.md").write_text("be the coder\n")
@@ -174,7 +176,7 @@ async def test_an_accepted_device_gets_everything_sealed(network):
         json.loads((net["server"] / "mcp" / "mcp_settings.json").read_text())[
             "servers"
         ]["mentiko"]["command"]
-        == "node"
+        == sys.executable
     )
     assert (
         net["server"] / "agents" / "coder" / "system_prompt.md"
@@ -442,3 +444,55 @@ async def test_pacing_keeps_a_big_sync_under_the_relay_send_limit(network):
     # the wire is instant, so the whole budget is slept
     assert sum(slept) >= frames_sent / 8 - 1.0  # the relay refills 8 a second
     assert len(slept) == len(net["calls"])
+
+
+def core_call(snapshot, primary, secondary, revision):
+    """What the primary's service sends for one core bundle."""
+    sealed = cs.seal(
+        "core",
+        {"digest": snapshot.digest, "files_digest": snapshot.files_digest},
+        cs.core_blob(snapshot, "mac-kollab"),
+        issuer_key=primary,
+        recipient_public_key=bytes(secondary.verify_key),
+        revision=revision,
+    )
+    return {"v": 1, "op": "core", "bundle": base64.b64encode(sealed).decode()}
+
+
+def secondary_service(secondary, primary, notices, root=None):
+    return ConfigSyncService(
+        key=secondary,
+        transport=None,
+        online=dict,
+        recipients=list,
+        primary=lambda: bytes(primary.verify_key).hex(),
+        device_name=lambda: "server-kollab",
+        peer_name=lambda _key: "mac-kollab",
+        notice=notices.append,
+        root=root,
+    )
+
+
+@pytest.mark.asyncio
+async def test_skipped_mcp_servers_are_named_once_per_distinct_set(tmp_path):
+    primary, secondary = SigningKey.generate(), SigningKey.generate()
+    mac, server, notices = tmp_path / "mac-kollab", tmp_path / "server-kollab", []
+    service = secondary_service(secondary, primary, notices, root=server)
+
+    async def push(revision, servers, model="claude-opus-5-5"):
+        write_json(mac / "config.json", primary_settings(model=model))
+        write_json(mac / "mcp" / "mcp_settings.json", {"servers": servers})
+        snapshot = cs.SnapshotBuilder(root=mac, keyring_get={}.get).build()
+        call = core_call(snapshot, primary, secondary, revision)
+        return await service.receive(bytes(primary.verify_key).hex(), call)
+
+    here, gone = {"command": sys.executable}, {"command": "no-such-mcp-server-xyz"}
+    assert await push(1, {"here": here, "gone": gone}) == {"ok": True}
+    assert await push(2, {"here": here, "gone": gone}, model="claude-opus-5-6") == {"ok": True}
+
+    written = json.loads((server / "mcp" / "mcp_settings.json").read_text())
+    assert written["servers"] == {"here": here}
+    assert notices == ["Skipped MCP servers not installed here: gone"]  # once, not per bundle
+
+    await push(3, {"here": here, "gone": gone, "lost": gone})  # a different set speaks again
+    assert notices[1:] == ["Skipped MCP servers not installed here: gone, lost"]

@@ -7,6 +7,7 @@ Every key here is a made-up marker. Nothing reads the real ~/.kollab: each
 import json
 import os
 import stat
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -105,7 +106,7 @@ def fill_primary(kollab):
         kollab / "mcp" / "mcp_settings.json",
         {
             "servers": {
-                "mentiko": {"command": "node", "env": {"TOKEN": "fake-mcp-token"}}
+                "mentiko": {"command": sys.executable, "env": {"TOKEN": "fake-mcp-token"}}
             }
         },
     )
@@ -214,7 +215,7 @@ def test_snapshot_carries_settings_agents_skills_mcp_and_resolved_keys(homes):
     assert leaves[("kollabor", "llm", "profiles", "gpt-5.4", "model")] == "gpt-5.4"
     assert leaves[("terminal", "render_fps")] == 30
     assert snapshot.mcp == {
-        "mentiko": {"command": "node", "env": {"TOKEN": "fake-mcp-token"}}
+        "mentiko": {"command": sys.executable, "env": {"TOKEN": "fake-mcp-token"}}
     }
     assert [e.path for e in snapshot.files] == [
         "agents/coder/system_prompt.md",
@@ -501,7 +502,7 @@ def test_secondary_applies_settings_keeps_its_own_and_marks_them_managed(homes, 
             stat.S_IMODE((server / "config.json").stat().st_mode) == 0o600
         )  # it now holds keys
         mcp = json.loads((server / "mcp" / "mcp_settings.json").read_text())
-        assert mcp["servers"]["mentiko"]["command"] == "node"
+        assert mcp["servers"]["mentiko"]["command"] == sys.executable
         record = read_managed_config()
         assert record.primary_name == "mac-kollab" and record.revision == 10
         assert ("kollabor", "llm", "active_profile") in record.keys
@@ -885,3 +886,65 @@ def test_a_file_whose_only_change_is_the_exec_bit_reaches_the_secondary(homes, k
     assert done["applied"] is True
     with homes("server") as server:
         assert not (server / "skills" / "tdd" / "run.sh").stat().st_mode & 0o111
+
+
+def mcp_on_server(homes):
+    with homes("server") as server:
+        text = (server / "mcp" / "mcp_settings.json").read_text()
+        return json.loads(text)["servers"], read_managed_config()
+
+
+def test_mcp_servers_whose_command_is_not_installed_here_are_skipped(homes, keys, tmp_path):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        write_json(
+            kollab / "mcp" / "mcp_settings.json",
+            {
+                "servers": {
+                    "here": {"command": sys.executable},
+                    "gone": {"command": "no-such-mcp-server-xyz"},
+                    "far": {"command": str(tmp_path / "no-such-server")},
+                    "remote": {"type": "sse", "url": "https://mcp.example.test/sse"},
+                }
+            },
+        )
+        snapshot = builder().build()
+    with homes("server") as server:  # a local server that shares a skipped name
+        write_json(
+            server / "mcp" / "mcp_settings.json",
+            {"servers": {"gone": {"command": "my-own-launcher"}}},
+        )
+    receiver = cs.Receiver(secondary)
+
+    reply, applied = push_core(snapshot, 10, receiver, primary, secondary, homes)
+
+    assert reply == {"ok": True}
+    assert applied.skipped_mcp == ("far", "gone")
+    servers, record = mcp_on_server(homes)
+    assert servers.keys() == {"here", "gone", "remote"}  # a URL server has no command
+    assert servers["gone"] == {"command": "my-own-launcher"}  # not overwritten
+    assert record.mcp_servers == ("here", "remote")  # the skipped ones are not managed
+    with homes("mac") as kollab:  # the primary drops everything
+        write_json(kollab / "mcp" / "mcp_settings.json", {"servers": {}})
+        dropped = builder().build()
+    push_core(dropped, 11, receiver, primary, secondary, homes)
+    servers, _ = mcp_on_server(homes)
+    assert servers == {"gone": {"command": "my-own-launcher"}}  # only what it synced goes
+
+
+def test_a_synced_server_whose_new_command_is_missing_keeps_its_last_good_definition(homes, keys):
+    primary, secondary = keys
+    receiver = cs.Receiver(secondary)
+    for revision, command in ((10, sys.executable), (11, "no-such-mcp-server-xyz")):
+        with homes("mac") as kollab:
+            if revision == 10:
+                fill_primary(kollab)
+            write_json(kollab / "mcp" / "mcp_settings.json", {"servers": {"one": {"command": command}}})
+            snapshot = builder().build()
+        _, applied = push_core(snapshot, revision, receiver, primary, secondary, homes)
+
+    assert applied.skipped_mcp == ("one",)
+    servers, record = mcp_on_server(homes)
+    assert servers["one"]["command"] == sys.executable  # never swapped for one that cannot start
+    assert record.mcp_servers == ("one",)  # still synced, so the primary can still drop it

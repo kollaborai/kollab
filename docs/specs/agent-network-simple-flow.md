@@ -699,6 +699,11 @@ How it stays secure with 40 bits:
 - Primary wins. The secondary sets every key the primary sends, keeps its own
   keys the primary does not send, and deletes a key or file the primary
   dropped. It records what it manages in `~/.kollab/private/managed-config.json`.
+- An MCP server whose command is not installed on a secondary (a bare name
+  `shutil.which` cannot find, or a path that is missing or not executable) is
+  skipped: it is never written and a local server of the same name stays. The
+  secondary shows one line, `Skipped MCP servers not installed here: a, b`, once
+  per distinct set. URL servers have no command and always sync.
 - On a secondary, `/config` shows each synced key as a read-only line
   `<label>: <value>   managed by <primary>`; a secret shows as `set`. The
   Loadout and Model rows lead LLM Settings on every device. They are read-only

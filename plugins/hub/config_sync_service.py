@@ -81,6 +81,7 @@ class ConfigSyncService:
         device_name: Callable[[], str],
         peer_name: Callable[[str], str],
         after_apply: Callable[[Applied], Awaitable[None]] | None = None,
+        notice: Callable[[str], None] | None = None,
         builder: SnapshotBuilder | None = None,
         root: Path | None = None,
         poll_seconds: float = POLL_SECONDS,
@@ -94,6 +95,7 @@ class ConfigSyncService:
         self._device_name = device_name
         self._peer_name = peer_name
         self._after_apply = after_apply
+        self._notice = notice
         self._root = root
         self._builder = builder or SnapshotBuilder(root=root)
         self._poll = poll_seconds
@@ -112,6 +114,7 @@ class ConfigSyncService:
         self._pushes: dict[str, asyncio.Task] = {}
         self._task: asyncio.Task | None = None
         self._closed = False
+        self._told_skipped: tuple[str, ...] = ()
 
     # ---- lifecycle ----
 
@@ -328,6 +331,7 @@ class ConfigSyncService:
                     "config sync: could not apply a bundle (%s)", type(error).__name__
                 )
                 return {"error": "failed"}
+        self._tell(applied)
         if (
             applied is not None
             and self._after_apply is not None
@@ -340,6 +344,17 @@ class ConfigSyncService:
                     "config sync: refresh after apply failed (%s)", type(error).__name__
                 )
         return reply
+
+    def _tell(self, applied: Applied | None) -> None:
+        """One line for each distinct set of skipped MCP servers, never one per bundle."""
+        if applied is None or self._notice is None:
+            return
+        if applied.skipped_mcp == self._told_skipped:
+            return
+        self._told_skipped = applied.skipped_mcp
+        if applied.skipped_mcp:
+            names = ", ".join(applied.skipped_mcp)
+            self._notice(f"Skipped MCP servers not installed here: {names}")
 
 
 def _batches(entries: list[FileEntry]) -> list[list[FileEntry]]:
