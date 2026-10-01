@@ -9368,7 +9368,7 @@ class HubPlugin(BasePlugin):
             )
             await stack.push(view, "connect-guide", reuse=False)
             if view.answer == "screen":
-                text = await self._connect_home()
+                text = await self._connect_home(guide=True)
             elif view.answer == "new_network":
                 text = await self._guided_new_network()
             elif view.answer == "join":
@@ -9485,8 +9485,11 @@ class HubPlugin(BasePlugin):
         tasks.add(task)  # the set is what keeps a detached task alive
         task.add_done_callback(tasks.discard)
 
-    async def _connect_home(self) -> str:
-        """Bare /connect: the Connect screen on a network, the code form off one."""
+    async def _connect_home(self, *, guide: bool = False) -> str:
+        """Bare /connect: the Connect screen on a network, the code form off one.
+
+        ``guide`` (the first-launch notice) adds the steps for the other computer.
+        """
         from .relay_commands import NO_NETWORK
 
         status = None
@@ -9519,7 +9522,7 @@ class HubPlugin(BasePlugin):
             return status
         if not domain:
             return await self._open_connect_altview("kollabor.ai")
-        return await self._open_connect_screen(domain, snapshot=snapshot)
+        return await self._open_connect_screen(domain, snapshot=snapshot, guide=guide)
 
     async def _open_connect_altview(self, domain: str = "kollabor.ai") -> str:
         """Open the private enrollment form without putting its code in chat."""

@@ -263,7 +263,8 @@ def _flow(marker, has_network, keys):
 
 def test_flow_routes_each_answer(marker):
     plugin = _flow(marker, True, ["Enter"])
-    plugin._connect_home.assert_awaited_once()
+    # A device already on a network still gets the steps for the other computer.
+    plugin._connect_home.assert_awaited_once_with(guide=True)
     assert marker.exists()
 
     marker.unlink()

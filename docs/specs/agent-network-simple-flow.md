@@ -218,7 +218,7 @@ notice, once per machine, before anyone has typed `/connect`.
  enter set up now   esc later
 ```
 
-- Enter on a device that already has a network opens the Connect screen.
+- Enter on a device that already has a network opens the Connect screen, with a join code and the same "On your other computer" box.
 - Enter on a device with no network offers two choices (up/down, Enter):
 
 ```

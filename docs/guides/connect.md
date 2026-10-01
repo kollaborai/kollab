@@ -126,7 +126,7 @@ Enter sets it up now; Esc for later (/connect any time).
   `kollab --upgrade` (or `pip install -U kollab`), run `kollab` and press Enter
   on the same notice, choose *Join with a code* and type the code. Joining opens
   the private code form, as `/connect` does.
-- **Enter, on a computer already on a network.** Opens the Connect screen.
+- **Enter, on a computer already on a network.** Opens the Connect screen, with a join code and the same "On your other computer" steps.
 - **Esc.** Leaves it for later; `/connect` does the same thing at any time.
 - **After a join.** One line says settings arrive sealed from the computer that
   issued the code, and that a ChatGPT login does not travel: run `/login` on this
