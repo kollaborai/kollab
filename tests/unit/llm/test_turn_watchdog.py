@@ -208,6 +208,20 @@ class TestTurnWatchdogHeal(unittest.TestCase):
         self.assertFalse(qp.is_processing)
         self.assertEqual(len(calls), 0)  # nothing to drain → no kick
 
+    def test_heal_stuck_busy_ends_the_chain_failed(self):
+        # A wedge is a failure even when turn_completed is stale True: the heal
+        # records an error before lowering is_processing, so a remote request
+        # bound to the chain ends with the failed flag.
+        c = Clock()
+        wd, qp, api, mh, calls = _make(
+            c, is_processing=True, turn_completed=True, queue=0, last_progress_at=c()
+        )
+        qp.last_turn_error = None
+        c.t += 601
+        mode = _run(wd.check_once())
+        self.assertEqual(mode, "stuck_busy")
+        self.assertTrue(qp.last_turn_error)
+
     def test_heal_orphaned_queue_kicks(self):
         c = Clock()
         wd, qp, api, mh, calls = _make(
