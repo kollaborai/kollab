@@ -326,3 +326,33 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
     rows = await left.remote_agents()
     assert len(rows) == 1
     assert rows[0]["device"] == key_label(right.commands.client.public_key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", ["open", "agents"])
+async def test_revoked_peer_queued_message_never_reaches_the_model(bridges, level):
+    """A device revoked through membership keeps nothing queued deliverable.
+
+    A member-side revocation (accept_membership -> client.revoke) drops the
+    approval without touching the conversation store, so the delivery loop
+    itself must refuse a queued record whose peer is no longer approved
+    (docs section 4: revoking a device drops it on every member).
+    """
+    members, _ = bridges
+    (left, *_), (right, _, right_model, _) = members
+    set_trust(left, level)
+    set_trust(right, level)
+    if level == "agents":
+        allow(left, right)
+
+    sent = await left.send(address(right), "check the tunnel")
+    assert sent["state"] == "queued"
+
+    # Membership-level revocation: approvals drop, the store keeps the task.
+    right.commands.client.revoke(left.commands.client.public_key)
+    assert right.store.task(sent["id"])["state"] == "queued"
+
+    await right._tick()
+
+    assert right_model.contexts == []
+    assert right.store.task(sent["id"])["state"] == "cancelled"

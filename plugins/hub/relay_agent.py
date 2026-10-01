@@ -2985,6 +2985,16 @@ class RelayAgentBridge:
         if not queued:
             return
         record = self.store.task(queued[0]["id"])
+        state = self._state().state
+        if record["peer"] not in state.approvals:
+            # A revocation that arrived through membership dropped the
+            # approval without touching this store (accept_membership ->
+            # client.revoke); the queued record dies here the way a local
+            # /connect revoke cancels it (docs section 4).
+            self.store.transition(
+                record["id"], "cancelled", detail="peer approval revoked"
+            )
+            return
         # A sender on manual trust marks its request as a task and waits for its
         # result: run it as one whatever this device's trust.
         as_task = record["payload"].get("task") is True
