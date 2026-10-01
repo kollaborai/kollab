@@ -66,13 +66,16 @@ MAX_REMOTE_PEERS = 8
 DIRECTORY_STALE_SECONDS = 45
 TASK_TIMEOUT = 600
 ARRIVAL_POLL_SECONDS = 3.0
-# A knock nobody answered in a week is forgotten: the directory never tells the
-# knocker about a rejection, so silence is all there is to go on.
+# A knock nobody answered in a week is forgotten. A rejection is asked of the
+# directory; one that cannot say (older, or the answer expired) leaves silence.
 KNOCK_EXPIRY_SECONDS = 7 * 24 * 3600
+# How often the directory is asked how one knock was decided.
+KNOCK_STATUS_SECONDS = 60
 # The directory forgets a device's consent after a day; repeating it well inside that.
 LINK_REFRESH_SECONDS = 6 * 60 * 60
 LINK_RETRY_SECONDS = 60
 _SHORT_CODE_SHAPE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
+_REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
     "invalid_contact",
@@ -205,6 +208,8 @@ class RelayAgentBridge:
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
         self._wall_clock = time.time  # epoch seconds; tests swap it
+        self._knock_asked: dict[str, float] = {}  # knock key -> when its answer was last asked
+        self._no_knock_status = ""  # origin of a directory without the status route
         self._links_lock = asyncio.Lock()
         self._links_declared: tuple[str, tuple[str, ...]] | None = None
         self._links_due = 0.0
@@ -264,7 +269,9 @@ class RelayAgentBridge:
             raise
         return undo
 
-    def _bind_knocked_peer(self, recipient_key: str, agent_name: str) -> None:
+    def _bind_knocked_peer(
+        self, recipient_key: str, agent_name: str, request_id: str = ""
+    ) -> None:
         """The knocking side of an introduction: get ready to hear back.
 
         Nothing flows until the other device accepts: the directory links two
@@ -279,21 +286,26 @@ class RelayAgentBridge:
             return
         if recipient_key in client.state.approvals:
             if recipient_key in self._state().state.knocks:
-                self._record_knock(recipient_key)  # knocked again: the week starts over
+                # knocked again: the week starts over
+                self._record_knock(recipient_key, request_id)
             return
         try:
             self.set_peer_trust(recipient_key, "agents")
             self.set_peer_link(recipient_key)
             client.approve(recipient_key)
             self.store.grant(client.state.room, recipient_key, agent_name)
-            self._record_knock(recipient_key)
+            self._record_knock(recipient_key, request_id)
         except Exception:
             self._clear_knock(recipient_key)
             raise
 
-    def _record_knock(self, key: str) -> None:
+    def _record_knock(self, key: str, request_id: str = "") -> None:
         store = self._state()
         store.state.knocks[key] = int(self._wall_clock())
+        if _REQUEST_ID.match(request_id):  # the id the directory can be asked about
+            store.state.knock_requests[key] = request_id
+        else:
+            store.state.knock_requests.pop(key, None)
         store.save()
 
     def _clear_knock(self, key: str) -> None:
@@ -302,8 +314,10 @@ class RelayAgentBridge:
         client.revoke(key)
         self.store.revoke(client.state.room, key)
         store = self._state()
-        if store.state.knocks.pop(key, None) is not None:
+        known = store.state.knocks.pop(key, None) is not None
+        if store.state.knock_requests.pop(key, None) is not None or known:
             store.save()
+        self._knock_asked.pop(key, None)
 
     def expire_knocks(self) -> None:
         """Forget knocks nobody answered for KNOCK_EXPIRY_SECONDS.
@@ -330,6 +344,52 @@ class RelayAgentBridge:
         store.save()
         for key in expired:
             self._clear_knock(key)
+
+    async def ask_knock_answers(self) -> None:
+        """Ask the directory how one outstanding knock was decided.
+
+        A rejection clears what the knock left at once, as the week's expiry
+        would. Accepted, or an answer the directory no longer holds, ends the
+        asking for that knock; a directory without the route ends it for the
+        directory. The expiry stays the backstop either way. A knock is asked
+        at most once a minute, and one knock per beat so a slow directory
+        cannot hold up the refresh (ponytail: raise if many knocks matter).
+        """
+        client = self.commands.client
+        store = self._state()
+        requests = store.state.knock_requests
+        origin = client.state.origin
+        if not requests or not origin or origin == self._no_knock_status:
+            return
+        if client.status().get("state") != "online":
+            return
+        for key in [key for key in requests if key not in store.state.knocks]:
+            del requests[key]  # answered or cleared meanwhile
+        now = self._wall_clock()
+        due = [
+            key
+            for key in requests
+            if now - self._knock_asked.get(key, float("-inf")) >= KNOCK_STATUS_SECONDS
+        ]
+        if not due:
+            return
+        key = min(due, key=lambda item: self._knock_asked.get(item, 0.0))
+        self._knock_asked[key] = now
+        try:
+            status = await self.commands.contact_request_status(
+                origin.removeprefix("https://"), key, requests[key]
+            )
+        except Exception as exc:
+            if getattr(exc, "code", "") == "no_route":
+                self._no_knock_status = origin  # an older directory: the expiry decides
+            else:
+                logger.debug("could not ask how a knock was answered")  # next minute
+            return
+        if status == "rejected":
+            self._clear_knock(key)
+        elif status != "pending":  # accepted, or gone from the directory
+            del requests[key]
+            store.save()
 
     def is_stranger(self, address: str) -> bool:
         """Whether an agent lives on an accepted stranger's device, not on this network."""
@@ -845,6 +905,10 @@ class RelayAgentBridge:
         except Exception:
             logger.warning("could not expire unanswered knocks")
         try:
+            await self.ask_knock_answers()
+        except Exception:
+            logger.debug("could not ask how knocks were answered", exc_info=True)
+        try:
             self.store.expire_queued(TASK_TIMEOUT)
             local = await asyncio.to_thread(self.directory.agents, self.workspace)
             if not self.directory.truncated and any(
@@ -1104,7 +1168,7 @@ class RelayAgentBridge:
         try:
             client = self.commands.client
             if directory_origin(params["domain"]) == client.state.origin:
-                self._bind_knocked_peer(key, agent.name)
+                self._bind_knocked_peer(key, agent.name, receipt)
                 await self.sync_links(force=True)
         except Exception:
             logger.warning("knock sent, but a reply path could not be prepared")

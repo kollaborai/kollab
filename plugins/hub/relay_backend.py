@@ -740,6 +740,16 @@ class InMemoryBackend:
         row["decision"] = decision
         return "stored"
 
+    async def contact_request_status(
+        self, recipient_hash: str, request_id: str, sender_key: str
+    ) -> str:
+        """The decision on one request, only for the key that sent it."""
+        self._prune_contact_requests(time.monotonic())
+        row = self.contact_requests.get(recipient_hash, {}).get(request_id)
+        if row is None or row["frame"]["sender_key"] != sender_key:
+            return "unavailable"
+        return row["decision"]
+
 
 _RESERVE_LEASE = """
 local t = redis.call('TIME')
@@ -988,6 +998,16 @@ if current == ARGV[2] then return 'duplicate' end
 if current ~= 'pending' then return 'conflict' end
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
 return 'stored'
+"""
+
+_CONTACT_REQUEST_STATUS = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local expiry = redis.call('ZSCORE', KEYS[2], ARGV[1])
+local payload = redis.call('HGET', KEYS[1], ARGV[1])
+if not expiry or tonumber(expiry) <= now or not payload then return 'unavailable' end
+if cjson.decode(payload)['frame']['sender_key'] ~= ARGV[2] then return 'unavailable' end
+return redis.call('HGET', KEYS[3], ARGV[1]) or 'pending'
 """
 
 _CREATE_ENROLLMENT_OFFER = """
@@ -2253,6 +2273,23 @@ class RedisRelayBackend:
             return str(result)
         except Exception as exc:
             raise RelayBackendError("contact request decision is unavailable") from exc
+
+    async def contact_request_status(
+        self, recipient_hash: str, request_id: str, sender_key: str
+    ) -> str:
+        try:
+            result = await self._redis.eval(
+                _CONTACT_REQUEST_STATUS,
+                3,
+                self._contact_data_key(recipient_hash),
+                self._contact_recipient_index_key(recipient_hash),
+                self._contact_decisions_key(recipient_hash),
+                request_id,
+                sender_key,
+            )
+            return str(result)
+        except Exception as exc:
+            raise RelayBackendError("contact request status is unavailable") from exc
 
     async def notify_room_change(self, room_hash: str, node_ids: set[str]) -> None:
         payload = {"type": "room_changed", "room_hash": room_hash}

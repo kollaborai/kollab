@@ -269,6 +269,18 @@ CONTACT_JSON_SCHEMAS = {
             "signature": _HEX128,
         }
     ),
+    # The sender of a knock asking how it was decided.
+    "status": _schema(
+        {
+            "v": {"const": 1},
+            **_CONTACT_RECIPIENT_PROPERTIES,
+            "sender_key": _HEX64,
+            "request_id": _HEX32,
+            "issued_at": _INTEGER,
+            "nonce": _HEX32,
+            "signature": _HEX128,
+        }
+    ),
     # A key's consent to link with other keys: `peers` replaces what it declared
     # before. Two keys reach each other across rooms only while each names the other.
     "links": _schema(
@@ -294,6 +306,7 @@ CONTACT_INBOX_PATH = "/relay/v1/contact/inbox"
 CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
 CONTACT_LOOKUP_PATH = "/relay/v1/contact/lookup"
 CONTACT_LINKS_PATH = "/relay/v1/contact/links"
+CONTACT_STATUS_PATH = "/relay/v1/contact/status"
 
 
 def generate_enrollment_code(offer_id: str) -> str:
@@ -1008,6 +1021,7 @@ def create_app(config: RelayConfig) -> web.Application:
     app.router.add_post(CONTACT_DECISIONS_PATH, contact_decision_handler)
     app.router.add_post(CONTACT_LOOKUP_PATH, contact_lookup_handler)
     app.router.add_post(CONTACT_LINKS_PATH, contact_links_handler)
+    app.router.add_post(CONTACT_STATUS_PATH, contact_status_handler)
     app.on_startup.append(start_relay)
     app.on_shutdown.append(shutdown_relay)
     app.on_cleanup.append(cleanup_relay)
@@ -1596,6 +1610,7 @@ async def _consume_enrollment_request_rate(
             "enrollment_reply_poll_handler",
             "enrollment_install_ack_poll_handler",
             "contact_inbox_handler",
+            "contact_status_handler",
         }
         else ENROLLMENT_RATE_LIMIT
     )
@@ -2046,6 +2061,29 @@ async def contact_decision_handler(request: web.Request) -> web.Response:
     return web.json_response(
         {"status": status, "receipt": frame["request_id"]}
     )
+
+
+@_enrollment_endpoint
+async def contact_status_handler(request: web.Request) -> web.Response:
+    """Tell the sender of a knock how it was decided; nobody else learns anything.
+
+    Signed by the key that sent that request. An unknown, expired or someone
+    else's id gets the same 404 `unavailable`, so the route says nothing about
+    which ids exist. A decided request is readable for the rest of its 24-hour
+    lifetime (CONTACT_REQUEST_TTL_MS), like a pending one.
+    """
+    state: RelayState = request.app["relay_state"]
+    frame = await _read_contact_frame(request, "status")
+    _verify_contact_frame(state, request, frame, "sender_key")
+    await _consume_enrollment_nonce(state, frame, "sender_key")
+    status = await state.backend.contact_request_status(
+        _contact_recipient_hash(frame["recipient_key"]),
+        frame["request_id"],
+        frame["sender_key"],
+    )
+    if status not in {"pending", "accepted", "rejected"}:
+        raise _EnrollmentHTTPError(404, "unavailable")
+    return web.json_response({"status": status})
 
 
 @_enrollment_endpoint

@@ -46,10 +46,14 @@ strings, caps bodies at 64 KiB and proxies to workers. The public GET probe of
 deployed proxy-route check has been performed. See the [implementation
 ledger](agent-network-simple-flow.md).
 
-The contact-request source registers five further POST routes, also in
+The contact-request source registers six further POST routes, also in
 `plugins/hub/relay_service.py`: `/relay/v1/contact/requests` (submit a sealed
 introduction), `/relay/v1/contact/inbox` (list requests addressed to a key),
 `/relay/v1/contact/decisions` (accept or reject one),
+`/relay/v1/contact/status` (the sender of a knock asks how it was decided:
+signed by the sender's key, answer `{"status":"pending"|"accepted"|"rejected"}`,
+404 `unavailable` for an unknown, expired or someone else's request id, the same
+answer for all three; a decided request stays readable for the knock's 24 hours),
 `/relay/v1/contact/lookup` (unsigned; body `{"v":1,"route":"<16 hex>"}`, answer
 `{"key":"<64 hex>"}`, 404 `unknown_route`, 409 `ambiguous_route`; the client
 recomputes the route from the returned key and refuses a mismatch), and
@@ -60,6 +64,10 @@ POST-only, no query strings, 64 KiB application-wide body cap
 `deploy/nginx.conf` checkout is not part of this source tree, so whether it
 proxies these routes could not be checked here; verify on the deployment host
 before relying on `/connect knock` against a public relay.
+
+`/relay/v1/contact/status` is new in 0.11.0. A device whose directory predates
+it gets a plain 404, stops asking that directory (debug log only) and leaves a
+rejected knock to the seven-day expiry.
 
 The configured `origin` is the exact canonical external HTTPS origin, with no path or trailing slash. TLS and signed discovery must agree with it. The public descriptor advertises `control: <origin>/relay/v1` with `relay`/`rendezvous` roles only while the deployed service is intentionally published. The current public descriptor and service evidence are summarized above and in the deployment ledger.
 

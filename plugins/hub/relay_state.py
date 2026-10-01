@@ -168,6 +168,9 @@ class RelayState:
     # -> when the knock was sent (epoch seconds). What a knock leaves behind is
     # cleared if nothing comes of it (docs/specs/agent-network-simple-flow.md).
     knocks: dict[str, int] = field(default_factory=dict)
+    # The request id of each knock above, so the directory can be asked how it was
+    # decided (POST /relay/v1/contact/status).
+    knock_requests: dict[str, str] = field(default_factory=dict)
     # Ids (`join:<id>`, `knock:<receipt>`) of the join requests and knocks the
     # human was already told about in the main pane, pruned to what is still
     # pending, so a restart announces only what is new.
@@ -301,6 +304,19 @@ class RelayStateStore:
         ):
             raise RelayError("invalid knock times")
         for key in value.knocks:
+            validate_public_key(key)
+        if (
+            not isinstance(value.knock_requests, dict)
+            or len(value.knock_requests) > MAX_APPROVALS
+            or any(
+                not isinstance(item, str)
+                or len(item) != 32
+                or not set(item) <= set("0123456789abcdef")
+                for item in value.knock_requests.values()
+            )
+        ):
+            raise RelayError("invalid knock requests")
+        for key in value.knock_requests:
             validate_public_key(key)
         if (
             not isinstance(value.announced, list)

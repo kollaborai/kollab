@@ -379,10 +379,14 @@ when he accepts. The declaration is refreshed while each device is online and
 withdrawn by `/connect revoke` or `/connect leave`. The relay still sees
 sealed frames only, and now also which two keys agreed to be linked.
 
-A knock nobody answers within seven days is forgotten, because the directory
-never tells the knocker about a rejection: Ana's device drops the approval,
-trust, link and reply grant it prepared, unless the link is live both ways or
-Marco's device has ever reached hers.
+A rejected knock is cleared at once: Ana's device asks the directory once a
+minute how each knock was decided (`POST /relay/v1/contact/status`, answered
+only to the key that sent it, for the knock's 24 hours) and drops what it
+prepared on a rejection. A knock nobody answers within seven days is forgotten
+too, which covers an older directory and an answer that expired while Ana was
+offline: her device drops the approval, trust, link and reply grant it
+prepared, unless the link is live both ways or Marco's device has ever reached
+hers.
 
 What each side sees. Ana's roster lists exactly the agents Marco allowed, as
 `ops@mac-kollab`; a message to any other agent on his device does not resolve.

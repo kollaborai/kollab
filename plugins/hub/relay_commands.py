@@ -710,6 +710,11 @@ class RelayCommands:
     async def pending_contact_requests(self, domain: str):
         return await self._contacts().pending(domain)
 
+    async def contact_request_status(
+        self, domain: str, recipient_key: str, request_id: str
+    ) -> str:
+        return await self._contacts().status(domain, recipient_key, request_id)
+
     async def decide_contact_request(
         self, domain: str, request_id: str, decision: str
     ):

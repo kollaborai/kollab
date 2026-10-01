@@ -27,6 +27,7 @@ CONTACT_INBOX_PATH = "/relay/v1/contact/inbox"
 CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
 CONTACT_LOOKUP_PATH = "/relay/v1/contact/lookup"
 CONTACT_LINKS_PATH = "/relay/v1/contact/links"
+CONTACT_STATUS_PATH = "/relay/v1/contact/status"
 CONTACT_SIGNATURE_DOMAIN = b"kollab-relay-contact-http/1\x00"
 CONTACT_MAX_TTL_SECONDS = 24 * 60 * 60
 CONTACT_MAX_INTRODUCTION_BYTES = 2048
@@ -53,6 +54,7 @@ _SAFE_ERRORS = {
     "discovery",
     "unknown_route",
     "ambiguous_route",
+    "no_route",
 }
 
 
@@ -382,6 +384,9 @@ class ContactRequestManager:
                     raw = await response.content.read(CONTACT_MAX_HTTP_FRAME_BYTES + 1)
                     if len(raw) > CONTACT_MAX_HTTP_FRAME_BYTES:
                         raise ContactProtocolError("invalid_response")
+                    if response.status == 404 and not raw.lstrip().startswith(b"{"):
+                        # An older directory has no such route: its 404 is not our JSON.
+                        raise ContactProtocolError("no_route")
                     payload = _strict_json(raw)
                     if response.status not in {200, 201, 202}:
                         code = payload.get("error")
@@ -525,6 +530,44 @@ class ContactRequestManager:
         ):
             raise ContactProtocolError("invalid_response")
         return ContactDecision(request_id, status)
+
+    async def status(self, domain: str, recipient_key: str, request_id: str) -> str:
+        """How the other device answered a knock this device sent.
+
+        "pending", "accepted" or "rejected", or "gone" when the directory no
+        longer holds the request. The frame is signed by this device's key and
+        the directory answers only the key that sent the request, so an id that
+        is not ours reads as "gone" too. A directory without the route raises
+        "no_route".
+        """
+        recipient_key = validate_contact_key(recipient_key.lower())
+        if not isinstance(request_id, str) or not _HEX_32.fullmatch(request_id):
+            raise ContactProtocolError("invalid_request")
+        origin, ca, cidrs = await self._route(domain)
+        client = self.commands.client
+        frame = _signed_frame(
+            client._store.key,
+            origin,
+            CONTACT_STATUS_PATH,
+            {
+                "recipient_identity": "ed25519:" + recipient_key,
+                "recipient_key": recipient_key,
+                "sender_key": client.public_key,
+                "request_id": request_id,
+            },
+        )
+        try:
+            result = await self._post(
+                origin, CONTACT_STATUS_PATH, frame, ca=ca, cidrs=cidrs
+            )
+        except ContactProtocolError as exc:
+            if exc.code == "unavailable":
+                return "gone"
+            raise
+        answer = result.get("status")
+        if set(result) != {"status"} or answer not in {"pending", "accepted", "rejected"}:
+            raise ContactProtocolError("invalid_response")
+        return answer
 
     async def sync_links(self, domain: str, peers: list[str]) -> None:
         """Declare which other devices this key consents to link with.
