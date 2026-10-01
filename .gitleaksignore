@@ -1,6 +1,18 @@
-# False positives in branch history (test fixtures and variable names);
-# the current lines carry inline gitleaks:allow markers.
-52bf8b1b45617e010420e0a9c43a7059e8ad5168:tests/unit/test_enrollment_codes.py:generic-api-key:11
-85c14f026d85917084607366ebfcd06e4202ee65:tests/unit/test_relay_agent_bridge.py:generic-api-key:571
+# Suppress confirmed false positives from gitleaks (generic-api-key rule).
+# gitleaks scans full history, so historical commits that predate the inline
+# `# gitleaks:allow` markers still flag. None of these is a real credential:
+#   - test_enrollment_codes.py: the "01234567" test fixture
+#   - test_relay_agent_bridge.py: a HubMessage test construction
+#   - enrollment_client.py / private_directory.py: runtime key-variable
+#     references (envelope_key, owner_signing_key), already marked gitleaks:allow
+9fbbbc391cf8ea5771de1fb4e857754e64d072cb:plugins/hub/enrollment_client.py:generic-api-key:1800
+cbdbf46bc204f7a75d6487d107408ce25291f4e9:tests/unit/test_enrollment_codes.py:generic-api-key:11
+cbdbf46bc204f7a75d6487d107408ce25291f4e9:plugins/hub/dns/private_directory.py:generic-api-key:530
+a87878ff71572721e4acd4dd0b005d9d030b2394:tests/unit/test_enrollment_codes.py:generic-api-key:11
+a87878ff71572721e4acd4dd0b005d9d030b2394:plugins/hub/dns/private_directory.py:generic-api-key:530
+a33886caa71e375082c7719f4ef867b3a62c0574:tests/unit/test_enrollment_codes.py:generic-api-key:11
+a33886caa71e375082c7719f4ef867b3a62c0574:tests/unit/test_relay_agent_bridge.py:generic-api-key:571
 52bf8b1b45617e010420e0a9c43a7059e8ad5168:plugins/hub/dns/private_directory.py:generic-api-key:947
+52bf8b1b45617e010420e0a9c43a7059e8ad5168:tests/unit/test_enrollment_codes.py:generic-api-key:11
 7b652aabc4d56b48bfb80b9faf8c1a4e0376beec:plugins/hub/enrollment_client.py:generic-api-key:1778
+85c14f026d85917084607366ebfcd06e4202ee65:tests/unit/test_relay_agent_bridge.py:generic-api-key:571
