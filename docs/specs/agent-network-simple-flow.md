@@ -304,8 +304,11 @@ woken. There was no `/connect` command, no key, no address, no grant.
 On the Mac, `crontab -e`:
 
 ```
-0 3 * * * cd ~/dev/kollab && kollab --hub msg infra@home-server "rotate the nginx logs and report the freed space" >> ~/cron-infra.log 2>&1
+0 3 * * * cd ~/dev/kollab && $HOME/.local/bin/kollab --hub msg infra@home-server "rotate the nginx logs and report the freed space" >> ~/cron-infra.log 2>&1
 ```
+
+Cron's PATH is only `/usr/bin:/bin`, so the job names kollab by its full path
+(`command -v kollab` prints it); a bare `kollab` is "command not found" at 03:00.
 
 At 03:00 the command uses the `laptop-kollab` identity, delivers the message,
 waits for infra's reply, prints it, and exits:
