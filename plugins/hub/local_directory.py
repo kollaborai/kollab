@@ -156,6 +156,14 @@ class LocalAgentDirectory:
         self.stale_after = stale_after
         self.truncated = False
         self.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Shared /tmp path space: refuse a socket dir another user owns
+        # (validated only; a read-side view never creates it).
+        from .presence import secure_socket_dir
+
+        try:
+            secure_socket_dir(self.socket_dir, create=False)
+        except RuntimeError as exc:
+            raise LocalDirectoryError(str(exc)) from None
         root = _directory_fd(self.config_dir)
         try:
             self.machine_id = self._machine_id(root)

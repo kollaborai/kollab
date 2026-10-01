@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -321,6 +322,24 @@ def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
             )
     except Exception as e:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
+
+
+def require_own_socket(path: str) -> None:
+    """Refuse a unix hub socket another local user planted or took over.
+
+    Hub sockets live in shared /tmp path space; a swapped socket file would
+    receive everything we send. A missing path falls through so the connect
+    attempt raises the real error.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise ConnectionError(
+            f"refusing hub socket {path}: not a socket owned by this user"
+            f" (uid {info.st_uid})"
+        )
 
 
 class AgentSocketServer:
@@ -2111,6 +2130,7 @@ class AgentMessenger:
                 timeout=timeout,
             )
         else:
+            require_own_socket(target)
             reader, writer = await asyncio.wait_for(
                 asyncio.open_unix_connection(target),
                 timeout=timeout,
