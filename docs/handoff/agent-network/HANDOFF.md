@@ -194,6 +194,22 @@ H. Cleanup, after E:
    - `git worktree prune`, and remove the merged agent worktrees under `.claude/worktrees`.
 I. Update this file and the memory, run the Done Gate, and send one short report (after J to M).
 
+### Progress (update at every merge)
+| Item | Agent report | State |
+|---|---|---|
+| A: decisions 3, 5, 6 + cron dim line | agent-reports/a-decisions.md | running |
+| M: knock 7-day expiry, announced ids kept | agent-reports/m-knock-announce.md | merged 4b82429 (5311 unit pass) |
+| M: knock cleared on rejection | (next agent) | to do: the directory never tells the knocker; needs a sender-signed `contact/status` route + knocker poll, 7-day expiry stays the fallback on old relays |
+| M: chain exit failed flag, keyring retry per reconnect | agent-reports/m-chain-keyring.md | running |
+| B: guided setup | agent-reports/b-guided-setup.md | running |
+
+Found while preparing: PR #120 is already merged (2026-09-29), so K only closes issue #99 and
+deletes `mesh-direct-bootstrap` (its tip e02e761 is in no other branch; the local ref stays).
+L candidates: clean worktrees whose HEAD is in origin/main or a pushed branch (25); keep
+`kollab-connect-codes` (1 dirty file), `kollab-agent-pacing` (4 dirty, unpushed) and
+`kollab-m2-finish` (unpushed). The `~/.codex/worktrees/<id>/mentiko` dirs belong to mentiko,
+not kollab: untouched. Release prep script: scratchpad `release_prep.sh <version> <date>`.
+
 ### After the release, part of the same goal
 J. Website: update the kollabor.ai site in `~/dev/kollabor.ai` (the network, `/connect`, joining
    by code, trust levels, knocks, self-hosting with `kollab relay serve --domain`). Use that
