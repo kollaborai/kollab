@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-01
+
 ### Added
 - Guided setup on the first launch of 0.11.0. Once per machine kollab shows "New: connect your agents across computers. Enter sets it up now; Esc for later (/connect any time)." Enter on a computer with no network offers "Start a new network on kollabor.ai" (it creates the network, then opens the Connect screen with the join code and an "On your other computer" box: upgrade, run kollab and press Enter on the same notice, choose Join with a code) or "Join with a code"; on a computer already on a network Enter opens the Connect screen. After a join one line says settings arrive sealed from the computer that issued the code and that a ChatGPT login does not travel: run `/login`. Enter and Esc both answer and write the marker `~/.kollab/connect-guide-seen`; pipe mode, detached and spawned agents and launches without a terminal never see it.
 - The guided setup counts a computer alone on a network as not set up. kollab 0.10.7 made a network of one on every launch, so every upgraded computer went straight to the Connect screen and never saw Join with a code; now Enter offers the two choices there. Start a new network keeps the computer's own network (named if it has none) and opens the Connect screen with the code and the steps for the other computer; Join with a code replaces it. A network with another computer on it is never replaced, and Enter on one still opens the Connect screen.
