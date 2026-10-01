@@ -119,6 +119,79 @@ runs; pipe output through `tail`; read functions, not whole files.
    affected live proof.
 7. **Ask Marco how to release.** Default: one release after everything is proven.
 
+## Release goal: 0.11.0
+
+Marco's goal prompt approves every decision and step below. Ask him only before
+deleting data not listed here or changing a decision.
+
+### Decisions
+1. One release, 0.11.0, with everything on `issue-121-network-simple-flow`.
+2. One PR to `main` ("Agent network: milestones 1-4", Fixes #121). It merges with a merge
+   commit, so the per-fix history stays, after the 3 required checks are green. CI failures
+   are fixed by capped agents.
+3. Config sync skips MCP server entries whose command is not found on the receiving machine,
+   and shows one line naming the skipped servers, once.
+4. alzan-prod: in `~/.kollab/agents/_base/sections/01-session-context.md`, back the file up,
+   then replace `<trender>hostname</trender>` with `<trender>uname -n</trender>`.
+5. Several workspaces on one machine: the latest join wins the machine's config record. The
+   device whose primary is then refused shows one line saying so.
+6. Manual trust (Story 7): add a short live proof, tests/live/story7, and delete the stale
+   Codex verifier `scripts/relay/verify_agent_conversation.py` and its unit test.
+7. The three foreign uncommitted files stay untouched and are never staged.
+8. Not in 0.11.0: renaming a network, and knock abuse limits. Constitution section 15
+   keeps them.
+
+### New feature: guided setup after the upgrade
+- On the first launch of 0.11.0, once per machine, show "New: connect your agents across
+  computers. Enter sets it up now; Esc for later (/connect any time)."
+- On a device with no network, Enter offers two choices:
+  - Start a new network: kollabor.ai, then the Connect screen with the join code and an
+    "On your other computer" box: 1) `kollab --upgrade` (or `pip install -U kollab`);
+    2) run `kollab` and press Enter on this same notice; 3) choose join and type the code.
+  - Join with a code: the private code form.
+- After a join, say that settings arrive sealed from <primary>, and that a ChatGPT login
+  does not travel: run /login on this computer.
+- Codes never go in commands or logs.
+- tmux specs at 80 and 120 columns.
+- Update constitution Story 1, the connect guide, and the CHANGELOG pair.
+
+### Work order
+A. Decisions 3, 5 and 6 (the code parts), each with tests.
+B. The guided setup.
+C. A live round on a branch build: m1, m2, m3, m4, story5, story7, plus a guided-setup proof.
+   Then the PR, CI and merge.
+D. The release, per CLAUDE.md "Cutting a Release":
+   - a prep PR that sets 0.11.0 in all 11 pyproject files, the `kollabor-*>=` pins and
+     `uv lock`, and moves CHANGELOG [Unreleased] to [0.11.0] in both copies (byte-identical);
+   - merge it, then the annotated tag `v0.11.0` on the merged commit, pushed alone;
+   - watch publish.yml through PyPI, the GitHub Release and Homebrew.
+E. Production:
+   - Redeploy the kollabor.ai relay from the tag: deploy_relay.sh from a clean worktree.
+   - Move selfhost.kollabor.ai off the test venv onto the released package in its own venv
+     (`~/kollab-selfhost/venv`), under systemd (`kollab relay serve --domain
+     selfhost.kollabor.ai --print systemd`), with the same state dir. Then run
+     verify_serve.sh.
+F. Marco's path, proven on throwaway installs only:
+   - fresh venvs with kollab 0.10.7 from PyPI on the Mac and alzan-prod;
+   - launch, and the update notice shows;
+   - the user's upgrade command brings 0.11.0;
+   - the guided setup runs on the Mac, and the other computer joins by following its steps;
+   - agents talk both ways, with a clean transcript.
+   - Also prove the source-install path on a throwaway clone at the old `main`:
+     `kollab --upgrade` reaches 0.11.0.
+G. Marco's real installs, left ready, not upgraded:
+   - `~/dev/kollab`: `git switch main` WITHOUT pulling, so his editable `kollab` still
+     reports 0.10.7 and offers the update. His three uncommitted files carry over.
+   - alzan-prod's real `kollab` stays at its version.
+   - Check that both show the update notice.
+H. Cleanup, after E:
+   - Stop tmux `e2e-mac` and `e2e-srv`.
+   - On both hosts, remove ~/kollab-m1-*, ~/kollab-m3-*, ~/kollab-m4-*, ~/kollab-s5-*,
+     ~/kollab-e2e-*, the ~/kollab-m1 venv, and the throwaway installs from F.
+   - Keep the last 3 relay release dirs.
+   - `git worktree prune`, and remove the merged agent worktrees under `.claude/worktrees`.
+I. Update this file and the memory, run the Done Gate, and send one short report.
+
 ## Final state: every milestone proven live on 0.11.0.dev6 (cc50acf), 2026-09-30
 
 Both machines ran the installed build, default launch, relay 20260930-cc50acf; every transcript clean.
