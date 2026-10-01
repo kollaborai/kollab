@@ -24,6 +24,7 @@ ID = re.compile(r"[0-9a-f]{32}\Z")
 MAX_APPROVALS = 256
 MAX_VOUCHERS = 8  # members remembered per vouched device
 MAX_REVOKED = 64  # revocations remembered
+MAX_ANNOUNCED = 128  # pending join requests and knocks the human was told about
 INVITE_PREFIX = "kollab-invite-v1:"
 
 
@@ -167,6 +168,10 @@ class RelayState:
     # -> when the knock was sent (epoch seconds). What a knock leaves behind is
     # cleared if nothing comes of it (docs/specs/agent-network-simple-flow.md).
     knocks: dict[str, int] = field(default_factory=dict)
+    # Ids (`join:<id>`, `knock:<receipt>`) of the join requests and knocks the
+    # human was already told about in the main pane, pruned to what is still
+    # pending, so a restart announces only what is new.
+    announced: list[str] = field(default_factory=list)
 
 
 class RelayStateStore:
@@ -297,6 +302,12 @@ class RelayStateStore:
             raise RelayError("invalid knock times")
         for key in value.knocks:
             validate_public_key(key)
+        if (
+            not isinstance(value.announced, list)
+            or len(value.announced) > MAX_ANNOUNCED
+            or any(not isinstance(item, str) or not 0 < len(item) <= 96 for item in value.announced)
+        ):
+            raise RelayError("invalid announced requests")
         try:
             if value.device_name:
                 validate_device_name(value.device_name)

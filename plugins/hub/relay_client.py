@@ -41,6 +41,7 @@ from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
     KEY,
+    MAX_ANNOUNCED,
     MAX_APPROVALS,
     MAX_REVOKED,
     MAX_VOUCHERS,
@@ -342,6 +343,14 @@ class RelayClient:
                 self._notify_peer_session_listeners(
                     PeerSessionEvent("peer_appeared", key, None, session)
                 )
+
+    def remember_announced(self, ids: list[str]) -> None:
+        """Keep which join requests and knocks the human was already told about."""
+        ids = ids[-MAX_ANNOUNCED:]
+        if ids != self.state.announced:
+            self._adopt_bridge_fields()
+            self.state.announced = ids
+            self._store.save()
 
     def add_config_recipient(self, key: str) -> None:
         """Remember a device accepted with a join code: it gets the sealed config.

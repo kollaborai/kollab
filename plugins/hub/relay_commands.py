@@ -284,9 +284,10 @@ class RelayCommands:
         self._knock_count_cache = (float("-inf"), 0)
         self._knock_rows: tuple[tuple[str, str], ...] = ()
         self._screen_polled = float("-inf")
-        # ponytail: ids of announced requests and knocks live for the process;
-        # human-scale volume, so no pruning.
-        self._announced: set[str] = set()
+        # Ids of the requests and knocks already announced. They live in the
+        # network state, so a restart announces only what is new.
+        self._announced: set[str] = set(self.client.state.announced)
+        self._knocks_fetched = False
         # Public discovery pins remain separate from transport invitations.
         if state_dir is None:
             from .dns.storage import get_dns_dir
@@ -328,16 +329,20 @@ class RelayCommands:
             level = DEFAULT_TRUST
         return level if isinstance(level, str) and level else DEFAULT_TRUST
 
-    def _pending_rows(self) -> list:
-        """Pending join requests for this device's issuer agent, never raising."""
+    def _try_pending_rows(self) -> list | None:
+        """Pending join requests for this device's issuer agent; None when unreadable."""
         getter = getattr(self.agent_bridge, "pending_enrollment_requests", None)
         if not callable(getter):
-            return []
+            return None
         source = getattr(getattr(self.agent_bridge, "identity", None), "agent_id", None)
         try:
             return list(getter(source_agent=source))
         except Exception:
-            return []
+            return None
+
+    def _pending_rows(self) -> list:
+        """Pending join requests for this device's issuer agent, never raising."""
+        return self._try_pending_rows() or []
 
     def _pending_request_lines(self) -> list[str]:
         """`requests` lines for the status screen: who wants to join, by name."""
@@ -393,6 +398,7 @@ class RelayCommands:
             (row.receipt_id, _arrival_name(row.device_name, row.sender_key))
             for row in rows
         )
+        self._knocks_fetched = True
         self._knock_count_cache = (now, len(rows))
         return len(rows)
 
@@ -410,18 +416,19 @@ class RelayCommands:
         """Main-pane lines for join requests and knocks not announced yet.
 
         Names only. A request or knock is announced once, however often this
-        runs. While a Connect or knock screen is showing them live they are
-        marked seen and nothing is printed.
+        runs, and across restarts. While a Connect or knock screen is showing
+        them live they are marked seen and nothing is printed.
         """
         domain, online = self._domain_online()
         network = self._network_name(domain) or "this network"
+        rows = self._try_pending_rows()
         found = [
             (
                 f"join:{getattr(row, 'enrollment_id', '')}",
                 f"{_arrival_name(getattr(row, 'device_name', ''))} wants to join "
                 f"{network}. /connect to review",
             )
-            for row in self._pending_rows()
+            for row in rows or []
             if getattr(row, "decision_available", True)
         ]
         if online and domain:
@@ -431,7 +438,23 @@ class RelayCommands:
                 for receipt, name in self._knock_rows
             ]
         fresh = [(key, line) for key, line in found if key not in self._announced]
-        self._announced.update(key for key, _ in fresh)
+        # Keep only what is still pending, plus every id of a kind that could
+        # not be read this time (an unready issuer or an unreachable directory
+        # reads as empty, which is not the same as decided).
+        pending = {f"join:{getattr(row, 'enrollment_id', '')}" for row in rows or []}
+        pending |= {f"knock:{receipt}" for receipt, _ in self._knock_rows}
+        unread = (("join:",) if rows is None else ()) + (
+            () if online and domain and self._knocks_fetched else ("knock:",)
+        )
+        self._announced = {
+            item
+            for item in self._announced
+            if item in pending or item.startswith(unread)
+        } | {key for key, _ in fresh}
+        try:
+            self.client.remember_announced(sorted(self._announced))
+        except (OSError, RelayError):
+            pass  # still announced once for this process; saved at the next change
         if time.monotonic() - self._screen_polled < SCREEN_OPEN_SECONDS:
             return []
         return [line for _, line in fresh]

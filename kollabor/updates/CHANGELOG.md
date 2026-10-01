@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Join codes are looked up by a keyed tag (`POST /relay/v1/enrollment/lookup`) and an offer burns after five failed proofs. The joining device sends its name with the request, and the accept line shows the name and key fingerprint.
 
 ### Fixed
+- A restart no longer announces every pending join request and knock again: the ids already announced are kept in the network state, pruned to what is still pending
 - A knock nobody answers no longer leaves its approval, trust, link and reply grant behind: the knocking device records when it knocked and drops them after seven days, unless the other device accepted (its link is live, or it already reached this device)
 - `kollab --hub msg` no longer exits with "finished without a reply" while the remote agent is still answering: a remote request's turn now ends when the queue processor finishes the whole chain (no tool result left to go back to the model, nothing queued, no other turn running) instead of after the model looked idle for a second, and the end frame still follows every reply and the forwarded plain-text answer, refs #121
 - A remote request whose turn answers in plain text instead of `hub_msg` now gets that text back: when the turn sent no reply on the request's thread, the runtime sends its final assistant text as the reply (hub XML and thinking stripped), so `kollab --hub msg` and cron jobs always get their answer.
