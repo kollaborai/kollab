@@ -123,7 +123,10 @@ def validate_message(
     # an older build has none, and the caller falls back to key_label(peer_key).
     # turn_end marks the runtime's end-of-turn frame (never the model's): the
     # far agent finished the turn that handled the request on this thread.
-    optional_fields = {"from_device", "turn_end"}
+    # task marks a first message sent under a human grant (the sender is on
+    # manual trust): the receiver runs it as a remote task and answers as its
+    # result, whatever its own trust.
+    optional_fields = {"from_device", "turn_end", "task"}
     if (
         not isinstance(payload, dict)
         or not fields <= set(payload)
@@ -146,6 +149,10 @@ def validate_message(
             or type(end["failed"]) is not bool
         ):
             raise RelayError("invalid turn end")
+    if "task" in payload and (
+        payload["task"] is not True or payload.get("kind") != "message"
+    ):
+        raise RelayError("invalid task marker")
     for name in ("id", "thread_id"):
         if not isinstance(payload[name], str) or not ID.fullmatch(payload[name]):
             raise RelayError("invalid conversation identifier")
@@ -1287,7 +1294,12 @@ class ConversationStore:
         return {"id": event_id, **dict(row), "payload": json.loads(row["payload"])}
 
     def delivery_authorized(
-        self, event_id: str, *, room: str, approvals: list[str]
+        self,
+        event_id: str,
+        *,
+        room: str,
+        approvals: list[str],
+        without_grant: bool = False,
     ) -> bool:
         item = self.outbound(event_id)
         if (
@@ -1357,7 +1369,12 @@ class ConversationStore:
                 self.authorize_return(room, payload)
             except RelayError:
                 return False
-            return self.authorized(payload["thread_id"], room=room, approvals=approvals)
+            return self.authorized(
+                payload["thread_id"],
+                room=room,
+                approvals=approvals,
+                without_grant=without_grant,
+            )
         return False
 
     def retarget_outbound(self, event_id: str, payload: dict) -> None:
@@ -1760,8 +1777,19 @@ class ConversationStore:
                 (message_id, room) if room is not None else (message_id,),
             )
 
-    def authorized(self, task_id: str, *, room: str, approvals: list[str]) -> bool:
-        """Recheck after queueing and after any awaited local tool approval."""
+    def authorized(
+        self,
+        task_id: str,
+        *,
+        room: str,
+        approvals: list[str],
+        without_grant: bool = False,
+    ) -> bool:
+        """Recheck after queueing and after any awaited local tool approval.
+
+        without_grant: open trust admitted the sender with no receiving grant,
+        so its task needs none while that trust holds.
+        """
         task = self.task(task_id, room=room)
         if (
             task is None
@@ -1773,4 +1801,4 @@ class ConversationStore:
             return False
         if task["return_authorized"] and task["payload"]["kind"] in EVENT_KINDS:
             return True
-        return self.allowed(room, task["peer"], task["agent_name"])
+        return without_grant or self.allowed(room, task["peer"], task["agent_name"])

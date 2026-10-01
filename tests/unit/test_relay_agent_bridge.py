@@ -2784,3 +2784,59 @@ async def test_raising_trust_to_manual_stops_a_message_queued_under_open_trust(b
     assert sent == []
     assert left.store.pending_outbound() == []
     assert target
+
+
+# --- mixed trust: each device's trust is its own ---
+
+
+@pytest.mark.asyncio
+async def test_a_manual_senders_request_runs_as_a_task_on_an_open_receiver(bridges):
+    members, _ = bridges
+    (left, left_hub, left_model, _), (right, right_hub, right_model, _) = members
+    right.set_trust_level("open")  # the sender stays manual
+    target = await handle(left, right)
+    await left.command(f"authorize {target} Find out what uname -n prints")
+
+    sent = await left_hub._handle_hub_msg_tool(
+        {"id": "send", "to": address(right), "content": "Find out what uname -n prints"}
+    )
+    assert sent.success
+    await right._tick()
+
+    # A remote task turn bound to the request, not an ordinary hub turn.
+    assert right.active is not None and not right.active.finished
+    assert len(right_model.contexts) == 1
+    assert right_model.contexts[-1].run(right._turn.get) == right.active.record["id"]
+    running = await left.command(f"task {target} 1")
+    assert running.startswith(f"request 1 on {target}: ") and "running" in running
+
+    await in_turn(right_model, right.guard_model({}, SimpleNamespace(cancelled=False)))
+    await in_turn(
+        right_model,
+        right_hub._parse_hub_messages(
+            {"response_text": "It prints worker-1.", "turn_completed": True}
+        ),
+    )
+    assert right.store.task(right.active.record["id"])["state"] == "completed"
+    await left._tick()
+    returned = left_model.conversation_history[-1]
+    assert "[relay result] It prints worker-1." in returned.content
+    assert "completed" in await left.command(f"task {target} 1")
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_a_manual_senders_request_running_on_an_open_receiver(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    right.set_trust_level("open")
+    target = await handle(left, right)
+    await left.command(f"send {target} Find out what uname -n prints")
+    await right._tick()
+    task = right.active
+    assert task is not None and not task.finished
+
+    cancelled = await left.command(f"cancel {target} 1")
+
+    assert cancelled.startswith(f"request 1 on {target}: ")
+    assert task.finished
+    assert right.store.task(task.record["id"])["state"] == "cancelled"

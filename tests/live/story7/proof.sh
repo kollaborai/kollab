@@ -407,7 +407,7 @@ say "s2: the Mac agent's first message must not go out"
 GRANT_RE='communication grant is required|use /connect authorize'
 SRV_IN_RE="${BACK}[[:space:]]*(->|→)"
 SRV_SH0=$(shell_ok srv "$(off_of srv)"); SRV_IN0=$(count_pat srv "$SRV_IN_RE"); GB=$(count_pat mac "$GRANT_RE")
-cmd mac "$(printf 'ask %s to run `uname -n` and report back what it prints' "$REMOTE")"
+cmd mac "$(printf 'Find out what `uname -n` prints on %s, using hub_msg' "$REMOTE")"
 if wait_for mac "$GRANT_RE" 300 "$GB"; then
   sleep 30   # the Mac agent finishes its turn
   cap mac s2-mac-blocked; cap srv s2-srv-quiet

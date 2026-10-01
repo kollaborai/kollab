@@ -1572,6 +1572,10 @@ class RelayAgentBridge:
         }
         if params.get("turn_end") is not None:
             payload["turn_end"] = params["turn_end"]
+        if kind == "message" and not open_trust:
+            # Sent under a human grant: the receiver runs it as a task, whatever
+            # its own trust, and answers on this thread as the task's result.
+            payload["task"] = True
         if kind in EVENT_KINDS and kind != "answer":
             payload["reply_to"] = payload["thread_id"]
         validate_message(
@@ -1608,7 +1612,10 @@ class RelayAgentBridge:
         if (
             item["open"] and not self.sends_without_grant(self.trust_level())
         ) or not self.store.delivery_authorized(
-            event_id, room=state.room, approvals=state.approvals
+            event_id,
+            room=state.room,
+            approvals=state.approvals,
+            without_grant=self.effective_trust(item["peer"]) == "open",
         ):
             self.store.mark_outbound(
                 event_id, "revoked", detail="authorization changed"
@@ -2885,7 +2892,10 @@ class RelayAgentBridge:
             record["agent_id"] != self.identity.agent_id
             or record["agent_name"] != self.identity.identity
             or not self.store.authorized(
-                record["id"], room=state.room, approvals=state.approvals
+                record["id"],
+                room=state.room,
+                approvals=state.approvals,
+                without_grant=self.effective_trust(record["peer"]) == "open",
             )
         ):
             raise RelayError("remote task authority was revoked or changed")
@@ -2960,7 +2970,10 @@ class RelayAgentBridge:
         if not queued:
             return
         record = self.store.task(queued[0]["id"])
-        if self.effective_trust(record["peer"]) != "manual":
+        # A sender on manual trust marks its request as a task and waits for its
+        # result: run it as one whatever this device's trust.
+        as_task = record["payload"].get("task") is True
+        if self.effective_trust(record["peer"]) != "manual" and not as_task:
             # Open and agents trust: an ordinary hub turn, no task envelope,
             # no active-task bookkeeping (docs/specs/agent-network-simple-flow.md §6).
             # One request at a time: the next reaches the model only after the
@@ -3097,6 +3110,7 @@ class RelayAgentBridge:
                     record["id"],
                     room=record["room"],
                     approvals=self._state().state.approvals,
+                    without_grant=self.effective_trust(record["peer"]) == "open",
                 ):
                     token = self._turn.set(record["id"])
                     try:
