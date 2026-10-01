@@ -409,7 +409,7 @@ SRV_IN_RE="${BACK}[[:space:]]*(->|→)"
 SRV_SH0=$(shell_ok srv "$(off_of srv)"); SRV_IN0=$(count_pat srv "$SRV_IN_RE"); GB=$(count_pat mac "$GRANT_RE")
 cmd mac "$(printf 'Find out what `uname -n` prints on %s, using hub_msg' "$REMOTE")"
 if wait_for mac "$GRANT_RE" 300 "$GB"; then
-  sleep 30   # the Mac agent finishes its turn
+  sleep 15   # the Mac agent finishes its turn
   cap mac s2-mac-blocked; cap srv s2-srv-quiet
   SRV_SH1=$(shell_ok srv "$(off_of srv)"); SRV_IN1=$(count_pat srv "$SRV_IN_RE"); GATE=$(log_grep mac 'communication grant is required')
   if [ "${SRV_SH1:-0}" -gt "${SRV_SH0:-0}" ] || [ "${SRV_IN1:-0}" -gt "${SRV_IN0:-0}" ]; then
@@ -475,7 +475,7 @@ else
   cap mac s6-mac-no-reply; cap srv s6-srv-no-reply
   rec s6-reply-via-envelope FAIL s6-mac-no-reply.txt "no reply from $REMOTE within 300s of the authorized send (the server pane: s6-srv-no-reply.txt)"
 fi
-sleep 25   # the Mac agent finishes reporting the reply
+sleep 15   # the Mac agent finishes reporting the reply
 
 # ================================================================== s7 ====
 say "s7: /connect withdraw"
@@ -526,7 +526,7 @@ QRE='answer with /connect answer [0-9]+'
 QB=$(count_pat mac "$QRE")
 ASK='before doing anything else, ask me one question: should the report be red or blue? wait for my answer, then reply with the word color and my answer'
 run_cmd mac "/connect send $REMOTE \"$ASK\"" "request [0-9]+ to ${REMOTE}: [a-z_]+" 120 || true
-if wait_for mac "$QRE" 240 "$QB"; then
+if wait_for mac "$QRE" 120 "$QB"; then
   sleep 3; cap mac s9-mac-question
   QN=$(raw mac 500 | grep -oE 'answer with /connect answer [0-9]+' | tail -1 | grep -oE '[0-9]+$' || true)
   RB2=$(count_pat mac "$RE_REPLY")
