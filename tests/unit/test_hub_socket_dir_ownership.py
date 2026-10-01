@@ -133,3 +133,118 @@ def test_client_accepts_own_socket():
             require_own_socket(str(route))
         finally:
             server.close()
+
+
+def _foreign_socket_lstat(monkeypatch, uid: int) -> None:
+    """Make os.lstat report every path as a socket file owned by ``uid``."""
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        return os.stat_result(
+            (
+                stat.S_IFSOCK | 0o600,
+                info.st_ino,
+                info.st_dev,
+                info.st_nlink,
+                uid,
+                info.st_gid,
+                info.st_size,
+                info.st_atime,
+                info.st_mtime,
+                info.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+
+
+def test_attach_client_refuses_foreign_socket(tmp_path, monkeypatch, capsys):
+    import asyncio
+
+    from kollabor.attach_client import AttachClient
+
+    sock_path = tmp_path / "lapis.sock"
+    sock_path.touch()
+    _foreign_socket_lstat(monkeypatch, os.getuid() + 1)
+
+    async def fail_if_connected(path, *args, **kwargs):
+        raise AssertionError("must not connect to a foreign socket")
+
+    monkeypatch.setattr(asyncio, "open_unix_connection", fail_if_connected)
+    client = AttachClient(str(sock_path), "lapis", interactive=False)
+    asyncio.run(client.run())
+    err = capsys.readouterr().err
+    assert "refusing hub socket" in err and "lapis.sock" in err
+
+
+def test_attach_client_same_uid_socket_reaches_connect(monkeypatch, capsys):
+    import asyncio
+    import tempfile
+
+    from kollabor.attach_client import AttachClient
+
+    # A real socket file we own; the connect itself is what fails.
+    with tempfile.TemporaryDirectory(prefix="kso-", dir="/tmp") as root:
+        server = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        sock_path = Path(root) / "lapis.sock"
+        server.bind(str(sock_path))
+        try:
+
+            async def refused(path, *args, **kwargs):
+                raise ConnectionRefusedError("no listener")
+
+            monkeypatch.setattr(asyncio, "open_unix_connection", refused)
+            client = AttachClient(str(sock_path), "lapis", interactive=False)
+            asyncio.run(client.run())
+        finally:
+            server.close()
+        err = capsys.readouterr().err
+        assert "cannot connect" in err
+        assert "refusing hub socket" not in err
+
+
+def test_hub_state_client_refuses_foreign_socket(tmp_path, monkeypatch):
+    import asyncio
+
+    from kollabor.state.hub_client import HubStateClient, HubStateClientError
+
+    sock_path = tmp_path / "lapis.sock"
+    sock_path.touch()
+    _foreign_socket_lstat(monkeypatch, os.getuid() + 1)
+    monkeypatch.setattr(
+        HubStateClient, "discover_peer_socket", classmethod(lambda cls, _: sock_path)
+    )
+
+    async def attempt():
+        async with HubStateClient.connect("lapis"):
+            pass
+
+    with pytest.raises(HubStateClientError, match="refusing hub socket"):
+        asyncio.run(attempt())
+
+
+def test_hub_state_client_same_uid_socket_reaches_connect(monkeypatch):
+    import asyncio
+    import tempfile
+
+    from kollabor.state.hub_client import HubStateClient, HubStateClientError
+
+    # A real socket file we own, with no listener: connect itself must fail.
+    with tempfile.TemporaryDirectory(prefix="kso-", dir="/tmp") as root:
+        server = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        sock_path = Path(root) / "lapis.sock"
+        server.bind(str(sock_path))
+        server.close()
+        monkeypatch.setattr(
+            HubStateClient,
+            "discover_peer_socket",
+            classmethod(lambda cls, _: sock_path),
+        )
+
+        async def attempt():
+            async with HubStateClient.connect("lapis"):
+                pass
+
+        with pytest.raises(HubStateClientError, match="failed to open socket"):
+            asyncio.run(attempt())

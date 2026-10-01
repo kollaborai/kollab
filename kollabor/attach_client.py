@@ -97,6 +97,11 @@ class AttachClient:
         """Main attach loop."""
         global _current_client
         try:
+            # Shared /tmp path space: never stream this window into a socket
+            # another local user planted or took over.
+            from plugins.hub.messenger import require_own_socket
+
+            require_own_socket(self.socket_path)
             self._reader, self._writer = await asyncio.open_unix_connection(
                 self.socket_path
             )
