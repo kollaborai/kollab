@@ -5,7 +5,9 @@ M1_REPO=${M1_REPO:-/Users/malmazan/dev/kollab}
 M1_HOST=${M1_HOST:-alzan-prod}
 M1_EXPECT_WHEELS=11
 
-M1_MAC_ROOT=$HOME/kollab-m1
+# M1_ROOT_NAME gives a proof its own venv root on both hosts, so two proofs never stop each other's processes.
+M1_ROOT_NAME=${M1_ROOT_NAME:-kollab-m1}
+M1_MAC_ROOT=$HOME/$M1_ROOT_NAME
 M1_MAC_VENV=$M1_MAC_ROOT/venv
 M1_MAC_WS=${M1_MAC_WS:-$HOME/kollab-m1-mac}
 M1_MAC_SESSION=${M1_MAC_SESSION:-m1-mac}
@@ -22,7 +24,7 @@ die() { printf '[m1 FATAL] %s\n' "$*" >&2; exit 1; }
 
 m1_srv_paths() {
   M1_SRV_HOME=$(m1_ssh 'printf %s "$HOME"') || die "cannot ssh to $M1_HOST"
-  M1_SRV_ROOT=$M1_SRV_HOME/kollab-m1
+  M1_SRV_ROOT=$M1_SRV_HOME/$M1_ROOT_NAME
   M1_SRV_VENV=$M1_SRV_ROOT/venv
   M1_SRV_WS=$M1_SRV_HOME/$M1_SRV_WS_NAME
 }
