@@ -1104,7 +1104,7 @@ class ConnectGuideAltView(AltView):
     """
 
     def __init__(
-        self, *, has_network: bool, on_answer: Callable[[], Any] | None = None
+        self, *, has_network: bool = False, on_answer: Callable[[], Any] | None = None
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect-guide",

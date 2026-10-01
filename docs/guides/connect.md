@@ -109,3 +109,32 @@ To update Kollab, run `/upgrade` inside Kollab or `kollab --upgrade` in a shell.
 - The old names from before this design (`offer`, `enroll`, `requests`, `peers`, `agents`, `contact`, `invite`, `join`, `disconnect`, and others) print where to go now.
 
 For full details, see the [command reference](../reference/commands.md).
+
+## First launch: the guided setup
+
+The first time a machine runs 0.11.0, kollab shows one notice before you have
+typed anything:
+
+```
+New: connect your agents across computers.
+Enter sets it up now; Esc for later (/connect any time).
+```
+
+- **Enter, on a computer with no network.** Choose *Start a new network on
+  kollabor.ai* or *Join with a code*. Starting a network opens the Connect screen
+  with the join code and an "On your other computer" box: run
+  `kollab --upgrade` (or `pip install -U kollab`), run `kollab` and press Enter
+  on the same notice, choose *Join with a code* and type the code. Joining opens
+  the private code form, as `/connect` does.
+- **Enter, on a computer already on a network.** Opens the Connect screen.
+- **Esc.** Leaves it for later; `/connect` does the same thing at any time.
+- **After a join.** One line says settings arrive sealed from the computer that
+  issued the code, and that a ChatGPT login does not travel: run `/login` on this
+  computer.
+
+The notice is asked once per machine. Enter and Esc both count as an answer and
+write one marker file, `~/.kollab/connect-guide-seen`; quitting without answering
+shows it again next launch. Delete the file to see it again. It never appears in
+pipe mode, in detached or daemon agents, with a query on the command line, or
+without a terminal. The code is typed only in the private form, never in a
+command, an argument or a log.

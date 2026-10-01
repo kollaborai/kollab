@@ -203,6 +203,62 @@ same screen, read from the daemon.
 
 The request also shows in the main pane, once, as `<device> wants to join <network>. /connect to review`, even when the Connect screen is closed (for example after `/connect code`'s private screen was closed). It names the device only, never a code, key, fingerprint or `relay:` address.
 
+
+#### Story 1, first launch of 0.11.0: the guided setup
+
+The first time a machine runs 0.11.0 the Mac and the server each show one
+notice, once per machine, before anyone has typed `/connect`.
+
+```
+ Connect
+
+ New: connect your agents across computers.
+ Enter sets it up now; Esc for later (/connect any time).
+
+ enter set up now   esc later
+```
+
+- Enter on a device that already has a network opens the Connect screen.
+- Enter on a device with no network offers two choices (up/down, Enter):
+
+```
+ Connect
+
+ This computer is not on a network yet.
+
+ > Start a new network on kollabor.ai
+   Join with a code
+
+ up/down select   enter choose   esc later
+```
+
+- "Start a new network on kollabor.ai" creates the network the way `/connect`
+  does with no network, then opens the Connect screen with the join code and a
+  box for the other computer:
+
+```
+ On your other computer
+   1) kollab --upgrade (or pip install -U kollab)
+   2) run kollab and press Enter on the same notice
+   3) choose Join with a code and type the code
+```
+
+- "Join with a code" opens the private code form. The code is typed there and
+  nowhere else: never in a command, argv or a log.
+- After a successful join the form adds one line under the joined line:
+  `settings arrive sealed from <primary name>, and a ChatGPT login does not
+  travel: run /login on this computer.` The primary's name is known once its
+  first sealed bundle has landed; before that the line says "the device that
+  issued the code".
+- Esc at the notice, or Enter, is an answer and is never asked again. Quitting
+  without answering shows the notice again next launch. The answer is one marker
+  file, `~/.kollab/connect-guide-seen` (machine-global; `KOLLAB_CONNECT_GUIDE_MARKER`
+  moves it, which is how the tmux specs avoid the real one).
+- Never shown in pipe mode, in a detached or daemon agent (the daemon and every
+  hub-spawned agent run `--detached`), with a CLI query, `--hub` or `--web-ui`,
+  or on a launch without a terminal. Specs: `tests/tmux/specs/network-guided-setup-80.json`
+  and `-120.json`.
+
 ### Story 2: Marco asks his agent to have the server agent check the tunnel
 
 Mac, in chat with his agent lapis:
