@@ -16,7 +16,7 @@ Branch docs/agent-network-0.11, commit 96a5b5c, worktree /Users/malmazan/dev/kol
 - 390 and 820 px, iframe measure on all 7: no page overflow, 0 unclipped offenders. Screenshots only covered the sidebar (Agent Network listed); I did not eyeball the page body.
 
 ## Deploy today (read-only checks)
-- kollabor.ai = edge nginx 50.116.8.243 (ssh -p 2222 deploy@) in front of alzan-prod (ssh arch-server): /home/almazan/kollabor.ai, docker compose service kollabor-web, container kollaborai-kollabor-web-1, 3002->3000, created 2026-04-18. Edge vhost not readable as deploy; edge->10.0.0.5:3002 is inferred.
+- kollabor.ai = the edge nginx in front of the server: /home/almazan/kollabor.ai, docker compose service kollabor-web, container kollaborai-kollabor-web-1, 3002->3000, created 2026-04-18. Edge vhost not readable as deploy; edge->10.0.0.5:3002 is inferred.
 - That checkout is at 117e060, has local edits, NO git remote, its own .env, compose port 3002 (repo HEAD says 3000, main checkout WIP says 4322). Never overwrite compose or .env.
 - Live is far behind HEAD: /docs/hub, agent-mesh, discovery, coordinator, context are 404 today. Deploying ships all of HEAD since 117e060 (Tailwind v4, rebrand, 5 docs pages), not only network docs.
 - deploy/DEPLOYMENT.md (PM2, /var/www/kollabor.ai) and .github/workflows/deploy.yml (push to main) describe a setup that is not running (no such dir or pm2 on the edge). Treat as dead.
