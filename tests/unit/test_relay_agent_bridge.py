@@ -2703,3 +2703,84 @@ async def test_starting_a_request_reports_its_number_not_its_id(bridges):
     assert result.output.startswith("remote request 1: ")
     assert result.output.endswith("; acceptance is not completion")
     assert grant["id"] not in result.output
+
+
+# --- manual trust: a send with no human grant is refused, never queued or retried ---
+
+
+def _record_wire(bridge, fail=False):
+    """Count every conversation request the bridge puts on the wire."""
+    sent, request = [], bridge.secure_transport.request
+
+    async def recording(*args, **kwargs):
+        sent.append(args[1])
+        if fail:
+            raise RelayError("peer unreachable")
+        return await request(*args, **kwargs)
+
+    bridge.secure_transport.request = recording
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_manual_trust_refuses_an_ungranted_message_and_queues_nothing(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, *_) = members
+    allow(left, right)
+    target = await handle(left, right)
+    sent = _record_wire(left)
+
+    for to in (address(right), target):
+        result = await left_hub._handle_hub_msg_tool(
+            {"id": "send", "to": to, "content": "Create proof.txt"}
+        )
+        assert not result.success and "/connect authorize" in result.output
+    with pytest.raises(RelayError, match="/connect authorize"):
+        await left.send(address(right), "Create proof.txt")
+
+    await left._flush_outbound()  # the loop that retries the outbox every second
+    assert left.store.pending_outbound() == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_manual_trust_authorized_message_goes_out_as_a_task(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, _, right_model, _) = members
+    allow(left, right)
+    target = await handle(left, right)
+    sent = _record_wire(left)
+    await left.command(f"authorize {target} Create proof.txt")
+
+    result = await left_hub._handle_hub_msg_tool(
+        {"id": "send", "to": address(right), "content": "Create proof.txt"}
+    )
+
+    assert result.success and sent == ["message"]
+    await right._tick()
+    assert len(right_model.contexts) == 1  # a task, not a chat message
+
+
+@pytest.mark.asyncio
+async def test_raising_trust_to_manual_stops_a_message_queued_under_open_trust(bridges):
+    members, _ = bridges
+    (left, left_hub, *_), (right, *_) = members
+    target = await handle(left, right)
+    left.set_trust_level("open")
+    _record_wire(left, fail=True)  # the peer is unreachable: the send stays queued
+    result = await left_hub._handle_hub_msg_tool(
+        {"id": "send", "to": address(right), "content": "Create proof.txt"}
+    )
+    assert result.success and "queued" in result.output
+    assert len(left.store.pending_outbound()) == 1
+
+    left.set_trust_level("manual")  # the human takes control; the peer comes back
+    left.secure_transport = SecureConversationTransport(
+        left.commands.client, left.commands.client._store.key.encode()
+    )
+    sent = _record_wire(left)
+    await left._flush_outbound()
+
+    assert sent == []
+    assert left.store.pending_outbound() == []
+    assert target

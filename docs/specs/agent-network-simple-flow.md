@@ -472,6 +472,7 @@ back through the task envelope; a remote question waits for the human's
 `/connect answer`, shown as `infra@home-server -> lapis` and ending
 `(answer with /connect answer 3 <text>)`. This is the Codex model, unchanged
 apart from the numbers, and it is only reachable through this setting.
+Switching to manual trust revokes any message still queued from open or agents trust, so nothing leaves without a human grant.
 
 ### Story 8: the sealed config follows Marco
 

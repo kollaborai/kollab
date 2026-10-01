@@ -524,6 +524,11 @@ class RelayAgentBridge:
     def trust_level(self) -> str:
         return self._state().state.trust
 
+    @staticmethod
+    def sends_without_grant(level: str) -> bool:
+        """Open and agents trust send an ordinary message with no human grant."""
+        return level in ("open", "agents")
+
     def set_trust_level(self, level: str) -> str:
         self._require_human_network_context(
             "remote model turns cannot change network trust"
@@ -1454,7 +1459,7 @@ class RelayAgentBridge:
         # message: it is an ordinary hub message, not a task
         # (docs/specs/agent-network-simple-flow.md §4/§6).
         level = self.trust_level()
-        open_trust = level in ("open", "agents")
+        open_trust = self.sends_without_grant(level)
         # Which process judged the send, and what it read: the human sets trust
         # in one process and the owner sends from another.
         logger.info("network send gate: kind=%s trust=%s pid=%d", kind, level, os.getpid())
@@ -1597,7 +1602,12 @@ class RelayAgentBridge:
             return {"id": event_id, "state": item["state"], "duplicate": True}
         client = self.commands.client
         state = self._state().state
-        if not self.store.delivery_authorized(
+        # An open row waits in the outbox with no grant behind it. It goes out only
+        # while the trust level still lets a message go without one, so raising
+        # trust to manual revokes it instead of letting the retry loop send it.
+        if (
+            item["open"] and not self.sends_without_grant(self.trust_level())
+        ) or not self.store.delivery_authorized(
             event_id, room=state.room, approvals=state.approvals
         ):
             self.store.mark_outbound(

@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The stale Codex live-acceptance script under `scripts/relay/` and its unit test are gone; manual trust (Story 7) gets a short live proof instead, refs #121
 
 ### Fixed
+- A message queued under open trust no longer goes out after `/connect trust manual`: raising the trust level revokes it, so the outbox retry cannot deliver it with no human grant.
 - A keyring that unlocks after launch is picked up by sealed config sync: the primary reads the keyring again for the API keys it could not read, once each time a device reconnects (a peer's new relay session, or this device's own relay link coming back), instead of leaving them out until `config.json` changes. The keys already read are not read again, so a missing macOS Keychain entry still prompts at most once per reconnect, refs #121
 - A remote request whose chain dies no longer stays open: a queue drain, hub continuation or goal turn that raises, is cancelled or is healed by the watchdog now ends the request with a failed end frame at once, and a request no turn ever handled gets the failed frame at the 600 s ceiling instead of being dropped, so `kollab --hub msg` exits 1 instead of waiting for nothing, refs #121
 - A restart no longer announces every pending join request and knock again: the ids already announced are kept in the network state, pruned to what is still pending
