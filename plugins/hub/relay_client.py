@@ -287,6 +287,7 @@ class RelayClient:
         self.state.links = []
         self.state.vouched_by = {}
         self.state.revoked = []
+        self.state.knocks = {}
         self._store.save()
 
     async def leave(self) -> None:
@@ -317,6 +318,7 @@ class RelayClient:
             "peer_trust",
             "config_recipients",
             "links",
+            "knocks",
         ):
             setattr(self.state, name, getattr(disk, name))
 

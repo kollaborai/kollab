@@ -66,6 +66,9 @@ MAX_REMOTE_PEERS = 8
 DIRECTORY_STALE_SECONDS = 45
 TASK_TIMEOUT = 600
 ARRIVAL_POLL_SECONDS = 3.0
+# A knock nobody answered in a week is forgotten: the directory never tells the
+# knocker about a rejection, so silence is all there is to go on.
+KNOCK_EXPIRY_SECONDS = 7 * 24 * 3600
 # The directory forgets a device's consent after a day; repeating it well inside that.
 LINK_REFRESH_SECONDS = 6 * 60 * 60
 LINK_RETRY_SECONDS = 60
@@ -201,6 +204,7 @@ class RelayAgentBridge:
         self.membership_sync: MembershipSync | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
+        self._wall_clock = time.time  # epoch seconds; tests swap it
         self._links_lock = asyncio.Lock()
         self._links_declared: tuple[str, tuple[str, ...]] | None = None
         self._links_due = 0.0
@@ -271,17 +275,61 @@ class RelayAgentBridge:
         `/connect allow`.
         """
         client = self.commands.client
-        if recipient_key == client.public_key or recipient_key in client.state.approvals:
+        if recipient_key == client.public_key:
+            return
+        if recipient_key in client.state.approvals:
+            if recipient_key in self._state().state.knocks:
+                self._record_knock(recipient_key)  # knocked again: the week starts over
             return
         try:
             self.set_peer_trust(recipient_key, "agents")
             self.set_peer_link(recipient_key)
             client.approve(recipient_key)
             self.store.grant(client.state.room, recipient_key, agent_name)
+            self._record_knock(recipient_key)
         except Exception:
-            client.revoke(recipient_key)  # approval, name, trust and link
-            self.store.revoke(client.state.room, recipient_key)
+            self._clear_knock(recipient_key)
             raise
+
+    def _record_knock(self, key: str) -> None:
+        store = self._state()
+        store.state.knocks[key] = int(self._wall_clock())
+        store.save()
+
+    def _clear_knock(self, key: str) -> None:
+        """Take back everything a knock left: approval, name, trust, link, grant."""
+        client = self.commands.client
+        client.revoke(key)
+        self.store.revoke(client.state.room, key)
+        store = self._state()
+        if store.state.knocks.pop(key, None) is not None:
+            store.save()
+
+    def expire_knocks(self) -> None:
+        """Forget knocks nobody answered for KNOCK_EXPIRY_SECONDS.
+
+        A knock the other device accepted never expires: its link is live both
+        ways, or it already reached this device (`_receive` drops the record
+        then). A device that has since become a member, or was removed, is no
+        stranger any more and keeps whatever it now is. While offline no live
+        link is visible, so nothing is judged.
+        """
+        client = self.commands.client
+        store = self._state()
+        knocks = store.state.knocks
+        if not knocks or client.status().get("state") != "online":
+            return
+        live = {row["key"] for row in client.peers()}
+        now = self._wall_clock()
+        expired = []
+        for key, sent in tuple(knocks.items()):
+            if key in live or key not in store.state.links:
+                del knocks[key]  # answered, or no longer a stranger
+            elif now - sent > KNOCK_EXPIRY_SECONDS:
+                expired.append(key)
+        store.save()
+        for key in expired:
+            self._clear_knock(key)
 
     def is_stranger(self, address: str) -> bool:
         """Whether an agent lives on an accepted stranger's device, not on this network."""
@@ -792,6 +840,10 @@ class RelayAgentBridge:
             show(line)
 
     async def _refresh_directory(self):
+        try:
+            self.expire_knocks()
+        except Exception:
+            logger.warning("could not expire unanswered knocks")
         try:
             self.store.expire_queued(TASK_TIMEOUT)
             local = await asyncio.to_thread(self.directory.agents, self.workspace)
@@ -1670,7 +1722,10 @@ class RelayAgentBridge:
         client = self.commands.client
         if peer not in client.state.approvals:
             raise RelayError("peer is not approved")
-        stranger = peer in self._state().state.links
+        store = self._state()
+        stranger = peer in store.state.links
+        if store.state.knocks.pop(peer, None) is not None:
+            store.save()  # it reached us: the knock was accepted
         if stranger and method in {"peer.forward", "peer.exchange", MEMBERS_METHOD}:
             # A stranger reaches allowed agents only; it is not a network member.
             raise RelayError("peer is not part of this network")

@@ -163,6 +163,10 @@ class RelayState:
     # Devices revoked on this network, by this device or announced by a member:
     # a vouch for one of them counts for nothing until a member accepts it anew.
     revoked: list[str] = field(default_factory=list)
+    # Knocks this device sent that nobody answered yet: the knocked device's key
+    # -> when the knock was sent (epoch seconds). What a knock leaves behind is
+    # cleared if nothing comes of it (docs/specs/agent-network-simple-flow.md).
+    knocks: dict[str, int] = field(default_factory=dict)
 
 
 class RelayStateStore:
@@ -284,6 +288,14 @@ class RelayStateStore:
             for voucher in vouchers:
                 validate_public_key(voucher)
         for key in value.revoked:
+            validate_public_key(key)
+        if (
+            not isinstance(value.knocks, dict)
+            or len(value.knocks) > MAX_APPROVALS
+            or any(type(sent) is not int or sent < 0 for sent in value.knocks.values())
+        ):
+            raise RelayError("invalid knock times")
+        for key in value.knocks:
             validate_public_key(key)
         try:
             if value.device_name:
