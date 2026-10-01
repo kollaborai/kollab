@@ -434,16 +434,16 @@ cap mac g5-mac-status; cap srv g5-srv-status
 g6=0; end=$(( $(date +%s) + 60 ))
 while :; do
   ALL=$(printf '%s\n%s\n' "$SRV_FORM" "$(raw srv 500)" | flat)
-  if grep -Fq -- "settings arrive sealed from $MAC_DEVICE" <<<"$ALL" && grep -Fq -- 'run /login' <<<"$ALL"; then g6=1; break; fi
+  if grep -Fq -- "Settings arrive sealed from $MAC_DEVICE" <<<"$ALL" && grep -Fq -- 'Run /login' <<<"$ALL"; then g6=1; break; fi
   if [ "$(date +%s)" -ge "$end" ]; then break; fi
   sleep 3
 done
 cap srv g6-srv-pane
 if [ "$g6" = 1 ]; then
-  rec g6-post-join-line PASS g6-srv-pane.txt "server line names '$MAC_DEVICE' and says run /login"
+  rec g6-post-join-line PASS g6-srv-pane.txt "server line names '$MAC_DEVICE' and says Run /login"
 else
-  FOUND=$(grep -o 'settings arrive sealed from [^,]*' <<<"$ALL" | tail -1 || true)
-  rec g6-post-join-line FAIL g6-srv-pane.txt "no 'settings arrive sealed from $MAC_DEVICE ... run /login' on the server within 60s of closing the form (saw: '${FOUND:-no post-join line at all}')"
+  FOUND=$(grep -o 'Settings arrive sealed from [^.]*' <<<"$ALL" | tail -1 || true)
+  rec g6-post-join-line FAIL g6-srv-pane.txt "no 'Settings arrive sealed from $MAC_DEVICE ... Run /login' on the server within 60s of closing the form (saw: '${FOUND:-no post-join line at all}')"
 fi
 
 # ================================================================== g7 ====

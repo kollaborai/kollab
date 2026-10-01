@@ -338,8 +338,8 @@ def test_other_computer_box_on_the_new_network_screen(width):
 
 def test_post_join_line_names_the_primary_and_the_login():
     line = post_join_line("mac-kollab")
-    assert "settings arrive sealed from mac-kollab" in line
-    assert "a ChatGPT login does not travel: run /login on this computer." in line
+    assert "Settings arrive sealed from mac-kollab" in line
+    assert "Run /login on this computer: a ChatGPT login does not travel." in line
     assert "the device that issued the code" in post_join_line("")
 
 
@@ -353,8 +353,8 @@ def test_join_outcome_shows_the_note_under_the_joined_line():
     view._render_outcome(4, 80)
     text = " ".join(row for _, row in sorted(pane.rows))
     assert "joined mac-net as box. trust: open" in text
-    assert "settings arrive sealed from mac-kollab" in text
-    assert "run /login on this computer." in text
+    assert "Settings arrive sealed from mac-kollab" in text
+    assert "Run /login on this computer:" in text
     assert "enter/esc close" in text
     with pytest.raises(ValueError):
         ConnectOutcome.rejected().__class__(

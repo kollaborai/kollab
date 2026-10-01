@@ -246,8 +246,8 @@ notice, once per machine, before anyone has typed `/connect`.
 - "Join with a code" opens the private code form. The code is typed there and
   nowhere else: never in a command, argv or a log.
 - After a successful join the form adds one line under the joined line:
-  `settings arrive sealed from <primary name>, and a ChatGPT login does not
-  travel: run /login on this computer.` The primary's name is known once its
+  `Settings arrive sealed from <primary name>. Run /login on this computer: a
+  ChatGPT login does not travel.` The primary's name is known once its
   first sealed bundle has landed; before that the line says "the device that
   issued the code".
 - Esc at the notice, or Enter, is an answer and is never asked again. Quitting

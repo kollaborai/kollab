@@ -85,8 +85,8 @@ def post_join_line(primary: str = "") -> str:
     code's issuer instead; `JoinLine` only falls back to that after a wait."""
     source = display_name(primary) if primary else "the device that issued the code"
     return (
-        f"settings arrive sealed from {source}, and a ChatGPT login does not "
-        "travel: run /login on this computer."
+        f"Settings arrive sealed from {source}. Run /login on this computer: "
+        "a ChatGPT login does not travel."
     )
 
 

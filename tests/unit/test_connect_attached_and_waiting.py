@@ -644,7 +644,7 @@ async def test_attached_join_form_shows_the_line_with_the_primarys_name_from_the
     await view.render_frame(0.0)
 
     assert _JOINED in renderer.text()
-    assert "settings arrive sealed from mac-kollab" in renderer.text()
+    assert "Settings arrive sealed from mac-kollab" in renderer.text()
     assert "the device that issued the code" not in renderer.text()
     assert said == [post_join_line("mac-kollab")]  # the daemon's main pane, once
     await view.on_complete()
