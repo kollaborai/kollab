@@ -10,7 +10,10 @@ Nothing here touches a join code, a key or a relay address.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,9 @@ from .device_names import display_name
 # the variable so they never write the real marker.
 MARKER_ENV = "KOLLAB_CONNECT_GUIDE_MARKER"
 MARKER_NAME = "connect-guide-seen"
+# How long the post-join line waits for the primary's name, and how often it looks.
+JOIN_LINE_PATIENCE = 30.0
+JOIN_LINE_POLL = 1.0
 DEFAULT_DOMAIN = "kollabor.ai"
 
 NOTICE_LINES = (
@@ -75,10 +81,53 @@ def guide_applies(args: Any, *, interactive: bool) -> bool:
 
 
 def post_join_line(primary: str = "") -> str:
-    """The one message after a successful join. `primary` is empty until its
-    first sealed config has landed, and the line names the code's issuer then."""
+    """The one message after a successful join. An empty `primary` names the
+    code's issuer instead; `JoinLine` only falls back to that after a wait."""
     source = display_name(primary) if primary else "the device that issued the code"
     return (
         f"settings arrive sealed from {source}, and a ChatGPT login does not "
         "travel: run /login on this computer."
     )
+
+
+class JoinLine:
+    """The post-join line of one join, said once.
+
+    It names the primary as soon as this device knows the name (the join binds
+    the issuer's, and the first sealed config carries it). Only after
+    `patience` seconds without a name does it say "the device that issued the
+    code" instead.
+    """
+
+    def __init__(
+        self,
+        primary_name: Callable[[], str],
+        *,
+        patience: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self._primary_name = primary_name
+        self._clock = clock
+        self._deadline = clock() + (JOIN_LINE_PATIENCE if patience is None else patience)
+        self.said = False
+
+    def text(self) -> str:
+        """The line, or "" while the name is still worth waiting for."""
+        name = self._primary_name()
+        if name or self._clock() >= self._deadline:
+            return post_join_line(name)
+        return ""
+
+    async def say(
+        self,
+        emit: Callable[[str], None],
+        *,
+        poll: float | None = None,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+    ) -> None:
+        """Hand the line to `emit` once, as soon as there is one."""
+        while not (line := self.text()):
+            await sleep(JOIN_LINE_POLL if poll is None else poll)
+        if not self.said:
+            self.said = True
+            emit(line)

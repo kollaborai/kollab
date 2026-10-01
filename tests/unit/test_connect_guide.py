@@ -360,3 +360,46 @@ def test_join_outcome_shows_the_note_under_the_joined_line():
         ConnectOutcome.rejected().__class__(
             ConnectOutcome.rejected().status, note="nope"
         )
+
+
+def test_join_line_waits_for_the_name_then_falls_back_after_the_patience():
+    from plugins.hub.connect_guide import JoinLine
+
+    now, name = [0.0], [""]
+    line = JoinLine(lambda: name[0], patience=30.0, clock=lambda: now[0])
+    assert line.text() == ""  # the name may still come
+    now[0] = 29.0
+    assert line.text() == ""
+    name[0] = "mac-kollab"
+    assert line.text() == post_join_line("mac-kollab")
+    name[0], now[0] = "", 30.0
+    assert line.text() == post_join_line("")  # about 30 s without a name
+
+
+@pytest.mark.asyncio
+async def test_join_line_is_said_once_with_the_name_as_soon_as_it_is_known():
+    from plugins.hub.connect_guide import JoinLine
+
+    names, said = iter(["", "", "mac-kollab"]), []
+
+    async def sleep(_seconds):
+        return None
+
+    line = JoinLine(lambda: next(names, "mac-kollab"), patience=30.0)
+    await line.say(said.append, poll=0.0, sleep=sleep)
+    await line.say(said.append, poll=0.0, sleep=sleep)  # asking again says nothing more
+    assert said == [post_join_line("mac-kollab")]
+
+
+@pytest.mark.asyncio
+async def test_join_line_says_the_stand_in_once_when_no_name_comes():
+    from plugins.hub.connect_guide import JoinLine
+
+    now, said = [0.0], []
+
+    async def sleep(seconds):
+        now[0] += seconds
+
+    line = JoinLine(lambda: "", patience=30.0, clock=lambda: now[0])
+    await line.say(said.append, poll=1.0, sleep=sleep)
+    assert said == [post_join_line("")] and now[0] == 30.0

@@ -30,7 +30,10 @@ from plugins.altview.connect_altview import (
     ConnectScreenState,
     connect_screen_lines,
 )
+from plugins.hub import connect_guide
 from plugins.hub import plugin as plugin_module
+from plugins.hub.connect_guide import post_join_line
+from plugins.hub.device_names import key_label
 from plugins.hub.plugin import CONNECT_OWNED_ELSEWHERE, HubPlugin
 from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow
 from plugins.hub.relay_state import RelayError
@@ -622,6 +625,32 @@ async def test_attached_join_status_of_an_unknown_receipt_raises_not_fails():
 
 
 @pytest.mark.asyncio
+async def test_attached_join_form_shows_the_line_with_the_primarys_name_from_the_daemon(
+    monkeypatch,
+):
+    """The daemon knows the issuer; the window's form must say so, not the stand-in."""
+    rig = _Rig(_snapshot(domain="", network="", requests=()))
+    monkeypatch.setattr("kollabor_config.managed_config.read_managed_config", lambda: None)
+    rig.daemon._relay_agent._state = lambda: SimpleNamespace(
+        state=SimpleNamespace(inviter=_ISSUER, peer_devices={_ISSUER: "mac-kollab"})
+    )
+    said: list[str] = []
+    rig.daemon.show_network_notice = said.append
+    view, renderer = await _typed_form(rig, monkeypatch)
+
+    await view.handle_input(_named("Enter"))
+    rig.enroll_gate.set()
+    await asyncio.sleep(0.05)
+    await view.render_frame(0.0)
+
+    assert _JOINED in renderer.text()
+    assert "settings arrive sealed from mac-kollab" in renderer.text()
+    assert "the device that issued the code" not in renderer.text()
+    assert said == [post_join_line("mac-kollab")]  # the daemon's main pane, once
+    await view.on_complete()
+
+
+@pytest.mark.asyncio
 async def test_a_join_that_finishes_before_pending_still_carries_the_joined_line():
     """An approval that is already decided when the daemon answers `hub_enroll`."""
     rig = _Rig()
@@ -630,7 +659,7 @@ async def test_a_join_that_finishes_before_pending_still_carries_the_joined_line
 
     result = await rig.remote.hub_enroll("kollabor.ai", _SYNTHETIC_CODE)
 
-    assert result == {"status": "approved", "detail": _JOINED}
+    assert result == {"status": "approved", "detail": _JOINED, "note": ""}
 
 
 @pytest.mark.asyncio
@@ -847,12 +876,10 @@ async def test_start_returns_pending_once_the_request_is_submitted_and_status_fo
     }
     gate.set()
     await _settle()
-    from plugins.hub.connect_guide import post_join_line
-
     assert await plugin._connect_enrollment_status(receipt) == {
         "status": "approved",
         "detail": _JOINED,
-        "note": post_join_line(),
+        "note": "",  # this device has not learned the issuer's name yet
     }
     # It can be read again by a window that missed the first answer.
     assert (await plugin._connect_enrollment_status(receipt))["status"] == "approved"
@@ -985,6 +1012,144 @@ async def test_no_daemon_join_shows_waiting_then_the_full_joined_line(monkeypatc
 
     assert _JOINED in renderer.text()
     await view.on_complete()
+
+
+# --------------------------------------------------------------------- #
+# The post-join line names the primary and reaches the main pane once
+# --------------------------------------------------------------------- #
+
+_ISSUER = "ab" * 32
+
+
+def _joined_daemon(enroll, monkeypatch, names):
+    """A daemon that joined by code: `names` is its peer_devices (the issuer's name once bound)."""
+    monkeypatch.setattr("kollabor_config.managed_config.read_managed_config", lambda: None)
+    plugin = _daemon(enroll)
+    plugin._relay_agent._state = lambda: SimpleNamespace(
+        state=SimpleNamespace(inviter=_ISSUER, peer_devices=names)
+    )
+    said: list[str] = []
+    plugin.show_network_notice = said.append
+    return plugin, said
+
+
+@pytest.mark.asyncio
+async def test_the_join_line_names_the_issuer_and_reaches_the_main_pane_once(monkeypatch):
+    gate = asyncio.Event()
+
+    async def enroll(domain, code, on_submitted=None):
+        on_submitted()
+        await gate.wait()
+        return {"status": "approved"}
+
+    plugin, said = _joined_daemon(enroll, monkeypatch, {_ISSUER: "mac-kollab"})
+    started = await plugin._run_connect_enrollment("kollabor.ai", _SYNTHETIC_CODE)
+    gate.set()
+    await _settle()
+
+    named = post_join_line("mac-kollab")
+    assert said == [named]  # nobody had the form open, and the main pane still got it
+    for _ in range(3):  # a form that polls again changes nothing
+        assert (await plugin._connect_enrollment_status(started["receipt_id"]))["note"] == named
+    assert said == [named]
+
+
+@pytest.mark.asyncio
+async def test_the_join_line_waits_for_the_issuers_name_then_says_it_once(monkeypatch):
+    monkeypatch.setattr(connect_guide, "JOIN_LINE_POLL", 0.0)
+    gate = asyncio.Event()
+
+    async def enroll(domain, code, on_submitted=None):
+        on_submitted()
+        await gate.wait()
+        return {"status": "approved"}
+
+    names = {_ISSUER: key_label(_ISSUER)}  # a key label is a stand-in, not a name
+    plugin, said = _joined_daemon(enroll, monkeypatch, names)
+    started = await plugin._run_connect_enrollment("kollabor.ai", _SYNTHETIC_CODE)
+    gate.set()
+    await _settle()
+
+    assert said == []  # not the stand-in: the name may still come
+    status = await plugin._connect_enrollment_status(started["receipt_id"])
+    assert status["status"] == "approved" and status["note"] == ""
+    names[_ISSUER] = "mac-kollab"  # the first directory refresh or sealed config named it
+    await _settle()
+    assert said == [post_join_line("mac-kollab")]
+
+
+@pytest.mark.asyncio
+async def test_the_join_line_falls_back_when_no_name_arrives_in_time(monkeypatch):
+    monkeypatch.setattr(connect_guide, "JOIN_LINE_POLL", 0.0)
+    monkeypatch.setattr(connect_guide, "JOIN_LINE_PATIENCE", 0.05)
+    gate = asyncio.Event()
+
+    async def enroll(domain, code, on_submitted=None):
+        on_submitted()
+        await gate.wait()
+        return {"status": "approved"}
+
+    plugin, said = _joined_daemon(enroll, monkeypatch, {})
+    await plugin._run_connect_enrollment("kollabor.ai", _SYNTHETIC_CODE)
+    gate.set()
+    await asyncio.sleep(0.2)
+
+    assert said == [post_join_line("")]
+
+
+@pytest.mark.asyncio
+async def test_the_form_shows_no_stand_in_while_the_issuers_name_is_still_coming(monkeypatch):
+    monkeypatch.setattr(connect_altview, "_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(connect_guide, "JOIN_LINE_POLL", 0.0)
+    gate = asyncio.Event()
+
+    async def enroll(domain, code, on_submitted=None):
+        on_submitted()
+        await gate.wait()
+        return {"status": "approved"}
+
+    names: dict[str, str] = {}
+    plugin, said = _joined_daemon(enroll, monkeypatch, names)
+    plugin._cli_args = SimpleNamespace(attach=False)
+    stack = SimpleNamespace(push=AsyncMock())
+    plugin.event_bus = _Bus(altview_stack_manager=stack)
+    await plugin._open_connect_altview("kollabor.ai")
+    view, _name = stack.push.await_args.args
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    for char in _SYNTHETIC_CODE.replace("-", ""):
+        await view.handle_input(_key(char))
+    await view.handle_input(_named("Enter"))
+    gate.set()
+    await asyncio.sleep(0.05)
+    await view.render_frame(0.0)
+
+    assert _JOINED in renderer.text()
+    assert "the device that issued the code" not in renderer.text()
+    names[_ISSUER] = "mac-kollab"
+    await _settle()
+    assert said == [post_join_line("mac-kollab")]
+    await view.on_complete()
+
+
+def test_the_approved_result_carries_the_note_so_a_window_never_guesses_it():
+    """A window reads the note from the daemon; before, the RPC dropped it and the form
+    always said the stand-in, whatever the daemon knew."""
+    from kollabor.state.interface import enrollment_result
+
+    named = {
+        "status": "approved",
+        "detail": _JOINED,
+        "note": post_join_line("mac-kollab"),
+    }
+    assert enrollment_result(named) == named
+    # "" is an answer too: the daemon is still waiting for the name
+    assert enrollment_result({"status": "approved", "note": ""}) == {
+        "status": "approved",
+        "note": "",
+    }
+    for bad in ("x" * 201, "bad\x1b[31m", 5, None):
+        assert enrollment_result({"status": "approved", "note": bad}) == {"status": "approved"}
 
 
 # --------------------------------------------------------------------- #

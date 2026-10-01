@@ -9454,15 +9454,36 @@ class HubPlugin(BasePlugin):
             )
 
     def _primary_name(self) -> str:
-        """The primary's name once its first sealed config has landed, else ''."""
+        """The primary's device name once this device knows it, else ''.
+
+        The join binds the issuer's name when the issuer sent one, and the
+        first sealed config carries it too. A key label is a stand-in.
+        """
         try:
             from kollabor_config.managed_config import read_managed_config
 
+            from .device_names import key_label
+
+            state = self._relay_agent._state().state
+            inviter = state.inviter
+            if not inviter:
+                return ""
             record = read_managed_config()
-            inviter = self._relay_agent._state().state.inviter
-            return record.primary_name if record and record.primary_key == inviter else ""
+            names = (
+                state.peer_devices.get(inviter),
+                record.primary_name if record and record.primary_key == inviter else None,
+            )
+            return next((n for n in names if n and n != key_label(inviter)), "")
         except Exception:
             return ""
+
+    def _say_join_line(self, line) -> None:
+        """The post-join line in the main pane, once, however the form went: a form
+        closed before the approval never shows its own."""
+        tasks = self.__dict__.setdefault("_join_line_tasks", set())
+        task = asyncio.ensure_future(line.say(self.show_network_notice))
+        tasks.add(task)  # the set is what keeps a detached task alive
+        task.add_done_callback(tasks.discard)
 
     async def _connect_home(self) -> str:
         """Bare /connect: the Connect screen on a network, the code form off one."""
@@ -9524,10 +9545,14 @@ class HubPlugin(BasePlugin):
                 if status == "approved":
                     # The daemon names the network, device and trust level; a
                     # window cannot know them, and an older daemon sends none.
+                    # A daemon that sends a note sends "" while it still waits for
+                    # the primary's name; only one that sends none (an older daemon)
+                    # gets the generic line here.
+                    note = result.get("note")
                     try:
                         return ConnectOutcome.approved(
                             result.get("detail") or self._joined_line(domain),
-                            result.get("note") or post_join_line(),
+                            post_join_line() if note is None else note,
                         )
                     except (TypeError, ValueError):
                         return ConnectOutcome.approved()
@@ -9625,12 +9650,14 @@ class HubPlugin(BasePlugin):
             status = result.get("status") if isinstance(result, dict) else None
             if status == "approved":
                 try:
-                    from .connect_guide import post_join_line
+                    from .connect_guide import JoinLine
 
+                    line = JoinLine(self._primary_name)
+                    self._say_join_line(line)
                     return {
                         "status": "approved",
                         "detail": self._joined_line(domain),
-                        "note": post_join_line(self._primary_name()),
+                        "note": line.text(),
                     }
                 except Exception:
                     return {"status": "approved"}

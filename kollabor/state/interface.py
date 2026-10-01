@@ -53,10 +53,16 @@ def enrollment_result(
     ):
         return {"status": "pending", "receipt_id": receipt_id}
     if status == "approved":
+        approved = {"status": "approved"}
         detail = result.get("detail")
         if isinstance(detail, str) and 0 < len(detail) <= 200 and detail.isprintable():
-            return {"status": "approved", "detail": detail}
-        return {"status": "approved"}
+            approved["detail"] = detail
+        # The line about settings and logins. "" is an answer: the daemon still
+        # waits for the primary's name, so the window must not guess one.
+        note = result.get("note")
+        if isinstance(note, str) and len(note) <= 200 and note.isprintable():
+            approved["note"] = note
+        return approved
     if status == "rejected" or (allow_failed and status == "failed"):
         return {"status": status}
     return None
