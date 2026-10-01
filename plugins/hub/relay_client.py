@@ -101,7 +101,13 @@ def link_binding(first: str, second: str) -> str:
     ).hexdigest()
 
 
+# Frames a client may send: a burst, then a steady rate (a token bucket on the real clock).
+SEND_BURST = 20.0
+SEND_RATE_PER_SECOND = 8
+
+
 @dataclass
+
 class _ApplicationPending:
     peer: str
     local_session: str
@@ -169,7 +175,7 @@ class RelayClient:
         self._closed = True
         self._first_attempt = asyncio.Event()
         self._send_lock = asyncio.Lock()
-        self._tokens = 20.0
+        self._tokens = SEND_BURST
         self._token_time = time.monotonic()
         self._counts: Counter = Counter()
         self._ws_url = ""
@@ -823,7 +829,9 @@ class RelayClient:
             raise RelayError("relay frame too large")
         async with self._send_lock:
             now = time.monotonic()
-            self._tokens = min(20.0, self._tokens + (now - self._token_time) * 8)
+            self._tokens = min(
+                SEND_BURST, self._tokens + (now - self._token_time) * SEND_RATE_PER_SECOND
+            )
             self._token_time = now
             if self._tokens < 1:
                 raise RelayError("relay send rate limit reached")
