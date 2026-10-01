@@ -11,6 +11,7 @@ import collections
 import contextvars
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -534,6 +535,7 @@ class RelayAgentBridge:
         store = self._state()
         store.state.trust = level
         store.save()
+        logger.info("network trust set to %s (pid %d)", level, os.getpid())
         return store.state.trust
 
     def effective_trust(self, peer_key: str) -> str:
@@ -1451,7 +1453,11 @@ class RelayAgentBridge:
         # Open and agents trust need no human communication grant to send a
         # message: it is an ordinary hub message, not a task
         # (docs/specs/agent-network-simple-flow.md §4/§6).
-        open_trust = self.trust_level() in ("open", "agents")
+        level = self.trust_level()
+        open_trust = level in ("open", "agents")
+        # Which process judged the send, and what it read: the human sets trust
+        # in one process and the owner sends from another.
+        logger.info("network send gate: kind=%s trust=%s pid=%d", kind, level, os.getpid())
         expires_at = int(time.time()) + TASK_TIMEOUT
         candidates = None
         if kind == "message":
