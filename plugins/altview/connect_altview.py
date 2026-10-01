@@ -21,6 +21,13 @@ from typing import Any, Awaitable, Callable
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
+from plugins.hub.connect_guide import (
+    CHOICES,
+    NO_NETWORK_LINE,
+    NOTICE_LINES,
+    OTHER_COMPUTER_STEPS,
+    OTHER_COMPUTER_TITLE,
+)
 from plugins.hub.device_names import (
     NAME_DISPLAY_MAX,
     clip_display,
@@ -133,6 +140,8 @@ class ConnectOutcome:
     # One line of non-secret text shown in place of the generic one, e.g.
     # `joined marco-home as alzan-prod-home. trust: open`.
     detail: str = ""
+    # A second line for an approved join: what happens to settings and logins.
+    note: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, ConnectStatus):
@@ -151,14 +160,21 @@ class ConnectOutcome:
             or ConnectAltView._filter_text(self.detail, 200) != self.detail
         ):
             raise ValueError("outcome detail must be one short printable line")
+        if self.note and (
+            self.status is not ConnectStatus.APPROVED
+            or not isinstance(self.note, str)
+            or len(self.note) > 200
+            or ConnectAltView._filter_text(self.note, 200) != self.note
+        ):
+            raise ValueError("outcome note must be one short printable line")
 
     @classmethod
     def pending(cls, receipt_id: str) -> ConnectOutcome:
         return cls(ConnectStatus.PENDING, receipt_id)
 
     @classmethod
-    def approved(cls, detail: str = "") -> ConnectOutcome:
-        return cls(ConnectStatus.APPROVED, detail=detail)
+    def approved(cls, detail: str = "", note: str = "") -> ConnectOutcome:
+        return cls(ConnectStatus.APPROVED, detail=detail, note=note)
 
     @classmethod
     def connected(cls, detail: str = "") -> ConnectOutcome:
@@ -401,6 +417,11 @@ class ConnectAltView(AltView):
             message = "could not submit the join request"
 
         self._write_line(2, y, message, width)
+        row = y + 1
+        if outcome is not None and outcome.note:
+            for line in textwrap.wrap(outcome.note, max(10, width - 3)):
+                self._write_line(2, row, line, width)
+                row += 1
         if self._stage == "waiting":
             if self._wait_note:
                 self._write_line(2, y + 1, self._wait_note, width)
@@ -411,7 +432,7 @@ class ConnectAltView(AltView):
                 width,
             )
         else:
-            self._write_line(2, y + 3, "enter/esc close", width)
+            self._write_line(2, max(y + 3, row + 1), "enter/esc close", width)
 
     def _edit_focused_field(self, key_press: KeyPress) -> None:
         field = self._domain_chars() if self._focus == "domain" else self._code_chars
@@ -626,6 +647,8 @@ class ConnectScreenState:
     # Why this window cannot act on the network. With it the screen shows what
     # the window knows and offers nothing else.
     note: str = ""
+    # The first-launch guide opened this screen: add the steps for the other computer.
+    guide: bool = False
 
 
 _WANTS_TO_JOIN = " wants to join"
@@ -756,8 +779,44 @@ def connect_screen_lines(
             + [f"{device} (offline)" for device in snapshot.offline_devices]
         )
         lines += _block("online", online or ["none"], width)
+    if state.guide and not state.note and not state.code_only:
+        lines += ["", _fit(" " + OTHER_COMPUTER_TITLE, width)]
+        lines += [_fit("   " + step, width) for step in OTHER_COMPUTER_STEPS]
     lines += ["", _fit(_footer(state), width)]
     return _clip(lines, width, max_lines)
+
+
+def _draw_lines(renderer: Any, lines: list[str], width: int) -> None:
+    """The Connect frame: title bar, then the body lines from row 3."""
+    renderer.clear_screen()
+    theme = T()
+    renderer.write_at(0, 0, solid_fg(str(C["half_bottom"]) * width, theme.dark[1]), "")
+    renderer.write_at(
+        0, 1, solid(lines[0].ljust(width), theme.dark[1], theme.text, width), ""
+    )
+    for offset, line in enumerate(lines[1:]):
+        renderer.write_at(0, 3 + offset, line, "")
+
+
+def connect_guide_lines(stage: str, selected: int, width: int) -> list[str]:
+    """The first-launch guide as plain lines, each at most ``width`` characters.
+
+    ``stage`` is ``notice`` (the one-time notice) or ``choices`` (a device with
+    no network). The first line is the title.
+    """
+    lines = [_fit(" Connect", width)]
+    if stage == "notice":
+        for text in NOTICE_LINES:
+            lines += [" " + row for row in textwrap.wrap(text, max(10, width - 2))]
+        footer = " enter set up now   esc later"
+    else:
+        lines += [_fit(" " + NO_NETWORK_LINE, width), ""]
+        lines += [
+            _fit(f" {'>' if index == selected else ' '} {text}", width)
+            for index, text in enumerate(CHOICES)
+        ]
+        footer = " up/down select   enter choose   esc later"
+    return lines + ["", _fit(footer, width)]
 
 
 class ConnectScreenAltView(AltView):
@@ -784,6 +843,7 @@ class ConnectScreenAltView(AltView):
         code_only: bool = False,
         snapshot: ConnectSnapshot | None = None,
         note: str = "",
+        guide: bool = False,
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect-screen",
@@ -805,6 +865,7 @@ class ConnectScreenAltView(AltView):
         self._on_decide = on_decide
         self.code_only = code_only
         self._note = note
+        self._guide = guide
         self._fixed_snapshot = snapshot
         self._renderer: Any = None
         self._private_code: PrivateCode | None = None
@@ -842,17 +903,11 @@ class ConnectScreenAltView(AltView):
         width, height = self._renderer.get_terminal_size()
         if width <= 0 or height <= 0:
             return True
-        lines = connect_screen_lines(self._screen_state(), width, height - 2)
-        self._renderer.clear_screen()
-        theme = T()
-        self._renderer.write_at(
-            0, 0, solid_fg(str(C["half_bottom"]) * width, theme.dark[1]), ""
+        _draw_lines(
+            self._renderer,
+            connect_screen_lines(self._screen_state(), width, height - 2),
+            width,
         )
-        self._renderer.write_at(
-            0, 1, solid(lines[0].ljust(width), theme.dark[1], theme.text, width), ""
-        )
-        for offset, line in enumerate(lines[1:]):
-            self._renderer.write_at(0, 3 + offset, line, "")
         self._armed = True
         return True
 
@@ -1029,9 +1084,94 @@ class ConnectScreenAltView(AltView):
             notice=self._notice,
             code_only=self.code_only,
             note=self._note,
+            guide=self._guide,
         )
 
     def _clear_code(self) -> None:
         if self._private_code is not None:
             self._private_code.clear()
             self._private_code = None
+
+
+class ConnectGuideAltView(AltView):
+    """The first-launch notice and, on a device with no network, the two choices.
+
+    ``answer`` stays ``None`` until the person answers: ``later`` (Esc),
+    ``screen`` (Enter on a device that already has a network), ``new_network``
+    or ``join``. The first Enter or Esc calls ``on_answer`` (the once-per-machine
+    marker); the caller acts on ``answer`` after the view closes. Nothing here
+    holds a join code.
+    """
+
+    def __init__(
+        self, *, has_network: bool, on_answer: Callable[[], Any] | None = None
+    ) -> None:
+        metadata = AltViewMetadata(
+            plugin_type="connect-guide",
+            description="First-launch network setup notice",
+            version="1.0.0",
+            author="Kollabor",
+            category="internal",
+            icon="[LINK]",
+            aliases=[],
+            supports_named_sessions=False,
+            supports_background=False,
+        )
+        super().__init__(metadata)
+        self._has_network = has_network
+        self._on_answer = on_answer
+        self._renderer: Any = None
+        self._marked = False
+        self._armed = False
+        self.stage = "notice"
+        self.selected = 0
+        self.answer: str | None = None
+
+    async def on_enter(self, renderer: Any) -> None:
+        self._renderer = renderer
+        self.stage = "notice"
+        self.selected = 0
+        self.answer = None
+
+    async def render_frame(self, delta_time: float) -> bool:
+        if self._renderer is None:
+            return False
+        width, height = self._renderer.get_terminal_size()
+        if width <= 0 or height <= 0:
+            return True
+        lines = connect_guide_lines(self.stage, self.selected, width)
+        _draw_lines(self._renderer, _clip(lines, width, height - 2), width)
+        self._armed = True  # the choices are on screen: Enter may pick one
+        return True
+
+    async def handle_input(self, key_press: KeyPress) -> bool:
+        name = key_press.name
+        if name == "Escape":
+            self._mark()
+            self.answer = "later"
+            return True
+        if name in ("ArrowUp", "ArrowDown") and self.stage == "choices":
+            self.selected = 1 - self.selected
+            self.request_render()
+        elif name == "Enter" and self.stage == "notice":
+            self._mark()
+            if self._has_network:
+                self.answer = "screen"
+                return True
+            self.stage = "choices"
+            self._armed = False  # a double-tapped Enter must not pick unseen
+            self.request_render()
+        elif name == "Enter" and self._armed:
+            self.answer = ("new_network", "join")[self.selected]
+            return True
+        return False
+
+    def _mark(self) -> None:
+        if self._marked:
+            return
+        self._marked = True
+        if self._on_answer is not None:
+            try:
+                self._on_answer()
+            except Exception:
+                pass  # the notice only shows again next launch

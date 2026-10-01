@@ -1,0 +1,43 @@
+{
+  "name": "network-guided-setup-120",
+  "description": "First launch of 0.11.0 on a computer with no network, 120 columns: the one-time notice, then the two choices; Esc leaves. Runs with an empty HOME and its own marker file, so it never writes the real ~/.kollab marker and never reaches the live relay. It stops at the choices.",
+  "config": {
+    "command": "HOME=/tmp/kollab-guided-setup-120 KOLLAB_CONNECT_GUIDE_MARKER=/tmp/kollab-guided-setup-120/marker PYTHONPATH=\"$PWD:$(printf '%s:' $PWD/packages/*/src)\" ${KOLLAB_TEST_PYTHON:-python} main.py --no-daemon",
+    "app_init_sleep": 5,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 30,
+    "key_delay": 0.4
+  },
+  "setup": [
+    { "action": "shell", "command": "rm -rf /tmp/kollab-guided-setup-120 && mkdir -p /tmp/kollab-guided-setup-120" }
+  ],
+  "steps": [
+    { "action": "start_app" },
+    { "action": "section", "title": "The notice" },
+    { "action": "wait_for", "pattern": "New: connect your agents across computers", "timeout": 40, "description": "notice appears on first launch" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "New: connect your agents across computers\\.", "description": "notice headline" },
+    { "action": "assert_contains", "pattern": "Enter sets it up now; Esc for later \\(/connect any time\\)\\.", "description": "notice keys" },
+    { "action": "shell", "command": "test ! -e /tmp/kollab-guided-setup-120/marker", "description": "an unanswered notice leaves no marker" },
+
+    { "action": "section", "title": "Enter on a device with no network: the two choices" },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "Join with a code", "timeout": 10, "description": "choices appear" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "not on a network yet", "description": "says this device has no network" },
+    { "action": "assert_contains", "pattern": "Start a new network on kollabor\\.ai", "description": "choice: start a new network" },
+    { "action": "assert_contains", "pattern": "Join with a code", "description": "choice: join with a code" },
+    { "action": "shell", "command": "test -f /tmp/kollab-guided-setup-120/marker", "description": "Enter wrote the marker" },
+
+    { "action": "section", "title": "Esc leaves; nothing was created" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Start a new network on kollabor", "description": "choices closed" },
+    { "action": "assert_not_contains", "pattern": "On your other computer", "description": "no network was started" }
+  ],
+  "teardown": [
+    { "action": "shell", "command": "rm -rf /tmp/kollab-guided-setup-120", "allow_failure": true }
+  ]
+}

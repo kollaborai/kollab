@@ -4368,6 +4368,17 @@ class HubPlugin(BasePlugin):
         )
         await self.event_bus.register_hook(nudge_hook)
 
+        # First launch: offer the guided network setup once the TUI is ready.
+        await self.event_bus.register_hook(
+            Hook(
+                name="hub_connect_guide",
+                plugin_name=self.name,
+                event_type=EventType.SYSTEM_STARTUP,
+                callback=self._on_startup_connect_guide,
+                priority=HookPriority.DISPLAY.value,
+            )
+        )
+
         # Start the hub after all plugins initialized
         # Skip in attach mode - we're a viewer, not a peer on the mesh
         if self._cli_args and getattr(self._cli_args, "attach", None):
@@ -9314,6 +9325,142 @@ class HubPlugin(BasePlugin):
         except Exception:
             return None
 
+    async def _on_startup_connect_guide(self, context, event_context=None):
+        """SYSTEM_STARTUP: offer the guided network setup once per machine.
+
+        Only the window that has the terminal gets here with a yes: an attached
+        client or a single process, never the daemon or a spawned agent (see
+        ``guide_applies``). It starts a task, so startup never waits on a person.
+        """
+        import sys
+
+        from .connect_guide import guide_applies
+
+        try:
+            interactive = bool(sys.stdin.isatty() and sys.stdout.isatty())
+        except Exception:
+            interactive = False
+        if guide_applies(getattr(self, "_cli_args", None), interactive=interactive):
+            self._connect_guide_task = asyncio.get_running_loop().create_task(
+                self._run_connect_guide()
+            )
+        return {"success": True}
+
+    async def _run_connect_guide(self) -> None:
+        """The notice, then the path the person picks (constitution, Story 1)."""
+        from plugins.altview.connect_altview import ConnectGuideAltView
+
+        from .connect_guide import DEFAULT_DOMAIN, mark_guide_seen
+
+        try:
+            startup = getattr(self, "_startup_task", None)
+            if startup is not None:
+                await asyncio.wait({startup}, timeout=10)  # the relay agent exists after
+            stack = self._altview_stack()
+            if stack is None or stack.is_in_altview:
+                return  # another screen is open: the notice waits for the next launch
+            view = ConnectGuideAltView(
+                has_network=await self._connect_has_network(),
+                on_answer=mark_guide_seen,
+            )
+            await stack.push(view, "connect-guide", reuse=False)
+            if view.answer == "screen":
+                text = await self._connect_home()
+            elif view.answer == "new_network":
+                text = await self._guided_new_network()
+            elif view.answer == "join":
+                text = await self._open_connect_altview(DEFAULT_DOMAIN)
+            else:
+                return
+            if text:
+                self._say_connect(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The type only: nothing in this flow holds a code, but a message might.
+            logger.warning("Connect guide failed: %s", type(exc).__name__)
+
+    async def _connect_has_network(self) -> bool:
+        """Whether this device is on a network, asked the way bare /connect asks."""
+        from .relay_commands import NO_NETWORK
+
+        if self._attached():
+            snapshot = await self._attached_connect_snapshot()
+            if snapshot is not None:
+                return bool(snapshot.domain)
+            status = str(await self._attached_connect("status"))
+            return status.splitlines()[:1] != [NO_NETWORK]
+        domain = self._relay_network_domain()
+        if not domain and self._relay_commands is None:
+            # A second window does not own the relay; asking for status starts the bridge.
+            await self._run_connect_command("status")
+            domain = self._relay_network_domain()
+        return bool(domain)
+
+    async def _guided_new_network(self) -> str:
+        """Start a network on kollabor.ai, then show the Connect screen with the
+        steps for the other computer; a reason string when it cannot."""
+        from .connect_guide import DEFAULT_DOMAIN
+
+        if not await self._start_connect_network(DEFAULT_DOMAIN):
+            return f"connect: could not start a network on {DEFAULT_DOMAIN}; try /connect"
+        return await self._open_connect_screen(
+            self._relay_network_domain() or DEFAULT_DOMAIN, guide=True
+        )
+
+    async def _start_connect_network(self, domain: str) -> bool:
+        """Start a network on `domain` (the first device); True once one exists."""
+        from .relay_commands import NO_NETWORK
+
+        if not _looks_like_connect_target(domain):
+            return False
+        try:
+            if self._attached():
+                text = await self._attached_connect(domain)
+            else:
+                text = await self._run_connect_command(domain)
+        except Exception:
+            return False
+        first = str(text).splitlines()[:1]
+        return bool(first) and first[0].startswith("network ") and first[0] != NO_NETWORK
+
+    def _altview_stack(self):
+        """The AltView stack manager, created on first use."""
+        if not self.event_bus:
+            return None
+        stack_mgr = None
+        try:
+            stack_mgr = self.event_bus.get_service("altview_stack_manager")
+        except Exception:
+            pass
+        if not stack_mgr:
+            from kollabor_tui.altview.stack_manager import AltViewStackManager
+
+            renderer = self.event_bus.get_service("renderer")
+            stack_mgr = AltViewStackManager(self.event_bus, renderer)
+            self.event_bus.register_service("altview_stack_manager", stack_mgr)
+        return stack_mgr
+
+    def _say_connect(self, text: str) -> None:
+        """One system line in the chat, for a result no screen shows."""
+        renderer = self.event_bus.get_service("renderer") if self.event_bus else None
+        coordinator = getattr(renderer, "message_coordinator", None)
+        if coordinator is not None:
+            coordinator.display_message_sequence(
+                [("system", text, {"display_type": "info"})]
+            )
+
+    def _primary_name(self) -> str:
+        """The primary's name once its first sealed config has landed, else ''."""
+        try:
+            from kollabor_config.managed_config import read_managed_config
+
+            record = read_managed_config()
+            inviter = self._relay_agent._state().state.inviter
+            return record.primary_name if record and record.primary_key == inviter else ""
+        except Exception:
+            return ""
+
     async def _connect_home(self) -> str:
         """Bare /connect: the Connect screen on a network, the code form off one."""
         from .relay_commands import NO_NETWORK
@@ -9360,6 +9507,8 @@ class HubPlugin(BasePlugin):
                 ConnectOutcome,
             )
 
+            from .connect_guide import post_join_line
+
             def outcome_of(result, domain: str):
                 if not isinstance(result, dict):
                     return ConnectOutcome.error()
@@ -9374,7 +9523,8 @@ class HubPlugin(BasePlugin):
                     # window cannot know them, and an older daemon sends none.
                     try:
                         return ConnectOutcome.approved(
-                            result.get("detail") or self._joined_line(domain)
+                            result.get("detail") or self._joined_line(domain),
+                            result.get("note") or post_join_line(),
                         )
                     except (TypeError, ValueError):
                         return ConnectOutcome.approved()
@@ -9407,31 +9557,9 @@ class HubPlugin(BasePlugin):
 
             async def attach(domain: str) -> bool:
                 """No code: this is the first device, so start a network."""
-                from .relay_commands import NO_NETWORK
+                return await self._start_connect_network(domain)
 
-                if not _looks_like_connect_target(domain):
-                    return False
-                try:
-                    if getattr(getattr(self, "_cli_args", None), "attach", None):
-                        text = await self._attached_connect(domain)
-                    else:
-                        text = await self._run_connect_command(domain)
-                except Exception:
-                    return False
-                first = str(text).splitlines()[:1]
-                return bool(first) and first[0].startswith("network ") and first[0] != NO_NETWORK
-
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
-
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            stack_mgr = self._altview_stack()
 
             await stack_mgr.push(
                 ConnectAltView(
@@ -9494,7 +9622,13 @@ class HubPlugin(BasePlugin):
             status = result.get("status") if isinstance(result, dict) else None
             if status == "approved":
                 try:
-                    return {"status": "approved", "detail": self._joined_line(domain)}
+                    from .connect_guide import post_join_line
+
+                    return {
+                        "status": "approved",
+                        "detail": self._joined_line(domain),
+                        "note": post_join_line(self._primary_name()),
+                    }
                 except Exception:
                     return {"status": "approved"}
             return {"status": "rejected"} if status == "rejected" else failed
@@ -9564,7 +9698,7 @@ class HubPlugin(BasePlugin):
         return ""
 
     async def _open_connect_screen(
-        self, domain: str, *, code_only: bool = False, snapshot=None
+        self, domain: str, *, code_only: bool = False, snapshot=None, guide: bool = False
     ) -> str:
         """Open the Connect screen; `/connect code` opens only its private code.
 
@@ -9611,17 +9745,7 @@ class HubPlugin(BasePlugin):
                     )
                 return reason or None
 
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
-
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            stack_mgr = self._altview_stack()
 
             # Another window owns the relay: a code, a request and a decision
             # all live there, so this screen shows what the shared state says
@@ -9636,6 +9760,7 @@ class HubPlugin(BasePlugin):
                     code_only=code_only,
                     snapshot=None if code_only else read_only,
                     note=CONNECT_OWNED_ELSEWHERE if read_only is not None else "",
+                    guide=guide,
                 ),
                 "connect-code" if code_only else "connect-screen",
                 reuse=False,
@@ -9773,17 +9898,7 @@ class HubPlugin(BasePlugin):
                 )
                 return reason or None
 
-            stack_mgr = None
-            try:
-                stack_mgr = self.event_bus.get_service("altview_stack_manager")
-            except Exception:
-                pass
-            if not stack_mgr:
-                from kollabor_tui.altview.stack_manager import AltViewStackManager
-
-                renderer = self.event_bus.get_service("renderer")
-                stack_mgr = AltViewStackManager(self.event_bus, renderer)
-                self.event_bus.register_service("altview_stack_manager", stack_mgr)
+            stack_mgr = self._altview_stack()
             await stack_mgr.push(
                 ContactReviewAltView(domain, load, decide),
                 "contact-review",

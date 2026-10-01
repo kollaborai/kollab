@@ -847,9 +847,12 @@ async def test_start_returns_pending_once_the_request_is_submitted_and_status_fo
     }
     gate.set()
     await _settle()
+    from plugins.hub.connect_guide import post_join_line
+
     assert await plugin._connect_enrollment_status(receipt) == {
         "status": "approved",
         "detail": _JOINED,
+        "note": post_join_line(),
     }
     # It can be read again by a window that missed the first answer.
     assert (await plugin._connect_enrollment_status(receipt))["status"] == "approved"
