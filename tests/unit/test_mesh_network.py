@@ -24,7 +24,7 @@ from nacl.signing import SigningKey
 
 from kollabor_agent.runtime import AgentRuntime
 from kollabor_events import EventBus, EventType, Hook
-from plugins.hub import peer_transport, relay_client
+from plugins.hub import peer_transport
 from plugins.hub.dns.endpoint import build_server_ssl_context
 from plugins.hub.dns.identity import IdentityManager
 from plugins.hub.dns.models import AgentRecord
@@ -45,6 +45,8 @@ from plugins.hub.relay_state import RelayError
 
 from .test_peer_transport import RelayWire, _mint_tls_cert
 from .test_relay_agent_bridge import Directory, ModelRecorder
+
+pytestmark = pytest.mark.usefixtures("unthrottled_relay")
 
 ROOM = "ab" * 32
 
@@ -839,9 +841,6 @@ async def test_links_between_members_stay_valid_across_thirty_concurrent_refresh
     # Three nodes share one event loop here, so a slow CI runner can stretch one
     # round trip past the real 3 s; the timeout measures this machine, not the protocol.
     monkeypatch.setattr(peer_transport, "PEER_EXCHANGE_TIMEOUT", 30)
-    # Seven and a half simulated minutes run in seconds of real time, which a
-    # per-real-second send budget was never meant to cover.
-    monkeypatch.setattr(relay_client, "SEND_BURST", 10_000.0)
     await link_everything(mesh3)
     clock = {"now": time.time()}
     monkeypatch.setattr(time, "time", lambda: clock["now"])
