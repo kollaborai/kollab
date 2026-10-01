@@ -135,8 +135,8 @@ deleting data not listed here or changing a decision.
    then replace `<trender>hostname</trender>` with `<trender>uname -n</trender>`.
 5. Several workspaces on one machine: the latest join wins the machine's config record. The
    device whose primary is then refused shows one line saying so.
-6. Manual trust (Story 7): add a short live proof, tests/live/story7, and delete the stale
-   Codex verifier `scripts/relay/verify_agent_conversation.py` and its unit test.
+6. Manual trust (Story 7): add a short live proof, tests/live/story7, . The stale Codex verifier
+   script and its unit test are deleted.
 7. The three foreign uncommitted files stay untouched and are never staged.
 8. Not in 0.11.0: renaming a network, and knock abuse limits. Constitution section 15
    keeps them.
@@ -348,13 +348,9 @@ install both, every proof, cleanup that keeps the selfhost one command running).
   `~/.kollab/agents/_base/sections/01-session-context.md` runs
   `<trender>hostname</trender>` and logs an ERROR every turn (the bundled
   prompt uses `uname -n` since 0.10.4).
-- `scripts/relay/verify_agent_conversation.py` targets the old command
-  surface; it is the only live verifier for manual trust (Story 7). Keep,
-  rewrite or delete.
 
 ## Small follow-ups (not started)
 
-- `scripts/relay/verify_agent_conversation.py` and its live checks still parse the old manual-trust output (`remote receipt: {json}`, `remote task <hex>: ...`, hex `withdraw`/`answer` ids). Update them to the numbers.
 - A remote cron fire draws one `agent -> agent@device` box per fire; a 30 s job draws one every 30 s. Not seen on a real screen yet.
 
 ## Gotchas

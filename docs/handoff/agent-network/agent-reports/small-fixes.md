@@ -15,5 +15,5 @@ Suite: 5201 passed, 9 skipped, 203 subtests passed. Ruff clean on all touched fi
 Not done
 - No live run. The outgoing box was checked against a fake renderer (not a real terminal at 80/120); relay serve against a real subprocess on a throwaway HOME, not production.
 - b and e have no changelog line (asked for a, c, d only).
-- Still open in Small follow-ups: `verify_agent_conversation.py` old manual-trust output; one box per remote cron fire.
+- Still open in Small follow-ups: one box per remote cron fire.
 - manual-trust-numbers.md and review-m3-m4.md still list d and e as open; left as history.

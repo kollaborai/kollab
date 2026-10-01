@@ -28,7 +28,7 @@ Three uncommitted files in the main checkout are NOT part of this work and were 
 - A second window in a workspace without a daemon prints /connect status text instead of the screen.
 - Device names clip at 20 characters on the request row. The status widget count (◈ name* +N) counts local agents only; its producer is in the untouched status/ files.
 - Replies to the CLI (kollab --hub msg) are matched oldest-request-first per agent; overlapping requests to one agent that also sends interim messages can cross.
-- Leftovers: scripts/relay/verify_agent_conversation.py is stale; provisioning OAuth code is dead; kollabor-voice missing from publish.yml package list; pre-existing ruff hits in tests/unit/test_provisioning_store.py and test_relay_network_trust.py; error text near plugins/hub/plugin.py:8146 mentions the removed `grants`.
+- Leftovers: provisioning OAuth code is dead; kollabor-voice missing from publish.yml package list; pre-existing ruff hits in tests/unit/test_provisioning_store.py and test_relay_network_trust.py; error text near plugins/hub/plugin.py:8146 mentions the removed `grants`.
 - alzan-prod has no `hostname` binary; its global ~/.kollab/agents/_base/sections/01-session-context.md runs <trender>hostname</trender> and logs an ERROR every turn. Environmental.
 - Stray sessions still running: Mac tmux e2e-mac; alzan-prod tmux e2e-srv, sh-relay, sh-pub, sh-static plus stray kollab/python processes. Scratch workspaces ~/kollab-m1-* on both hosts and ~/kollab-m1/venv on both.
 

@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A network is named after the device that starts it, `<first device name>-net` (for example `mac-kollab-net`). A device that joins takes the name from the signed decision that admits it, so the Connect screen, `/connect status`, the accept line, the joined line and the hub context show it instead of the directory's name. `/connect leave` forgets it. No command renames it yet.
 - Join codes are looked up by a keyed tag (`POST /relay/v1/enrollment/lookup`) and an offer burns after five failed proofs. The joining device sends its name with the request, and the accept line shows the name and key fingerprint.
 
+### Removed
+- The stale Codex live-acceptance script under `scripts/relay/` and its unit test are gone; manual trust (Story 7) gets a short live proof instead, refs #121
+
 ### Fixed
 - A restart no longer announces every pending join request and knock again: the ids already announced are kept in the network state, pruned to what is still pending
 - A knock nobody answers no longer leaves its approval, trust, link and reply grant behind: the knocking device records when it knocked and drops them after seven days, unless the other device accepted (its link is live, or it already reached this device)

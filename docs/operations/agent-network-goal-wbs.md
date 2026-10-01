@@ -46,7 +46,7 @@ published release; and clean installed-package acceptance on the Mac and
 
 Runs `0428cb8fb09a47ea821fe673e9930093` and `b42ec1abb234489b9c0be37d3a762fac`
 both passed every check of
-`scripts/relay/verify_agent_conversation.py` between the Mac and `alzan-prod`
+the old live verifier script (since deleted) between the Mac and `alzan-prod`
 through `https://kollabor.ai`: pairing, attached `/connect status` on both
 hosts, the core model/tool/file exchange, question/answer, follow-up,
 cancellation, reconnect, and receiver-guard rejection of unauthorized,

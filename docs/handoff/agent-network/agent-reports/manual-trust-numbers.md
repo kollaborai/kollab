@@ -13,7 +13,6 @@ Branch `worktree-agent-a6deca3db4a406544`, worktree `/Users/malmazan/dev/kollab/
 
 ## Open
 - Outgoing box: a hub_msg addressed to a `relay:` address (not `agent@device`) still draws `sapphire -> relay:...` (`_display_outgoing_message(target, ...)` in `_handle_hub_msg_tool`). The documented manual-trust form uses `agent@device` and is clean. Fix needs a sync address-to-handle lookup.
-- `scripts/relay/verify_agent_conversation.py` and its live checks still parse `remote receipt: {json}`, `remote task <hex>:` and hex `withdraw`/`answer` ids; update to numbers before the next live run.
 - `authorize` still prints `expires at <unix epoch>`.
 - No tmux spec and no live run (manual trust needs two devices on `trust manual`).
 
