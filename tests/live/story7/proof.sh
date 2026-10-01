@@ -338,6 +338,12 @@ for _ in $(seq 1 8); do
   sleep 8
 done
 cap mac g5-mac-status; cap srv g5-srv-status
+# Take the names the status bar shows now when the other side's roster lists them: the
+# first roster match can be a stale agent from an earlier launch.
+MAC_AGENT=$(grep -oE '◈ [A-Za-z0-9_-]+' <<<"$(raw mac 200)" | tail -1 | sed 's/^◈ //' || true)
+SRV_AGENT=$(grep -oE '◈ [A-Za-z0-9_-]+' <<<"$(raw srv 200)" | tail -1 | sed 's/^◈ //' || true)
+if [ -n "$SRV_AGENT" ] && grep -qF "${SRV_AGENT}@${SRV_DEVICE}" <<<"$MAC_STATUS"; then REMOTE="${SRV_AGENT}@${SRV_DEVICE}"; fi
+if [ -n "$MAC_AGENT" ] && grep -qF "${MAC_AGENT}@${MAC_DEVICE}" <<<"$SRV_STATUS"; then BACK="${MAC_AGENT}@${MAC_DEVICE}"; fi
 [ -n "$REMOTE" ] && [ -n "$BACK" ] && [ -n "$MAC_DEVICE" ] || abort setup-g5-status-both-sides "mac sees '${REMOTE:-nothing}', server sees '${BACK:-nothing}', mac device '${MAC_DEVICE:-unknown}'" g5-mac-status.txt
 
 

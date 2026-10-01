@@ -516,6 +516,18 @@ ask_over() { # ask_over <from> <to> <to-token> <prompt> <want-ERE> <step>: one r
     fi
   fi
 }
+# The g7 relaunch can leave a different agent on a side than the one g5 saw. Read each
+# side's current name from its pane status ("◈ <name>") and ask those.
+cmd mac "/connect status"; cmd srv "/connect status"; sleep 7
+MAC_AGENT=$(grep -oE '◈ [A-Za-z0-9_-]+' <<<"$(raw mac 200)" | tail -1 | sed 's/^◈ //' || true)
+SRV_AGENT=$(grep -oE '◈ [A-Za-z0-9_-]+' <<<"$(raw srv 200)" | tail -1 | sed 's/^◈ //' || true)
+if [ -n "$MAC_AGENT" ] && [ -n "$SRV_AGENT" ]; then
+  BACK="${MAC_AGENT}@${MAC_DEVICE}"; REMOTE="${SRV_AGENT}@${SRV_DEVICE}"
+  grep -qF "$REMOTE" <<<"$(raw mac 200)" || say "g8: warning: the Mac roster does not list $REMOTE"
+  grep -qF "$BACK" <<<"$(raw srv 200)" || say "g8: warning: the server roster does not list $BACK"
+else
+  say "g8: warning: no agent name in a pane status; keeping $REMOTE and $BACK from g5"
+fi
 say "g8: Mac agent asks $REMOTE, server agent asks $BACK"
 ask_over mac srv "$REMOTE" "$(printf 'ask %s to run `uname -n` and `uptime` and report back what they print' "$REMOTE")" "$SRV_HOSTNAME|load average|up [0-9]" g8-mac-to-srv
 ask_over srv mac "$BACK" "$(printf 'ask %s to run `uname -n` and report back what it prints' "$BACK")" "$MAC_HOSTNAME" g8-srv-to-mac

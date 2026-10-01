@@ -8563,6 +8563,12 @@ class HubPlugin(BasePlugin):
                 return [(message.to, str(exc))]
             refusal = _receipt_refusal(receipt)
             if refusal:
+                if receipt.get("reason") == "recipient_unavailable" or (
+                    receipt.get("state") == "unavailable"
+                ):
+                    # The peer answered that nobody by that name is there, so the
+                    # roster this handle was resolved from is stale.
+                    refusal = "that agent is not online: run /connect status to see who is"
                 return [(message.to, refusal)]
             message.metadata["network"] = {"to": address}
             self._trace_delivery(message, "remote_accepted", detail="network")

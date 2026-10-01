@@ -2101,10 +2101,14 @@ def cli_main() -> None:
         import json
         import os
 
-        from kollabor.daemon import LAUNCH_ARGS_ENV, fork_daemon
+        from kollabor.daemon import LAUNCH_ARGS_ENV, find_workspace_daemon, fork_daemon
 
         try:
-            daemon_pid, socket_path = fork_daemon(sys.argv)
+            # A bare relaunch attaches to the workspace's live daemon; forking
+            # another one doubles the agent.
+            daemon_pid, socket_path = find_workspace_daemon(
+                sys.argv[1:]
+            ) or fork_daemon(sys.argv)
         except RuntimeError as e:
             print(f"daemon startup failed: {e}", file=sys.stderr)
             print("falling back to single-process mode", file=sys.stderr)
