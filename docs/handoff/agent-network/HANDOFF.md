@@ -203,9 +203,11 @@ I. Update this file and the memory, run the Done Gate, and send one short report
 | M: chain exit failed flag, keyring retry per reconnect | agent-reports/m-chain-keyring.md | merged 801f141; watchdog heal ends failed too (a148c60) |
 | B: guided setup | agent-reports/b-guided-setup.md | merged c55351f; marker `~/.kollab/connect-guide-seen` (env `KOLLAB_CONNECT_GUIDE_MARKER` moves it) |
 | B/A polish: primary named in the post-join line, the line in the main pane, notices quiet across restarts | agent-reports/b-polish.md | merged 936ebab; unit suite 5283 passed |
-| C: guided setup live proof (tests/live/guided) on 0.11.0.dev7 | agent-reports/live-guided.md | running (venv root `kollab-gs`, sessions gs-mac/gs-srv) |
-| C: Story 7 live proof (tests/live/story7) | (after live-guided: both would take the server's machine-wide config record) | to do |
-| J: website docs, written and built, not deployed | agent-reports/site-docs.md | running (worktree ~/dev/kollabor.ai-network-docs) |
+| C: guided setup live proof (tests/live/guided) on 0.11.0.dev7 | agent-reports/live-guided.md | PASS 16/16 (g1-g9), clean transcript, real marker untouched; merged. Copy fix after it: the post-join line now reads "Settings arrive sealed from X. Run /login on this computer: a ChatGPT login does not travel." (712165f) |
+| C: Story 7 live proof (tests/live/story7) on 0.11.0.dev7 | agent-reports/live-story7.md | running (venv root `kollab-s7`, sessions s7-mac/s7-srv) |
+| J: website docs | agent-reports/site-docs.md, site-deploy.md | LIVE: https://kollabor.ai/docs/network (12 sections, nav entry, docs card); only those 3 files shipped onto the live tree after its rebuild matched kollabor.ai text-for-text. Checked by eye at 390 and 820 px, no overflow. Backup `/home/almazan/kollabor.ai.bak-2026-09-30`, old image `kollaborai-kollabor-web:pre-network-docs-2026-09-30`. The website repo HEAD (Tailwind v4 + rebrand) does not build and was NOT deployed; the docs also sit on its branch `docs/agent-network-0.11` (96a5b5c) for when it ships. Site-wide: inline code shows backticks (prose CSS), not ours. |
+
+PR #122 (https://github.com/kollaborai/kollab/pull/122) is open; CI fixes so far: a gitleaks false positive (4ecc290) and a wall-clock timeout in the thirty-refresh mesh test (f2110d1).
 
 Found while preparing: PR #120 is already merged (2026-09-29), so K only closes issue #99 and
 deletes `mesh-direct-bootstrap` (its tip e02e761 is in no other branch; the local ref stays).
