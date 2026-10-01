@@ -626,7 +626,7 @@ class TerminalLLMChat:
         # Initialize LLM core service components
         self.project_data_dir = get_project_data_dir()
         conversations_dir = get_conversations_dir()
-        conversations_dir.mkdir(parents=True, exist_ok=True)
+        conversations_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.conversation_logger = KollaborConversationLogger(conversations_dir)
         self.mcp_integration = MCPIntegration(event_bus=self.event_bus)
         self.plugin_sdk = KollaborPluginSDK()
