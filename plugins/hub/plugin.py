@@ -9384,13 +9384,17 @@ class HubPlugin(BasePlugin):
             logger.warning("Connect guide failed: %s", type(exc).__name__)
 
     async def _connect_has_network(self) -> bool:
-        """Whether this device is on a network, asked the way bare /connect asks."""
+        """Whether this device shares a network with another device, asked the way bare
+        /connect asks. A device alone on one (every 0.10.7 launch made it) counts as not
+        set up: the notice offers it the two choices, not the Connect screen."""
         from .relay_commands import NO_NETWORK
 
         if self._attached():
             snapshot = await self._attached_connect_snapshot()
             if snapshot is not None:
-                return bool(snapshot.domain)
+                return bool(snapshot.domain) and bool(
+                    snapshot.remote_agents or snapshot.offline_devices or snapshot.config_from
+                )
             status = str(await self._attached_connect("status"))
             return status.splitlines()[:1] != [NO_NETWORK]
         domain = self._relay_network_domain()
@@ -9398,17 +9402,27 @@ class HubPlugin(BasePlugin):
             # A second window does not own the relay; asking for status starts the bridge.
             await self._run_connect_command("status")
             domain = self._relay_network_domain()
-        return bool(domain)
+        return bool(domain) and not self._relay_alone()
+
+    def _relay_alone(self) -> bool:
+        """True when no other device is on this device's network (RelayState.is_alone)."""
+        try:
+            return self._relay_agent._state().state.is_alone()
+        except Exception:
+            return False  # cannot tell: keep the Connect screen's path
 
     async def _guided_new_network(self) -> str:
         """Start a network on kollabor.ai, then show the Connect screen with the
         steps for the other computer; a reason string when it cannot."""
         from .connect_guide import DEFAULT_DOMAIN
 
-        if not await self._start_connect_network(DEFAULT_DOMAIN):
-            return f"connect: could not start a network on {DEFAULT_DOMAIN}; try /connect"
+        # A device alone on a network keeps it: connecting again re-attaches the same
+        # room (naming it if it has no name), so there is no second network.
+        domain = self._relay_network_domain() or DEFAULT_DOMAIN
+        if not await self._start_connect_network(domain):
+            return f"connect: could not start a network on {domain}; try /connect"
         return await self._open_connect_screen(
-            self._relay_network_domain() or DEFAULT_DOMAIN, guide=True
+            self._relay_network_domain() or domain, guide=True
         )
 
     async def _start_connect_network(self, domain: str) -> bool:

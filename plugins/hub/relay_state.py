@@ -181,6 +181,18 @@ class RelayState:
     config_told_skipped: str = ""
     config_told_refused: bool = False
 
+    def is_alone(self) -> bool:
+        """True when no other device is on this network: none approved, no inviter, no
+        peer binding, nobody accepted by a code or linked. Every kollab 0.10.7 launch
+        left a network of one; a join may replace that, never a bigger network."""
+        return not (
+            self.approvals
+            or self.inviter
+            or self.peer_devices
+            or self.config_recipients
+            or self.links
+        )
+
 
 class RelayStateStore:
     """No state, seed or invitation is written inside the workspace."""

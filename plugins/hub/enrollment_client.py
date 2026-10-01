@@ -1741,7 +1741,10 @@ async def enroll_device(
                 raise EnrollmentProtocolError("conflict")
         else:
             if not _destination_state_empty(client):
-                raise EnrollmentProtocolError("conflict")
+                if not client.state.is_alone():
+                    raise EnrollmentProtocolError("conflict")
+                # A network of one (every 0.10.7 launch made it): this join replaces it.
+                await client.leave()
             if discovery is None:
                 discovery, _ca, _private_cidrs = await _discover_destination(commands, domain)
             device_name = getattr(client.state, "device_name", "") or default_device_name(

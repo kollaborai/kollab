@@ -436,7 +436,7 @@ async def test_bare_connect_in_the_owner_window_still_opens_the_screen():
     await owner._handle_connect_command("")
 
     owner._run_connect_command.assert_not_awaited()
-    owner._open_connect_screen.assert_awaited_once_with("kollabor.ai", snapshot=None)
+    owner._open_connect_screen.assert_awaited_once_with("kollabor.ai", snapshot=None, guide=False)
 
 
 # ------------------------------------------------------ remote-target refusals

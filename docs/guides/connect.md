@@ -120,13 +120,16 @@ New: connect your agents across computers.
 Enter sets it up now; Esc for later (/connect any time).
 ```
 
-- **Enter, on a computer with no network.** Choose *Start a new network on
-  kollabor.ai* or *Join with a code*. Starting a network opens the Connect screen
+- **Enter, on a computer with no network, or alone on one.** Choose *Start a new
+  network on kollabor.ai* or *Join with a code*. A computer alone on a network (no
+  other device, no inviter; every 0.10.7 launch made one) counts as not set up:
+  *Start* keeps its own network and *Join with a code* replaces it, and a network
+  with another computer on it is never replaced. Starting a network opens the Connect screen
   with the join code and an "On your other computer" box: run
   `kollab --upgrade` (or `pip install -U kollab`), run `kollab` and press Enter
   on the same notice, choose *Join with a code* and type the code. Joining opens
   the private code form, as `/connect` does.
-- **Enter, on a computer already on a network.** Opens the Connect screen, with a join code and the same "On your other computer" steps.
+- **Enter, on a computer that shares a network with another computer.** Opens the Connect screen, with a join code and the same "On your other computer" steps.
 - **Esc.** Leaves it for later; `/connect` does the same thing at any time.
 - **After a join.** One line says settings arrive sealed from the computer that
   issued the code, and that a ChatGPT login does not travel: run `/login` on this
