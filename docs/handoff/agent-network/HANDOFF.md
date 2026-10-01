@@ -192,7 +192,30 @@ H. Cleanup, after E:
      ~/kollab-e2e-*, the ~/kollab-m1 venv, and the throwaway installs from F.
    - Keep the last 3 relay release dirs.
    - `git worktree prune`, and remove the merged agent worktrees under `.claude/worktrees`.
-I. Update this file and the memory, run the Done Gate, and send one short report.
+I. Update this file and the memory, run the Done Gate, and send one short report (after J to M).
+
+### After the release, part of the same goal
+J. Website: update the kollabor.ai site in `~/dev/kollabor.ai` (the network, `/connect`, joining
+   by code, trust levels, knocks, self-hosting with `kollab relay serve --domain`). Use that
+   repo's own build and deploy, then check the live pages.
+K. GitHub, with Marco's go:
+   - close PR #120 (the old guide, superseded) and issue #99 (the mesh shipped in 0.11.0),
+     each with a one-line comment that links the merged PR;
+   - delete the remote branch `mesh-direct-bootstrap`.
+L. Old worktrees: remove those under `~/.codex/worktrees/` and
+   `~/.config/superpowers/worktrees/kollab/`, plus `~/dev/kollab-release-v0.7.1`, but only
+   where the HEAD is already in `origin/main` or a pushed branch. List any with unpushed
+   commits here; do not delete them.
+M. Five small bugs, each with a test that fails before the fix:
+   - a knock that is rejected or never answered leaves the knocker's approval, link and reply
+     grant: clear them on rejection, and expire them after 7 days without an answer;
+   - a daemon restart re-announces join requests and knocks it already announced: keep the
+     announced ids in state;
+   - a chain that dies before either `finally` leaves its request open for 600 s: every exit
+     path ends the request with the failed flag;
+   - a keyring that unlocks after launch is not picked up: retry only the keys that were
+     unresolved, at most once per reconnect, so there are no repeated Keychain prompts;
+   - a remote cron fire draws a full box every time: draw one dim line per fire.
 
 ## Final state: every milestone proven live on 0.11.0.dev6 (cc50acf), 2026-09-30
 
