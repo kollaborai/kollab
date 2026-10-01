@@ -651,6 +651,31 @@ def test_a_key_the_primary_drops_is_removed_and_empty_parents_pruned(homes, keys
         )
 
 
+def test_a_resend_that_changes_nothing_still_tightens_the_file_modes(
+    homes,
+    keys,
+):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+    receiver = cs.Receiver(secondary)
+    push_core(snapshot, 10, receiver, primary, secondary, homes)
+    with homes("server") as server:
+        # the same values sat at a looser mode from before this device joined
+        os.chmod(server / "config.json", 0o644)
+        os.chmod(server / "mcp" / "mcp_settings.json", 0o644)
+
+    reply, applied = push_core(snapshot, 10, receiver, primary, secondary, homes)
+
+    assert reply == {"ok": True} and not applied.config_changed
+    with homes("server") as server:
+        assert stat.S_IMODE((server / "config.json").stat().st_mode) == 0o600
+        assert (
+            stat.S_IMODE((server / "mcp" / "mcp_settings.json").stat().st_mode) == 0o600
+        )
+
+
 def test_a_secondary_refuses_local_only_keys_even_from_its_primary(homes, keys):
     primary, secondary = keys
     hostile = cs.pack_json(

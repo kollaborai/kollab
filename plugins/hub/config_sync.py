@@ -705,6 +705,15 @@ def _write_json(path: Path, value: dict) -> None:
     )
 
 
+def _tighten(path: Path) -> None:
+    """0600 even when an apply changed nothing: the file may hold the same key
+    at a looser mode from before this device was managed (section 9)."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass  # nothing on disk to tighten
+
+
 def _file_path(parts: tuple[str, ...], root: Path | None = None) -> Path:
     """The target of a synced file. Refuses any symlink below the top folder."""
     current = kollab_root(root) / parts[0]  # the user may link the folder itself
@@ -864,6 +873,7 @@ class Receiver:
             _write_json(config_path, current)
             applied.config_changed = True
             applied.profiles_changed = _llm_profiles(before) != _llm_profiles(current)
+        _tighten(config_path)  # keys live here: 0600 on every apply, write or not
         mcp_path = mcp_settings_path(self._root)
         settings = _read_object(mcp_path)
         existing = settings.get("servers")
@@ -884,6 +894,7 @@ class Receiver:
             settings["servers"] = merged
             _write_json(mcp_path, settings)
             applied.mcp_changed = True
+        _tighten(mcp_path)  # server env can carry tokens: 0600 on every apply
         write_managed_config(
             ManagedConfig(
                 primary_key=primary_key,

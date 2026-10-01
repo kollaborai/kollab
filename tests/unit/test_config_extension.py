@@ -367,6 +367,42 @@ class TestConfigLoaderVersionTracking:
             loader.validate_provider_config("auto", config)  # Should not raise
 
 
+class TestSaveMergedConfigModes:
+    """The saved file holds API keys, so it is written 0600."""
+
+    def test_save_creates_the_config_file_at_0600(self, tmp_path, monkeypatch):
+        """A fresh save lands 0600, not the open() default."""
+        import json
+        import stat
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        manager = ConfigManager(tmp_path / "absent.json")
+        loader = ConfigLoader(manager, fast_mode=True)
+
+        assert loader.save_merged_config({"kollabor": {"llm": {"x": 1}}}) is True
+        saved = tmp_path / ".kollab" / "config.json"
+        assert json.loads(saved.read_text())["kollabor"]["llm"]["x"] == 1
+        assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+
+    def test_save_tightens_an_existing_loose_config_file(self, tmp_path, monkeypatch):
+        """A file left world-readable by an older version is tightened on save."""
+        import os
+        import stat
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        saved = tmp_path / ".kollab" / "config.json"
+        saved.parent.mkdir(parents=True)
+        saved.write_text('{"terminal": {}}', encoding="utf-8")
+        os.chmod(saved, 0o644)
+        manager = ConfigManager(tmp_path / "absent.json")
+        loader = ConfigLoader(manager, fast_mode=True)
+
+        assert loader.save_merged_config({"terminal": {"render_fps": 12}}) is True
+        assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+
+
 class TestConfigMigration:
     """Test configuration migration from v1 to v2."""
 

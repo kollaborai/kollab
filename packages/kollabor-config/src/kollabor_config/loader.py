@@ -1,6 +1,7 @@
 """Configuration loading and plugin integration logic."""
 
 import logging
+import os
 import re
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
@@ -941,8 +942,14 @@ class ConfigLoader:
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            with open(save_path, "w") as f:
+            # 0600: API keys live in this file. Created tight, and a file an
+            # older version left loose is tightened on the next save.
+            descriptor = os.open(
+                save_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600
+            )
+            with os.fdopen(descriptor, "w") as f:
                 json.dump(config_to_save, f, indent=2, ensure_ascii=False)
+            os.chmod(save_path, 0o600)
             logger.info(f"Saved configuration to: {save_path}")
             return True
         except Exception as e:
