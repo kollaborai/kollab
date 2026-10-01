@@ -546,3 +546,18 @@ async def test_a_workspace_that_lost_the_machines_record_to_a_later_join_says_so
     assert lines_a == [SYNC_IS_OFF]  # said once, not once per bundle
     assert lines_b == []  # the workspace that won has nothing to report
 
+
+@pytest.mark.asyncio
+async def test_the_relay_agent_shows_config_sync_notices_in_the_main_pane(network):
+    net = network
+    lines = []
+    net["right"].plugin.show_network_notice = lines.append
+    write_json(
+        net["mac"] / "mcp" / "mcp_settings.json",
+        {"servers": {"ghost": {"command": "no-such-mcp-server-xyz"}}},
+    )
+
+    await sync_once(net)
+
+    assert lines == ["Skipped MCP servers not installed here: ghost"]
+
