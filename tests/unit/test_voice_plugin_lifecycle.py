@@ -560,3 +560,40 @@ async def test_uncertain_background_does_not_block_the_next_user_request():
     assert delivered[1]["message"] == request["text"]
     assert delivered[1]["voice"]["uncertain_event_ids"] == []
     assert plugin.status()["pending"] == 0
+
+
+def test_microphone_core_widget_registration_and_absent_service():
+    from kollabor_tui.status.core_widgets import (
+        WidgetContext,
+        register_core_widgets,
+        render_microphone,
+    )
+    from kollabor_tui.status.widget_registry import StatusWidgetRegistry
+
+    registry = StatusWidgetRegistry()
+    register_core_widgets(registry)
+    assert registry.get("microphone") is not None
+    assert "mic off" in render_microphone(20, WidgetContext())
+
+
+def test_microphone_widget_renders_live_listening_and_last_heard():
+    from kollabor_tui.status.core_widgets import WidgetContext, render_microphone
+
+    bus = FakeBus()
+    bus.register_service("voice_plugin", SimpleNamespace(status=lambda: {
+        "state": "listening",
+        "last_transcript": {"text": "check the microphone"},
+    }))
+    rendered = render_microphone(40, WidgetContext(event_bus=bus))
+    assert "mic listening" in rendered
+    assert "check the microphone" in rendered
+
+
+def test_microphone_widget_renders_off_state():
+    from kollabor_tui.status.core_widgets import WidgetContext, render_microphone
+
+    bus = FakeBus()
+    bus.register_service(
+        "voice_plugin", SimpleNamespace(status=lambda: {"state": "off"})
+    )
+    assert "mic off" in render_microphone(20, WidgetContext(event_bus=bus))

@@ -277,6 +277,29 @@ class StatusLayoutManager:
                 self._layout.rows.append(new_row)
                 logger.info(f"Added missing row {row_id} during migration")
 
+        # Add newly introduced core widgets without replacing user choices.
+        has_microphone = any(
+            w.id in {"microphone", "voice"}
+            for row in self._layout.rows
+            for w in row.widgets
+        )
+        if not has_microphone:
+            row2 = self._layout.get_row(2)
+            visible_rows = [row for row in self._layout.rows if row.visible]
+            target = (
+                row2
+                if row2 and row2.visible
+                else (
+                    visible_rows[0]
+                    if visible_rows
+                    else (row2 or self._layout.rows[0])
+                )
+            )
+            target.widgets.append(
+                WidgetConfig(id="microphone", width=WidgetWidth.auto())
+            )
+            logger.info("Added microphone widget during layout migration")
+
         # Sort rows by ID to maintain order
         self._layout.rows.sort(key=lambda r: r.id)
 
@@ -306,6 +329,7 @@ class StatusLayoutManager:
                 WidgetConfig(id="profile", width=WidgetWidth.auto()),
                 WidgetConfig(id="model", width=WidgetWidth.auto()),
                 WidgetConfig(id="status", width=WidgetWidth.auto()),
+                WidgetConfig(id="microphone", width=WidgetWidth.auto()),
             ],
         )
 

@@ -63,7 +63,14 @@ def enrollment_result(
         if isinstance(note, str) and len(note) <= 200 and note.isprintable():
             approved["note"] = note
         return approved
-    if status == "rejected" or (allow_failed and status == "failed"):
+    if allow_failed and status == "failed":
+        failed = {"status": "failed"}
+        # Why it failed: one line of display text, never a key or an id.
+        reason = result.get("reason")
+        if isinstance(reason, str) and 0 < len(reason) <= 200 and reason.isprintable():
+            failed["reason"] = reason
+        return failed
+    if status == "rejected":
         return {"status": status}
     return None
 

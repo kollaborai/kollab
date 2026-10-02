@@ -1,9 +1,16 @@
 """Hub stop lifecycle tests."""
 
 import asyncio
+import os
+import signal
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 from plugins.hub.plugin import HubPlugin
+
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
 
 
 class FakePresence:
@@ -131,6 +138,69 @@ def test_stop_peer_reports_failure_only_if_pid_survives_sigkill(monkeypatch):
 
         assert result == "stop timed out (pid survived SIGKILL)"
         assert plugin._presence.cleaned == []
+
+    asyncio.run(run_test())
+
+
+def test_agent_pid_alive_reads_an_exited_unreaped_child_as_dead():
+    """The window that forked the daemon is its parent, so the exited daemon is
+    a zombie and os.kill(pid, 0) still succeeds on it."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 5
+        while HubPlugin._agent_pid_alive(child.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not HubPlugin._agent_pid_alive(child.pid)
+    finally:
+        child.wait()
+
+
+def test_agent_pid_alive_is_true_for_pids_that_really_survive():
+    child = subprocess.Popen(SLEEPER)
+    try:
+        assert HubPlugin._agent_pid_alive(child.pid)  # our child, still running
+        assert HubPlugin._agent_pid_alive(os.getpid())  # not our child
+        assert not HubPlugin._agent_pid_alive(0)
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_stop_peer_reports_stopped_when_the_forked_daemon_exits_unreaped(monkeypatch):
+    """`/hub stop all` typed in the attached window: the daemon exits on the
+    shutdown request but stays a zombie of that window. That is a stop, not
+    "pid survived SIGKILL"."""
+
+    async def run_test():
+        child = subprocess.Popen(SLEEPER)
+        try:
+            plugin = HubPlugin()
+            plugin._presence = FakePresence()
+            agent = SimpleNamespace(
+                identity="koordinator",
+                pid=child.pid,
+                socket_path="/tmp/koordinator.sock",
+                agent_id="agent-koordinator",
+            )
+
+            async def signal_shutdown(socket_path, reason="", timeout=3.0):
+                os.kill(child.pid, signal.SIGKILL)  # the daemon dies, nobody reaps it
+                return True
+
+            monkeypatch.setattr(
+                "plugins.hub.plugin.AgentMessenger.signal_shutdown",
+                signal_shutdown,
+            )
+            monkeypatch.setattr("plugins.hub.plugin.STOP_GRACE_SECONDS", 0.3)
+            monkeypatch.setattr("plugins.hub.plugin.STOP_TERM_SECONDS", 0.2)
+            monkeypatch.setattr("plugins.hub.plugin.STOP_KILL_SECONDS", 0.3)
+
+            result = await plugin._stop_peer_agent(agent, reason="test")
+
+            assert result == "stopped"
+            assert plugin._presence.cleaned == ["koordinator"]
+        finally:
+            child.wait()
 
     asyncio.run(run_test())
 

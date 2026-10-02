@@ -142,6 +142,34 @@ class WidgetContext:
 # =============================================================================
 
 
+def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
+    """Render live microphone state from the event-bus voice service."""
+    try:
+        event_bus = getattr(ctx, "event_bus", None) if ctx else None
+        plugin = event_bus.get_service("voice_plugin") if event_bus else None
+        if plugin is None:
+            return _fg("mic off", T().text_dim)
+        state = plugin.status() or {}
+        voice_state = str(state.get("state") or "off").lower().replace("_", " ")
+        if voice_state not in {"off", "starting", "listening", "error"}:
+            voice_state = "error" if state.get("observer_error") else "off"
+        label = f"mic {voice_state}"
+        transcript = state.get("last_transcript") or {}
+        heard = str(transcript.get("text") or "").strip()
+        if heard and voice_state in {"listening", "error"} and width >= 16:
+            available = max(4, width - len(label) - 2)
+            label = f"{label}: {_middle_truncate(heard, available)}"
+        color = {
+            "listening": T().success[0],
+            "starting": T().warning[0],
+            "error": T().warning[0],
+        }.get(voice_state, T().text_dim)
+        return _fg(_middle_truncate(label, max(1, width)), color)
+    except Exception as e:
+        logger.debug("microphone widget unavailable: %s", e, exc_info=True)
+        return _fg("mic off", T().text_dim)
+
+
 def render_cwd(width: int, ctx: Optional[WidgetContext]) -> str:
     """Render current working directory widget.
 
@@ -1604,6 +1632,18 @@ def register_core_widgets(registry: StatusWidgetRegistry) -> None:
         registry: The StatusWidgetRegistry to register widgets with
     """
     logger.info("Registering core status widgets...")
+
+    # Microphone / voice status
+    registry.register(
+        id="microphone",
+        name="Microphone",
+        description="Live voice/microphone state and last heard transcript",
+        render_fn=render_microphone,
+        category=WidgetCategory.CORE,
+        default_width="auto",
+        min_width=7,
+    )
+
 
     # Current Working Directory
     registry.register(

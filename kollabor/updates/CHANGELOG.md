@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-01
+
+### Added
+- The status bar shows the microphone: `mic off`, `mic starting`, `mic listening` or `mic error`, and while it listens, the last thing it heard, cut to fit. New layouts have it on row 2 after the status; an existing layout gets it once, on row 2 or its first visible row, without moving anything else.
+
+### Fixed
+- A workspace that issued join codes before 0.11 can join a network again. Its private directory file was still pinned to its own key, so the join failed right after the other device accepted it: the form said only "the join request did not complete" and nothing was logged. Once the join may go ahead, the old file is set aside as `private-directory.<time>.replaced` (kept, not deleted) and a fresh one is pinned to the new network. A join that does fail now says why on the form and in one log line, never with the code or a key.
+- `/hub stop all` typed in the attached window no longer says "stop timed out (pid survived SIGKILL)" for an agent that did stop. The window is the daemon's parent and now reaps it before checking whether it is still alive.
+
 ## [0.11.0] - 2026-10-01
 
 ### Added
