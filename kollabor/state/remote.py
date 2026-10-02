@@ -781,7 +781,7 @@ class RemoteStateService(StateService):
             {"domain": domain, "code": code},
             timeout=max(self._timeout, 90.0),
         )
-        checked = enrollment_result(result)
+        checked = enrollment_result(result, allow_failed=True)
         if checked is None:
             raise ValueError("daemon connect enrollment failed")
         return checked

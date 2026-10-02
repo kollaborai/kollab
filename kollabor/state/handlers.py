@@ -466,7 +466,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             # Never let an exception containing the private code escape the
             # local RPC boundary or reach RpcServer's traceback response.
             return {"error": "connect request could not be submitted"}
-        return enrollment_result(result) or {
+        return enrollment_result(result, allow_failed=True) or {
             "error": "connect request could not be submitted"
         }
 

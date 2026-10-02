@@ -32,7 +32,11 @@ from plugins.altview.connect_altview import (
 )
 from plugins.hub import connect_guide
 from plugins.hub import plugin as plugin_module
-from plugins.hub.connect_guide import post_join_line
+from plugins.hub.connect_guide import (
+    JOIN_FAILURE_REASONS,
+    join_failure_reason,
+    post_join_line,
+)
 from plugins.hub.device_names import key_label
 from plugins.hub.plugin import CONNECT_OWNED_ELSEWHERE, HubPlugin
 from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow
@@ -595,6 +599,9 @@ async def test_attached_join_failure_after_submit_is_not_called_a_send_failure(
 
     assert "did not complete" in renderer.text()
     assert "could not submit" not in renderer.text()
+    # Why, from the daemon, on the form; and never the code.
+    assert join_failure_reason("unavailable") in renderer.text()
+    assert _SYNTHETIC_CODE not in renderer.text()
     await view.on_complete()
 
 
@@ -893,22 +900,35 @@ async def test_start_returns_the_final_result_when_it_fails_before_any_submit():
     plugin = _daemon(enroll)
 
     assert await plugin._run_connect_enrollment("kollabor.ai", _SYNTHETIC_CODE) == {
-        "error": "connect request could not be submitted"
+        "status": "failed",
+        "reason": join_failure_reason("unavailable"),
     }
     assert not plugin.__dict__["_connect_joins"]
 
 
 @pytest.mark.asyncio
-async def test_start_swallows_code_bearing_exceptions():
+async def test_start_swallows_code_bearing_exceptions(caplog):
     async def enroll(domain, code, on_submitted=None):
         raise RuntimeError(f"relay refused {code}")
 
     plugin = _daemon(enroll)
 
-    result = await plugin._run_connect_enrollment("kollabor.ai", _SYNTHETIC_CODE)
+    with caplog.at_level("WARNING"):
+        result = await plugin._run_connect_enrollment("kollabor.ai", _SYNTHETIC_CODE)
 
-    assert result == {"error": "connect request could not be submitted"}
+    assert result == {"status": "failed", "reason": join_failure_reason("internal")}
     assert _SYNTHETIC_CODE not in repr(result)
+    # The one log line names the exception type, never its message.
+    assert "RuntimeError" in caplog.text
+    assert _SYNTHETIC_CODE not in caplog.text
+
+
+def test_no_failure_reason_can_carry_a_code_a_key_or_an_id():
+    for reason in [*JOIN_FAILURE_REASONS.values(), join_failure_reason("anything")]:
+        assert reason.isprintable() and len(reason) <= 200
+        assert not re.search(r"[0-9a-f]{32}", reason)
+        assert not re.search(r"\b[A-Z0-9]{4}-[A-Z0-9]{4}\b", reason)
+    assert join_failure_reason(None) == join_failure_reason("not-a-code")
 
 
 @pytest.mark.asyncio
@@ -926,7 +946,8 @@ async def test_a_failed_join_reads_back_as_failed_and_an_unknown_receipt_raises(
     await _settle()
 
     assert await plugin._connect_enrollment_status(started["receipt_id"]) == {
-        "status": "failed"
+        "status": "failed",
+        "reason": join_failure_reason("unavailable"),
     }
     with pytest.raises(ValueError):
         await plugin._connect_enrollment_status("0000000000000000")

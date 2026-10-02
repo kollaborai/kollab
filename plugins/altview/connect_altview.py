@@ -140,7 +140,8 @@ class ConnectOutcome:
     # One line of non-secret text shown in place of the generic one, e.g.
     # `joined marco-home as home-server. trust: open`.
     detail: str = ""
-    # A second line for an approved join: what happens to settings and logins.
+    # A second line: for an approved join what happens to settings and logins,
+    # for a failed one why.
     note: str = ""
 
     def __post_init__(self) -> None:
@@ -161,7 +162,7 @@ class ConnectOutcome:
         ):
             raise ValueError("outcome detail must be one short printable line")
         if self.note and (
-            self.status is not ConnectStatus.APPROVED
+            self.status not in (ConnectStatus.APPROVED, ConnectStatus.ERROR)
             or not isinstance(self.note, str)
             or len(self.note) > 200
             or ConnectAltView._filter_text(self.note, 200) != self.note
@@ -185,8 +186,8 @@ class ConnectOutcome:
         return cls(ConnectStatus.REJECTED)
 
     @classmethod
-    def error(cls) -> ConnectOutcome:
-        return cls(ConnectStatus.ERROR)
+    def error(cls, note: str = "") -> ConnectOutcome:
+        return cls(ConnectStatus.ERROR, note=note)
 
 
 ConnectSubmitCallback = Callable[

@@ -9603,7 +9603,10 @@ class HubPlugin(BasePlugin):
                         return ConnectOutcome.approved()
                 if status == "rejected":
                     return ConnectOutcome.rejected()
-                return ConnectOutcome.error()
+                try:
+                    return ConnectOutcome.error(result.get("reason") or "")
+                except (TypeError, ValueError):
+                    return ConnectOutcome.error()
 
             async def submit(submission):
                 try:
@@ -9687,11 +9690,19 @@ class HubPlugin(BasePlugin):
             return failed
         submitted = asyncio.Event()
 
+        def why(code_: object) -> dict[str, str]:
+            """A failed join and its reason: from a fixed code, never from text."""
+            from .connect_guide import join_failure_reason
+
+            return {"status": "failed", "reason": join_failure_reason(code_)}
+
         async def run() -> dict[str, str]:
             try:
                 result = await enroll(domain, code, on_submitted=submitted.set)
-            except Exception:
-                return failed
+            except Exception as exc:
+                # The message can carry the code; the type alone is safe to log.
+                logger.warning("connect enrollment raised %s", type(exc).__name__)
+                return why("internal")
             status = result.get("status") if isinstance(result, dict) else None
             if status == "approved":
                 try:
@@ -9706,7 +9717,9 @@ class HubPlugin(BasePlugin):
                     }
                 except Exception:
                     return {"status": "approved"}
-            return {"status": "rejected"} if status == "rejected" else failed
+            if status == "rejected":
+                return {"status": "rejected"}
+            return why(result.get("error") if isinstance(result, dict) else None)
 
         joins = self.__dict__.setdefault("_connect_joins", {})
         receipt = secrets.token_hex(8)
