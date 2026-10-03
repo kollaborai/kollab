@@ -1341,6 +1341,16 @@ class QueueProcessor:
             )
             if suppress_display:
                 logger.info("Hub consumed response, display suppressed")
+            elif (
+                getattr(self, "active_voice", None)
+                and clean_response.strip() == "."
+                and not tool_execution_pending
+            ):
+                # Voice instructions: "return exactly one period (.) ... A lone
+                # period is silent." It was silent for speech but still drew a
+                # bare "." on screen for every ignored utterance.
+                suppress_display = True
+                logger.info("Voice ignore reply, display suppressed")
             if intermediate_pipe_response:
                 logger.debug(
                     "Pipe mode suppressed intermediate response before tool continuation"
@@ -1833,6 +1843,12 @@ class QueueProcessor:
                 - call_tokens
                 - 512
             )
+            # non_tool_tokens counts the whole stored history. When it alone
+            # fills the budget (compaction hasn't caught up yet), still give the
+            # current batch a quarter of it: without the reserve every result
+            # became a spill pointer, so the model never saw its tool output and
+            # re-ran the same reads forever.
+            remaining_tokens = max(remaining_tokens, effective_budget // 4)
             derived = max(0, remaining_tokens * 3)
 
         if explicit > 0:
