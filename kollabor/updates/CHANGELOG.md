@@ -7,14 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-10-03
+
 ### Added
 - The web UI has a Settings dialog with six tabs: Session, Configuration, Loadouts, Model, Setup and Network. They cover what the terminal's `/config`, `/llm`, `/model`, `/setup` and `/connect` screens do, and typing one of those commands in the web chat opens its tab. Secret values are not sent back to the browser, and join codes are redacted from logs and saved conversations. See `docs/features/web-settings-panels.md`.
+- The model registry adds GPT-6, Claude 5.5/Fable 5.1, Gemini 3.7/3.8 Flash, and Grok 4.6/4.7 entries with context, capability, and pricing metadata.
+- Context compaction can ask the model what to preserve before summarizing; `/compact now`, `/compact status`, and `/compact preview` provide manual controls. Automatic compaction thresholds are capped at 272K tokens.
+
 - A model with no entry in the model registry logs one warning naming the default context window it falls back to.
 
 ### Changed
 - Requests are no longer trimmed to fit the context window. A pre-send guard silently dropped the oldest messages from every request without telling the model, so agents could lose their place mid-task. Large tool output is already capped where it is produced, compaction shrinks the history, and a real overflow now shows a visible error instead.
 - The `kollabor.llm.max_history` setting is gone. Every request sends the whole conversation instead of the last N messages, and compaction is what keeps it inside the model's window. The Max History slider is removed from `/config`.
-- The question gate is removed. A `<question>` tag no longer pauses a reply's tool calls until you answer, and agents are no longer told to use it. Tools in a reply always run.
+- The question gate is removed. A `<question>` tag no longer pauses a reply's tool calls until you answer, and agents are no longer told to use it. Tools in a reply are no longer paused by the gate, though normal permission checks still apply.
 - `kollabor.llm.context_overhead_tokens` defaults to 48,000 instead of 60,000. Measured on 169 real first turns, the system prompt and tool schemas take 34K tokens at the median and 45K at most, so the old guess took room from tool output.
 
 ### Fixed
@@ -31,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tool-call stops are reported as `tool_calls` on Anthropic and Responses streams, including the ChatGPT/Codex backend, which sends its calls only as stream items, so the inconsistent-stop warning can fire. Codex calls made through the non-streaming path keep their tool calls.
 - OpenAI chat and OpenRouter streams keep each tool call's real id and read every call in a chunk; tool calls with no arguments are no longer dropped; Gemini and Responses requests keep every system message.
 - A reply that is still cut off after auto-continue, or whose continuation comes back empty, now says so instead of ending mid-word.
+- A direct hub message addressed to an agent is no longer dropped while the user is typing or the ESC cooldown is active; it waits and wakes the agent once it can run.
+- Starting an agent with a launch task no longer broadcasts that private prompt to every peer as a user message.
+- Hub tool results retain a token budget even when stored conversation history fills the budget, so agents receive results instead of repeatedly rereading spill pointers.
+- In voice mode, a response consisting only of `.` stays silent in the conversation display, matching the voice instruction.
+
 - The raw request log rotates to a new file at `raw_log_max_file_mb` instead of dropping interactions.
 - A plugin that initializes twice (startups with a plugin CLI argument such as `kollab --hub status`) no longer logs "Command name conflict" for its own commands.
 - The API-format error points at the profile's real `provider` and `base_url` settings and `/setup` instead of a `tool_format` setting that doesn't exist.
