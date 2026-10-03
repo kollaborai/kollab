@@ -60,7 +60,6 @@ class StreamingHandler:
     async def call_llm(
         self,
         conversation_history,
-        max_history: int,
         native_tools: Optional[List[dict]],
         mcp_discovery_complete: asyncio.Event,
         is_cancelled_fn: Callable[[], bool],
@@ -73,7 +72,6 @@ class StreamingHandler:
 
         Args:
             conversation_history: Current conversation history
-            max_history: Maximum history messages to send
             native_tools: Native tool definitions for function calling (or None)
             mcp_discovery_complete: Event signaling MCP discovery is done
             is_cancelled_fn: Callable that returns True if request is cancelled
@@ -123,7 +121,6 @@ class StreamingHandler:
         try:
             return await self.api_service.call_llm(  # type: ignore[no-any-return]
                 conversation_history=conversation_history,
-                max_history=max_history,
                 streaming_callback=self.handle_chunk,
                 tools=native_tools,
                 on_rate_limit=self._on_rate_limit,

@@ -1194,19 +1194,6 @@ these run shell commands in managed terminal sessions.
 
 ### control flow
 
-#### <question> - ask user for input
-
-  syntax:
-    <question>what should I do about X?</question>
-
-  how it works:
-    - suspends all pending tool execution
-    - displays the question to the user
-    - waits for user response
-    - resumes tool execution with user's answer
-    - prevents runaway agent loops by forcing a human checkpoint
-    - configured via: kollabor.llm.question_gate_enabled (default true)
-
 #### <think> - internal reasoning (hidden)
 
   syntax:

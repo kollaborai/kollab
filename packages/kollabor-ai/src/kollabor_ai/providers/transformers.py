@@ -708,6 +708,10 @@ class AnthropicResponseTransformer:
             cache_creation = usage.get("cache_creation_input_tokens", 0)
             cache_read = usage.get("cache_read_input_tokens", 0)
             stop_reason = chunk.get("delta", {}).get("stop_reason")
+            # The non-stream path maps max_tokens to "length"; the stream must
+            # too, or auto-continue (last_stop_reason == "length") never fires.
+            if stop_reason == "max_tokens":
+                stop_reason = "length"
             if output_tokens or input_tokens or cache_creation or cache_read:
                 total_input = input_tokens + cache_creation + cache_read
                 usage_info = UsageInfo(

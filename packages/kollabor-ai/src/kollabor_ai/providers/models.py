@@ -55,9 +55,9 @@ class ProviderConfig(BaseModel):
     # provider window and the call came back empty. Interactive/agent responses
     # fit comfortably in 16k; override per-profile for big-generation tasks.
     max_tokens: int = Field(default=16384, ge=1)
-    # Total context window (input + output) the model accepts. The budget guard
-    # trims history against this before sending so a request can't exceed the
-    # window. Normally set from the model registry at config-creation time; this
+    # Total context window (input + output) the model accepts. Compaction and
+    # the tool-output budget size themselves against it; requests are never
+    # trimmed to fit. Normally set from the model registry at config-creation time; this
     # default is only the fallback for an unknown model — kept conservative
     # (200k, the common floor) so an unknown model can't silently over-send.
     context_window: int = Field(default=200000, ge=1)

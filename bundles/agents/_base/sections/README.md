@@ -19,7 +19,6 @@ sections/
 ├── protocols/                      # Behavioral protocols
 │   ├── tool-workflow.md            # Tool-first methodology
 │   ├── response-patterns.md        # Response type classification
-│   ├── question-gate.md            # Question gate protocol
 │   ├── investigation-examples.md   # Example investigations
 │   ├── task-planning.md            # Todo list system
 │   ├── tool-execution.md           # Tool execution protocol

@@ -325,12 +325,8 @@ class GoalTurnDriver:
         if qp is None:
             return BoundaryContext(queue_empty=False, pending_work=True)
         queue_empty = qp.processing_queue.empty()
-        pending_work = bool(getattr(qp, "pending_tools", None)) or bool(
-            getattr(self.coord, "pending_tools", None)
-        )
         return BoundaryContext(
             queue_empty=queue_empty,
-            pending_work=pending_work,
             invalidated=bool(qp.cancel_processing),
         )
 

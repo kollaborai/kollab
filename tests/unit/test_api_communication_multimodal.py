@@ -67,17 +67,6 @@ async def test_image_request_is_rejected_before_provider_io(tmp_path: Path):
     provider.call.assert_not_awaited()
 
 
-def test_token_estimate_keeps_tool_call_payloads_visible():
-    tool_calls = [
-        {
-            "id": "call-1",
-            "function": {"name": "read", "arguments": '{"path":"/tmp/a"}'},
-        }
-    ]
-
-    assert APICommunicationService._estimate_tokens(tool_calls) > 1
-
-
 def test_image_capability_resolves_before_provider_initialization(tmp_path: Path):
     config = MagicMock()
     config.get = lambda key, default=None: {

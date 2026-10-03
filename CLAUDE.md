@@ -34,7 +34,7 @@ Monorepo with extracted packages:
 - `pricing_registry.py` - Cost rates. Seeded from `models.json` (authoritative) on top of `default_pricing.json`, then `~/.kollab/pricing.json`. Falls back across providers for the same model id, since rates belong to the model not the transport.
 - `profile_manager.py` - LLM profile management (`EFFORT_LEVELS`, per-field env resolution)
 - `response_processor.py` - Response processing
-- `response_parser.py` - Response parsing (includes Question Gate detection)
+- `response_parser.py` - Response parsing
 - `prompt_renderer.py` - Dynamic system prompt rendering
 - `providers/` - Provider implementations (OpenAI, Anthropic, etc.)
 - `oauth/` - OAuth token management
@@ -569,7 +569,7 @@ Both initialize `TerminalLLMChat` in `kollabor/application.py`.
 
 ## Configuration System
 
-**Dot notation:** `config.get("kollabor.llm.max_history", 90)`
+**Dot notation:** `config.get("kollabor.llm.enable_streaming", False)`
 
 **Global directory (`~/.kollab/`):**
 - `config.json` - User configuration
@@ -660,22 +660,6 @@ Event bus (`kollabor_events.bus`) coordinates:
 - **StreamingHandler** (`kollabor/llm/`) - Stream processing
 - **MessageHandler** (`kollabor/llm/`) - Message flow
 - **LLMHookSystem** (`kollabor/llm/`) - Request/response interception
-
-### Question Gate Protocol
-
-Suspends tool execution when agent asks clarifying questions using `<question>` tags (prevents runaway loops):
-
-1. Agent includes `<question>...</question>` tag
-2. System detects tag, suspends pending tools (stored in `pending_tools`)
-3. User responds
-4. Suspended tools execute, results injected
-5. Agent continues
-
-**Configuration:** `kollabor.llm.question_gate_enabled` (default: `true`)
-
-**Key files:** `kollabor_ai.response_parser` (detection), `kollabor/llm/llm_coordinator.py` (queue management)
-
-See `docs/features/question-gate-protocol.md`.
 
 ### Plugin System Details
 **Discovery locations (in order):**

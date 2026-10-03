@@ -77,7 +77,7 @@ SYNCED = {
     "kollabor": {
         "llm": {
             "active_profile": "anthropic",
-            "max_history": 50,
+            "terminal_timeout": 50,
             "profiles": {
                 "anthropic": {"model": "claude-opus-5-5", "api_key": FAKE_KEY}
             },
@@ -87,11 +87,11 @@ SYNCED = {
 }
 SYNCED_KEYS = [
     "kollabor.llm.active_profile",
-    "kollabor.llm.max_history",
+    "kollabor.llm.terminal_timeout",
     "kollabor.llm.profiles.anthropic.model",
     "kollabor.llm.profiles.anthropic.api_key",
 ]
-STALE = {"kollabor": {"llm": {"active_profile": "old-loadout", "max_history": 999}}}
+STALE = {"kollabor": {"llm": {"active_profile": "old-loadout", "terminal_timeout": 120}}}
 
 
 def test_a_synced_loadout_shows_managed_by_the_primary_with_the_value_from_disk(
@@ -121,9 +121,9 @@ def test_other_synced_settings_become_read_only_labels_and_the_rest_still_edit(
 
     view = opened(STALE)
 
-    (history,) = find(view, "kollabor.llm.max_history")
-    assert isinstance(history, LabelWidget)
-    assert "50" in text_of(history) and "managed by laptop-kollab" in text_of(history)
+    (timeout,) = find(view, "kollabor.llm.terminal_timeout")
+    assert isinstance(timeout, LabelWidget)
+    assert "50" in text_of(timeout) and "managed by laptop-kollab" in text_of(timeout)
     (streaming,) = find(view, "kollabor.llm.enable_streaming")  # not synced
     assert not isinstance(streaming, LabelWidget)
     assert "managed by" not in text_of(streaming)
@@ -132,10 +132,10 @@ def test_other_synced_settings_become_read_only_labels_and_the_rest_still_edit(
 def test_a_synced_row_cannot_be_edited_or_saved(tmp_path, monkeypatch):
     sync_to(tmp_path, monkeypatch, SYNCED, SYNCED_KEYS)
     view = opened(STALE)
-    (history,) = find(view, "kollabor.llm.max_history")
+    (timeout,) = find(view, "kollabor.llm.terminal_timeout")
 
     consumed = [
-        history.handle_input(KeyPress(name=name, code=char or name, char=char or None))
+        timeout.handle_input(KeyPress(name=name, code=char or name, char=char or None))
         for name, char in (
             ("Enter", "\r"),
             ("Space", " "),
@@ -145,7 +145,7 @@ def test_a_synced_row_cannot_be_edited_or_saved(tmp_path, monkeypatch):
     ]
 
     assert consumed == [False] * 4
-    assert not history.has_pending_changes()
+    assert not timeout.has_pending_changes()
     view._do_save("global")
     assert view.config_service.saved == []  # nothing was written anywhere
 
@@ -192,8 +192,8 @@ def test_a_device_nobody_manages_shows_the_loadout_without_a_label(
     (model,) = find(view, "kollabor.llm.profiles.mine.model")
     assert "mine" in text_of(loadout) and "gpt-5.5" in text_of(model)
     assert "managed by" not in text_of(loadout) + text_of(model)
-    (history,) = find(view, "kollabor.llm.max_history")
-    assert not isinstance(history, LabelWidget)
+    (timeout,) = find(view, "kollabor.llm.terminal_timeout")
+    assert not isinstance(timeout, LabelWidget)
 
 
 def test_the_loadout_rows_lead_the_llm_settings_section(tmp_path, monkeypatch):
@@ -204,7 +204,7 @@ def test_the_loadout_rows_lead_the_llm_settings_section(tmp_path, monkeypatch):
 
     assert [w.get_label() for w in view._section_widgets[index][:2]] == [
         "Loadout",
-        "Max History",
+        "Enable Streaming",
     ]
 
 
@@ -227,5 +227,5 @@ def test_a_damaged_record_leaves_config_fully_editable(
 
     view = opened(STALE)
 
-    (history,) = find(view, "kollabor.llm.max_history")
-    assert not isinstance(history, LabelWidget)
+    (timeout,) = find(view, "kollabor.llm.terminal_timeout")
+    assert not isinstance(timeout, LabelWidget)

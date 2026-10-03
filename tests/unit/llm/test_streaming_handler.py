@@ -79,7 +79,6 @@ class TestStreamingHandler(unittest.TestCase):
         result = self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=conversation_history,
-                max_history=90,
                 native_tools=native_tools,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=is_cancelled_fn,
@@ -102,7 +101,6 @@ class TestStreamingHandler(unittest.TestCase):
         self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=[],
-                max_history=90,
                 native_tools=None,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=lambda: False,
@@ -124,7 +122,6 @@ class TestStreamingHandler(unittest.TestCase):
         self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=[],
-                max_history=90,
                 native_tools=None,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=lambda: False,
@@ -151,7 +148,6 @@ class TestStreamingHandler(unittest.TestCase):
             self.loop.run_until_complete(
                 self.handler.call_llm(
                     conversation_history=conversation_history,
-                    max_history=90,
                     native_tools=native_tools,
                     mcp_discovery_complete=mcp_complete,
                     is_cancelled_fn=is_cancelled_fn,
@@ -178,7 +174,6 @@ class TestStreamingHandler(unittest.TestCase):
         result = self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=conversation_history,
-                max_history=90,
                 native_tools=native_tools,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=is_cancelled_fn,

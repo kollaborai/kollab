@@ -62,7 +62,7 @@ The daemon publishes structured events alongside its ANSI output. Event types yo
 receive, defined in `sse.py`:
 
 `token`, `thinking`, `tool_start`, `tool_result`, `permission_request`,
-`permission_granted`, `permission_denied`, `turn_complete`, `error`, `question_gate`
+`permission_granted`, `permission_denied`, `turn_complete`, `error`
 
 ## The mapping
 

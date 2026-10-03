@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Requests are no longer trimmed to fit the context window. A pre-send guard silently dropped the oldest messages from every request without telling the model, so agents could lose their place mid-task. Large tool output is already capped where it is produced, compaction shrinks the history, and a real overflow now shows a visible error instead.
+- The `kollabor.llm.max_history` setting is gone. Every request sends the whole conversation instead of the last N messages, and compaction is what keeps it inside the model's window. The Max History slider is removed from `/config`.
+- The question gate is removed. A `<question>` tag no longer pauses a reply's tool calls until you answer, and agents are no longer told to use it. Tools in a reply always run.
+
+### Fixed
+- Context compaction no longer re-fires every turn. The trigger compared a rough character estimate (about 2.3x too high, and counting text compaction can't remove) instead of the prompt size the API reported, so one compaction never got under the threshold and every turn summarized the summary again. It now uses the reported count, and the estimate only when no usage was reported.
+- Truncated replies now auto-continue on Anthropic, Gemini, ChatGPT/Codex (OpenAI Responses) and custom-provider streams: each reports a max-output-tokens stop as `length`. Responses streams no longer drop `response.incomplete` (it carried the final usage), and custom streams keep `finish_reason` past a trailing usage-only chunk or a server that omits usage.
+
 ## [0.11.1] - 2026-10-01
 
 ### Added

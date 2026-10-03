@@ -56,7 +56,6 @@ class ConversationManager:
         self.context_window: List[Dict[str, Any]] = []
 
         # Configuration
-        self.max_history = config.get("kollabor.llm.max_history", 999)
         self.max_context_tokens = config.get("kollabor.llm.max_context_tokens", 4000)
         self.save_conversations = config.get("kollabor.llm.save_conversations", True)
 
@@ -206,16 +205,11 @@ class ConversationManager:
         return self.context_window
 
     def _update_context_window(self):
-        """Update the context window with recent messages."""
-        # Simple sliding window for now
-        # TODO: Implement token counting for precise context management
-        self.context_window = self.messages[-self.max_history :]
+        """Update the context window: the whole conversation, never trimmed.
 
-        # Ensure we have system message if it exists
-        system_messages = [m for m in self.messages if m["role"] == "system"]
-        if system_messages and system_messages[0] not in self.context_window:
-            # Prepend system message
-            self.context_window = [system_messages[0]] + self.context_window
+        Compaction is what shrinks a conversation, not a message-count cap.
+        """
+        self.context_window = list(self.messages)
 
     def _get_last_message_uuid(self) -> Optional[str]:
         """Get UUID of the last message."""
@@ -332,7 +326,7 @@ class ConversationManager:
             "duration": self._calculate_duration(),
             "topics": topics,
             "average_message_length": self._calculate_avg_message_length(),
-            "context_usage": f"{len(self.context_window)}/{self.max_history}",
+            "context_usage": f"{len(self.context_window)}",
         }
 
         return summary
@@ -914,7 +908,7 @@ class ConversationManager:
                 "messages": messages,
                 "metadata": metadata,
                 "message_index": {m["uuid"]: m for m in messages},
-                "context_window": messages[-self.max_history :],
+                "context_window": messages,
                 "current_parent_uuid": None,
             }
         except Exception as e:
@@ -1155,8 +1149,6 @@ class ConversationManager:
             },
             "context": {
                 "window_size": len(self.context_window),
-                "max_size": self.max_history,
-                "utilization": f"{(len(self.context_window) / self.max_history * 100):.1f}%",
             },
             "threading": {
                 "unique_threads": len(set(m.get("parent_uuid") for m in self.messages)),

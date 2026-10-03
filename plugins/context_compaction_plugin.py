@@ -623,14 +623,12 @@ class ContextCompactionPlugin(BasePlugin):
     def _estimate_history_tokens(
         self, history: List[ConversationMessage]
     ) -> int:
-        """Estimate tokens for the conversation about to be sent.
+        """Estimate tokens from message text (~3 chars/token) when no usage was reported.
 
-        The API-reported count lags by one request and reads 0 after a
-        context-window overflow, so on its own it lets an over-budget
-        conversation slip through without ever triggering compaction.
-        Estimating from current message content (~3 chars/token, deliberately
-        conservative) lets compaction react to a single turn that just added a
-        large payload, before that oversized request goes out.
+        Fallback only. It counts content chars (not tool schemas or tool-call
+        args) and overshot the real count 2.3x on 2026-09-30 (101K estimated vs
+        44K reported), so never compare it to the threshold when an
+        API-reported count exists.
         """
         total_chars = 0
         for msg in history:
@@ -734,14 +732,17 @@ class ContextCompactionPlugin(BasePlugin):
         a 2-message conversation with a huge system prompt, and also
         prevents token-blind compaction from agent chatter.
         """
-        # Gate 1: token count. Use the larger of the API-reported count
-        # (accurate, but from the PREVIOUS request and 0 after an overflow) and
-        # a fresh estimate of the history about to be sent. The estimate is what
-        # lets compaction react to a turn that just added a large payload,
-        # before that oversized request goes out.
-        prompt_tokens = max(
-            self._get_prompt_tokens(), self._estimate_history_tokens(history)
-        )
+        # Gate 1: token count. Runs at LLM_REQUEST_POST, so the API-reported
+        # count is for the history that was just sent: exact, and the only
+        # number compaction can move. The chars//3 estimate is the fallback for
+        # a request that reported no usage. Never max() them: the estimate runs
+        # ~2.3x high and counts the system prompt and the verbatim-preserved
+        # tasks/HUD that compaction cannot remove, so it stayed above the
+        # threshold after every compaction and re-fired it every turn.
+        prompt_tokens = self._get_prompt_tokens()
+        estimated = prompt_tokens <= 0
+        if estimated:
+            prompt_tokens = self._estimate_history_tokens(history)
         token_threshold = self._get_token_threshold()
         if prompt_tokens < token_threshold:
             return False
@@ -770,7 +771,8 @@ class ContextCompactionPlugin(BasePlugin):
             source = "fallback"
 
         logger.info(
-            f"Compaction triggered: {prompt_tokens} tokens >= {token_threshold} "
+            f"Compaction triggered: {prompt_tokens} tokens"
+            f"{' (estimated)' if estimated else ''} >= {token_threshold} "
             f"[{source}] ({human_turns} human turns, min {min_turns}) "
             f"(round {self._compaction_round})"
         )
@@ -876,17 +878,18 @@ class ContextCompactionPlugin(BasePlugin):
         if not history:
             return data
 
-        if self._should_compact(history) and not self._coordination_pending():
-            self._compaction_in_progress = True
-            task = asyncio.create_task(self._run_compaction())
-            self._compaction_task = task
-            self._compaction_tasks.add(task)
-            task.add_done_callback(self._compaction_task_done)
-        elif self._should_compact(history) and self._coordination_pending():
-            logger.info(
-                "Compaction deferred: coordination in flight "
-                "(queued HUD hub messages or pending hub replies)"
-            )
+        if self._should_compact(history):
+            if self._coordination_pending():
+                logger.info(
+                    "Compaction deferred: coordination in flight "
+                    "(queued HUD hub messages or pending hub replies)"
+                )
+            else:
+                self._compaction_in_progress = True
+                task = asyncio.create_task(self._run_compaction())
+                self._compaction_task = task
+                self._compaction_tasks.add(task)
+                task.add_done_callback(self._compaction_task_done)
 
         self._maybe_emit_budget_hud(history)
 

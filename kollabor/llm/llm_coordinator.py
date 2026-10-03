@@ -374,9 +374,6 @@ class LLMService:
         self.default_timeout = default_timeout
         self.enable_metrics = enable_metrics
 
-        # Load LLM configuration from kollabor.llm section (API details handled by API service)
-        self.max_history = config.get("kollabor.llm.max_history", 999)
-
         # Load task management configuration using structured dataclass
         task_config_dict = config.get("kollabor.llm.task_management", {})
         self.task_config = LLMTaskConfig.from_dict(task_config_dict)
@@ -782,14 +779,6 @@ class LLMService:
             mcp_integration=self.mcp_integration,
         )
 
-        # Question gate: pending tools queue
-        # When agent uses <question> tag, tool calls are suspended here
-        # and injected when user responds
-        self.pending_tools: List[Dict[str, Any]] = []
-        self.question_gate_active = False
-        self.question_gate_enabled = config.get(
-            "kollabor.llm.question_gate_enabled", True
-        )
         # Provider system integration (wrapper pattern - LEGACY mode for backward compatibility)
         self._provider_registry = ProviderRegistry
         self._tool_accumulator = ToolCallAccumulator(legacy_mode=True)
@@ -836,7 +825,6 @@ class LLMService:
             conversation_history=self.conversation_history,
             session_stats=self.session_stats,
             stats=self.stats,
-            pending_tools=self.pending_tools,
             queue_metrics=self._queue_metrics,
             task_config=self.task_config,
             api_service=self.api_service,
@@ -850,8 +838,6 @@ class LLMService:
             streaming_handler=self._streaming,
             native_tools_handler=self._native_tools,
             add_message_fn=self._add_conversation_message,
-            max_history=self.max_history,
-            question_gate_enabled=self.question_gate_enabled,
             max_queue_size=self.task_config.queue.max_size,
         )
 
@@ -1033,16 +1019,6 @@ class LLMService:
     def processing_start_time(self, value):
         if hasattr(self, "_queue_processor"):
             self._queue_processor.processing_start_time = value
-
-    @property
-    def question_gate_active(self) -> bool:
-        return cast(bool, self._queue_processor.question_gate_active)
-
-    @question_gate_active.setter
-    def question_gate_active(self, value: bool):
-        if hasattr(self, "_queue_processor"):
-            self._queue_processor.question_gate_active = value
-        # During init, no-op (will be set in QueueProcessor.__init__)
 
     async def initialize(self) -> bool:
         """Initialize the LLM service components."""
@@ -1715,81 +1691,6 @@ class LLMService:
         if prompt_builder and prompt_builder.ensure_shell_aliases_loaded():
             self.rebuild_system_prompt()
 
-        # Question gate: if enabled and there are pending tools, execute them now
-        # and inject results into conversation before processing user message
-        tool_injection_results = None
-        if (
-            self.question_gate_enabled
-            and self.question_gate_active
-            and self.pending_tools
-        ):
-            # Snapshot before any await — another coroutine could mutate
-            # pending_tools while we're suspended inside execute_all_tools.
-            pending_snapshot = list(self.pending_tools)
-            self.pending_tools.clear()
-            self.question_gate_active = False
-
-            logger.info(
-                f"Question gate: executing {len(pending_snapshot)} suspended tool(s)"
-            )
-
-            # Show tool execution indicator (prevents UI freeze appearance)
-            tool_count = len(pending_snapshot)
-            tool_desc = (
-                pending_snapshot[0].get("type", "tool")
-                if tool_count == 1
-                else f"{tool_count} tools"
-            )
-            self.renderer.update_thinking(True, f"Executing {tool_desc}...")
-
-            tool_injection_results = await self.tool_executor.execute_all_tools(
-                pending_snapshot
-            )
-
-            # Stop tool execution indicator
-            self.renderer.update_thinking(False)
-
-            # Display and log tool results
-            if tool_injection_results:
-                self.message_display_service.display_complete_response(
-                    thinking_duration=0,
-                    response="",
-                    tool_results=tool_injection_results,
-                    original_tools=pending_snapshot,
-                )
-
-                # Add tool results to conversation history
-                batched_tool_results = []
-                for result in tool_injection_results:
-                    await self.conversation_logger.log_system_message(
-                        (
-                            f"Executed {result.tool_type} ({result.tool_id}): "
-                            f"{result.output if result.success else result.error}"
-                        ),
-                        parent_uuid=self.current_parent_uuid,
-                        subtype="tool_result",
-                        tool_use_id=result.tool_id,
-                    )
-
-                    # Collect tool results for batching
-                    tool_context = self.tool_executor.format_result_for_conversation(
-                        result
-                    )
-                    batched_tool_results.append(f"Tool result: {tool_context}")
-
-                # Add all tool results as single conversation message
-                if batched_tool_results:
-                    self._add_conversation_message(
-                        ConversationMessage(
-                            role="user", content="\n".join(batched_tool_results)
-                        )
-                    )
-
-            # Clear question gate state
-            self.pending_tools.clear()
-            self.question_gate_active = False
-            logger.info("Question gate: cleared after tool execution")
-
         # Reset turn_completed flag
         self.turn_completed = False
         self.cancel_processing = False
@@ -1811,12 +1712,7 @@ class LLMService:
                 lambda: self._process_queue(), name="process_queue"
             )
 
-        return {
-            "status": "queued",
-            "tools_injected": (
-                len(tool_injection_results) if tool_injection_results else 0
-            ),
-        }
+        return {"status": "queued"}
 
     async def submit_human_input(
         self,
@@ -2117,7 +2013,6 @@ class LLMService:
             str,
             await self._streaming.call_llm(
                 conversation_history=self.conversation_history,
-                max_history=self.max_history,
                 native_tools=self.native_tools,
                 mcp_discovery_complete=self.mcp_discovery_complete,
                 is_cancelled_fn=lambda: self.cancel_processing,
@@ -2141,9 +2036,6 @@ class LLMService:
         """
         logger.info("Hot reloading LLM configuration...")
 
-        # Reload LLM settings
-        self.max_history = self.config.get("kollabor.llm.max_history", 999)
-
         # Reload tool executor timeouts
         self.tool_executor.terminal_timeout = self.config.get(
             "kollabor.llm.terminal_timeout", 120
@@ -2157,23 +2049,12 @@ class LLMService:
             "kollabor.llm.enable_streaming", False
         )
 
-        # Question gate: cached at init; file save + in-memory config update
-        # this key, but QueueProcessor uses cached copies until reload_config
-        # runs (triggered by ConfigAltView after Ctrl+S save).
-        self.question_gate_enabled = self.config.get(
-            "kollabor.llm.question_gate_enabled", True
-        )
-        if getattr(self, "_queue_processor", None) is not None:
-            self._queue_processor.question_gate_enabled = self.question_gate_enabled
-
         # Note: processing_delay and thinking_delay are already read dynamically each call
 
         logger.info(
-            f"Config reloaded: max_history={self.max_history}, "
-            f"terminal_timeout={self.tool_executor.terminal_timeout}, "
+            f"Config reloaded: terminal_timeout={self.tool_executor.terminal_timeout}, "
             f"mcp_timeout={self.tool_executor.mcp_timeout}, "
-            f"streaming={self.api_service.enable_streaming}, "
-            f"question_gate={self.question_gate_enabled}"
+            f"streaming={self.api_service.enable_streaming}"
         )
 
     # --- StatusService delegation methods ---

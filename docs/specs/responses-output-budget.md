@@ -29,8 +29,11 @@ the backend default. Reasoning effort remains supported on both paths.
   an explicit output budget. The model registry's
   128,000 value remains the known model ceiling, not the default reserve for
   every interactive turn.
-- Preserve the existing context-budget guard, which reserves the configured
-  output budget before trimming history.
+- Requests are never trimmed to fit the window. The pre-send context-budget
+  guard was removed on 2026-10-02: oversized output is bounded where it is
+  produced (file-read caps, `_cap_tool_output`, the tool-batch budget),
+  compaction shrinks stored history, and a real overflow fails loudly
+  (`model_context_window_exceeded` asks for /compact).
 
 ## scope
 

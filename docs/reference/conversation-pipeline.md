@@ -145,12 +145,6 @@ Triggered on every user keystroke (Enter).
       v
     LLMService.process_user_input(message)
       |
-      +-- [question gate check]
-      |     if question_gate_active and pending_tools:
-      |       execute pending tools first
-      |       log_system_message(subtype="tool_call") for each result
-      |       add tool results to conversation_history
-      |
       +-- logger.log_user_message(message)
       |     writes JSONL: type="user" with intelligence analysis
       |     updates current_parent_uuid
@@ -286,14 +280,6 @@ Tool results are logged as system entries. There are two paths:
   This is an inconsistency — both paths produce the same kind of
   entry (tool execution result) but with different subtype labels.
 
-  Question Gate Tool Execution (llm_coordinator.py):
-    When tools are executed during question gate resolution:
-      logger.log_system_message(
-          f"Executed {tool_type} ({tool_id}): {output}",
-          parent_uuid=current_parent_uuid,
-          subtype="tool_call",      <- same as XML path
-      )
-
 
 Pipeline Flow: Session Restart
 ===============================
@@ -379,7 +365,6 @@ Complete Flow Diagram
                   v
                LLMService.process_user_input(message)
                   |
-                  +-- question gate check
                   +-- JSONL: user entry (log_user_message)
                   +-- enqueue message
                   +-- start _process_queue()
@@ -442,8 +427,7 @@ Gaps and Inconsistencies
   [1] tool_result vs tool_call subtype inconsistency
       Native tool results use subtype="tool_result" with tool_use_id.
       XML tool results use subtype="tool_call" without tool_use_id.
-      Question gate tools also use subtype="tool_call".
-      These all represent the same concept (tool execution result)
+      These both represent the same concept (tool execution result)
       but use different subtypes and different field coverage.
 
   [2] System prompt logged as user message

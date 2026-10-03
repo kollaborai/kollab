@@ -5,7 +5,7 @@ import time
 import unittest
 from dataclasses import dataclass, field
 from typing import Optional
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
@@ -49,7 +49,6 @@ class TestQueueProcessor(unittest.TestCase):
             "total_output_tokens": 0,
         }
         self.stats = {"total_thinking_time": 0}
-        self.pending_tools = []
         self.queue_metrics = {
             "total_enqueue_attempts": 0,
             "total_enqueue_successes": 0,
@@ -82,14 +81,11 @@ class TestQueueProcessor(unittest.TestCase):
         self.native_tools_handler.discovery_complete.set()
 
         self.add_message_fn = MagicMock()
-        self.max_history = 90
-        self.question_gate_enabled = False
 
         self.processor = QueueProcessor(
             conversation_history=self.conversation_history,
             session_stats=self.session_stats,
             stats=self.stats,
-            pending_tools=self.pending_tools,
             queue_metrics=self.queue_metrics,
             task_config=self.task_config,
             api_service=self.api_service,
@@ -103,8 +99,6 @@ class TestQueueProcessor(unittest.TestCase):
             streaming_handler=self.streaming_handler,
             native_tools_handler=self.native_tools_handler,
             add_message_fn=self.add_message_fn,
-            max_history=self.max_history,
-            question_gate_enabled=self.question_gate_enabled,
             max_queue_size=10,
         )
         # Default to turn_completed=True so process_queue doesn't enter
@@ -386,7 +380,6 @@ class TestQueueProcessor(unittest.TestCase):
             "content": "test response",
             "components": {},
             "turn_completed": True,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = []
         self.conversation_logger.log_assistant_message = AsyncMock(
@@ -447,7 +440,6 @@ class TestQueueProcessor(unittest.TestCase):
             "content": "intermediate answer",
             "components": {},
             "turn_completed": False,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = [
             {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
@@ -513,7 +505,6 @@ class TestQueueProcessor(unittest.TestCase):
             "spoken_text": "I'll recheck the voice mode files.",
             "components": {},
             "turn_completed": False,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = [
             {"id": "read", "type": "terminal", "command": "true"}
@@ -543,9 +534,18 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(order[-1], ("The check is finished.", voice))
         self.assertIsNone(self.processor.active_voice)
 
-    def test_pipe_mode_displays_question_gate_response(self):
-        """Pipe mode keeps a response that is waiting for user input visible."""
-        self.renderer.pipe_mode = True
+    def test_question_tag_does_not_suspend_xml_tools(self):
+        """A <question> tag is plain text: the XML tool in the same reply runs."""
+        from kollabor_ai.response_parser import ResponseParser
+
+        parser = ResponseParser()
+        parsed = parser.parse_response(
+            "<question>Which file should I inspect?</question>\n"
+            "<terminal>printf ''</terminal>"
+        )
+        self.assertFalse(parsed["turn_completed"])
+        self.assertNotIn("question", parsed["components"])
+
         self.native_tools_handler.tool_calling_enabled = False
         self.api_service.has_pending_tool_calls.return_value = False
         self.api_service.get_last_token_usage = MagicMock(return_value=None)
@@ -553,18 +553,23 @@ class TestQueueProcessor(unittest.TestCase):
         self.api_service.last_stop_reason = ""
         self.api_service.model = "test-model"
         self.api_service.provider_type = "test"
-        self.response_parser.parse_response.return_value = {
-            "content": "Which file should I inspect?",
-            "components": {},
-            "turn_completed": True,
-            "question_gate_active": True,
-        }
-        self.response_parser.get_all_tools.return_value = [
-            {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
-        ]
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = "ok"
+        self.tool_executor.execute_tool = AsyncMock(
+            return_value=ToolExecutionResult(
+                tool_id="terminal_1",
+                tool_type="terminal",
+                success=True,
+                output="",
+            )
+        )
+        self.response_parser.parse_response.return_value = parsed
+        self.response_parser.get_all_tools.return_value = parser.get_all_tools(parsed)
         self.conversation_logger.log_assistant_message = AsyncMock(
             return_value="assistant-uuid"
         )
+        self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
         self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
@@ -572,7 +577,6 @@ class TestQueueProcessor(unittest.TestCase):
             return_value=("Which file should I inspect?", False, False, False)
         )
 
-        self.processor.question_gate_enabled = True
         self.loop.run_until_complete(
             self.processor._execute_llm_turn_inner(
                 user_message_provided=True,
@@ -580,13 +584,8 @@ class TestQueueProcessor(unittest.TestCase):
             )
         )
 
-        self.message_display_service.display_complete_response.assert_called_once()
-        self.message_display_service.display_complete_response.assert_called_once_with(
-            thinking_duration=ANY,
-            response="Which file should I inspect?",
-            tool_results=None,
-            thinking_content=[],
-        )
+        self.tool_executor.execute_tool.assert_awaited_once()
+        self.message_display_service.display_tool_results.assert_called_once()
 
     # ------------------------------------------------------------------
     # Tests for _emit_llm_response_and_handle
@@ -930,7 +929,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
         self.response_parser.parse_response.return_value = {
             "content": "final", "components": {}, "turn_completed": True,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = []
         self.api_service.has_pending_tool_calls.return_value = False

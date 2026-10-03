@@ -4,7 +4,7 @@
 A gate to keep the registry well-formed and current. Run in CI / pre-commit;
 exits non-zero with a clear report on any problem. Two kinds of checks:
 
-  * schema   — every entry has the fields the budget guard and pricing rely on
+  * schema   — every entry has the fields compaction, the tool-output budget and pricing rely on
   * freshness — the registry must have been reviewed within MAX_AGE_DAYS, so new
                 frontier models don't silently rot out of the list
 

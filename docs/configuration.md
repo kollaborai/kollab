@@ -112,7 +112,6 @@ The base config is divided into sections:
     },
     "llm": {
       "auto_detect_provider": true,
-      "max_history": 90,
       "max_retries": 5,
       "save_conversations": true,
       "conversation_format": "jsonl",
@@ -151,7 +150,7 @@ The base config is divided into sections:
 The config system uses dot notation for nested access:
 
 ```python
-config.get("kollabor.llm.max_history", 90)
+config.get("kollabor.llm.enable_streaming", False)
 config.get("terminal.render_fps", 20)
 ```
 

@@ -396,4 +396,4 @@ if the flow has bugs.
   - **Config:** `plugins.hub.wait_for_user_enabled` (checkbox in `/config` under Hub,
     **Wait-for-user**) toggles whether `<wait_for_user/>` enters `WAITING` presence,
     peer-message cooldown, and queue-processor “park” behavior. Default on.
-    Changing it requires an app restart (same pattern as `question_gate_enabled`).
+    Changing it requires an app restart.

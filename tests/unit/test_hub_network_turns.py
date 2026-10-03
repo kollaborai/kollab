@@ -1031,7 +1031,6 @@ def _real_processor(hub) -> QueueProcessor:
         conversation_history=[],
         session_stats={},
         stats={"total_thinking_time": 0},
-        pending_tools=[],
         queue_metrics={},
         task_config=SimpleNamespace(queue=queue),
         api_service=AsyncMock(),
@@ -1045,8 +1044,6 @@ def _real_processor(hub) -> QueueProcessor:
         streaming_handler=MagicMock(),
         native_tools_handler=MagicMock(),
         add_message_fn=MagicMock(),
-        max_history=90,
-        question_gate_enabled=False,
         max_queue_size=10,
     )
 

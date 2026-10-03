@@ -2,7 +2,7 @@
 
 Loaded once from ``bundles/data/models.json`` (with ``~/.kollab/models.json``
 merged on top). Used to set a provider config's ``context_window`` from the
-model in use so the context-budget guard bounds every request to the real
+model in use so compaction and the tool-output budget work against the real
 per-model window instead of a one-size default.
 
 Single source of truth: both ``create_config_from_profile`` and the context

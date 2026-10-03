@@ -47,7 +47,6 @@ class TestLLMServiceIntegration(unittest.TestCase):
             "kollabor.llm.model": "test-model",
             "kollabor.llm.temperature": 0.7,
             "kollabor.llm.timeout": 30,
-            "kollabor.llm.max_history": 10,
             "kollabor.llm.enable_streaming": False,
             "kollabor.llm.terminal_timeout": 10,
             "kollabor.llm.mcp_timeout": 20,
@@ -68,7 +67,6 @@ class TestLLMServiceIntegration(unittest.TestCase):
     def test_service_initialization(self):
         """Test service initializes with correct configuration."""
         # After refactoring, API configuration is in api_service
-        self.assertEqual(self.service.max_history, 10)
         self.assertIsNotNone(self.service.api_service)
         self.assertIsNotNone(self.service.message_display_service)
 
@@ -537,7 +535,6 @@ class TestMessageDisplayCoordination(unittest.TestCase):
             "kollabor.llm.model": "test-model",
             "kollabor.llm.temperature": 0.7,
             "kollabor.llm.timeout": 30,
-            "kollabor.llm.max_history": 10,
             "kollabor.llm.enable_streaming": False,
             "kollabor.llm.terminal_timeout": 10,
             "kollabor.llm.mcp_timeout": 20,
@@ -653,7 +650,6 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
             "kollabor.llm.model": "test-model",
             "kollabor.llm.temperature": 0.7,
             "kollabor.llm.timeout": 30,
-            "kollabor.llm.max_history": 10,
             "kollabor.llm.enable_streaming": False,
             "kollabor.llm.terminal_timeout": 10,
             "kollabor.llm.mcp_timeout": 20,

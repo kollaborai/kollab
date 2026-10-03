@@ -24,7 +24,6 @@ from kollabor_ai.generated_image_artifacts import (
 )
 from kollabor_ai.message_content import (
     contains_image_content,
-    content_to_text,
     redact_media_data,
 )
 from kollabor_ai.model_registry import supports_vision
@@ -574,7 +573,6 @@ class APICommunicationService:
     async def call_llm(
         self,
         conversation_history: List[Dict[str, Any]],
-        max_history: Optional[int] = None,
         streaming_callback=None,
         tools: Optional[List[Dict[str, Any]]] = None,
         on_rate_limit=None,
@@ -586,7 +584,6 @@ class APICommunicationService:
 
         Args:
             conversation_history: List of conversation messages
-            max_history: Maximum number of messages to send (optional)
             streaming_callback: Optional callback for streaming content chunks
             tools: Optional list of tool definitions for native function calling
             turn_id: Optional explicit turn id for the raw log entry. If
@@ -651,7 +648,7 @@ class APICommunicationService:
         self._connection_stats["last_activity"] = time.time()
 
         # Prepare messages for API
-        messages = self._prepare_messages(conversation_history, max_history)
+        messages = self._prepare_messages(conversation_history)
         self._provider_kwargs = dict(provider_kwargs)
 
         # Use provider system (always enabled)
@@ -1370,8 +1367,9 @@ class APICommunicationService:
         # reason, zero usage, and no content. It must be caught explicitly: it
         # otherwise looks like a successful empty turn, gets saved, and every
         # later request inherits the same too-large history and fails the same
-        # way. The budget guard should keep us from ever getting here; this is
-        # the backstop that makes the failure loud instead of silent.
+        # way. Output caps at the source (file reads, _cap_tool_output) and
+        # compaction should keep us from ever getting here; this is the
+        # backstop that makes the failure loud instead of silent.
         if (
             getattr(self, "last_stop_reason", None) or ""
         ) == "model_context_window_exceeded":
@@ -1399,26 +1397,21 @@ class APICommunicationService:
         )
 
     def _prepare_messages(
-        self, conversation_history: List[Any], max_history: Optional[int]
+        self, conversation_history: List[Any]
     ) -> List[Dict[str, Any]]:
         """Prepare conversation messages for API request.
 
+        The whole history is sent; nothing is trimmed to fit. Compaction is
+        what keeps a conversation inside the model's window.
+
         Args:
             conversation_history: Raw conversation history
-            max_history: Maximum messages to include
 
         Returns:
             List of formatted messages for API
         """
-        # Apply history limit if specified
-        if max_history:
-            recent_messages = conversation_history[-max_history:]
-        else:
-            recent_messages = conversation_history
-
-        # Format messages for API
         messages: list[dict[str, Any]] = []
-        for msg in recent_messages:
+        for msg in conversation_history:
             # Handle both ConversationMessage objects and dicts
             if hasattr(msg, "role"):
                 role, content = msg.role, msg.content
@@ -1449,44 +1442,19 @@ class APICommunicationService:
 
             messages.append(formatted)
 
-        return self._enforce_token_budget(messages)
-
-    @staticmethod
-    def _estimate_tokens(value: Any) -> int:
-        """Conservative token estimate for a message field.
-
-        Uses ~3 chars/token (an intentional over-estimate for English/code) so
-        the budget guard trims early rather than late. Non-string content
-        (tool-call payloads, content-block lists) is stringified first.
-        """
-        if not value:
-            return 0
-        if isinstance(value, str):
-            text = value
-        elif isinstance(value, list):
-            text = content_to_text(value)
-            if not text:
-                text = json.dumps(value, ensure_ascii=False, default=str)
-        else:
-            text = json.dumps(value, ensure_ascii=False, default=str)
-        return len(text) // 3 + 1
-
-    def _message_tokens(self, message: Dict[str, Any]) -> int:
-        total = self._estimate_tokens(message.get("content"))
-        if message.get("tool_calls"):
-            total += self._estimate_tokens(message.get("tool_calls"))
-        return total
+        return self._strip_leading_orphans(messages)
 
     @staticmethod
     def _strip_leading_orphans(
         messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Keep the trimmed window valid for the API.
+        """Keep the request window valid for the API.
 
-        After dropping old turns the window must still start on a real user
-        turn: a leading assistant/tool message, or a tool result whose
-        originating tool call was trimmed away, would be rejected (a
-        tool_result must follow its tool_use). Drop such leading messages.
+        When compaction cuts mid-exchange, the window must still start on a
+        real user turn: a leading assistant/tool message,
+        or a tool result whose originating tool call was cut away, would be
+        rejected (a tool_result must follow its tool_use). Drop such leading
+        messages. Nothing is ever dropped to fit a token budget.
         If the entire bounded window is orphaned tool state, replace it with a
         recoverable user message rather than send an invalid
         function_call_output-only request.
@@ -1532,73 +1500,6 @@ class APICommunicationService:
                 ),
             }
         ]
-
-    def _enforce_token_budget(
-        self, messages: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Bound a request to the model's context window before it is sent.
-
-        A single turn that injects a large payload (e.g. reading a big file)
-        can push the request past the provider window; the call then returns
-        empty (stop_reason=model_context_window_exceeded) and, because the
-        oversized history stays in place, every later turn fails the same way.
-        This drops the oldest messages from the *request only* (the stored
-        history is untouched and is summarized separately) so the wire payload
-        always fits. Returns the list unchanged when the window is unknown,
-        rather than risk over-trimming.
-        """
-        cfg = getattr(getattr(self, "_provider", None), "config", None)
-        window = int(getattr(cfg, "context_window", 0) or 0)
-        if window <= 0:
-            return self._strip_leading_orphans(list(messages))
-
-        reserve_output = int(getattr(cfg, "max_tokens", 0) or 16384)
-        # The system prompt and tool schemas are added by the provider and are
-        # not in `messages`; reserve a conservative fixed overhead for them.
-        overhead = 60000
-        if self.config:
-            overhead = int(
-                self.config.get("kollabor.llm.context_overhead_tokens", overhead)
-            )
-        margin = 4000
-        budget = window - reserve_output - overhead - margin
-        if budget <= 0:
-            # Misconfigured (output reserve/overhead exceed the window); don't
-            # nuke the conversation — let the overflow guard surface it instead.
-            return messages
-
-        costs = [self._message_tokens(m) for m in messages]
-        total = sum(costs)
-        if total <= budget:
-            # Even an in-budget window can begin with a stale tool result
-            # after a prior history trim/reset. Never send that orphan to the
-            # provider just because no further budget trimming is needed.
-            return self._strip_leading_orphans(list(messages))
-
-        kept = list(messages)
-        kept_costs = list(costs)
-        dropped = 0
-        # Always keep the final (current) turn; drop from the oldest end.
-        while len(kept) > 1 and total > budget:
-            total -= kept_costs.pop(0)
-            kept.pop(0)
-            dropped += 1
-
-        before = len(kept)
-        kept = self._strip_leading_orphans(kept)
-        dropped += before - len(kept)
-
-        logger.warning(
-            "Context budget guard trimmed %d oldest message(s) to fit the model "
-            "window (window=%d, reserve_out=%d, overhead=%d, budget=%d). Stored "
-            "history is preserved; only this request was bounded.",
-            dropped,
-            window,
-            reserve_output,
-            overhead,
-            budget,
-        )
-        return kept
 
     def get_last_token_usage(self) -> Dict[str, int]:
         """Get token usage from last API call.

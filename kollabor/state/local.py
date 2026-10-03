@@ -750,7 +750,6 @@ class LocalStateService(StateService):
           - llm_service.is_processing
           - llm_service.status_service: queue_size, queue_max,
             dropped_messages, circuit_breaker_state
-          - llm_service.pending_tools (question gate suspended tools)
           - llm_service.task_manager._background_tasks
         """
         try:
@@ -781,12 +780,6 @@ class LocalStateService(StateService):
                     or "closed"
                 )
 
-            pending_tools = getattr(self._llm_service, "pending_tools", None) or []
-            try:
-                pending_tools_count = len(pending_tools)
-            except TypeError:
-                pending_tools_count = 0
-
             bg_count = 0
             task_mgr = getattr(self._llm_service, "task_manager", None)
             if task_mgr is not None:
@@ -811,7 +804,6 @@ class LocalStateService(StateService):
                 queue_size=queue_size,
                 queue_max=queue_max,
                 dropped_messages=dropped_messages,
-                pending_tools_count=pending_tools_count,
                 bg_tasks_count=bg_count,
                 circuit_breaker_state=circuit_state,
                 active_operation=ActiveOperationSnapshot.from_dict(operation_data),

@@ -85,10 +85,10 @@ The global config at `~/.kollab/config.json` can customize conversation-related 
 {
   "kollabor": {
     "llm": {
-      "max_history": 90
+      "save_conversations": true
     }
   }
 }
 ```
 
-`max_history` controls how many messages are kept in the active conversation context sent to the LLM.
+`save_conversations` turns conversation logging on or off. The whole conversation is sent to the model on every request: nothing trims it by message count. Compaction is what keeps it inside the model's context window.

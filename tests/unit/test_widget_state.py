@@ -25,7 +25,6 @@ class TestFromFlatDict:
             "session": "sess-abc",
             "is_processing": True,
             "bg_tasks": 2,
-            "pending_tools": 1,
             "tmux_sessions": 0,
             "cwd": "/tmp/project",
             "git_branch": "main",
@@ -79,7 +78,7 @@ class TestFromFlatDict:
         d = {"messages": 3, "input_tokens": 100}
         state = WidgetState.from_flat_dict(d)
 
-        assert len(WidgetState.state_fields()) == 34
+        assert len(WidgetState.state_fields()) == 33
         assert state.messages == 3
         assert state.input_tokens == 100
         assert state.output_tokens == 0  # default

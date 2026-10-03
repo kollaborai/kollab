@@ -49,7 +49,7 @@ class AgentLifecycle(Enum):
     READY       idle, waiting for input or messages
     WORKING     executing a task (tool calls, file ops, shell)
     THINKING    waiting on LLM response (streaming or not)
-    BLOCKED     suspended, waiting on human input (question gate)
+    BLOCKED     suspended, waiting on human input
     DREAMING    processing vault -- distilling working memory
                 into crystallized knowledge (background, future)
     SUSPENDED   paused by user or coordinator, can be resumed

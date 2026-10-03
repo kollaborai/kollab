@@ -489,7 +489,7 @@ class OpenAIResponsesProvider(LLMProvider):
                     if chunk.is_final and chunk.raw_chunk:
                         raw_event = chunk._raw_payload or chunk.raw_chunk
                         evt = raw_event.get("event", "")
-                        if evt in ("response.done", "response.completed"):
+                        if evt in OpenAIResponsesTransformer.FINAL_EVENTS:
                             final_response = raw_event.get("response", {})
 
             if not final_response:
@@ -954,7 +954,7 @@ class OpenAIResponsesProvider(LLMProvider):
                     _record_image_generation_item(
                         completed_image_items, raw_payload.get("item")
                     )
-                elif event_name in ("response.done", "response.completed"):
+                elif event_name in OpenAIResponsesTransformer.FINAL_EVENTS:
                     response_payload = raw_payload.get("response")
                     if isinstance(response_payload, dict):
                         for item in response_payload.get("output", []) or []:
@@ -1072,7 +1072,7 @@ class OpenAIResponsesProvider(LLMProvider):
         Handles both standard Responses API and ChatGPT codex event names:
         - response.output_text.delta -> text streaming
         - response.output_item.added/done -> item events
-        - response.completed / response.done -> final response
+        - response.completed / response.done / response.incomplete -> final response
         - response.created/in_progress/content_part.* -> ignored
 
         Args:
@@ -1116,7 +1116,7 @@ class OpenAIResponsesProvider(LLMProvider):
                 return chunk
 
             # Final response (both event names)
-            if event in ("response.done", "response.completed"):
+            if event in OpenAIResponsesTransformer.FINAL_EVENTS:
                 resp_data = parsed_data.get("response", parsed_data)
                 event_data = {"event": event, "response": resp_data}
                 usage = OpenAIResponsesTransformer._usage_info(resp_data.get("usage"))
@@ -1124,6 +1124,7 @@ class OpenAIResponsesProvider(LLMProvider):
                     delta=TextDelta(content=""),
                     usage=usage,
                     is_final=True,
+                    finish_reason=OpenAIResponsesTransformer._stop_reason(resp_data),
                     raw_chunk=redact_generated_image_data(event_data),
                 )
                 chunk._raw_payload = event_data

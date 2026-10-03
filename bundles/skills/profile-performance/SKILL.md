@@ -398,13 +398,8 @@ check conversation file sizes:
 check message counts:
   <terminal>wc -l .kollab/conversations/*.jsonl</terminal>
 
-configure max history:
-  in .kollab/config.json:
-    "core": {
-      "llm": {
-        "max_history": 50
-      }
-    }
+shrink a long conversation:
+  run /compact (nothing trims history by message count)
 
 
 step 3: check for memory leaks
@@ -474,8 +469,8 @@ step 3: check conversation history size
   <terminal>ls -lh .kollab/conversations/</terminal>
   <terminal>wc -l .kollab/conversations/session_*.jsonl | tail -1</terminal>
 
-step 4: reduce max history if large
-  "core": {"llm": {"max_history": 30}}
+step 4: compact a long conversation
+  run /compact
 
 step 5: check network latency
   compare timestamps in raw_llm_interactions_*.jsonl
@@ -496,8 +491,8 @@ step 3: check for memory leaks
   monitor memory over time:
     <terminal>watch -n 10 'ps aux | grep -i "python.*kollabor" | awk "{print $6}"'</terminal>
 
-step 4: reduce history size
-  "core": {"llm": {"max_history": 20}}
+step 4: compact a long conversation
+  run /compact
 
 step 5: clear old conversations
   <terminal>rm .kollab/conversations/session_*.jsonl</terminal>
@@ -513,7 +508,7 @@ tip 1: reduce render cpu usage
   - reduce visual effects (shimmer, gradients)
 
 tip 2: reduce llm latency
-  - reduce max_history (fewer tokens = faster)
+  - run /compact on long conversations (fewer tokens = faster)
   - use faster model endpoint
   - enable streaming for perceived speed
   - check keepalive_timeout for connection reuse
@@ -525,7 +520,7 @@ tip 3: reduce plugin overhead
   - avoid blocking operations in hooks
 
 tip 4: reduce memory usage
-  - reduce max_history
+  - run /compact on long conversations
   - clear old conversation logs
   - check for memory leaks (growing lists)
   - restart application periodically
@@ -567,7 +562,7 @@ render loop:
   - enable render cache
 
 llm calls:
-  - reduce max_history from 90 to 30
+  - run /compact on long conversations
   - use faster model
   - enable streaming
   - optimize system prompt length

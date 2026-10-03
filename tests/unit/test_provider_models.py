@@ -51,8 +51,8 @@ class TestProviderConfig:
         assert config.api_key == "test-key-123"
         assert config.model == "gpt-4"
         assert config.temperature == 0.7
-        # Output reserve: kept modest so it can't eat the context window. The
-        # budget guard scales the effective request against context_window.
+        # Output reserve: kept modest so it can't eat the context window that
+        # compaction and the tool-output budget size against.
         assert config.max_tokens == 16384
         # Conservative fallback window; the real per-model value comes from the
         # registry at config-creation time.

@@ -7,7 +7,6 @@
 <trender type="include" path="sections/protocols/tool-workflow.md" />
 <trender type="include" path="sections/protocols/response-patterns.md" />
 <trender type="include" path="sections/protocols/code-review.md" />
-<trender type="include" path="sections/protocols/question-gate.md" />
 <trender type="include" path="sections/protocols/task-planning.md" />
 <trender type="include" path="sections/protocols/tool-execution.md" />
 <trender type="include" path="sections/protocols/notifications.md" />

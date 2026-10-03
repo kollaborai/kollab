@@ -64,10 +64,9 @@ through the coordinator. modals use `enter_alternate_buffer()` /
 `exit_alternate_buffer(restore_state=True)` to pause/resume cleanly.
 
 **LLMCoordinator** (`kollabor/llm/llm_coordinator.py`) replaced the old
-llm_service.py. it orchestrates the QueueProcessor (handles question gate
-suspension), StreamingHandler, MessageHandler, and the permission hook system.
-the question gate protocol suspends pending tools when the agent emits
-`<question>` tags so it can ask before acting.
+llm_service.py. it orchestrates the QueueProcessor, StreamingHandler,
+MessageHandler, and the permission hook system. XML tools always run: a
+`<question>` tag is plain text and suspends nothing.
 
 **Unified tool pipeline**: native tool calls (from the provider API) and XML
 plugin tags (like `<hub_msg>`, `<scratchpad>`, `<vault_write>`) share the same
@@ -77,7 +76,7 @@ this replaced 33+ regex hacks on LLM_RESPONSE_POST with real first-class tools.
 
 ## configuration
 
-dot-notation: `config.get("kollabor.llm.max_history", 90)`.
+dot-notation: `config.get("kollabor.llm.enable_streaming", False)`.
 
 - global: `~/.kollab/config.json` (user-wide)
 - local: `.kollab/config.json` (project override, merged on top)

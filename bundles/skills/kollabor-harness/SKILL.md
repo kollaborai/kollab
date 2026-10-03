@@ -53,7 +53,7 @@ path encoding: `/home/user/proj` -> `home_user_proj`.
 dot-notation everywhere. never reach into raw dicts.
 
 ```python
-value = config.get("kollabor.llm.max_history", 90)
+value = config.get("kollabor.llm.enable_streaming", False)
 config.set("kollabor.ui.theme", "dark")
 ```
 

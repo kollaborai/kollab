@@ -158,7 +158,6 @@ class QueueProcessor:
         conversation_history: List[ConversationMessage],
         session_stats: Dict[str, Any],
         stats: Dict[str, Any],
-        pending_tools: List[Dict[str, Any]],
         queue_metrics: Dict[str, Any],
         task_config,
         api_service,
@@ -172,8 +171,6 @@ class QueueProcessor:
         streaming_handler,
         native_tools_handler,
         add_message_fn: Callable,
-        max_history: int,
-        question_gate_enabled: bool,
         max_queue_size: int,
     ):
         """Initialize queue processor.
@@ -182,7 +179,6 @@ class QueueProcessor:
             conversation_history: Shared conversation history list (mutable reference)
             session_stats: Shared session stats dict (mutable reference)
             stats: Shared stats dict (mutable reference)
-            pending_tools: Shared pending tools list (mutable reference)
             queue_metrics: Shared queue metrics dict (mutable reference)
             task_config: LLMTaskConfig for queue settings
             api_service: APICommunicationService instance
@@ -196,15 +192,12 @@ class QueueProcessor:
             streaming_handler: StreamingHandler instance
             native_tools_handler: NativeToolsHandler instance
             add_message_fn: Callback to add message to conversation (LLMService._add_conversation_message)
-            max_history: Maximum history messages for API calls
-            question_gate_enabled: Whether question gate is enabled
             max_queue_size: Maximum queue size
         """
         # Shared mutable containers (passed by reference)
         self.conversation_history = conversation_history
         self.session_stats = session_stats
         self.stats = stats
-        self.pending_tools = pending_tools
         self._queue_metrics = queue_metrics
 
         # Configuration and dependencies
@@ -220,8 +213,6 @@ class QueueProcessor:
         self._streaming_handler = streaming_handler
         self._native_tools_handler = native_tools_handler
         self._add_message_fn = add_message_fn
-        self._max_history = max_history
-        self.question_gate_enabled = question_gate_enabled
 
         # Tool output has a producer-level spill boundary and a batch-level
         # packing boundary. The artifact root is session/project scoped so the
@@ -278,7 +269,6 @@ class QueueProcessor:
         # Processing state (owned by QueueProcessor)
         self.current_processing_tokens = 0
         self.processing_start_time: Optional[float] = None
-        self.question_gate_active = False
         self._last_tool_error_sig: Optional[str] = None
         # Watchdog heartbeat: monotonic timestamp of the last real forward
         # progress (a turn executed, a message processed). The TurnWatchdog
@@ -865,7 +855,6 @@ class QueueProcessor:
             {
                 "model": getattr(self.api_service, "model", "unknown"),
                 "message_count": len(self.conversation_history),
-                "max_history": self._max_history,
             },
             "llm_service",
         )
@@ -997,7 +986,6 @@ class QueueProcessor:
 
             response = await self._streaming_handler.call_llm(
                 conversation_history=self.conversation_history,
-                max_history=self._max_history,
                 native_tools=None if tools_withheld else self._native_tools_handler.tools,
                 mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                 is_cancelled_fn=lambda: self.cancel_processing,
@@ -1077,7 +1065,6 @@ class QueueProcessor:
                 )
                 response = await self._streaming_handler.call_llm(
                     conversation_history=self.conversation_history,
-                    max_history=self._max_history,
                     native_tools=None if tools_withheld else self._native_tools_handler.tools,
                     mcp_discovery_complete=self._native_tools_handler.discovery_complete,
                     is_cancelled_fn=lambda: self.cancel_processing,
@@ -1266,14 +1253,9 @@ class QueueProcessor:
             # tools only (terminal_commands, tool_calls, file_operations,
             # plugin_tools), not native API tool_use blocks. If the model
             # returned native tools, the turn is NOT done -- the model
-            # still needs to see the tool results. Exception: question_gate
-            # active means the user must answer first regardless.
+            # still needs to see the tool results.
             self.turn_completed = parsed_response["turn_completed"]
-            question_gate_active = parsed_response.get("question_gate_active", False)
-            has_xml_question = (
-                parsed_response.get("components", {}).get("question") is not None
-            )
-            if has_native_tools and not (question_gate_active or has_xml_question):
+            if has_native_tools:
                 self.turn_completed = False
             self.stats["total_thinking_time"] += thinking_duration
             self.session_stats["messages"] += 1
@@ -1309,14 +1291,9 @@ class QueueProcessor:
             # Pipe mode must emit only the terminal response for a logical
             # turn.  A tool-bearing response is an intermediate model turn;
             # displaying it here and then displaying the continuation emits
-            # the same user-facing text twice on stdout.  Question-gated XML
-            # tools are the exception because they are intentionally paused
-            # for user input rather than continued automatically.
+            # the same user-facing text twice on stdout.
             pipe_mode = getattr(self.renderer, "pipe_mode", False) is True
-            tools_suspended = self.question_gate_enabled and question_gate_active
-            tool_execution_pending = bool(has_native_tools) or (
-                bool(all_tools) and not tools_suspended
-            )
+            tool_execution_pending = bool(has_native_tools) or bool(all_tools)
             intermediate_pipe_response = pipe_mode and (
                 tool_execution_pending or not self.turn_completed
             )
@@ -1380,27 +1357,10 @@ class QueueProcessor:
                         native_results, original_tools_for_display
                     )
 
-            # Step 7: Execute XML tools (incremental, with question gate)
+            # Step 7: Execute XML tools (incremental)
             xml_tool_results = []
             if all_tools:
-                if self.question_gate_enabled and parsed_response.get(
-                    "question_gate_active"
-                ):
-                    self.pending_tools.clear()
-                    self.pending_tools.extend(all_tools)
-                    self.question_gate_active = True
-                    publish_semantic(
-                        self.renderer,
-                        "question_gate",
-                        question=parsed_response.get("components", {}).get(
-                            "question", ""
-                        ),
-                        pending_tools=len(all_tools),
-                    )
-                    logger.info(
-                        f"Question gate: suspended {len(all_tools)} tool(s) pending user response"
-                    )
-                elif not suppress_display:
+                if not suppress_display:
                     # Execute tools one at a time and display each result
                     # incrementally so the user sees progress in real time.
                     for i, tool_data in enumerate(all_tools):

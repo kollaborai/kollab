@@ -587,7 +587,6 @@ error: Session already exited: dev
 | `<think>` | Reasoning (stripped from user display) | `<think>working through the logic</think>` | N/A — content is stripped before storage, never shown to agent again |
 | `<tool>` | MCP tool call (attribute-based) | `<tool name="github:issue_create"><title>bug</title></tool>` | Whatever the MCP server returns, passed through unchanged |
 | `<tool_call>` | Native tool call fallback (content-based) | `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` | Same as the corresponding native tool result |
-| `<question>` | Question gate (suspends pending tools) | `<question>should i also update the tests?</question>` | No synthetic response — agent waits for the human's actual next message, and pending tools execute only after the human replies |
 
 ### Plugin-contributed XML tags
 
@@ -2024,7 +2023,7 @@ tree is:
    → Keep them in sync manually
 
 2. **Is this a metadata operation on the conversation/context itself?**
-   (e.g., context ledger curation, question gates)
+   (e.g., context ledger curation)
    → XML mode only is usually fine — the operation is cheap, runs
      synchronously, doesn't benefit from native schema validation
    → Skip the native JSON definition to avoid round-trip cost
