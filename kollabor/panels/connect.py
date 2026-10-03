@@ -181,17 +181,20 @@ class ConnectPanel:
             for row in snap["requests"]
         ]
         panel["row_actions"] = [
-            {"id": "accept", "label": "Accept"},
-            {"id": "reject", "label": "Reject", "confirm": True},
+            {"id": "accept", "label": "Accept", "payload_key": "enrollment_id"},
+            {"id": "reject", "label": "Reject", "confirm": True, "payload_key": "enrollment_id"},
         ]
         panel["toolbar_actions"] = [
             {"id": "new_code", "label": "New Join Code"},
             {"id": "knocks", "label": "Review Introductions"},
         ]
         panel["controls"] = [
-            make_field("trust", "dropdown", "Trust", value=snap["trust"], options=list(TRUST_LEVELS)),
             make_field(
-                "rename", "text_input", "This Device's Name", value=snap["device"],
+                "level", "dropdown", "Trust", action="trust",
+                value=snap["trust"], options=list(TRUST_LEVELS),
+            ),
+            make_field(
+                "name", "text_input", "This Device's Name", action="rename", value=snap["device"],
                 help="1-63 characters: a-z, 0-9 and dashes.",
             ),
         ]
@@ -238,11 +241,12 @@ class ConnectPanel:
         return ok_result(f"{verb} {who}.", panel=fresh)
 
     async def _set(self, ctx: Any, action: str, payload: dict) -> dict:
-        value = str(payload.get("value", payload.get(action, payload.get("name", payload.get("level", ""))))).strip()
+        field = "name" if action == "rename" else "level"  # the control's path
+        value = str(payload.get(field, payload.get("value", payload.get(action, "")))).strip()
         try:
             checked = validate_device_name(value) if action == "rename" else validate_trust(value)
         except ValueError as exc:
-            raise PanelError(str(exc), errors={action: str(exc)}) from exc
+            raise PanelError(str(exc), errors={field: str(exc)}) from exc
         text = str(await ctx.hub_connect(f"{'name' if action == 'rename' else 'trust'} {checked}"))
         fresh = await self.describe(ctx, {})
         message = text.splitlines()[0] if text else ""
@@ -386,8 +390,8 @@ class ConnectKnocksPanel:
             for r in rows
         ]
         panel["row_actions"] = [
-            {"id": "allow", "label": "Allow"},
-            {"id": "deny", "label": "Deny", "confirm": True},
+            {"id": "allow", "label": "Allow", "payload_key": "receipt_id"},
+            {"id": "deny", "label": "Deny", "confirm": True, "payload_key": "receipt_id"},
         ]
         if not rows:
             panel["notice"] = "No introductions waiting."

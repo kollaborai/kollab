@@ -89,7 +89,9 @@ async def test_describe_shows_the_snapshot_and_never_mints_a_code():
     assert "ab12…ef01" in panel["rows"][0]["detail"]
     assert ids(panel["row_actions"]) == ["accept", "reject"]
     assert ids(panel["toolbar_actions"]) == ["new_code", "knocks"]
-    assert ids(panel["controls"] and [{"id": c["path"]} for c in panel["controls"]]) == ["trust", "rename"]
+    # contract: a control posts {path: value} to its action; a row action reads payload_key
+    assert [(c["path"], c["action"]) for c in panel["controls"]] == [("level", "trust"), ("name", "rename")]
+    assert [a["payload_key"] for a in panel["row_actions"]] == ["enrollment_id", "enrollment_id"]
     assert not any(call[0] == "offer" for call in hub.calls) and CODE not in json.dumps(panel)
 
 
@@ -150,13 +152,13 @@ async def test_new_network_composes_hub_connect_like_the_guided_flow():
 @pytest.mark.asyncio
 async def test_rename_trust_validate_then_call_hub_connect():
     hub = Hub(connect={"name new-name": "this device is now new-name"})
-    assert (await CONNECT.act(hub, "rename", {"value": "new-name"}))["ok"]
+    assert (await CONNECT.act(hub, "rename", {"name": "new-name"}))["ok"]
     assert (await CONNECT.act(hub, "trust", {"level": "manual"}))["ok"]
     assert hub.calls == [("connect", "name new-name"), ("connect", "trust manual")]
     for action, value in (("rename", "Bad Name!"), ("trust", "everyone")):
         with pytest.raises(PanelError) as err:
             await CONNECT.act(hub, action, {"value": value})
-        assert action in err.value.errors
+        assert {"rename": "name", "trust": "level"}[action] in err.value.errors  # the control path
     failed = await CONNECT.act(Hub(connect={"trust open": "connect: not available"}), "trust", {"value": "open"})
     assert failed["ok"] is False
 
@@ -211,6 +213,7 @@ async def test_knocks_list_and_decide_by_receipt_with_server_side_sender_key():
     row = panel["rows"][0]
     assert row["label"] == "other-box" and "hi, it is me" in row["detail"] and SENDER not in json.dumps(panel)
     assert ids(panel["row_actions"]) == ["allow", "deny"]
+    assert [a["payload_key"] for a in panel["row_actions"]] == ["receipt_id", "receipt_id"]
     result = await KNOCKS.act(hub, "allow", {"id": KNOCK["receipt_id"]})
     await KNOCKS.act(hub, "deny", {"id": KNOCK["receipt_id"]})
     assert result["ok"] and hub.calls == [

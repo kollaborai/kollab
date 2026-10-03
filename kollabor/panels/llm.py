@@ -268,10 +268,10 @@ SCOPE_NOTE = "Saved to the provider profile; applies to every session using it."
 _ACTIVATE_TIMEOUT = 20.0
 _CATALOG_TIMEOUT = 8.0
 _ROW_ACTIONS = [
-    {"id": "activate", "label": "Use"},
-    {"id": "edit", "label": "Edit"},
-    {"id": "set_default", "label": "Set As Default"},
-    {"id": "delete", "label": "Delete", "confirm": True},
+    {"id": "activate", "label": "Use", "payload_key": "name"},
+    {"id": "edit", "label": "Edit", "payload_key": "name"},
+    {"id": "set_default", "label": "Set As Default", "payload_key": "name"},
+    {"id": "delete", "label": "Delete", "confirm": True, "payload_key": "name"},
 ]
 _TOOLBAR_ACTIONS = [
     {"id": "new", "label": "New Loadout"},

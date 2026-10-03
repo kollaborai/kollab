@@ -94,6 +94,7 @@ async def test_llm_describe_groups_current_default_and_empty_providers(llm_ctx):
     assert not rows["gpt-y"]["current"]
     assert [g["group"] for g in panel["empty_groups"]] == ["Models — OpenRouter"]
     assert {a["id"] for a in panel["row_actions"]} == {"activate", "edit", "set_default", "delete"}
+    assert {a["payload_key"] for a in panel["row_actions"]} == {"name"}
 
 
 @pytest.mark.asyncio
@@ -200,8 +201,9 @@ async def test_model_describe_merges_catalog_and_has_effort_control(model_ctx):
     assert [(r["id"], r["current"]) for r in panel["rows"]] == [
         ("m-a", True), ("m-b", False), ("m-c", False)]
     effort = panel["controls"][0]
-    assert (effort["path"], effort["value"], effort["options"]) == (
-        "effort", "high", ["default", "low", "high"])
+    assert (effort["path"], effort["action"], effort["value"], effort["options"]) == (
+        "level", "effort", "high", ["default", "low", "high"])
+    assert panel["row_actions"] == [{"id": "select", "label": "Use", "payload_key": "model"}]
 
 
 @pytest.mark.asyncio
@@ -216,8 +218,9 @@ async def test_model_select_and_effort_call_the_terminal_functions(model_ctx):
     for payload in ({}, {"model": "two words"}, {"model": "x" * 300}):
         with pytest.raises(PanelError):
             await MODEL.act(model_ctx, "select", payload)
-    with pytest.raises(PanelError):
+    with pytest.raises(PanelError) as no_level:
         await MODEL.act(model_ctx, "effort", {})
+    assert "level" in no_level.value.errors  # the control's path
     with pytest.raises(PanelError) as unknown:
         await MODEL.act(model_ctx, "switch", {})
     assert unknown.value.status == 404

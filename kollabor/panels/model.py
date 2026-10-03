@@ -89,13 +89,13 @@ async def _effort_control(handler: Any, profile: Any) -> dict:
     provider = (profile.get_provider() or "").lower()
     if provider not in EFFORT_SUPPORTED_PROVIDERS:
         return make_field(
-            "effort", "dropdown", "Reasoning Effort",
+            "level", "dropdown", "Reasoning Effort", action="effort",
             value="default", options=["default"], editable=False,
             help=f"{provider_display(provider)} has no reasoning-effort parameter.",
         )
     levels = await handler._model_effort_levels(profile)
     return make_field(
-        "effort", "dropdown", "Reasoning Effort",
+        "level", "dropdown", "Reasoning Effort", action="effort",
         value=profile.get_effort() or "default", options=["default", *levels],
         help="Saved to the active provider profile. Default lets the model decide.",
     )
@@ -120,7 +120,7 @@ class ModelPanel:
             "title": "Models",
             "scope_note": SCOPE_NOTE,
             "rows": [],
-            "row_actions": [{"id": "select", "label": "Use"}],
+            "row_actions": [{"id": "select", "label": "Use", "payload_key": "model"}],
             "toolbar_actions": [{"id": "refresh", "label": "Refresh Catalog"}],
             "controls": [],
             "empty_groups": [],
@@ -168,7 +168,7 @@ class ModelPanel:
         if action == "effort":
             level = payload.get("level", payload.get("value", payload.get("effort")))
             if not isinstance(level, str) or not level.strip():
-                raise PanelError("an effort level is required", errors={"effort": "Choose a level."})
+                raise PanelError("an effort level is required", errors={"level": "Choose a level."})
             outcome = await model_handler(ctx)._handle_effort(level)
             if not outcome.success:
                 return error_result(_one_line(outcome.message))
