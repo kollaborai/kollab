@@ -1567,7 +1567,7 @@ class ContextCompactionPlugin(BasePlugin):
         ledger entries and apply decisions:
           - keep: preserve the original message verbatim
           - summary: replace with agent-written summary
-          - pending: elide with a size marker
+          - pending: left untracked, so the summarizer covers it
           - evicted: keep the already-rewritten stub
 
         Returns (ledger_handled, untracked_msgs).
@@ -1642,23 +1642,10 @@ class ContextCompactionPlugin(BasePlugin):
                 )
                 ledger_handled.append(new_msg)
             else:
-                # Pending — elide with marker
-                markers = []
-                for e in entries:
-                    markers.append(
-                        f"[{e.ctx_id} {e.kind} {e.label}, "
-                        f"{e.size_bytes // 1024}KB, elided]"
-                    )
-                new_msg = ConversationMessage(
-                    role=msg.role,
-                    content="\n".join(markers),
-                    metadata={
-                        "compacted_from": ctx_ids,
-                        "ledger_decision": "elided",
-                        "elided": True,
-                    },
-                )
-                ledger_handled.append(new_msg)
+                # Pending (agent never curated it): fall through to the
+                # summarizer, as the curator prompt promises. Eliding it
+                # would drop the content with no summary at all.
+                untracked.append(msg)
 
         if ledger_handled:
             logger.info(
