@@ -399,12 +399,28 @@ function searchCommandItems(
   }
 
   const matchingChildIds = new Set(matchingChildren.map((item) => item.id));
-  return items.filter((item) => {
-    if (readMetadataNumber(item, "depth") > 0) {
-      return matchingChildIds.has(item.id);
-    }
-    return parentIds.has(item.id);
-  });
+  // Name matches first: the first row is what Enter selects, and a typed
+  // `/config` must not land on `/agent` just because its description says
+  // "configurations". Children stay directly under their parent.
+  const rank = (item: Unstable_TriggerItem) => {
+    const name = item.id.toLowerCase();
+    if (name === parentQuery) return 0;
+    if (name.startsWith(parentQuery)) return 1;
+    const aliases = readMetadata(item, "secondary")?.toLowerCase() ?? "";
+    return name.includes(parentQuery) || aliases.includes(parentQuery) ? 2 : 3;
+  };
+  return parents
+    .filter((item) => parentIds.has(item.id))
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => rank(a.item) - rank(b.item) || a.index - b.index)
+    .flatMap(({ item }) => [
+      item,
+      ...children.filter(
+        (child) =>
+          readMetadata(child, "parentId") === item.id &&
+          matchingChildIds.has(child.id),
+      ),
+    ]);
 }
 
 function matchesTriggerItem(
