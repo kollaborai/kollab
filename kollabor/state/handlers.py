@@ -84,6 +84,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.hub_contact_knock       (send a knock through the relay's owner)
         state.hub_contact_pending     (knocks waiting for this device)
         state.hub_contact_decide      (accept or reject one knock)
+        state.get_panel               (describe a kollabor.panels panel)
+        state.panel_action            (run one panel action)
     """
 
     async def _get_conversation(params: dict[str, Any]) -> dict[str, Any]:
@@ -668,6 +670,43 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except Exception as e:
             return {"error": str(e)}
 
+    def _panel_error(exc: Exception) -> dict[str, Any]:
+        from kollabor.panels import PanelError
+
+        if isinstance(exc, PanelError):
+            return {"error": exc.message, "status": exc.status, "errors": exc.errors}
+        # Never log params or the message: a panel payload can hold a secret.
+        logger.error("panel call failed: %s", type(exc).__name__)
+        return {"error": "panel unavailable", "status": 500}
+
+    async def _get_panel(params: dict[str, Any]) -> dict[str, Any]:
+        name, panel_params = params.get("name"), params.get("params", {})
+        if (
+            set(params) - {"name", "params"}
+            or not isinstance(name, str)
+            or not isinstance(panel_params, dict)
+        ):
+            return {"error": "invalid panel request", "status": 400}
+        try:
+            return {"panel": await state_service.get_panel(name, panel_params)}
+        except Exception as exc:
+            return _panel_error(exc)
+
+    async def _panel_action(params: dict[str, Any]) -> dict[str, Any]:
+        name, action = params.get("name"), params.get("action")
+        payload = params.get("payload", {})
+        if (
+            set(params) - {"name", "action", "payload"}
+            or not isinstance(name, str)
+            or not isinstance(action, str)
+            or not isinstance(payload, dict)
+        ):
+            return {"error": "invalid panel request", "status": 400}
+        try:
+            return {"result": await state_service.panel_action(name, action, payload)}
+        except Exception as exc:
+            return _panel_error(exc)
+
     async def _goal_command(params: dict[str, Any]) -> dict[str, Any]:
         try:
             return await state_service.goal_command(str(params.get("text", "")))
@@ -735,6 +774,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.hub_contact_knock": _hub_contact_knock,
         "state.hub_contact_pending": _hub_contact_pending,
         "state.hub_contact_decide": _hub_contact_decide,
+        "state.get_panel": _get_panel,
+        "state.panel_action": _panel_action,
         "state.hub_connect": _hub_connect,
         "state.hub_send_msg": _hub_send_msg,
         "state.list_hub_agents": _list_hub_agents,

@@ -169,6 +169,26 @@ class StateService(Protocol):
         """Return visible slash-command metadata for interactive clients."""
         ...
 
+    async def get_panel(
+        self, name: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Describe one panel (``kollabor.panels``) as plain data.
+
+        Raises ``PanelError`` (``.status``, ``.errors``) for an unknown panel or
+        a request the panel cannot serve.
+        """
+        ...
+
+    async def panel_action(
+        self, name: str, action: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run one panel action; returns ``{ok, message, errors, panel, open}``.
+
+        Raises ``PanelError`` like ``get_panel``. Payloads can hold secrets: never
+        log them.
+        """
+        ...
+
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a session-private generated image by opaque media ID.
 

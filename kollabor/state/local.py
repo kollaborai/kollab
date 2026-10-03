@@ -1032,7 +1032,31 @@ class LocalStateService(StateService):
                     "subcommands": subcommands,
                 }
             )
+        from kollabor.panels import panel_for_command
+
+        for entry in catalog:
+            panel = panel_for_command(entry["name"])
+            if panel:
+                entry["panel"] = panel
         return catalog
+
+    # === Panels (kollabor.panels) ===
+
+    async def get_panel(
+        self, name: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Describe one panel; this service is the panel's ``ctx``."""
+        from kollabor.panels import require_panel
+
+        return await require_panel(name).describe(self, params or {})
+
+    async def panel_action(
+        self, name: str, action: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run one panel action through the same functions the terminal calls."""
+        from kollabor.panels import require_panel
+
+        return await require_panel(name).act(self, action, payload or {})
 
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a generated image through the daemon-owned API service."""
