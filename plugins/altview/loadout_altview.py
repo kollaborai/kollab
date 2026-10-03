@@ -44,6 +44,20 @@ import logging
 import time
 from typing import Any, List, Optional, Tuple
 
+from kollabor.panels.llm import (  # isort: skip
+    EFFORT_OPTIONS as _EFFORT_OPTIONS,
+    build_active_profile_base,
+    build_sections,
+    default_max_tokens as _default_max_tokens,
+    empty_note,
+    is_chatgpt_codex_profile as _is_chatgpt_codex_profile,
+    loadout_note as _loadout_note,
+    model_registry_info as _model_registry_info,
+    provider_display as _provider_display,
+    resolve_provider_type as _resolve_provider_type,
+    short_error as _short_error,
+    suggest_name as _suggest_name,
+)
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
@@ -52,194 +66,6 @@ logger = logging.getLogger(__name__)
 
 
 # -- shared helpers -----------------------------------------------------------
-
-_PROVIDER_LABELS = {
-    "openai_responses": "OpenAI (ChatGPT)",
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "openrouter": "OpenRouter",
-    "gemini": "Gemini",
-    "azure": "Azure OpenAI",
-    "custom": "Custom",
-}
-
-_EFFORT_OPTIONS = ("default", "low", "medium", "high", "xhigh", "max", "ultra")
-
-
-def _provider_display(provider: str) -> str:
-    """Title-case display name for a provider type string."""
-    if not provider:
-        return "Provider"
-    return _PROVIDER_LABELS.get(provider.lower(), provider.replace("_", " ").title())
-
-
-def _resolve_provider_type(profile_manager: Any, provider_profile: str) -> str:
-    """Best-effort provider type (e.g. ``anthropic``) for a profile name."""
-    if not profile_manager or not provider_profile:
-        return provider_profile or ""
-    try:
-        profile = profile_manager.get_profile(provider_profile)
-    except Exception:
-        return provider_profile
-    if profile is not None and hasattr(profile, "get_provider"):
-        try:
-            return profile.get_provider() or provider_profile
-        except Exception:
-            return provider_profile
-    return provider_profile
-
-
-def _is_chatgpt_codex_profile(profile_manager: Any, provider_profile: str) -> bool:
-    """Whether a profile targets the ChatGPT OAuth/Codex transport."""
-    if not profile_manager or not provider_profile:
-        return False
-    try:
-        profile = profile_manager.get_profile(provider_profile)
-        endpoint = profile.get_endpoint() if profile is not None else ""
-    except Exception:
-        return False
-    return "chatgpt.com" in str(endpoint or "").lower()
-
-
-def _resolve_profile_entry(profile_manager: Any, entry: Any) -> Tuple[str, str]:
-    """(profile_name, provider_type) from a ``provider_profiles()`` item.
-
-    The item may be a profile name string or an ``LLMProfile``-like object --
-    the manager's exact return shape isn't known here (it lands separately),
-    so both are handled defensively.
-    """
-    if isinstance(entry, str):
-        return entry, _resolve_provider_type(profile_manager, entry)
-    name = getattr(entry, "name", "") or str(entry)
-    provider = ""
-    if hasattr(entry, "get_provider"):
-        try:
-            provider = entry.get_provider() or ""
-        except Exception:
-            provider = ""
-    elif hasattr(entry, "provider"):
-        provider = getattr(entry, "provider") or ""
-    return name, provider or _resolve_provider_type(profile_manager, name)
-
-
-def _model_registry_info(model: str) -> dict:
-    """Registry dict for an exact model id, or ``{}`` when unknown."""
-    if not model:
-        return {}
-    try:
-        from kollabor_ai.model_registry import get_model_registry
-
-        info = get_model_registry().get("models", {}).get(model)
-        return info if isinstance(info, dict) else {}
-    except Exception as exc:  # noqa: BLE001 - registry is best-effort
-        logger.debug("loadout: model registry unavailable: %s", exc)
-        return {}
-
-
-def _model_note(model: str, provider: str = "") -> str:
-    """``1M ctx • $5/$30`` style descriptor, matching ModelCommandHandler._registry_note."""
-    parts: List[str] = []
-    try:
-        from kollabor_ai.model_registry import resolve_context_window
-
-        window = resolve_context_window(model, provider or None)
-        if isinstance(window, int) and window > 0:
-            parts.append(
-                f"{window / 1_000_000:.2f}M ctx".replace(".00M", "M")
-                if window >= 1_000_000
-                else f"{window // 1000}K ctx"
-            )
-    except Exception as exc:  # noqa: BLE001 - never block rendering
-        logger.debug("loadout: context window lookup failed for %s: %s", model, exc)
-
-    info = _model_registry_info(model)
-    price_in, price_out = info.get("pricing_in"), info.get("pricing_out")
-    if isinstance(price_in, (int, float)) and isinstance(price_out, (int, float)):
-        parts.append(f"${price_in:g}/${price_out:g}")
-    return " • ".join(parts)
-
-
-def _loadout_note(loadout: Any) -> str:
-    """Right-aligned dim row note: ``model • 1M ctx • $5/$30 [• overrides]``."""
-    parts = [loadout.model]
-    note = _model_note(loadout.model)
-    if note:
-        parts.append(note)
-    if not loadout.implicit:
-        overrides = []
-        if loadout.temperature is not None:
-            overrides.append(f"temp {loadout.temperature:g}")
-        if loadout.effort:
-            overrides.append(f"effort {loadout.effort}")
-        if loadout.max_tokens:
-            overrides.append(f"max {loadout.max_tokens:,}")
-        if overrides:
-            parts.append(" • ".join(overrides))
-    return " • ".join(p for p in parts if p)
-
-
-def _default_max_tokens(model: str) -> int:
-    info = _model_registry_info(model)
-    value = info.get("default_output") or info.get("max_output")
-    if isinstance(value, int) and value > 0:
-        # The registry value is a model hint/ceiling. Kollab's provider config
-        # intentionally reserves 16K by default so a large output allowance
-        # does not consume the context budget on every turn. Users can still
-        # enter the registry ceiling explicitly for long generation.
-        return min(value, 16384)
-    return 16384
-
-
-def _suggest_name(model: str, existing: set, style: str) -> str:
-    """Suggested loadout name: bare model id, or ``-custom`` when branching."""
-    base = model or "loadout"
-    candidate = f"{base}-custom" if style == "custom" else base
-    if candidate not in existing:
-        return candidate
-    i = 2
-    while f"{candidate}-{i}" in existing:
-        i += 1
-    return f"{candidate}-{i}"
-
-
-def _short_error(msg: str) -> str:
-    msg = " ".join(msg.split())
-    if len(msg) > 120:
-        msg = msg[:117] + "..."
-    return msg or "unknown error"
-
-
-def build_active_profile_base(profile_manager: Any) -> Optional[Any]:
-    """Synthesize an implicit ``Loadout`` base from the active profile, or None.
-
-    Shared by the list view's "N with nothing selected" fallback and the
-    `/loadout new` handler path.
-    """
-    if profile_manager is None:
-        return None
-    try:
-        active = profile_manager.get_active_profile()
-    except Exception:
-        return None
-    if not active:
-        return None
-    try:
-        model = active.get_model() or ""
-    except Exception:
-        model = ""
-    if not model:
-        return None
-    try:
-        from kollabor_ai.loadout_manager import Loadout
-    except Exception as exc:  # pragma: no cover - import guard
-        logger.debug("loadout: Loadout dataclass unavailable: %s", exc)
-        return None
-    return Loadout(
-        name="",
-        provider_profile=getattr(active, "name", "") or "",
-        model=model,
-        implicit=True,
-    )
 
 
 def _render_widget_safe(widget: Any, width: int, position: str) -> List[str]:
@@ -395,54 +221,7 @@ class LoadoutListAltView(AltView):
         self._apply_filter()
 
     def _build_sections(self) -> List[Tuple[str, List[Any]]]:
-        """(section_title, loadouts) pairs: explicit first, then per provider."""
-        if self._manager is None:
-            return [("Loadouts", [])]
-
-        try:
-            loadouts = list(self._manager.list_loadouts())
-        except Exception as exc:
-            logger.error("loadout: list_loadouts() failed: %s", exc)
-            loadouts = []
-
-        explicit = [entry for entry in loadouts if not entry.implicit]
-        implicit = [entry for entry in loadouts if entry.implicit]
-
-        sections: List[Tuple[str, List[Any]]] = [("Loadouts", explicit)]
-
-        try:
-            profiles = list(self._manager.provider_profiles() or [])
-        except Exception as exc:
-            logger.warning("loadout: provider_profiles() failed: %s", exc)
-            profiles = []
-
-        claimed: set = set()
-        for entry in profiles:
-            name, provider = _resolve_profile_entry(self._profile_manager, entry)
-            if not name or name in claimed:
-                continue
-            claimed.add(name)
-            rows = [m for m in implicit if m.provider_profile == name]
-            # A configured provider always gets a section, even with zero rows.
-            # Skipping it made a provider serving no models look identical to a
-            # provider that was never configured -- the failure that hid
-            # OpenRouter's empty registry for an entire release.
-            sections.append((f"Models — {_provider_display(provider or name)}", rows))
-
-        # Defensive: keep any implicit loadout visible even if its
-        # provider_profile wasn't covered by provider_profiles() above, so a
-        # mismatch between the two manager methods never silently drops rows.
-        leftover = [m for m in implicit if m.provider_profile not in claimed]
-        if leftover:
-            by_profile: dict = {}
-            for entry in leftover:
-                by_profile.setdefault(entry.provider_profile, []).append(entry)
-            for profile_name, rows in by_profile.items():
-                provider = _resolve_provider_type(self._profile_manager, profile_name)
-                label = _provider_display(provider or profile_name)
-                sections.append((f"Models — {label}", rows))
-
-        return sections
+        return build_sections(self._manager, self._profile_manager)
 
     def _apply_filter(self) -> None:
         q = self._query.lower().strip()
@@ -786,12 +565,7 @@ class LoadoutListAltView(AltView):
             y += 1
 
     def _empty_note(self, title: str) -> str:
-        """Placeholder line for a section with no rows."""
-        if not title.startswith("Models"):
-            return "No saved loadouts — press N to create one from any model."
-        if self._catalogs_loading:
-            return "fetching catalog…"
-        return "no models — catalog unavailable, /llm again to retry"
+        return empty_note(title, loading=self._catalogs_loading)
 
     def _flat_lines(self) -> List[Tuple]:
         lines: List[Tuple] = []
