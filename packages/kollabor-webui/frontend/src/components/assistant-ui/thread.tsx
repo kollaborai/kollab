@@ -29,6 +29,10 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { AgentPoolEntry, SlashCommand } from "@/api";
 import {
+  panelCommandRequest,
+  type PanelOpenRequest,
+} from "@/components/panels/panel-model";
+import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
   AuiIf,
@@ -41,6 +45,7 @@ import {
   SuggestionPrimitive,
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -92,6 +97,8 @@ export type ThreadProps = {
   components?: ThreadComponents | undefined;
   agents?: readonly AgentPoolEntry[] | undefined;
   commands?: readonly SlashCommand[] | undefined;
+  /** Open a Settings tab; called for a bare panel command typed in the composer. */
+  onOpenPanel?: ((request: PanelOpenRequest) => void) | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -109,12 +116,18 @@ export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   agents = [],
   commands = [],
+  onOpenPanel,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} agents={agents} commands={commands} />
+      <ThreadRoot
+        isEmpty={isEmpty}
+        agents={agents}
+        commands={commands}
+        onOpenPanel={onOpenPanel}
+      />
     </ThreadComponentsContext.Provider>
   );
 };
@@ -123,7 +136,8 @@ const ThreadRoot: FC<{
   isEmpty: boolean;
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
-}> = ({ isEmpty, agents, commands }) => {
+  onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+}> = ({ isEmpty, agents, commands, onOpenPanel }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
 
   return (
@@ -170,7 +184,11 @@ const ThreadRoot: FC<{
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <Composer agents={agents} commands={commands} />
+            <Composer
+              agents={agents}
+              commands={commands}
+              onOpenPanel={onOpenPanel}
+            />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -245,7 +263,41 @@ const ThreadSuggestionItem: FC = () => {
 const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
-}> = ({ agents, commands }) => {
+  onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+}> = ({ agents, commands, onOpenPanel }) => {
+  const aui = useAui();
+
+  // A bare /config, /llm, /model, /setup or /connect (also /connect code and
+  // /connect knocks) opens its Settings tab and posts no text. Any other line is
+  // sent exactly as typed. Runs on form submit (Enter) and on the Send button.
+  const openPanelFromComposer = (event: { preventDefault: () => void }) => {
+    if (!onOpenPanel) return;
+    const { text, attachments } = aui.composer.getState();
+    const request =
+      attachments.length === 0 ? panelCommandRequest(text, commands) : null;
+    if (!request) return;
+    event.preventDefault();
+    aui.composer.setText("");
+    onOpenPanel(request);
+  };
+
+  // Picking a panel command in the slash menu (Enter or click) opens its tab
+  // instead of leaving "/config" in the box for a second Enter.
+  const openPanelForItem = (item: {
+    id: string;
+    metadata?: Record<string, unknown> | undefined;
+  }) => {
+    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
+    const insert = item.metadata?.insertText;
+    const request = panelCommandRequest(
+      `/${typeof insert === "string" ? insert : item.id}`,
+      commands,
+    );
+    if (!request) return;
+    aui.composer.setText("");
+    onOpenPanel(request);
+  };
+
   const commandItems = useMemo<readonly ComposerPaletteItem[]>(
     () => {
       const visibleCommands = [...commands]
@@ -436,13 +488,17 @@ const Composer: FC<{
 
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
-      <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
+      <ComposerPrimitive.Root
+        className="aui-composer-root relative flex w-full flex-col"
+        onSubmit={openPanelFromComposer}
+      >
         <ComposerPalette
           char="/"
           items={commandItems}
           title="Commands"
           emptyMessage="No matching commands"
           emptyHint="Keep typing to refine the command search."
+          onInserted={openPanelForItem}
         />
         <ComposerPalette
           char="@"
@@ -466,7 +522,7 @@ const Composer: FC<{
               aria-label="Message input"
               onKeyDown={handleComposerKeyDown}
             />
-            <ComposerAction />
+            <ComposerAction onBeforeSend={openPanelFromComposer} />
           </div>
         </ComposerPrimitive.AttachmentDropzone>
       </ComposerPrimitive.Root>
@@ -491,7 +547,9 @@ function prettyCommandName(name: string): string {
     .join(" ");
 }
 
-const ComposerAction: FC = () => {
+const ComposerAction: FC<{
+  onBeforeSend: (event: { preventDefault: () => void }) => void;
+}> = ({ onBeforeSend }) => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <ComposerAddAttachment />
@@ -529,7 +587,7 @@ const ComposerAction: FC = () => {
           </AuiIf>
         </AuiIf>
         <AuiIf condition={(s) => !s.thread.isRunning}>
-          <ComposerPrimitive.Send asChild>
+          <ComposerPrimitive.Send asChild onClick={onBeforeSend}>
             <TooltipIconButton
               tooltip="Send message"
               side="bottom"

@@ -1,6 +1,7 @@
 import type { FC } from "react";
 import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
 import type { AgentPoolEntry, SlashCommand } from "@/api";
+import type { PanelOpenRequest } from "@/components/panels/panel-model";
 
 // kollab-branded welcome screen. Replaces the kit's generic ThreadWelcome via
 // the `components.Welcome` slot; everything else (messages, tool calls,
@@ -23,10 +24,12 @@ const Welcome: FC = () => (
 export const Thread: FC<{
   agents?: readonly AgentPoolEntry[];
   commands?: readonly SlashCommand[];
-}> = ({ agents = [], commands = [] }) => (
+  onOpenPanel?: (request: PanelOpenRequest) => void;
+}> = ({ agents = [], commands = [], onOpenPanel }) => (
   <AssistantThread
     components={{ Welcome }}
     agents={agents}
     commands={commands}
+    onOpenPanel={onOpenPanel}
   />
 );
