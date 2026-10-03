@@ -2663,13 +2663,20 @@ class LocalStateService(StateService):
                 raise ValueError(f"Could not parse slash command: {text}")
             result = await executor.execute_command(command, self._event_bus)
             output = _web_command_output(result, command.name)
+            # /connect refuses a join code typed as an argument; the saved
+            # conversation must not keep the code either.
+            recorded = text
+            if command.name == "connect":
+                from kollabor.logging.setup import redact_join_codes
+
+                recorded = redact_join_codes(text)
             metadata = {
-                "slash_command": text,
+                "slash_command": recorded,
                 "command_success": bool(getattr(result, "success", False)),
             }
             add_message = getattr(self._llm_service, "_add_conversation_message", None)
             if callable(add_message):
-                add_message("user", text, metadata={"slash_command": text})
+                add_message("user", recorded, metadata={"slash_command": recorded})
                 add_message("assistant", output, metadata=metadata)
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(

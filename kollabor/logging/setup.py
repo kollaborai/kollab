@@ -38,6 +38,11 @@ _ENROLLMENT_CODE_RE = re.compile(
 )
 
 
+def redact_join_codes(text: str) -> str:
+    """Replace every join code in *text*, the same way log records are."""
+    return _ENROLLMENT_CODE_RE.sub("[join code redacted]", text)
+
+
 class JoinCodeRedactionFilter(_logging.Filter):
     """Rewrite any log record that carries a join code, for every formatter.
 
@@ -51,7 +56,7 @@ class JoinCodeRedactionFilter(_logging.Filter):
             message = record.getMessage()
         except Exception:
             return True  # a malformed record is the formatter's problem, not ours
-        redacted = _ENROLLMENT_CODE_RE.sub("[join code redacted]", message)
+        redacted = redact_join_codes(message)
         if redacted != message:
             record.msg = redacted
             record.args = None

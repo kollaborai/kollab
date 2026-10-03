@@ -131,6 +131,7 @@ class ConfigAltView(AltView):
         from kollabor_tui.widgets.dropdown import DropdownWidget
         from kollabor_tui.widgets.label import LabelWidget
         from kollabor_tui.widgets.slider import SliderWidget
+        from kollabor_tui.widgets.spin_box import SpinBoxWidget
         from kollabor_tui.widgets.text_input import TextInputWidget
 
         wtype = widget_config.get("type", "label")
@@ -153,6 +154,8 @@ class ConfigAltView(AltView):
             return TextInputWidget(cfg, config_path, self.config_service)
         elif wtype == "slider":
             return SliderWidget(cfg, config_path, self.config_service)
+        elif wtype == "spinbox":
+            return SpinBoxWidget(cfg, config_path, self.config_service)
         elif wtype == "label":
             return LabelWidget(
                 label=widget_config.get("label", ""),
@@ -234,7 +237,8 @@ class ConfigAltView(AltView):
         config_path = widget_config.get("config_path", "")
         last = config_path.rsplit(".", 1)[-1].lower()
         value = self._managed_value(config_path)
-        if any(word in last for word in ("key", "token", "secret", "password")):
+        # Suffix match: "bridge_token" is a secret, "token_threshold_k" is not.
+        if last.endswith(("key", "token", "secret", "password")):
             shown = "set" if value else "empty"  # a secret is never drawn
         elif value is None:
             shown = "unset"
