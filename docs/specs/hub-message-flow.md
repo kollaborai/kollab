@@ -114,15 +114,16 @@ the tag must NOT show in the UI.
        +---> plugin.py:2999-3000  if nothing left:
        |       data["suppress_display"] = True
        |
-       +---> plugin.py:2913  if cmd_results exist:
-                data["force_continue"] = True
+       +---> no continuation flag: the turn goes on because the
+       |     hub_msg tool result goes back to the model; wait="true"
+       |     ends it via metadata["end_turn"]
        |
        v
   back in queue_processor.py:714-724
   reads from response_context phases:
     clean_response = final_data["clean_response"]  <-- stripped
-    force_continue = final_data["force_continue"]
     suppress_display = final_data["suppress_display"]
+    turn_complete = final_data["turn_complete"]
        |
        v
   queue_processor.py:735-738

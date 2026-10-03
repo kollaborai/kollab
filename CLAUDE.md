@@ -233,7 +233,7 @@ Peer-to-peer agent mesh with persistent identity.
 - **CrystalStore** (`plugins/hub/crystal_store.py`) - Structured entries with IDs, dates, keywords, summaries
 - **Nudge system** - Auto-injects relevant crystal entries as system messages when user input matches keywords
 - **Dreaming** - Idle agents review their stream and distill insights into crystallized.md
-- **Rebirth** - On restart, `get_rebirth_context()` loads last 15 stream entries + working memory + crystallized + scratchpad
+- **Rebirth** - On restart, `get_rebirth_context(task_ledger=...)` lists the agent's active TaskLedger cards (id, status, priority, assigner, title; "none" when it has none, "unavailable" if the ledger can't be read) plus the last 15 stream entries, working memory and crystallized memory. Both the startup injection (`plugins/hub/plugin.py`) and the `hub_vault` trender pass the ledger
 
 **Vault XML tags (agent-accessible):**
 - `<vault_write keywords="a,b">insight text</vault_write>` - Save new crystal entry
@@ -324,7 +324,7 @@ kill -0 <pid>  # exit 0 = alive
 
 **Common hub bugs and their root causes:**
 - Raw `<hub_msg>` tags in UI: hook crashing (check "Failed executing hook" in log)
-- Agent loop (standing by forever): force_continue on delivery, fix with wait="true"
+- Agent loop (standing by forever): each delivery woke the agent again, fix with wait="true"
 - Agent not dying on stop: socket shutdown failed, needs SIGTERM fallback
 - Doubled messages: dedup window too short (now 120s)
 - Human typing in agent A shows as "-> agent B": broadcast display needs source_agent metadata

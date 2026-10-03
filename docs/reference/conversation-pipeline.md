@@ -6,6 +6,12 @@ Full trace of how a message flows through the kollabor system, from
 user keystroke to JSONL write. Covers every component involved,
 their wiring, and known gaps.
 
+Diagrams (draw.io, in docs/diagrams/):
+  - tool-call-lifecycle.drawio   4 pages: turn lifecycle, loop drivers,
+                                 provider loops, resume vs stop
+  - context-compaction.drawio    context compaction (see "Context Compaction
+                                 Plugin" below)
+
 
 Architecture Overview
 =====================
