@@ -203,14 +203,16 @@ def make_field(
     editable: bool = True,
     managed_by: Optional[str] = None,
     secret: bool = False,
+    action: Optional[str] = None,
 ) -> dict[str, Any]:
     """One field in the wire format.
 
     A secret never carries its value: ``value`` is None and ``is_set`` says
     whether one exists. ``editable`` is forced false for ``label`` rows and for
-    managed paths. ``options`` is a list of strings (dropdown).
+    managed paths. ``options`` is a list of strings (dropdown). A picker control
+    sets ``action``: the browser posts ``{path: value}`` to that action.
     """
-    return {
+    field = {
         "path": path,
         "type": type,
         "label": label,
@@ -226,6 +228,9 @@ def make_field(
         "secret": bool(secret),
         "is_set": value is not None and value != "",
     }
+    if action:
+        field["action"] = action
+    return field
 
 
 def panel_for_command(command: str) -> Optional[str]:

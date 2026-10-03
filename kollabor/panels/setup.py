@@ -301,12 +301,14 @@ def _pick(value: str) -> Optional[ProviderChoice]:
 def _values(payload: dict) -> tuple[ProviderChoice, str, str, str]:
     """Validated (provider, api_key, base_url, model) or PanelError with errors."""
     errors: dict[str, str] = {}
-    choice = _pick(payload.get("provider"))
+    # a wizard action sends {"values": {path: value}, "step": id}
+    values = payload.get("values") if isinstance(payload.get("values"), dict) else payload
+    choice = _pick(values.get("provider"))
     if choice is None:
         errors["provider"] = "Choose a provider from the list."
-    api_key = str(payload.get("api_key") or "").strip()
-    base_url = str(payload.get("base_url") or "").strip()
-    model = str(payload.get("model") or "").strip()
+    api_key = str(values.get("api_key") or "").strip()
+    base_url = str(values.get("base_url") or "").strip()
+    model = str(values.get("model") or "").strip()
     for key, value in (("api_key", api_key), ("base_url", base_url), ("model", model)):
         if len(value) > _MAX_FIELD or not value.isprintable():
             errors[key] = "That value is not valid."

@@ -94,6 +94,7 @@ async def test_llm_describe_groups_current_default_and_empty_providers(llm_ctx):
     assert not rows["gpt-y"]["current"]
     assert [g["group"] for g in panel["empty_groups"]] == ["Models — OpenRouter"]
     assert {a["id"] for a in panel["row_actions"]} == {"activate", "edit", "set_default", "delete"}
+    assert {a["payload_key"] for a in panel["row_actions"]} == {"name"}
 
 
 @pytest.mark.asyncio
@@ -200,8 +201,9 @@ async def test_model_describe_merges_catalog_and_has_effort_control(model_ctx):
     assert [(r["id"], r["current"]) for r in panel["rows"]] == [
         ("m-a", True), ("m-b", False), ("m-c", False)]
     effort = panel["controls"][0]
-    assert (effort["path"], effort["value"], effort["options"]) == (
-        "effort", "high", ["default", "low", "high"])
+    assert (effort["path"], effort["action"], effort["value"], effort["options"]) == (
+        "level", "effort", "high", ["default", "low", "high"])
+    assert panel["row_actions"] == [{"id": "select", "label": "Use", "payload_key": "model"}]
 
 
 @pytest.mark.asyncio
@@ -216,8 +218,9 @@ async def test_model_select_and_effort_call_the_terminal_functions(model_ctx):
     for payload in ({}, {"model": "two words"}, {"model": "x" * 300}):
         with pytest.raises(PanelError):
             await MODEL.act(model_ctx, "select", payload)
-    with pytest.raises(PanelError):
+    with pytest.raises(PanelError) as no_level:
         await MODEL.act(model_ctx, "effort", {})
+    assert "level" in no_level.value.errors  # the control's path
     with pytest.raises(PanelError) as unknown:
         await MODEL.act(model_ctx, "switch", {})
     assert unknown.value.status == 404
@@ -361,3 +364,45 @@ def test_valid_base_url_and_panel_registry():
     assert all(setup_panel.valid_base_url(u) for u in ok)
     assert not any(setup_panel.valid_base_url(u) for u in bad)
     assert get_panel("llm") is LLM and get_panel("model") is MODEL and get_panel("setup") is SETUP
+
+
+# -- action bodies as the browser sends them (CONTRACT-ACTIONS items 3 and 4) ---
+
+
+@pytest.mark.asyncio
+async def test_llm_save_reads_the_form_action_body(llm_ctx):
+    form = (await LLM.act(llm_ctx, "edit", {"name": "claude-x"}))["open"]
+    body = {
+        "changes": {"name": "viaform", "temperature": 0.4, "effort": "low",
+                    "max_tokens": "", "description": " d "},
+        "target": "global",
+        "context": form["context"],
+    }
+    assert (await LLM.act(llm_ctx, "save", body))["ok"]
+    _, name, kw = [c for c in llm_ctx.manager.calls if c[0] == "create"][-1]
+    assert (name, kw["provider_profile"], kw["model"], kw["temperature"], kw["effort"], kw["description"]) == (
+        "viaform", "anthropic", "claude-x", 0.4, "low", "d")
+    for bad, field in (({"temperature": 9}, "temperature"), ({"name": ""}, "name"), ({"effort": "huge"}, "effort")):
+        with pytest.raises(PanelError) as err:
+            # a top-level name must not stand in for the form's own field
+            await LLM.act(llm_ctx, "save", {**body, "name": "ignored", "changes": {**body["changes"], **bad}})
+        assert field in err.value.errors
+
+
+@pytest.mark.asyncio
+async def test_setup_reads_the_wizard_action_body(monkeypatch):
+    seen = []
+
+    async def fake(provider, model, api_key, base_url, timeout=25.0):
+        seen.append((provider, api_key))
+        return True, "connected"
+
+    monkeypatch.setattr(setup_panel, "test_connection", fake)
+    body = {"values": PAYLOAD, "step": "review"}
+    assert (await SETUP.act(FakeDaemon(FakeProfiles()), "test", body))["ok"]
+    assert seen == [("anthropic", KEY)]
+    daemon = FakeDaemon(FakeProfiles())
+    assert (await SETUP.act(daemon, "finish", body))["ok"] and daemon.activated
+    with pytest.raises(PanelError) as err:
+        await SETUP.act(FakeDaemon(FakeProfiles()), "finish", {"values": {**PAYLOAD, "api_key": ""}, "step": "key"})
+    assert "api_key" in err.value.errors and KEY not in str(err.value.errors)
