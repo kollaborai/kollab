@@ -1,7 +1,7 @@
 ---
 title: Unified Config Panels for the Web UI (/config, /llm, /model, /setup, /connect)
 created: 2026-10-02
-status: proposed (v2, after adversarial review)
+status: implemented (in progress)
 author: maintainers
 updated: 2026-10-02
 ---
@@ -386,6 +386,26 @@ and usable by any panel:
 - terminal `/config` shows editable secret fields (`plugins.hub.bridge_token`,
   `notify_telegram_token`) in plain text. mask them with `is_secret_path()`.
 
+
+## deviations (as built)
+
+what the code does where it differs from the design above.
+
+1. **a ContextVar sink carries the refusal, not only the exception.** `SlashCommandExecutor.execute_command` and the command handlers turn every exception into a failure result, so `AltViewUnavailable` never reaches `_execute_slash_command`. `AltViewStackManager.push()` and `FullScreenManager.launch_plugin()` (so `/matrix` and every other fullscreen plugin) append the view's name to `kollabor_tui.altview.stack_manager.unavailable_attempts` (a `ContextVar[list | None]`) and then raise. `LocalStateService._run_web_slash_command` sets it around the command and answers from it. A web-originated command refuses fullscreen views even in a process that owns a terminal.
+2. **"no terminal" is pipe mode or `--detached`/`-d` in `sys.argv`.** `interactive_terminal_available(renderer)` checks `renderer.pipe_mode is True` and argv (a `ponytail:` comment marks the shortcut; the upgrade is an explicit flag the app registers). Attach clients and a plain TUI stay interactive. Side effect to watch: a first-run wizard launched inside a detached process now raises instead of blocking, and the wizard's `except Exception` in `application.py` then saves `setup_completed`.
+3. **`open` carries the other panel's full `describe()`**, not just its name. An action that needs input (llm New/Edit, connect join and knocks, setup) returns the next form or wizard inline and the frontend renders it with a Back button.
+4. **there is a Setup tab.** The spec listed none. `/setup` (aliases `/onboard`, `/wizard`) opens Settings → Setup; the label lives in `PANEL_LOCATIONS["setup"]`.
+5. **a read-only network is 403.** A window whose daemon lost the relay to another window answers connect actions with 403 and a plain-language note. 409 stays "Session daemon is not running"; 503 is hub or profile manager unavailable; 502 is daemon unreachable; 404 is an unknown panel, row or action.
+6. **mtime poll, not watchdog.** `ConfigService` polls the config files' mtimes once a second on the loop and calls `reload()` (which notifies callbacks). watchdog is not installed in the daemon environment, so before this the daemon never saw a save from another process.
+7. **action payload contract** (the frontend's `PanelHost.tsx` and the panels agree on exactly this):
+   - row actions: POST `actions/{action.id}` with `{"id": row.id, [action.payload_key]: row.id}`. A row action whose panel reads a key other than `id` declares `payload_key` (llm `name`, model `model`, connect `enrollment_id`, knocks contact id); panels also accept `id`.
+   - picker controls (`controls` fields): POST `actions/{field.action or field.path}` with `{field.path: value}`. effort is `{"path": "level", "action": "effort", "type": "dropdown"}`, connect trust is `{"path": "level", "action": "trust"}`, rename is `{"path": "name", "action": "rename"}`.
+   - form actions: `{"changes": {path: value}, "target"?: "local"|"global"}`. A cleared secret arrives as `""`; untouched secrets are absent. A form's top-level `context` object is echoed back unchanged as `"context"` (llm New/Edit use it).
+   - wizard actions: `{"values": {path: value}, "step": stepId}`; `finish` resets the draft.
+   - toolbar actions: `{}`. One that needs input returns `open`.
+   - `summary` is a list of `{label, value}`; `notice` is a string; an optional per-row `actions: [ids]` limits which row actions show; `scope_note`, when present, replaces the tab's static scope line; `list_commands()` entries carry `panel` for config/llm/model/setup/connect.
+   - errors: 400 with top-level `{"message", "errors"}`; `PanelError.status` passes through.
+8. **the engine routes were not on this branch when this was written.** `routes/panels.py` and `apply_profile_mirror` are still to land; the daemon RPC (`StateService.get_panel` / `panel_action`) is in.
 
 ## review log
 
