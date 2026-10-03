@@ -397,6 +397,7 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
         is_processing = False
         turn_completed = False
         processing_queue = asyncio.Queue()
+        _last_tool_error_sig = None
 
         def note_chain_end(self):
             pass

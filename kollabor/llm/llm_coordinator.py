@@ -2007,19 +2007,6 @@ class LLMService:
 
     # --- StreamingHandler forwarding methods ---
 
-    async def _call_llm(self) -> str:
-        """Make API call to LLM using StreamingHandler."""
-        return cast(
-            str,
-            await self._streaming.call_llm(
-                conversation_history=self.conversation_history,
-                native_tools=self.native_tools,
-                mcp_discovery_complete=self.mcp_discovery_complete,
-                is_cancelled_fn=lambda: self.cancel_processing,
-                native_tools_provider=lambda: self.native_tools,
-            ),
-        )
-
     async def _handle_streaming_chunk(self, chunk: str) -> None:
         """Handle streaming content chunk from API."""
         await self._streaming.handle_chunk(chunk)

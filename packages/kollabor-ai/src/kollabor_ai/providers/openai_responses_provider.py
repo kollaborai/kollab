@@ -4,7 +4,6 @@ OpenAI Responses API provider implementation.
 Implements LLMProvider interface for OpenAI's Responses API with:
 - httpx async client for HTTP requests
 - Different request format (input field, instructions parameter)
-- Server-managed state (previous_response_id)
 - SSE streaming with custom event types
 - Tool calling with function_call_output format
 
@@ -14,7 +13,6 @@ Chat Completions in several key ways:
 - System prompt: 'instructions' parameter vs system message
 - Output: 'output' array of items vs 'choices' array
 - Tool results: 'function_call_output' items vs 'tool' role messages
-- State: 'previous_response_id' for chaining vs client-managed
 """
 
 import copy
@@ -158,6 +156,44 @@ def _merge_image_generation_items(
     response["output"] = normalized_output
 
 
+def _merge_function_call_items(
+    response: Dict[str, Any], completed_calls: List[Dict[str, Any]]
+) -> None:
+    """Add function calls seen as output_item.done to a final payload lacking them.
+
+    ChatGPT/Codex sends response.completed with an empty output, so without this
+    a tool-calling turn reads as plain text. Calls already in the output win.
+    """
+    output = response["output"]
+    seen = {
+        item.get("call_id") or item.get("id")
+        for item in output
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    }
+    for call in completed_calls:
+        key = call.get("call_id") or call.get("id")
+        if key not in seen:
+            seen.add(key)
+            output.append(copy.deepcopy(call))
+
+
+def _stream_failure(event: str, data: Dict[str, Any]) -> ProviderError:
+    """ProviderError carrying the server's own message for a failed stream.
+
+    response.failed nests it at response.error; a bare error event carries
+    code/message at the top level (some servers wrap it in "error").
+    """
+    response = data.get("response")
+    err = response.get("error") if isinstance(response, dict) else None
+    if not isinstance(err, dict):
+        err = data.get("error") if isinstance(data.get("error"), dict) else data
+    return ProviderError(
+        str(err.get("message") or f"Responses API stream reported {event}"),
+        provider="openai_responses",
+        error_code=str(err.get("code") or event),
+    )
+
+
 @register_provider(ProviderType.OPENAI_RESPONSES)
 class OpenAIResponsesProvider(LLMProvider):
     """
@@ -165,7 +201,6 @@ class OpenAIResponsesProvider(LLMProvider):
 
     The Responses API is OpenAI's new stateful API format with:
     - Different request format (input field, instructions parameter)
-    - Server-managed state (previous_response_id)
     - New streaming events (response.started, output_item.added, etc.)
 
     Configuration:
@@ -186,7 +221,6 @@ class OpenAIResponsesProvider(LLMProvider):
         "input": "What is the weather?",  # string or items array
         "instructions": "You are helpful",  # system prompt
         "tools": [...],
-        "previous_response_id": "resp_001",  # for chaining
         "stream": false
     }
 
@@ -204,8 +238,7 @@ class OpenAIResponsesProvider(LLMProvider):
     {
         "input": [
             {"type": "function_call_output", "call_id": "call_001", "output": "{...}"}
-        ],
-        "previous_response_id": "resp_001"
+        ]
     }
     """
 
@@ -328,7 +361,6 @@ class OpenAIResponsesProvider(LLMProvider):
             messages: Conversation messages (will be converted to input format)
             tools: Optional tool definitions (Anthropic format, will be transformed)
             **kwargs: Additional provider-specific parameters
-                - previous_response_id: For chaining responses
                 - temperature: Sampling temperature
                 - max_tokens: Maximum tokens to generate
 
@@ -702,7 +734,10 @@ class OpenAIResponsesProvider(LLMProvider):
         for msg in messages:
             role = msg.get("role")
             if role == "system":
-                instructions = content_to_text(msg.get("content", ""))
+                # Keep every system message; a later one must not replace an
+                # earlier one.
+                text = content_to_text(msg.get("content", ""))
+                instructions = f"{instructions}\n\n{text}" if instructions else text
             elif role == "tool":
                 # Convert Chat Completions tool result to Responses API format
                 input_messages.append(
@@ -775,22 +810,15 @@ class OpenAIResponsesProvider(LLMProvider):
         # For now, use items array format for consistency.
         # TODO: Optimize to use string format for simple single-turn prompts.
         #
-        # Responses API accepts an omitted input only when the request is a
-        # continuation identified by previous_response_id. Sending input=[]
-        # (or instructions alone) is rejected with a 400 missing-input error.
-        # The public Responses API supports server-managed continuations, but
-        # the ChatGPT/Codex OAuth transport rejects previous_response_id.
-        previous_response_id = (
-            None if self._requires_streaming else kwargs.get("previous_response_id")
-        )
-        if input_messages:
-            params["input"] = input_messages
-        elif not previous_response_id:
+        # The Responses API rejects input=[] (or instructions alone) with a
+        # 400 missing-input error, so fail before reaching the HTTP client.
+        if not input_messages:
             raise ProviderError(
-                "OpenAI Responses request requires input or previous_response_id",
+                "OpenAI Responses request requires input",
                 provider="openai_responses",
                 error_code="missing_input",
             )
+        params["input"] = input_messages
 
         if not self._requires_streaming:
             # The public Responses API calls the provider-neutral output
@@ -822,22 +850,6 @@ class OpenAIResponsesProvider(LLMProvider):
                     **params.get("reasoning", {}),
                     **effort["reasoning"],
                 }
-
-        # Add previous_response_id for state chaining. An empty input is valid
-        # only on this continuation path; the guard above prevents malformed
-        # initial requests from reaching the HTTP client.
-        if previous_response_id:
-            params["previous_response_id"] = previous_response_id
-
-        # Preserve public Responses API cache controls when the service
-        # forwards them. The ChatGPT/Codex OAuth transport rejects the
-        # retention field and ignores the key, so its backend cache remains
-        # implicit and must not receive these public-API-only parameters.
-        if not self._requires_streaming:
-            for cache_key in ("prompt_cache_key", "prompt_cache_retention"):
-                cache_value = kwargs.get(cache_key)
-                if cache_value is not None:
-                    params[cache_key] = cache_value
 
         # Transform function tools to Responses API format while preserving
         # hosted/non-function tools exactly as supplied. The Codex OAuth route
@@ -876,44 +888,6 @@ class OpenAIResponsesProvider(LLMProvider):
 
         return params
 
-    def _format_tool_result(
-        self,
-        tool_call_id: str,
-        result: Any,
-    ) -> Dict[str, Any]:
-        """
-        Format tool result for Responses API.
-
-        Creates a function_call_output item for sending tool results back.
-
-        Args:
-            tool_call_id: The call_id from the function_call item
-            result: Tool result (string or dict)
-
-        Returns:
-            Function_call_output item dict
-
-        Example:
-            {
-                "type": "function_call_output",
-                "call_id": "call_001",
-                "output": '{"temp": 72, "condition": "sunny"}'
-            }
-        """
-        # Serialize result to JSON if it's a dict
-        if isinstance(result, dict):
-            output = json.dumps(result)
-        elif isinstance(result, str):
-            output = result
-        else:
-            output = str(result)
-
-        return {
-            "type": "function_call_output",
-            "call_id": tool_call_id,
-            "output": _cap_function_call_output(output),
-        }
-
     async def _parse_sse_stream(
         self,
         response: Any,
@@ -939,6 +913,7 @@ class OpenAIResponsesProvider(LLMProvider):
         buffer = bytearray()
         max_line_bytes = RESPONSES_MAX_SSE_LINE_BYTES
         completed_image_items: Dict[str, Dict[str, Any]] = {}
+        completed_function_calls: List[Dict[str, Any]] = []
         pending_final: Optional[StreamingResponse] = None
 
         def accept_event(event_chunk: Optional[StreamingResponse]) -> bool:
@@ -951,9 +926,13 @@ class OpenAIResponsesProvider(LLMProvider):
             if isinstance(raw_payload, dict):
                 event_name = raw_payload.get("event")
                 if event_name == "response.output_item.done":
-                    _record_image_generation_item(
-                        completed_image_items, raw_payload.get("item")
-                    )
+                    done_item = raw_payload.get("item")
+                    _record_image_generation_item(completed_image_items, done_item)
+                    if (
+                        isinstance(done_item, dict)
+                        and done_item.get("type") == "function_call"
+                    ):
+                        completed_function_calls.append(done_item)
                 elif event_name in OpenAIResponsesTransformer.FINAL_EVENTS:
                     response_payload = raw_payload.get("response")
                     if isinstance(response_payload, dict):
@@ -1054,9 +1033,19 @@ class OpenAIResponsesProvider(LLMProvider):
                         response_payload,
                         completed_image_items,
                     )
+                    _merge_function_call_items(
+                        response_payload, completed_function_calls
+                    )
                     pending_final._raw_payload = raw_payload
+                # ChatGPT/Codex delivers tool calls only as output_item.done and
+                # ends with an EMPTY output, so the stop reason cannot come from
+                # the final payload alone.
+                if completed_function_calls and pending_final.finish_reason != "length":
+                    pending_final.finish_reason = "tool_calls"
                 yield pending_final
 
+        except ProviderError:
+            raise
         except Exception as e:
             logger.error(f"Failed to parse SSE stream: {e}")
             raise map_openai_error(e, "openai_responses") from e
@@ -1085,6 +1074,12 @@ class OpenAIResponsesProvider(LLMProvider):
         try:
             # Parse JSON data
             parsed_data = json.loads(data.decode("utf-8"))
+
+            # The real failure arrives as response.failed / error. Raise the
+            # server's own message instead of letting the stream end silently
+            # and surface as "Stream ended without response.completed event".
+            if event in ("response.failed", "error"):
+                raise _stream_failure(event, parsed_data)
 
             # Text streaming delta (codex sends these)
             if event == "response.output_text.delta":
@@ -1133,7 +1128,22 @@ class OpenAIResponsesProvider(LLMProvider):
             # Other events (created, in_progress, content_part) - skip
             return None
 
+        except ProviderError:
+            raise
         except Exception as e:
+            if event in (
+                *OpenAIResponsesTransformer.FINAL_EVENTS,
+                "response.failed",
+                "error",
+            ):
+                # A malformed terminal event decides the turn; dropping it would
+                # only resurface as "Stream ended without a final event".
+                raise ProviderError(
+                    f"Malformed {event} event from the Responses API: {e}",
+                    provider="openai_responses",
+                    error_code="malformed_stream_event",
+                    original_error=e,
+                ) from e
             logger.warning(f"Failed to parse SSE event (event={event}): {e}")
             return None
 

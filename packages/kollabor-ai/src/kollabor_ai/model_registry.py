@@ -70,6 +70,10 @@ def load_model_registry() -> Dict[str, Any]:
 _REGISTRY: Optional[Dict[str, Any]] = None
 
 
+# Models already reported as missing from the registry (one warning per model).
+_WARNED_UNLISTED: set[str] = set()
+
+
 def get_model_registry() -> Dict[str, Any]:
     """Return the merged registry, loading it once."""
     global _REGISTRY
@@ -113,14 +117,23 @@ def resolve_context_window(model: str, provider: Optional[str] = None) -> Option
     if window:
         return int(window)
 
+    fallback: Optional[int] = None
     if provider:
         defaults = (
             get_model_registry().get("provider_defaults", {}).get(provider.lower())
         )
         if defaults and defaults.get("context_window"):
-            return int(defaults["context_window"])
+            fallback = int(defaults["context_window"])
 
-    return None
+    if model and model not in _WARNED_UNLISTED:
+        _WARNED_UNLISTED.add(model)
+        logger.warning(
+            "Model %r has no context_window in the model registry; using %s. Add it "
+            "to bundles/data/models.json so compaction thresholds match its real window.",
+            model,
+            f"the {provider} default of {fallback}" if fallback else "the config default",
+        )
+    return fallback
 
 
 def supports_sampling(model: str) -> bool:

@@ -544,6 +544,7 @@ class AgentVault:
         max_tokens: int = 4000,
         crystal_store: Optional[Any] = None,
         global_crystal_store: Optional[Any] = None,
+        task_ledger: Optional[Any] = None,
     ) -> str:
         """Build the context injection for when an agent is reborn.
 
@@ -557,6 +558,9 @@ class AgentVault:
                 this repo). Defaults to raw fallback if None.
             global_crystal_store: Global CrystalStore (cross-project
                 personality, general skills). Shown after project tier.
+            task_ledger: TaskLedger. Its active cards for this identity are
+                listed, since the ledger is the only source of current
+                assignments after a restart. Omitted when None.
         """
         meta = self.get_meta()
         last_active = meta.get("last_active_human", "never")
@@ -566,6 +570,9 @@ class AgentVault:
         lines.append(f"--- vault: {self.identity} ---")
         lines.append(f"sessions: {session_count + 1} (previous: {session_count})")
         lines.append(f"last active: {last_active}")
+
+        if task_ledger is not None:
+            self._append_ledger_section(lines, task_ledger)
 
         # The raw stream remains the audit trail, but message traffic is not
         # executable rebirth context. The current task ledger is authoritative
@@ -630,6 +637,39 @@ class AgentVault:
         self.save_meta(session_count=session_count + 1)
 
         return context
+
+    # Cards listed in a rebirth; any beyond this are counted, not shown.
+    _REBIRTH_MAX_CARDS = 10
+
+    def _append_ledger_section(self, lines: List[str], ledger: Any) -> None:
+        """Append this agent's active TaskLedger cards to the rebirth lines.
+
+        The ledger is the only source of current assignments after a restart,
+        so the section always says something: the cards, "none", or
+        "unavailable" -- never a silent gap the agent has to ask peers about.
+        """
+        lines.append("")
+        try:
+            cards = ledger.get_active_for(self.identity)
+        except Exception as e:
+            logger.warning(f"Rebirth ledger read failed for {self.identity}: {e}")
+            lines.append(
+                "active TaskLedger cards: unavailable (read failed; "
+                "do not assume none)"
+            )
+            return
+
+        if not cards:
+            lines.append("active TaskLedger cards: none (no card is assigned to you)")
+            return
+
+        lines.append(
+            f"active TaskLedger cards ({len(cards)}) - your current assignments:"
+        )
+        for card in cards[: self._REBIRTH_MAX_CARDS]:
+            lines.append(f"  {card.summary_line()}")
+        if len(cards) > self._REBIRTH_MAX_CARDS:
+            lines.append(f"  +{len(cards) - self._REBIRTH_MAX_CARDS} more")
 
     def _append_crystal_section(
         self, lines: List[str], store: Any, budget: int, label: str

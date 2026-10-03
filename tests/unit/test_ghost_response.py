@@ -121,7 +121,7 @@ class TestGhostResponseHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, 2)
         on_rate_limit.assert_not_awaited()
 
-    async def test_call_llm_forwards_provider_state_and_cache_options(self) -> None:
+    async def test_call_llm_forwards_provider_options(self) -> None:
         service = make_service()
         provider = ForwardingProvider()
         service._provider = provider
@@ -129,20 +129,11 @@ class TestGhostResponseHandling(unittest.IsolatedAsyncioTestCase):
         content = await service.call_llm(
             [{"role": "user", "content": "continue"}],
             tools=[],
-            previous_response_id="resp_previous",
-            prompt_cache_key="harness-context-v1",
-            prompt_cache_retention="24h",
+            effort="high",
         )
 
         self.assertEqual(content, "forwarded")
-        self.assertEqual(
-            provider.stream_kwargs,
-            {
-                "previous_response_id": "resp_previous",
-                "prompt_cache_key": "harness-context-v1",
-                "prompt_cache_retention": "24h",
-            },
-        )
+        self.assertEqual(provider.stream_kwargs, {"effort": "high"})
 
     async def test_stream_without_usage_exposes_labeled_estimate(self) -> None:
         service = make_service()

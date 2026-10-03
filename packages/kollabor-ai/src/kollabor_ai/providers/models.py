@@ -352,7 +352,6 @@ class OpenAIResponsesConfig(ProviderConfig):
 
     The Responses API is OpenAI's new stateful API format with:
     - Different request format (input field, instructions parameter)
-    - Server-managed state (previous_response_id)
     - New streaming events (response.started, output_item.added, etc.)
 
     Configuration:

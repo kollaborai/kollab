@@ -125,14 +125,12 @@ class TestStreamingHandler(unittest.TestCase):
                 native_tools=None,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=lambda: False,
-                prompt_cache_key="stable-key",
-                previous_response_id="response-123",
+                effort="high",
             )
         )
 
         call_kwargs = self.api_service.call_llm.call_args.kwargs
-        self.assertEqual(call_kwargs["prompt_cache_key"], "stable-key")
-        self.assertEqual(call_kwargs["previous_response_id"], "response-123")
+        self.assertEqual(call_kwargs["effort"], "high")
 
     def test_call_llm_cancelled_before_start(self):
         """Test LLM call cancelled before starting."""

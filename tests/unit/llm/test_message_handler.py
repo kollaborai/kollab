@@ -476,6 +476,54 @@ class TestMessageHandler(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
+    def _run_hub_chain(self, sigs):
+        """Run a hub-woken chain whose turn N reports error signature sigs[N-1].
+
+        The model only completes the turn once sigs runs out. Returns
+        (turns_run, queue_processor).
+        """
+        self.coordinator.conversation_history.append(
+            type("obj", (object,), {"role": "user", "content": "hello"})()
+        )
+        qp = self.coordinator._queue_processor
+        qp.processing_queue = asyncio.Queue()
+        self.coordinator._process_queue = MagicMock(return_value=object())
+        turns = {"n": 0}
+
+        async def fake_continue():
+            qp._last_tool_error_sig = sigs[turns["n"]]
+            turns["n"] += 1
+            if turns["n"] >= len(sigs):
+                qp.turn_completed = True
+
+        self.coordinator._continue_conversation = fake_continue
+
+        async def run():
+            await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
+            hub_factory = self.coordinator.create_background_task.call_args[0][0]
+            await hub_factory()
+
+        self.loop.run_until_complete(run())
+        return turns["n"], qp
+
+    def test_hub_continue_stops_on_identical_tool_errors(self):
+        """3 identical failing tool batches in a row end a hub-woken chain.
+
+        Regression: only the queue-drain loop had the circuit breaker, so a
+        hub-woken agent repeating one failing tool ran to the 500-turn cap.
+        """
+        turns, qp = self._run_hub_chain(["terminal:boom"] * 50)
+        self.assertEqual(turns, 3)
+        self.assertTrue(qp.turn_completed)
+        self.coordinator.message_display_service.display_error_message.assert_called_once()
+
+    def test_hub_continue_error_breaker_resets_on_success_or_change(self):
+        """A success or a different error starts the identical-error count over."""
+        sigs = ["a", "a", None, "a", "a", "b", "b", None]
+        turns, _ = self._run_hub_chain(sigs)
+        self.assertEqual(turns, len(sigs))
+        self.coordinator.message_display_service.display_error_message.assert_not_called()
+
     def test_retry_continue_never_cancels_busy_session(self):
         """A hub trigger during a long busy chain must wait, not cancel.
 

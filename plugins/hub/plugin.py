@@ -4932,6 +4932,7 @@ class HubPlugin(BasePlugin):
                 rebirth_context = self._vault.get_rebirth_context(
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
+                    task_ledger=self._task_ledger,
                 )
 
                 # Release stale lane claims from previous session
@@ -6266,6 +6267,60 @@ class HubPlugin(BasePlugin):
             "already in your crystallized knowledge above."
         )
 
+    async def _provider_call_with_retry(self, provider, messages):
+        """provider.call() with the chat path's retry policy.
+
+        _dreaming_llm_call talks to the provider directly so it cannot touch
+        APICommunicationService's cancel/token state, which also skips that
+        service's retry loop. Retry the same transient classes here (rate
+        limits, 5xx, connection/timeout errors), honoring retry_after and the
+        shared backoff constants; anything else raises on the first try.
+        """
+        from kollabor_ai.api_communication_service import (
+            RETRY_BASE_DELAY_SECONDS,
+            RETRY_MAX_DELAY_SECONDS,
+        )
+        from kollabor_ai.providers.errors import (
+            APIConnectionError,
+            APITimeoutError,
+            RateLimitError,
+            ServerError,
+            TransientHTTPError,
+        )
+
+        transient_types = (
+            APIConnectionError,
+            APITimeoutError,
+            RateLimitError,
+            ServerError,
+            TransientHTTPError,
+        )
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                return await provider.call(messages=messages)
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                transient = isinstance(e, transient_types) or (
+                    isinstance(status, int) and (status == 429 or 500 <= status < 600)
+                )
+                if not transient or attempt >= max_retries:
+                    raise
+                retry_after = getattr(e, "retry_after", None)
+                if isinstance(retry_after, (int, float)) and retry_after >= 0:
+                    if retry_after > RETRY_MAX_DELAY_SECONDS:
+                        raise
+                    delay = float(retry_after)
+                else:
+                    delay = min(
+                        RETRY_BASE_DELAY_SECONDS * 2**attempt, RETRY_MAX_DELAY_SECONDS
+                    )
+                logger.debug(
+                    f"dreaming: transient provider error, retry "
+                    f"{attempt + 1}/{max_retries} in {delay:.0f}s: {e}"
+                )
+                await asyncio.sleep(delay)
+
     async def _dreaming_llm_call(self, prompt: str) -> Optional[str]:
         """Make a background LLM call for dreaming.
 
@@ -6290,12 +6345,13 @@ class HubPlugin(BasePlugin):
 
             # Make a simple one-shot call using the provider directly.
             # This bypasses APICommunicationService state (cancel flags,
-            # token tracking, etc.) so it's safe to run concurrently.
+            # token tracking, etc.) so it's safe to run concurrently. That also
+            # skips its retry loop, hence _provider_call_with_retry.
             messages = [
                 {"role": "user", "content": prompt},
             ]
 
-            response = await provider.call(messages=messages)
+            response = await self._provider_call_with_retry(provider, messages)
             content = response.get_text_content()
             return content.strip() if content else None
 
@@ -8314,7 +8370,7 @@ class HubPlugin(BasePlugin):
             # Check if we should nudge. Nudges are passive: inject a system
             # message that rides along with the agent's NEXT natural turn.
             # They never spawn turns themselves (that caused wake-from-park
-            # loops -- agent says "..", nudge fires force_continue, loop).
+            # loops -- agent says "..", the nudge wakes it again, loop).
             peers_online = len(self._roster) if self._roster else 0
             nudge = self._nudge_engine.evaluate(identity, peers_online)
             if nudge:
@@ -8401,7 +8457,6 @@ class HubPlugin(BasePlugin):
                 data["suppress_display"] = True
 
         if wait_tag_pat.search(response):
-            data["force_continue"] = False
             data["turn_complete"] = True
             logger.info("ignored removed wait_for_user tag and ended turn")
 
@@ -9027,23 +9082,22 @@ class HubPlugin(BasePlugin):
     async def _maybe_route_to_coordinator(self, response: str) -> None:
         """Auto-route untagged responses to coordinator if enabled.
 
-        INTENTIONALLY SILENT path. Do NOT add cmd_results.append or
-        force_continue here. This is the escape hatch for an agent
+        INTENTIONALLY SILENT path. Do NOT make this return a tool result
+        or ask for another turn. This is the escape hatch for an agent
         that has run out of tool calls and is emitting a final summary
         to the (nonexistent) user — in hub mode there's no user, so we
         route that summary to the coordinator so it isn't lost.
 
-        If this path triggered force_continue, the agent would be
+        If this path produced a tool result, the agent would be
         re-invoked, produce another "i'm done" summary, which would
-        route again, triggering another continue, infinite loop.
-        Silence here is the whole point — the agent's turn MUST end.
+        route again, infinite loop. Silence here is the whole point —
+        the agent's turn MUST end.
 
-        The tagged <hub_msg> path (line ~2317) is different and DOES
-        append to cmd_results + force_continue, because that's the
-        agent explicitly saying "send this AND keep going." The
-        10-second dedup on that path (_recent_hub_msgs at line ~2344)
-        prevents accidental loops if the agent retries the same
-        message.
+        The tagged <hub_msg> path is different: it is a real tool, so
+        its result goes back to the model and the turn continues
+        (wait="true" ends it instead, via metadata["end_turn"]). Its
+        dedup window prevents accidental loops if the agent retries the
+        same message.
 
         If you're "fixing" this to return feedback, STOP and read the
         history: fix was considered on 2026-04-11 and deliberately

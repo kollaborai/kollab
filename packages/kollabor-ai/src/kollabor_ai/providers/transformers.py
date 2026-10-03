@@ -10,7 +10,8 @@ Converts provider-specific responses to unified format:
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Set
+import uuid
+from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
 from .models import (
     ContentBlock,
@@ -308,10 +309,11 @@ class ToolCallAccumulator:
                 logger.debug(f"Tool {tool_call_id} missing name, not complete")
                 continue
 
-            # Skip if empty buffer
-            if not args_buffer or not args_buffer.strip():
-                logger.debug(f"Tool {tool_call_id} has empty arguments, not complete")
-                continue
+            # A named tool with no argument fragments is a no-parameter call
+            # (Anthropic sends an empty input_json_delta for it). This runs once
+            # the stream is over, so no more fragments are coming.
+            if not args_buffer.strip():
+                args_buffer = "{}"
 
             # Try to parse JSON
             try:
@@ -483,11 +485,10 @@ class OpenAIResponseTransformer:
 
         # Tool call delta
         if tool_calls and len(tool_calls) > 0:
-            # OpenAI can have multiple tool calls in one chunk
-            # For simplicity, we return the first one
-            # In production, you'd want to handle all of them
+            # One entry per call here: iter_chunks splits multi-call chunks and
+            # resolves each call's real id (only its first chunk carries it).
             tool_call = tool_calls[0]
-            tool_call_id = tool_call.get("index")  # OpenAI uses index, not ID
+            tool_call_id = tool_call.get("id") or tool_call.get("index")
             function = tool_call.get("function", {})
 
             return StreamingResponse(
@@ -521,6 +522,39 @@ class OpenAIResponseTransformer:
 
         # Empty chunk (keepalive)
         return None
+
+    @staticmethod
+    async def iter_chunks(stream: Any, model: str) -> AsyncIterator[StreamingResponse]:
+        """Unified chunks for an OpenAI chat stream, one delta per response.
+
+        A chunk may carry several tool_calls entries (backends that send
+        parallel calls whole); each becomes its own response, with usage and
+        finish_reason on the last. Only a call's first chunk carries its real
+        ``id``; later fragments have just the ``index``, so ids are resolved
+        here per stream (a synthetic one if the backend never sends any).
+        """
+        tool_ids: Dict[Any, str] = {}
+        async for raw in stream:
+            chunk = raw.model_dump()
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            entries = delta.get("tool_calls") or []
+            pieces = [] if entries else [chunk]
+            for pos, entry in enumerate(entries):
+                idx = entry.get("index", pos)
+                if entry.get("id") or idx not in tool_ids:
+                    tool_ids[idx] = entry.get("id") or f"call_{uuid.uuid4().hex[:24]}"
+                call = {**entry, "id": tool_ids[idx]}
+                piece_choice = {**choice, "delta": {**delta, "tool_calls": [call]}}
+                piece = {**chunk, "choices": [piece_choice]}
+                if pos < len(entries) - 1:
+                    piece_choice["finish_reason"] = None
+                    piece.pop("usage", None)
+                pieces.append(piece)
+            for piece in pieces:
+                response = OpenAIResponseTransformer.transform_openai_chunk(piece, model)
+                if response:
+                    yield response
 
     @staticmethod
     def transform_openai_response(
@@ -708,10 +742,12 @@ class AnthropicResponseTransformer:
             cache_creation = usage.get("cache_creation_input_tokens", 0)
             cache_read = usage.get("cache_read_input_tokens", 0)
             stop_reason = chunk.get("delta", {}).get("stop_reason")
-            # The non-stream path maps max_tokens to "length"; the stream must
-            # too, or auto-continue (last_stop_reason == "length") never fires.
-            if stop_reason == "max_tokens":
-                stop_reason = "length"
+            # The non-stream path maps these; the stream must too, or
+            # auto-continue ("length") and INCONSISTENT_TOOL_STOP
+            # ("tool_calls") never fire.
+            stop_reason = {"max_tokens": "length", "tool_use": "tool_calls"}.get(
+                stop_reason, stop_reason
+            )
             if output_tokens or input_tokens or cache_creation or cache_read:
                 total_input = input_tokens + cache_creation + cache_read
                 usage_info = UsageInfo(

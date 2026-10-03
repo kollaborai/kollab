@@ -31,6 +31,7 @@ from kollabor_ai.profile_manager import LLMProfile
 from kollabor_ai.providers.errors import (
     APIConnectionError,
     APITimeoutError,
+    AuthenticationError,
     EmptyResponseError,
     ProviderError,
     RateLimitError,
@@ -91,7 +92,7 @@ class APICommunicationService:
         # (whole conversation history) per call, so a single long session grows
         # O(n^2) — observed 290MB files, 6.2GB total dir (2026-07-03). Two
         # bounds, both tunable, both 0 = disabled:
-        #   - per-file cap: stop appending once one session's log is huge
+        #   - per-file cap: rotate to a new file once one session's log is huge
         #   - total-dir cap: prune oldest sessions so weeks of runs stay bounded
         self._raw_max_file_bytes = int(
             config.get("kollabor.llm.raw_log_max_file_mb", 100) * 1024 * 1024
@@ -99,7 +100,6 @@ class APICommunicationService:
         self._raw_max_total_bytes = int(
             config.get("kollabor.llm.raw_log_max_total_mb", 1024) * 1024 * 1024
         )
-        self._raw_file_capped_warned = False
         # Enforce the total-dir ceiling once at session start (prunes oldest
         # *_raw.jsonl). The current session's file does not exist yet, so it
         # is never a prune target here.
@@ -135,6 +135,9 @@ class APICommunicationService:
         # .done(), so there is nothing to cancel and ESC was a silent no-op
         # that waited out the sleep and then fired another request.
         self._cancel_event: Optional[asyncio.Event] = None
+        # Serializes OAuth token refresh after a 401 so concurrent requests
+        # don't spend the same (possibly rotating) refresh token twice.
+        self._oauth_refresh_lock = asyncio.Lock()
 
         # Token usage tracking
         self.last_token_usage: Dict[str, int] = {}
@@ -479,7 +482,8 @@ class APICommunicationService:
     async def _refresh_oauth_token(self) -> None:
         """Refresh expired OAuth token and update profile in-place.
 
-        Called before provider creation for OAuth profiles. If refresh
+        Called before provider creation for OAuth profiles and again after a
+        401 (``_refresh_oauth_after_401``). If refresh
         succeeds, updates self._profile.api_key with the fresh token
         and resolves the model to the latest available if still generic.
         If refresh fails (no refresh_token, network error), logs warning
@@ -595,8 +599,8 @@ class APICommunicationService:
                 call records ``continuation_of=<parent_turn_id>`` so a
                 truncated-and-resumed response can be stitched back to the
                 turn that started it.
-            **provider_kwargs: Provider-native request options such as
-                ``previous_response_id`` and Responses API cache controls.
+            **provider_kwargs: Provider-native request options forwarded to
+                the provider call, for example ``effort``.
 
         Returns:
             LLM response content
@@ -706,18 +710,9 @@ class APICommunicationService:
                     )
                 # Wrap provider call in a task so cancel_current_request()
                 # can actually cancel the in-flight HTTP request
-                if self.enable_streaming:
-                    self.current_request_task = asyncio.ensure_future(
-                        self._call_provider_stream(
-                            messages,
-                            tools,
-                            provider_streaming_callback,
-                        )
-                    )
-                else:
-                    self.current_request_task = asyncio.ensure_future(
-                        self._call_provider_nonstream(messages, tools)
-                    )
+                self.current_request_task = asyncio.ensure_future(
+                    self._call_provider(messages, tools, provider_streaming_callback)
+                )
 
                 content = await self.current_request_task
                 self._notify_operation_observer(
@@ -940,6 +935,57 @@ class APICommunicationService:
         except asyncio.TimeoutError:
             return  # backoff elapsed untouched, retry as normal
         raise asyncio.CancelledError("API request cancelled during retry backoff")
+
+    async def _call_provider(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        streaming_callback,
+    ) -> str:
+        """One provider request, replayed once after a 401 on an OAuth profile.
+
+        The OAuth access token is only refreshed when the provider is built, so
+        a long session outlives it. A 401 means nothing was generated, so the
+        replay cannot duplicate streamed output.
+        """
+
+        async def send() -> str:
+            if self.enable_streaming:
+                return await self._call_provider_stream(
+                    messages, tools, streaming_callback
+                )
+            return await self._call_provider_nonstream(messages, tools)
+
+        rejected_key = self._profile.api_key
+        try:
+            return await send()
+        except AuthenticationError:
+            if self._profile.auth_type != "oauth" or not (
+                await self._refresh_oauth_after_401(rejected_key)
+            ):
+                raise
+        return await send()
+
+    async def _refresh_oauth_after_401(self, rejected_key: str) -> bool:
+        """Refresh the OAuth token after a 401 and rebuild the provider.
+
+        True when a replay can succeed: the token differs from ``rejected_key``,
+        refreshed here or by a concurrent request that held the lock first.
+        """
+        async with self._oauth_refresh_lock:
+            if self._profile.api_key == rejected_key:
+                await self._refresh_oauth_token()
+                if self._profile.api_key == rejected_key:
+                    return False  # refresh failed (logged there); a replay would 401 again
+                previous = (self._provider, self._provider_error)
+                await self._initialize_provider()
+                if self._provider is None:  # rebuild failed: keep the old provider
+                    self._provider, self._provider_error = previous
+                    return False
+        logger.warning(
+            "OAuth access token rejected (401); refreshed it and replaying the request once"
+        )
+        return True
 
     async def _call_provider_nonstream(
         self,
@@ -1217,6 +1263,13 @@ class APICommunicationService:
                             cache_creation_tokens=cache_creation,
                             cache_read_tokens=cache_read,
                         )
+
+            # EXPLICIT mode completes a call inside add_delta only once its
+            # arguments parse, so a no-argument call (empty buffer) is still
+            # pending here. The accumulator returns only calls it has not handed
+            # back yet, so this cannot duplicate one.
+            if self._use_explicit_accumulation:
+                accumulated_tools.extend(self._tool_accumulator.get_completed_tools())
 
             # Combine content
             content = "".join(content_parts)
@@ -1706,32 +1759,50 @@ class APICommunicationService:
             )
 
             # Per-file cap: a single long session appends the full history per
-            # call (O(n^2)). Once this file is huge, stop appending so one
-            # runaway session can't blow past the total-dir ceiling mid-run.
+            # call (O(n^2)). Past the cap, move the full file aside and start a
+            # fresh one so recent wire data is never dropped, then re-apply the
+            # total-dir ceiling (oldest files go first).
             if self._raw_max_file_bytes > 0:
                 try:
                     if (
                         raw_file.exists()
                         and raw_file.stat().st_size >= self._raw_max_file_bytes
                     ):
-                        if not self._raw_file_capped_warned:
-                            self._raw_file_capped_warned = True
-                            logger.warning(
-                                "Raw log for session %s hit the per-file cap "
-                                "(%d MB); further raw entries this session are "
-                                "dropped. Tune kollabor.llm.raw_log_max_file_mb.",
-                                self.current_session_id,
-                                self._raw_max_file_bytes // (1024 * 1024),
-                            )
-                        return
-                except OSError:
-                    pass  # stat failed — fall through and attempt the write
+                        self._rotate_raw_log(raw_file)
+                        self._prune_raw_logs()
+                except OSError as e:
+                    logger.warning(
+                        "Raw log rotation failed for session %s (%s); appending to the full file",
+                        self.current_session_id,
+                        e,
+                    )
 
             with open(raw_file, "a") as f:
                 f.write(json.dumps(interaction.to_dict(), default=str) + "\n")
 
         except Exception as e:
             logger.warning(f"Failed to log raw interaction: {e}")
+
+    def _rotate_raw_log(self, raw_file: Path) -> None:
+        """Move a full raw log aside as ``<session>.<n>_raw.jsonl`` (n counts up).
+
+        The active file keeps its ``<session>_raw.jsonl`` name, so anything
+        tailing it sees the newest entries, and the ``*_raw.jsonl`` glob used
+        by the prune and the viewers still matches every chunk.
+        """
+        stem = raw_file.name.removesuffix("_raw.jsonl")
+        chunk = re.compile(rf"{re.escape(stem)}\.(\d+)_raw\.jsonl")
+        taken = [
+            int(m[1]) for f in raw_file.parent.iterdir() if (m := chunk.fullmatch(f.name))
+        ]
+        target = raw_file.with_name(f"{stem}.{max(taken, default=0) + 1}_raw.jsonl")
+        raw_file.rename(target)
+        logger.info(
+            "Raw log for session %s reached the per-file cap (%d MB); rotated to %s",
+            self.current_session_id,
+            self._raw_max_file_bytes // (1024 * 1024),
+            target.name,
+        )
 
     def _prune_raw_logs(self) -> None:
         """Keep the raw-conversations dir under the total-size ceiling.

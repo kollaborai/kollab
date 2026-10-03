@@ -287,10 +287,20 @@ class OpenAIResponsesTransformer:
     ) -> Optional[str]:
         """Map a token-cap stop (incomplete, max_output_tokens) to "length".
 
-        auto-continue keys off "length"; any other stop keeps ``default``.
+        auto-continue keys off "length" and INCONSISTENT_TOOL_STOP off "tool_calls"
+        (a function_call in the output); any other stop keeps ``default``.
         """
-        details = (response or {}).get("incomplete_details") or {}
-        return "length" if details.get("reason") == "max_output_tokens" else default
+        response = response or {}
+        details = response.get("incomplete_details") or {}
+        if details.get("reason") == "max_output_tokens":
+            return "length"
+        output = response.get("output")
+        if isinstance(output, list) and any(
+            isinstance(item, dict) and item.get("type") == "function_call"
+            for item in output
+        ):
+            return "tool_calls"
+        return default
 
     @staticmethod
     def _transform_image_generation_item(

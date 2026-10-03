@@ -11,22 +11,16 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
+from kollabor_agent.queue_processor import (
+    MAX_CONTINUATION_TURNS,
+    RepeatedToolErrorBreaker,
+)
 from kollabor_ai.message_content import content_to_text
 
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
-
-# Hard ceiling on continuation turns in a single uninterrupted chain.
-# This is a RUNAWAY backstop, not a work limit: it must sit far above any
-# healthy investigation depth (lapis's real chain was 34 turns). It exists
-# only to stop a no-progress spin — e.g. a path where turn_completed never
-# flips — from looping forever and eating the machine (that spin grew a
-# hung process to 5.7GB, 2026-07-03). It replaces the old 300s wall-clock
-# deadline, which was too aggressive and guillotined healthy multi-turn
-# chains mid-work.
-MAX_CONTINUATION_TURNS = 500
 
 
 class MessageHandler:
@@ -472,6 +466,10 @@ class MessageHandler:
                 try:
                     await coord._continue_conversation()
                     turn_count = 0
+                    # Same identical-error breaker as the queue drain loop; the
+                    # turn above counts toward the run.
+                    stuck = RepeatedToolErrorBreaker()
+                    stuck.observe(qp._last_tool_error_sig)
                     while not qp.turn_completed and not qp.cancel_processing:
                         # User input takes priority: yield the chain so the
                         # finally-block drain processes the queued message.
@@ -513,6 +511,17 @@ class MessageHandler:
                             await coord._continue_conversation()
                         except Exception as e:
                             logger.error(f"Hub continue error (turn {turn_count}): {e}")
+                            break
+                        if stuck.observe(qp._last_tool_error_sig):
+                            logger.warning(
+                                f"Hub continue: {stuck.count} identical tool "
+                                f"errors in a row, breaking chain"
+                            )
+                            coord.message_display_service.display_error_message(
+                                f"Stuck loop detected: same tool error repeated "
+                                f"{stuck.count} times. Breaking."
+                            )
+                            qp.turn_completed = True
                             break
                 finally:
                     qp.is_processing = False  # ends the chain (note_chain_end)

@@ -70,11 +70,56 @@ def _config_int(config: Any, key: str, default: int) -> int:
     return default
 
 
-# Hard ceiling on continuation turns in one LOOP 2 pass. Runaway backstop,
-# NOT a work limit — sits far above any healthy investigation depth. Stops a
-# no-progress spin (turn_completed never flips) from looping forever. Replaces
-# the old 300s wall-clock deadline that guillotined healthy multi-turn chains.
+# Hard ceiling on continuation turns in one uninterrupted chain. LOOP 2 here and
+# the hub wake loop (kollabor/llm/message_handler.py) share it. Runaway
+# backstop, NOT a work limit: it sits far above any healthy investigation depth
+# (lapis's real chain was 34 turns). It only stops a no-progress spin
+# (turn_completed never flips) from looping forever; one such spin grew a hung
+# process to 5.7GB (2026-07-03). Replaces the old 300s wall-clock deadline that
+# guillotined healthy multi-turn chains.
 MAX_CONTINUATION_TURNS = 500
+
+# Identical failing tool batches in a row before a chain is stopped.
+MAX_CONSECUTIVE_ERRORS = 3
+
+# Tokens of system prompt + tool schemas that never shrink, taken off the window
+# before tool output is budgeted (`kollabor.llm.context_overhead_tokens`).
+# Measured 2026-10-02 from the first-turn prompt_tokens of 169 real sessions
+# (~134 tool schemas): median 33,718, p90 37,253, max 45,316. 48,000 clears the
+# max; the old 60,000 guess ate 47% of a 128K window.
+DEFAULT_CONTEXT_OVERHEAD_TOKENS = 48000
+
+# Shown when a provider chokes on a reply that is not the JSON object it expects
+# (`'str' object has no attribute 'get'`): the profile's provider type or
+# endpoint does not match what is actually answering.
+_API_FORMAT_MISMATCH_MESSAGE = (
+    "API format mismatch. The endpoint's reply does not match this profile's "
+    "provider type.\n"
+    "Check the profile's provider and base_url in ~/.kollab/config.json "
+    "(or re-run /setup), then restart."
+)
+
+
+class RepeatedToolErrorBreaker:
+    """Spots a chain that keeps hitting the same failing tool call.
+
+    Shared by the queue drain (LOOP 2) and the hub wake loop. Feed it
+    ``QueueProcessor._last_tool_error_sig`` after every turn; it trips once
+    ``limit`` consecutive turns carry an identical signature. A turn with no
+    failure, or a different one, starts the count over.
+    """
+
+    def __init__(self, limit: int = MAX_CONSECUTIVE_ERRORS) -> None:
+        self.limit = limit
+        self.count = 0
+        self._sig: Optional[str] = None
+
+    def observe(self, sig: Optional[str]) -> bool:
+        """Record one turn's error signature; True when the chain is stuck."""
+        sig = sig if isinstance(sig, str) and sig else None
+        self.count = (self.count + 1 if sig == self._sig else 1) if sig else 0
+        self._sig = sig
+        return self.count >= self.limit
 
 
 def _should_ingest(result: ToolExecutionResult) -> bool:
@@ -571,20 +616,16 @@ class QueueProcessor:
                         logger.error(f"Queue processing error: {e}")
                         error_msg = str(e)
                         if "'str' object has no attribute 'get'" in error_msg:
-                            error_msg = (
-                                "API format mismatch. Your profile's tool_format setting may be wrong.\n"
-                                "Set tool_format on the profile in ~/.kollab/config.json to match your API\n"
-                                "('openai' or 'anthropic'), then restart."
-                            )
+                            error_msg = _API_FORMAT_MISMATCH_MESSAGE
                         self.last_turn_error = error_msg
                         self.message_display_service.display_error_message(error_msg)
                         break
 
                 # LOOP 2 — continue conversation until turn completes
                 turn_count = 0
-                consecutive_errors = 0
-                last_error_sig = None
-                MAX_CONSECUTIVE_ERRORS = 3
+                # The turn that led here counts toward the identical-error run.
+                stuck = RepeatedToolErrorBreaker()
+                stuck.observe(self._last_tool_error_sig)
                 # Wall-clock checkpoints only — never kill a working chain.
                 # Force-completing on a timer orphaned the last turn's tool
                 # results and left the session silent (the "agent stops
@@ -643,23 +684,17 @@ class QueueProcessor:
                         await continue_conversation_fn()
 
                         # Detect stuck loops (model repeating identical broken calls)
-                        last_resp = getattr(self, "_last_tool_error_sig", None)
-                        if last_resp and last_resp == last_error_sig:
-                            consecutive_errors += 1
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                                logger.warning(
-                                    f"Circuit breaker: {consecutive_errors} identical "
-                                    f"tool errors in a row, breaking loop"
-                                )
-                                self.message_display_service.display_error_message(
-                                    f"Stuck loop detected: same tool error repeated "
-                                    f"{consecutive_errors} times. Breaking."
-                                )
-                                self.turn_completed = True
-                                break
-                        else:
-                            consecutive_errors = 0
-                        last_error_sig = last_resp
+                        if stuck.observe(self._last_tool_error_sig):
+                            logger.warning(
+                                f"Circuit breaker: {stuck.count} identical "
+                                f"tool errors in a row, breaking loop"
+                            )
+                            self.message_display_service.display_error_message(
+                                f"Stuck loop detected: same tool error repeated "
+                                f"{stuck.count} times. Breaking."
+                            )
+                            self.turn_completed = True
+                            break
 
                     except Exception as e:
                         logger.error(
@@ -966,6 +1001,7 @@ class QueueProcessor:
             MAX_CONTINUATIONS = 3
             continuation_count = 0
             accumulated_response = ""
+            reply_cut_off = False
             accumulated_tokens = {
                 "prompt": 0,
                 "completion": 0,
@@ -1076,6 +1112,14 @@ class QueueProcessor:
 
             # If we continued, merge response and clean up history fragments
             if accumulated_response:
+                # Still cut after the retries, or the continue request came
+                # back empty: the reply ends mid-sentence, so say so below.
+                last_piece = (response or "").strip()
+                reply_cut_off = getattr(
+                    self.api_service, "last_stop_reason", ""
+                ) == "length" or (
+                    not last_piece and not self.api_service.has_pending_tool_calls()
+                )
                 response = accumulated_response + (response or "")
                 logger.info(
                     f"Auto-continuation complete after {continuation_count} retries, "
@@ -1270,8 +1314,9 @@ class QueueProcessor:
                 await asyncio.sleep(self.config.get("kollabor.llm.thinking_delay", 0.3))
                 self.renderer.update_thinking(False)
 
-            # Step 4: Emit LLM_RESPONSE (hub/plugins can set force_continue, etc.)
-            clean_response, force_continue, suppress_display, turn_complete = (
+            # Step 4: Emit LLM_RESPONSE (hooks can rewrite clean_response, set
+            # suppress_display, or end the turn with turn_complete)
+            clean_response, suppress_display, turn_complete = (
                 await self._emit_llm_response_and_handle(
                     response,
                     clean_response,
@@ -1280,9 +1325,6 @@ class QueueProcessor:
                     has_native_tools=has_native_tools,
                 )
             )
-            if force_continue:
-                self.turn_completed = False
-                logger.info("Plugin requested turn continuation")
             if turn_complete:
                 self.turn_completed = True
                 logger.debug("Plugin requested turn completion")
@@ -1325,6 +1367,13 @@ class QueueProcessor:
                         },
                         "llm_service",
                     )
+
+            if reply_cut_off:
+                logger.warning("Reply still cut off after auto-continue")
+                self.message_display_service.display_system_message(
+                    "The reply hit the model's output limit and could not be "
+                    "continued, so it may be incomplete."
+                )
 
             # Step 6: Execute native tools (batch via native_tools_handler)
             native_results = []
@@ -1685,11 +1734,7 @@ class QueueProcessor:
             self.renderer.update_thinking(False)
             error_msg = str(e) or f"{type(e).__name__} (no details)"
             if "'str' object has no attribute 'get'" in error_msg:
-                error_msg = (
-                    "API format mismatch. Your profile's tool_format setting may be wrong.\n"
-                    "Set tool_format on the profile in ~/.kollab/config.json to match your API\n"
-                    "('openai' or 'anthropic'), then restart."
-                )
+                error_msg = _API_FORMAT_MISMATCH_MESSAGE
             self.message_display_service.display_error_message(error_msg)
             self.last_turn_error = error_msg
             self.turn_completed = True
@@ -1758,7 +1803,7 @@ class QueueProcessor:
             overhead = _config_int(
                 self.config,
                 "kollabor.llm.context_overhead_tokens",
-                60000,
+                DEFAULT_CONTEXT_OVERHEAD_TOKENS,
             )
             margin = 4000
             effective_budget = context_window - reserve_output - overhead - margin
@@ -1901,18 +1946,17 @@ class QueueProcessor:
         all_tools: Optional[list] = None,
         has_native_tools: bool = False,
     ) -> tuple:
-        """Emit LLM_RESPONSE event and extract hub plugin modifications.
+        """Emit LLM_RESPONSE and read back what its hooks changed.
 
-        Returns (clean_response, force_continue, suppress_display, turn_complete).
+        Returns (clean_response, suppress_display, turn_complete).
         """
-        force_continue = False
         suppress_display = False
         turn_complete = False
         had_hub_tags = "<hub_msg" in (response_text or "")
         log_tag = f"{log_prefix}_" if log_prefix else ""
 
         if not self.event_bus:
-            return clean_response, force_continue, suppress_display, turn_complete
+            return clean_response, suppress_display, turn_complete
 
         response_context = await self.event_bus.emit_with_hooks(
             EventType.LLM_RESPONSE,
@@ -1932,8 +1976,6 @@ class QueueProcessor:
             for phase in ["pre", "main", "post"]:
                 phase_data = response_context.get(phase, {})
                 final_data = phase_data.get("final_data", {})
-                if final_data.get("force_continue"):
-                    force_continue = True
                 if final_data.get("suppress_display"):
                     suppress_display = True
                 if final_data.get("turn_complete"):
@@ -1948,7 +1990,7 @@ class QueueProcessor:
                             f"preview={clean_response[:80]!r}"
                         )
 
-        return clean_response, force_continue, suppress_display, turn_complete
+        return clean_response, suppress_display, turn_complete
 
     async def _bridge_relay(self, clean_response: str) -> None:
         """Send response to external platform if last user message was from bridge."""

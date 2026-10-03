@@ -90,10 +90,15 @@ class SlashCommandRegistry:
             # Check for name conflicts
             if command_def.name in self._commands:
                 existing = self._commands[command_def.name]
-                self.logger.error(
-                    f"Command name conflict: '{command_def.name}' already registered by plugin '{existing.plugin_name}'"
-                )
-                return False
+                if existing.plugin_name != command_def.plugin_name:
+                    self.logger.error(
+                        f"Command name conflict: '{command_def.name}' already "
+                        f"registered by plugin '{existing.plugin_name}'"
+                    )
+                    return False
+                # The same plugin again is a re-initialize: start() runs initialize()
+                # once to validate CLI arguments and again for the full init.
+                self.unregister_command(command_def.name)
 
             # Check for alias conflicts
             for alias in command_def.aliases:
