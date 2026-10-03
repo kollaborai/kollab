@@ -213,7 +213,7 @@ def test_save_validates_values_on_the_server(home):
 def test_save_rejects_a_managed_key_even_if_the_ui_sent_it(home):
     (home / ".kollab").mkdir()
     (home / ".kollab" / "config.json").write_text(
-        json.dumps({"kollabor": {"llm": {"max_history": 50}}})
+        json.dumps({"terminal": {"render_fps": 50}})
     )
     write_managed_config(
         ManagedConfig(
@@ -221,20 +221,20 @@ def test_save_rejects_a_managed_key_even_if_the_ui_sent_it(home):
             primary_name="laptop-kollab",
             revision=1,
             digest="d" * 64,
-            keys=(("kollabor", "llm", "max_history"),),
+            keys=(("terminal", "render_fps"),),
         )
     )
     config = FakeConfig()
 
-    field = fields_of(describe(config))["kollabor.llm.max_history"]
-    out = save(config, {"kollabor.llm.max_history": 7})
+    field = fields_of(describe(config))["terminal.render_fps"]
+    out = save(config, {"terminal.render_fps": 7})
 
     assert (field["managed_by"], field["editable"], field["value"]) == (
         "laptop-kollab",
         False,
         50,
     )
-    assert out["errors"] == {"kollabor.llm.max_history": "managed by laptop-kollab"}
+    assert out["errors"] == {"terminal.render_fps": "managed by laptop-kollab"}
     assert config.saved == []
 
 
