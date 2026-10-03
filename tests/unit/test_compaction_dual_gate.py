@@ -256,8 +256,8 @@ class TestAutoDetectThreshold(unittest.TestCase):
     def test_anthropic_claude_opus(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.75)
         _wire_profile(plugin, "claude-opus-4-6", "anthropic")
-        # 1M context * 0.75 = 750K
-        self.assertEqual(plugin._get_token_threshold(), 750_000)
+        # 1M context * 0.75 = 750K, capped at 272K
+        self.assertEqual(plugin._get_token_threshold(), 272_000)
 
     def test_anthropic_claude_haiku(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.75)
@@ -268,14 +268,14 @@ class TestAutoDetectThreshold(unittest.TestCase):
     def test_openai_gpt54(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.75)
         _wire_profile(plugin, "gpt-5.4", "openai")
-        # 1.05M context * 0.75 = 787.5K
-        self.assertEqual(plugin._get_token_threshold(), 787_500)
+        # 1.05M context * 0.75 = 787.5K, capped at 272K
+        self.assertEqual(plugin._get_token_threshold(), 272_000)
 
     def test_gemini_31_pro(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.80)
         _wire_profile(plugin, "gemini-3.1-pro-preview", "gemini")
-        # 1M context * 0.80 = 800K
-        self.assertEqual(plugin._get_token_threshold(), 800_000)
+        # 1M context * 0.80 = 800K, capped at 272K
+        self.assertEqual(plugin._get_token_threshold(), 272_000)
 
     def test_unknown_model_falls_back_to_provider(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.75)
@@ -302,15 +302,15 @@ class TestAutoDetectThreshold(unittest.TestCase):
 
     def test_ratio_clamped_low(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.10)
-        _wire_profile(plugin, "claude-opus-4-6", "anthropic")
-        # clamped to 0.50: 1M * 0.50 = 500K
-        self.assertEqual(plugin._get_token_threshold(), 500_000)
+        _wire_profile(plugin, "claude-haiku-4-5", "anthropic")
+        # clamped to 0.50: 200K * 0.50 = 100K
+        self.assertEqual(plugin._get_token_threshold(), 100_000)
 
     def test_ratio_clamped_high(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=1.5)
-        _wire_profile(plugin, "claude-opus-4-6", "anthropic")
-        # clamped to 0.95: 1M * 0.95 = 950K
-        self.assertEqual(plugin._get_token_threshold(), 950_000)
+        _wire_profile(plugin, "claude-haiku-4-5", "anthropic")
+        # clamped to 0.95: 200K * 0.95 = 190K
+        self.assertEqual(plugin._get_token_threshold(), 190_000)
 
     def test_context_window_resolution_gemini_prefix(self) -> None:
         plugin = _make_auto_plugin()

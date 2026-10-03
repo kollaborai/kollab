@@ -148,6 +148,9 @@ SUMMARY_INJECTION_PREFIX = (
 SUMMARY_INJECTION_SUFFIX = "\n\nContinue from where we left off."
 
 
+AUTO_THRESHOLD_CAP = 272_000
+
+
 class ContextCompactionPlugin(BasePlugin):
     """Automatically compacts conversation history by summarizing old messages."""
 
@@ -186,7 +189,7 @@ class ContextCompactionPlugin(BasePlugin):
                     "min_value": 0.50,
                     "max_value": 0.95,
                     "step": 0.05,
-                    "help": "Compact at this fraction of context window (0.75 = 75%)",
+                    "help": "Compact at this fraction of context window (0.75 = 75%), auto threshold capped at 272K",
                 },
                 {
                     "type": "slider",
@@ -701,7 +704,7 @@ class ContextCompactionPlugin(BasePlugin):
 
         Resolution order:
           1. Manual override: token_threshold_k > 0 in config
-          2. Auto-detect: context_window * compaction_ratio
+          2. Auto-detect: context_window * compaction_ratio, capped at 272K
           3. Hardcoded fallback: 100K
         """
         # Manual override takes precedence
@@ -718,7 +721,8 @@ class ContextCompactionPlugin(BasePlugin):
                 self.config.get("plugins.context_compaction.compaction_ratio", 0.75)
             )
             ratio = max(0.50, min(0.95, ratio))
-            return int(context_window * ratio)
+            # OpenAI bills 2x/1.5x past 272K input, so never auto-wait longer.
+            return min(int(context_window * ratio), AUTO_THRESHOLD_CAP)
 
         # Fallback if provider can't be resolved
         return 100_000
