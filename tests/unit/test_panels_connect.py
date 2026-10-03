@@ -232,3 +232,14 @@ async def test_knocks_list_and_decide_by_receipt_with_server_side_sender_key():
 def test_registry_lists_the_three_network_panels():
     assert set(connect_panel.PANELS) == {"connect", "connect-join", "connect-knocks"}
     assert get_panel("connect-knocks") is KNOCKS and get_panel("connect-join") is JOIN
+
+
+@pytest.mark.asyncio
+async def test_join_finish_reads_the_wizard_action_body():
+    hub = Hub()
+    result = await JOIN.act(hub, "finish", {"values": {"domain": "kollabor.ai", "code": CODE}, "step": "code"})
+    assert ("enroll", "kollabor.ai", CODE) in hub.calls
+    assert CODE not in json.dumps(result)
+    with pytest.raises(PanelError) as err:
+        await JOIN.act(Hub(), "finish", {"values": {"domain": "kollabor.ai", "code": ""}, "step": "code"})
+    assert "code" in err.value.errors

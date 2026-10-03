@@ -297,8 +297,10 @@ class ConnectJoinPanel:
         raise unknown_action(self.name, action)
 
     async def _finish(self, ctx: Any, payload: dict) -> dict:
-        domain = str(payload.get("domain") or DEFAULT_DOMAIN).strip()
-        code = str(payload.get("code") or "").strip()
+        # a wizard action sends {"values": {path: value}, "step": id}
+        values = payload.get("values") if isinstance(payload.get("values"), dict) else payload
+        domain = str(values.get("domain") or DEFAULT_DOMAIN).strip()
+        code = str(values.get("code") or "").strip()
         errors = {}
         if not domain or len(domain) > 253 or not domain.isprintable():
             errors["domain"] = "Enter a valid network domain."
