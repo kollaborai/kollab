@@ -30,6 +30,25 @@ def _build_log_handler(log_path: Path) -> logging.Handler:
     return handler
 
 
+class _RedactingStream:
+    """stderr into the engine log, with join codes redacted like log records.
+
+    ponytail: redacts per write() call; a code split across two writes would
+    pass, which tracebacks (written a line at a time) never do.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        from kollabor_config.log_redaction import redact_join_codes
+
+        return self._stream.write(redact_join_codes(text))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
 def _configure_logging(log_level: str, log_path: Path) -> None:
     """Send engine logging and stderr prints to the timestamped log file."""
     global _engine_stderr
@@ -43,7 +62,7 @@ def _configure_logging(log_level: str, log_path: Path) -> None:
         force=True,
     )
     _engine_stderr = open(log_path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
-    sys.stderr = _engine_stderr
+    sys.stderr = _RedactingStream(_engine_stderr)
     atexit.register(_flush_engine_log)
     logging.getLogger(__name__).info("Engine logging to %s", log_path)
 

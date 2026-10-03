@@ -29,3 +29,14 @@ def test_app_logging_setup_still_exports_the_shared_redaction():
 
     assert setup.redact_join_codes is log_redaction.redact_join_codes
     assert setup.JoinCodeRedactionFilter is log_redaction.JoinCodeRedactionFilter
+
+
+def test_engine_stderr_redacts_join_codes(tmp_path):
+    from kollabor_engine.__main__ import _RedactingStream
+
+    path = tmp_path / "engine.log"
+    with open(path, "a", encoding="utf-8") as raw:
+        _RedactingStream(raw).write("Traceback: bad code ABCD-EFGH\n")
+    text = path.read_text(encoding="utf-8")
+    assert "ABCD-EFGH" not in text
+    assert "[join code redacted]" in text

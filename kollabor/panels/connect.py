@@ -93,7 +93,7 @@ async def _writable_snapshot(ctx: Any) -> dict:
     if snap is None:
         raise PanelError(_UNAVAILABLE, status=503)
     if snap.get("read_only"):
-        raise PanelError(_READ_ONLY_NOTE, status=409)
+        raise PanelError(_READ_ONLY_NOTE, status=403)
     return snap
 
 

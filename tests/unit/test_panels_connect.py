@@ -103,7 +103,7 @@ async def test_no_network_offers_the_two_guide_choices_and_read_only_offers_none
     assert panel["notice"] and not panel["row_actions"] and not panel["toolbar_actions"]
     with pytest.raises(PanelError) as err:
         await CONNECT.act(read_only, "accept", {"id": "abc123"})
-    assert err.value.status == 409
+    assert err.value.status == 403
     gone = await CONNECT.describe(Hub(ValueError("no hub")), {})
     assert gone["notice"] and not gone["toolbar_actions"]
 
