@@ -145,7 +145,7 @@ export function FormPanel({
                 <Button
                   type="button"
                   variant={target === "global" ? "outline" : "default"}
-                  disabled={busy || dirtyCount === 0}
+                  disabled={busy || (dirtyCount === 0 && !panel.context)}
                   onClick={() => onAction(action, target)}
                 >
                   {busy ? "Saving…" : buttonLabel(action, target)}

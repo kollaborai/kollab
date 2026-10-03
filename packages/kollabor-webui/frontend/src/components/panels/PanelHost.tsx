@@ -6,6 +6,7 @@ import type {
   PanelActionResult,
   PanelDescription,
   PanelField,
+  PanelForm,
   PanelReveal,
   PanelRow,
   Profile,
@@ -76,6 +77,25 @@ const newView = (panel: PanelDescription): View => ({
   errors: {},
   message: null,
 });
+/**
+ * What a form action sends as `changes`. A settings form sends only the edits.
+ * An action form (it carries `context`, like a loadout) sends every editable
+ * field, so accepting the prefilled defaults still reaches the daemon.
+ */
+function formChanges(panel: PanelForm, draft: Draft): Record<string, unknown> {
+  const edits = serializeDraft(draft);
+  if (!panel.context) return edits;
+  const values: Record<string, unknown> = {};
+  for (const section of panel.sections) {
+    for (const field of section.fields) {
+      if (field.type === "label" || !field.editable || field.secret) continue;
+      if (field.value !== null && field.value !== undefined) {
+        values[field.path] = field.value;
+      }
+    }
+  }
+  return { ...values, ...edits };
+}
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
@@ -539,7 +559,7 @@ export function PanelHost({
                 name,
                 action.id,
                 {
-                  changes: serializeDraft(top.draft),
+                  changes: formChanges(panel, top.draft),
                   ...(target ? { target } : {}),
                   ...(panel.context ? { context: panel.context } : {}),
                 },
