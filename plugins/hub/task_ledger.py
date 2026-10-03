@@ -118,6 +118,26 @@ class TaskCard:
             return str(self.checkpoints[-1].get("note", ""))
         return ""
 
+    def summary_line(self, title_width: int = 80) -> str:
+        """One compact line (id, status, priority, assigner, title) for rebirth.
+
+        The title is the first non-empty line of the directive, truncated.
+        """
+        title = next(
+            (
+                " ".join(ln.split())
+                for ln in str(self.directive or "").splitlines()
+                if ln.strip()
+            ),
+            "",
+        )
+        if len(title) > title_width:
+            title = title[: title_width - 3] + "..."
+        return (
+            f"[{self.id}] {self.status} p{self.priority} "
+            f"from {self.assigner}: {title}"
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,

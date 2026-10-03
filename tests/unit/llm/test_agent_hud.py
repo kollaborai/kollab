@@ -188,7 +188,6 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
             ],
-            max_history=None,
         )
 
         self.assertEqual(messages[0]["role"], "user")

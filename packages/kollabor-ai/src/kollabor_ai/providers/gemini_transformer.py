@@ -82,7 +82,7 @@ class GeminiResponseTransformer:
 
         candidate = chunk["candidates"][0]
         parts = candidate.get("content", {}).get("parts", [])
-        finish_reason = candidate.get("finishReason")
+        finish_reason = GeminiResponseTransformer._finish_reason(candidate)
 
         # Check if final chunk
         is_final = finish_reason is not None
@@ -129,8 +129,9 @@ class GeminiResponseTransformer:
                     raw_chunk=chunk,
                 )
 
-        # Final chunk carrying only usage (no parts)
-        if is_final and usage:
+        # Final chunk with no parts. Usage is optional: dropping the chunk would
+        # lose the finish reason.
+        if is_final:
             return StreamingResponse(
                 delta=TextDelta(content=""),
                 usage=usage,
@@ -141,6 +142,12 @@ class GeminiResponseTransformer:
 
         # Empty chunk (keepalive)
         return None
+
+    @staticmethod
+    def _finish_reason(candidate: Dict[str, Any]) -> Optional[str]:
+        """Map MAX_TOKENS to "length", the stop reason auto-continue keys off."""
+        reason = candidate.get("finishReason")
+        return "length" if reason == "MAX_TOKENS" else reason
 
     @staticmethod
     def _chunk_usage(chunk: Dict[str, Any]) -> Optional[UsageInfo]:
@@ -194,7 +201,7 @@ class GeminiResponseTransformer:
         candidate = response["candidates"][0]
         content_data = candidate.get("content", {})
         parts = content_data.get("parts", [])
-        finish_reason = candidate.get("finishReason")
+        finish_reason = GeminiResponseTransformer._finish_reason(candidate)
 
         # Extract content blocks
         content_blocks: List[Any] = []

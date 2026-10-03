@@ -34,7 +34,6 @@ status: active
 - [Kollaborate](features/kollaborate.md) - Multi-agent parallel development framework
 - [Config Hooks](features/config-hooks.md) - JSON-based hooks (no Python needed)
 - [Dynamic System Prompts](features/dynamic-system-prompts.md) - Runtime prompt rendering
-- [Question Gate Protocol](features/question-gate-protocol.md) - Tool suspension on agent questions
 
 ## Plugins
 

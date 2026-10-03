@@ -656,7 +656,10 @@ class PromptRenderer:
 
         try:
             return str(
-                vault.get_rebirth_context(crystal_store=crystal_store)
+                vault.get_rebirth_context(
+                    crystal_store=crystal_store,
+                    task_ledger=getattr(hub, "_task_ledger", None),
+                )
             )
         except Exception:
             logger.debug("Failed to get vault rebirth context for hub_vault")

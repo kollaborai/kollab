@@ -47,7 +47,6 @@ class FakeQP:
         self.is_processing = kw.get("is_processing", False)
         self.turn_completed = kw.get("turn_completed", False)
         self.cancel_processing = kw.get("cancel_processing", False)
-        self.question_gate_active = kw.get("question_gate_active", False)
         self.last_progress_at = kw.get("last_progress_at", clock())
         self.processing_queue = FakeQueue(kw.get("queue", 0))
         self.tool_executor = FakeToolExec(kw.get("tool_executing", False))
@@ -154,14 +153,6 @@ class TestTurnWatchdogDetect(unittest.TestCase):
         c.t += 10_000
         self.assertIsNone(wd.detect())
 
-    def test_question_gate_not_flagged(self):
-        c = Clock()
-        wd, *_ = _make(
-            c, is_processing=True, question_gate_active=True, last_progress_at=c()
-        )
-        c.t += 10_000
-        self.assertIsNone(wd.detect())
-
     def test_orphaned_queue_needs_two_strikes(self):
         c = Clock()
         wd, qp, *_ = _make(c, is_processing=False, queue=2, last_progress_at=c())
@@ -263,7 +254,7 @@ class TestTurnWatchdogAgainstRealQueueProcessor(unittest.TestCase):
     """Contract test: the watchdog reads a REAL QueueProcessor, not a fake.
 
     Catches drift between the watchdog's assumptions (last_progress_at,
-    mark_progress, is_processing, processing_queue, question_gate_active,
+    mark_progress, is_processing, processing_queue,
     cancel_processing) and the actual class it watches in production.
     """
 
@@ -277,7 +268,6 @@ class TestTurnWatchdogAgainstRealQueueProcessor(unittest.TestCase):
             conversation_history=[],
             session_stats={},
             stats={},
-            pending_tools=[],
             queue_metrics={
                 "total_enqueue_attempts": 0,
                 "total_enqueue_successes": 0,
@@ -298,8 +288,6 @@ class TestTurnWatchdogAgainstRealQueueProcessor(unittest.TestCase):
             streaming_handler=MagicMock(),
             native_tools_handler=native,
             add_message_fn=MagicMock(),
-            max_history=90,
-            question_gate_enabled=False,
             max_queue_size=10,
         )
 

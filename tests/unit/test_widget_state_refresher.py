@@ -37,7 +37,6 @@ class FakeStateService:
         return ProcessingSnapshot(
             is_processing=True,
             current_processing_tokens=42,
-            pending_tools_count=1,
         )
 
     async def get_system_info(self):

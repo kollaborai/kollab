@@ -218,7 +218,6 @@ class WidgetStateRefresher:
             flat["is_processing"] = proc.is_processing
             flat["current_processing_tokens"] = proc.current_processing_tokens
             flat["bg_tasks"] = proc.bg_tasks_count
-            flat["pending_tools"] = proc.pending_tools_count
         except Exception as e:
             degraded = True
             logger.debug("refresher get_processing_state failed: %s", e)

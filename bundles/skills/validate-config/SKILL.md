@@ -226,7 +226,6 @@ required_settings = {
     'core.llm.api_url': 'llm api endpoint url',
     'core.llm.model': 'model name/identifier',
     'core.llm.temperature': 'sampling temperature (0.0-1.0)',
-    'core.llm.max_history': 'conversation history limit'
 }
 
 if config_path:
@@ -264,13 +263,6 @@ def validate_config(config):
         temp = config.get('core', {}).get('llm', {}).get('temperature', 0.7)
         if not 0.0 <= temp <= 2.0:
             errors.append(f'invalid temperature: {temp} (must be 0.0-2.0)')
-    except: pass
-
-    # check max_history
-    try:
-        history = config.get('core', {}).get('llm', {}).get('max_history', 90)
-        if history < 0 or history > 1000:
-            warnings.append(f'unusual max_history: {history}')
     except: pass
 
     # check timeout values

@@ -273,7 +273,6 @@ class ProcessingSnapshot(Snapshot):
     queue_size: int = 0
     queue_max: int = 0
     dropped_messages: int = 0
-    pending_tools_count: int = 0
     bg_tasks_count: int = 0
     circuit_breaker_state: str = "closed"
     active_operation: "ActiveOperationSnapshot" = field(
@@ -282,7 +281,9 @@ class ProcessingSnapshot(Snapshot):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProcessingSnapshot":
-        values = dict(data)
+        # Drop keys this build no longer has (an older daemon may still send them).
+        known = {f.name for f in fields(cls)}
+        values = {k: v for k, v in data.items() if k in known}
         operation = values.pop("active_operation", None)
         return cls(
             **values,

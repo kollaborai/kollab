@@ -641,10 +641,6 @@ class TerminalSession {
       case 'error':
         this.printError(`${event.code}: ${event.message}`);
         break;
-
-      case 'question_gate':
-        this.printQuestion(event.question);
-        break;
     }
   }
 
@@ -889,14 +885,6 @@ class TerminalSession {
 
   printPermissionDenied(toolId) {
     this.printWarning(`permission denied for ${toolId}`);
-  }
-
-  printQuestion(question) {
-    const line = document.createElement('div');
-    line.className = 'output-line permission';
-    line.innerHTML = `<div style="color: var(--warning)">[question] ${this.escapeHtml(question)}</div>`;
-    this.container.appendChild(line);
-    this.scrollToBottom();
   }
 
   scrollToBottom() {

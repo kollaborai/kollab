@@ -10,7 +10,6 @@ sections/
 ├── 01-session-context.md                 # Environment detection (git, docker, python, etc.)
 ├── 02-tool-workflow.md                   # Tool-first workflow methodology
 ├── 03-response-patterns.md               # Response type classification
-├── 04-question-gate.md                   # Question gate protocol
 ├── 05-investigation-examples.md          # Example investigations
 ├── 06-task-planning.md                   # Todo list system
 ├── 07-tool-reference.md                  # Command and file operation reference

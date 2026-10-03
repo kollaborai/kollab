@@ -21,7 +21,6 @@ class TestTaskManagement:
         """Create a mock configuration."""
         config = Mock()
         config.get.side_effect = lambda key, default=None: {
-            "kollabor.llm.max_history": 90,
             "kollabor.llm.background_tasks.max_concurrent": 50,
             "kollabor.llm.background_tasks.enable_monitoring": False,
             "kollabor.llm.background_tasks.cleanup_interval": 60,
@@ -383,7 +382,6 @@ class TestTaskManagementIntegration:
         """Create a mock configuration."""
         config = Mock()
         config.get.side_effect = lambda key, default=None: {
-            "kollabor.llm.max_history": 90,
             "kollabor.llm.background_tasks.max_concurrent": 50,
             "kollabor.llm.background_tasks.enable_monitoring": False,
             "kollabor.llm.background_tasks.cleanup_interval": 60,

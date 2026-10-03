@@ -24,7 +24,6 @@ from kollabor_ai.generated_image_artifacts import (
 )
 from kollabor_ai.message_content import (
     contains_image_content,
-    content_to_text,
     redact_media_data,
 )
 from kollabor_ai.model_registry import supports_vision
@@ -32,6 +31,7 @@ from kollabor_ai.profile_manager import LLMProfile
 from kollabor_ai.providers.errors import (
     APIConnectionError,
     APITimeoutError,
+    AuthenticationError,
     EmptyResponseError,
     ProviderError,
     RateLimitError,
@@ -92,7 +92,7 @@ class APICommunicationService:
         # (whole conversation history) per call, so a single long session grows
         # O(n^2) — observed 290MB files, 6.2GB total dir (2026-07-03). Two
         # bounds, both tunable, both 0 = disabled:
-        #   - per-file cap: stop appending once one session's log is huge
+        #   - per-file cap: rotate to a new file once one session's log is huge
         #   - total-dir cap: prune oldest sessions so weeks of runs stay bounded
         self._raw_max_file_bytes = int(
             config.get("kollabor.llm.raw_log_max_file_mb", 100) * 1024 * 1024
@@ -100,7 +100,6 @@ class APICommunicationService:
         self._raw_max_total_bytes = int(
             config.get("kollabor.llm.raw_log_max_total_mb", 1024) * 1024 * 1024
         )
-        self._raw_file_capped_warned = False
         # Enforce the total-dir ceiling once at session start (prunes oldest
         # *_raw.jsonl). The current session's file does not exist yet, so it
         # is never a prune target here.
@@ -136,6 +135,9 @@ class APICommunicationService:
         # .done(), so there is nothing to cancel and ESC was a silent no-op
         # that waited out the sleep and then fired another request.
         self._cancel_event: Optional[asyncio.Event] = None
+        # Serializes OAuth token refresh after a 401 so concurrent requests
+        # don't spend the same (possibly rotating) refresh token twice.
+        self._oauth_refresh_lock = asyncio.Lock()
 
         # Token usage tracking
         self.last_token_usage: Dict[str, int] = {}
@@ -480,7 +482,8 @@ class APICommunicationService:
     async def _refresh_oauth_token(self) -> None:
         """Refresh expired OAuth token and update profile in-place.
 
-        Called before provider creation for OAuth profiles. If refresh
+        Called before provider creation for OAuth profiles and again after a
+        401 (``_refresh_oauth_after_401``). If refresh
         succeeds, updates self._profile.api_key with the fresh token
         and resolves the model to the latest available if still generic.
         If refresh fails (no refresh_token, network error), logs warning
@@ -574,7 +577,6 @@ class APICommunicationService:
     async def call_llm(
         self,
         conversation_history: List[Dict[str, Any]],
-        max_history: Optional[int] = None,
         streaming_callback=None,
         tools: Optional[List[Dict[str, Any]]] = None,
         on_rate_limit=None,
@@ -586,7 +588,6 @@ class APICommunicationService:
 
         Args:
             conversation_history: List of conversation messages
-            max_history: Maximum number of messages to send (optional)
             streaming_callback: Optional callback for streaming content chunks
             tools: Optional list of tool definitions for native function calling
             turn_id: Optional explicit turn id for the raw log entry. If
@@ -598,8 +599,8 @@ class APICommunicationService:
                 call records ``continuation_of=<parent_turn_id>`` so a
                 truncated-and-resumed response can be stitched back to the
                 turn that started it.
-            **provider_kwargs: Provider-native request options such as
-                ``previous_response_id`` and Responses API cache controls.
+            **provider_kwargs: Provider-native request options forwarded to
+                the provider call, for example ``effort``.
 
         Returns:
             LLM response content
@@ -651,7 +652,7 @@ class APICommunicationService:
         self._connection_stats["last_activity"] = time.time()
 
         # Prepare messages for API
-        messages = self._prepare_messages(conversation_history, max_history)
+        messages = self._prepare_messages(conversation_history)
         self._provider_kwargs = dict(provider_kwargs)
 
         # Use provider system (always enabled)
@@ -709,18 +710,9 @@ class APICommunicationService:
                     )
                 # Wrap provider call in a task so cancel_current_request()
                 # can actually cancel the in-flight HTTP request
-                if self.enable_streaming:
-                    self.current_request_task = asyncio.ensure_future(
-                        self._call_provider_stream(
-                            messages,
-                            tools,
-                            provider_streaming_callback,
-                        )
-                    )
-                else:
-                    self.current_request_task = asyncio.ensure_future(
-                        self._call_provider_nonstream(messages, tools)
-                    )
+                self.current_request_task = asyncio.ensure_future(
+                    self._call_provider(messages, tools, provider_streaming_callback)
+                )
 
                 content = await self.current_request_task
                 self._notify_operation_observer(
@@ -943,6 +935,57 @@ class APICommunicationService:
         except asyncio.TimeoutError:
             return  # backoff elapsed untouched, retry as normal
         raise asyncio.CancelledError("API request cancelled during retry backoff")
+
+    async def _call_provider(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        streaming_callback,
+    ) -> str:
+        """One provider request, replayed once after a 401 on an OAuth profile.
+
+        The OAuth access token is only refreshed when the provider is built, so
+        a long session outlives it. A 401 means nothing was generated, so the
+        replay cannot duplicate streamed output.
+        """
+
+        async def send() -> str:
+            if self.enable_streaming:
+                return await self._call_provider_stream(
+                    messages, tools, streaming_callback
+                )
+            return await self._call_provider_nonstream(messages, tools)
+
+        rejected_key = self._profile.api_key
+        try:
+            return await send()
+        except AuthenticationError:
+            if self._profile.auth_type != "oauth" or not (
+                await self._refresh_oauth_after_401(rejected_key)
+            ):
+                raise
+        return await send()
+
+    async def _refresh_oauth_after_401(self, rejected_key: str) -> bool:
+        """Refresh the OAuth token after a 401 and rebuild the provider.
+
+        True when a replay can succeed: the token differs from ``rejected_key``,
+        refreshed here or by a concurrent request that held the lock first.
+        """
+        async with self._oauth_refresh_lock:
+            if self._profile.api_key == rejected_key:
+                await self._refresh_oauth_token()
+                if self._profile.api_key == rejected_key:
+                    return False  # refresh failed (logged there); a replay would 401 again
+                previous = (self._provider, self._provider_error)
+                await self._initialize_provider()
+                if self._provider is None:  # rebuild failed: keep the old provider
+                    self._provider, self._provider_error = previous
+                    return False
+        logger.warning(
+            "OAuth access token rejected (401); refreshed it and replaying the request once"
+        )
+        return True
 
     async def _call_provider_nonstream(
         self,
@@ -1221,6 +1264,13 @@ class APICommunicationService:
                             cache_read_tokens=cache_read,
                         )
 
+            # EXPLICIT mode completes a call inside add_delta only once its
+            # arguments parse, so a no-argument call (empty buffer) is still
+            # pending here. The accumulator returns only calls it has not handed
+            # back yet, so this cannot duplicate one.
+            if self._use_explicit_accumulation:
+                accumulated_tools.extend(self._tool_accumulator.get_completed_tools())
+
             # Combine content
             content = "".join(content_parts)
             if self.last_generated_images:
@@ -1370,8 +1420,9 @@ class APICommunicationService:
         # reason, zero usage, and no content. It must be caught explicitly: it
         # otherwise looks like a successful empty turn, gets saved, and every
         # later request inherits the same too-large history and fails the same
-        # way. The budget guard should keep us from ever getting here; this is
-        # the backstop that makes the failure loud instead of silent.
+        # way. Output caps at the source (file reads, _cap_tool_output) and
+        # compaction should keep us from ever getting here; this is the
+        # backstop that makes the failure loud instead of silent.
         if (
             getattr(self, "last_stop_reason", None) or ""
         ) == "model_context_window_exceeded":
@@ -1399,26 +1450,21 @@ class APICommunicationService:
         )
 
     def _prepare_messages(
-        self, conversation_history: List[Any], max_history: Optional[int]
+        self, conversation_history: List[Any]
     ) -> List[Dict[str, Any]]:
         """Prepare conversation messages for API request.
 
+        The whole history is sent; nothing is trimmed to fit. Compaction is
+        what keeps a conversation inside the model's window.
+
         Args:
             conversation_history: Raw conversation history
-            max_history: Maximum messages to include
 
         Returns:
             List of formatted messages for API
         """
-        # Apply history limit if specified
-        if max_history:
-            recent_messages = conversation_history[-max_history:]
-        else:
-            recent_messages = conversation_history
-
-        # Format messages for API
         messages: list[dict[str, Any]] = []
-        for msg in recent_messages:
+        for msg in conversation_history:
             # Handle both ConversationMessage objects and dicts
             if hasattr(msg, "role"):
                 role, content = msg.role, msg.content
@@ -1449,44 +1495,19 @@ class APICommunicationService:
 
             messages.append(formatted)
 
-        return self._enforce_token_budget(messages)
-
-    @staticmethod
-    def _estimate_tokens(value: Any) -> int:
-        """Conservative token estimate for a message field.
-
-        Uses ~3 chars/token (an intentional over-estimate for English/code) so
-        the budget guard trims early rather than late. Non-string content
-        (tool-call payloads, content-block lists) is stringified first.
-        """
-        if not value:
-            return 0
-        if isinstance(value, str):
-            text = value
-        elif isinstance(value, list):
-            text = content_to_text(value)
-            if not text:
-                text = json.dumps(value, ensure_ascii=False, default=str)
-        else:
-            text = json.dumps(value, ensure_ascii=False, default=str)
-        return len(text) // 3 + 1
-
-    def _message_tokens(self, message: Dict[str, Any]) -> int:
-        total = self._estimate_tokens(message.get("content"))
-        if message.get("tool_calls"):
-            total += self._estimate_tokens(message.get("tool_calls"))
-        return total
+        return self._strip_leading_orphans(messages)
 
     @staticmethod
     def _strip_leading_orphans(
         messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Keep the trimmed window valid for the API.
+        """Keep the request window valid for the API.
 
-        After dropping old turns the window must still start on a real user
-        turn: a leading assistant/tool message, or a tool result whose
-        originating tool call was trimmed away, would be rejected (a
-        tool_result must follow its tool_use). Drop such leading messages.
+        When compaction cuts mid-exchange, the window must still start on a
+        real user turn: a leading assistant/tool message,
+        or a tool result whose originating tool call was cut away, would be
+        rejected (a tool_result must follow its tool_use). Drop such leading
+        messages. Nothing is ever dropped to fit a token budget.
         If the entire bounded window is orphaned tool state, replace it with a
         recoverable user message rather than send an invalid
         function_call_output-only request.
@@ -1532,73 +1553,6 @@ class APICommunicationService:
                 ),
             }
         ]
-
-    def _enforce_token_budget(
-        self, messages: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Bound a request to the model's context window before it is sent.
-
-        A single turn that injects a large payload (e.g. reading a big file)
-        can push the request past the provider window; the call then returns
-        empty (stop_reason=model_context_window_exceeded) and, because the
-        oversized history stays in place, every later turn fails the same way.
-        This drops the oldest messages from the *request only* (the stored
-        history is untouched and is summarized separately) so the wire payload
-        always fits. Returns the list unchanged when the window is unknown,
-        rather than risk over-trimming.
-        """
-        cfg = getattr(getattr(self, "_provider", None), "config", None)
-        window = int(getattr(cfg, "context_window", 0) or 0)
-        if window <= 0:
-            return self._strip_leading_orphans(list(messages))
-
-        reserve_output = int(getattr(cfg, "max_tokens", 0) or 16384)
-        # The system prompt and tool schemas are added by the provider and are
-        # not in `messages`; reserve a conservative fixed overhead for them.
-        overhead = 60000
-        if self.config:
-            overhead = int(
-                self.config.get("kollabor.llm.context_overhead_tokens", overhead)
-            )
-        margin = 4000
-        budget = window - reserve_output - overhead - margin
-        if budget <= 0:
-            # Misconfigured (output reserve/overhead exceed the window); don't
-            # nuke the conversation — let the overflow guard surface it instead.
-            return messages
-
-        costs = [self._message_tokens(m) for m in messages]
-        total = sum(costs)
-        if total <= budget:
-            # Even an in-budget window can begin with a stale tool result
-            # after a prior history trim/reset. Never send that orphan to the
-            # provider just because no further budget trimming is needed.
-            return self._strip_leading_orphans(list(messages))
-
-        kept = list(messages)
-        kept_costs = list(costs)
-        dropped = 0
-        # Always keep the final (current) turn; drop from the oldest end.
-        while len(kept) > 1 and total > budget:
-            total -= kept_costs.pop(0)
-            kept.pop(0)
-            dropped += 1
-
-        before = len(kept)
-        kept = self._strip_leading_orphans(kept)
-        dropped += before - len(kept)
-
-        logger.warning(
-            "Context budget guard trimmed %d oldest message(s) to fit the model "
-            "window (window=%d, reserve_out=%d, overhead=%d, budget=%d). Stored "
-            "history is preserved; only this request was bounded.",
-            dropped,
-            window,
-            reserve_output,
-            overhead,
-            budget,
-        )
-        return kept
 
     def get_last_token_usage(self) -> Dict[str, int]:
         """Get token usage from last API call.
@@ -1805,32 +1759,50 @@ class APICommunicationService:
             )
 
             # Per-file cap: a single long session appends the full history per
-            # call (O(n^2)). Once this file is huge, stop appending so one
-            # runaway session can't blow past the total-dir ceiling mid-run.
+            # call (O(n^2)). Past the cap, move the full file aside and start a
+            # fresh one so recent wire data is never dropped, then re-apply the
+            # total-dir ceiling (oldest files go first).
             if self._raw_max_file_bytes > 0:
                 try:
                     if (
                         raw_file.exists()
                         and raw_file.stat().st_size >= self._raw_max_file_bytes
                     ):
-                        if not self._raw_file_capped_warned:
-                            self._raw_file_capped_warned = True
-                            logger.warning(
-                                "Raw log for session %s hit the per-file cap "
-                                "(%d MB); further raw entries this session are "
-                                "dropped. Tune kollabor.llm.raw_log_max_file_mb.",
-                                self.current_session_id,
-                                self._raw_max_file_bytes // (1024 * 1024),
-                            )
-                        return
-                except OSError:
-                    pass  # stat failed — fall through and attempt the write
+                        self._rotate_raw_log(raw_file)
+                        self._prune_raw_logs()
+                except OSError as e:
+                    logger.warning(
+                        "Raw log rotation failed for session %s (%s); appending to the full file",
+                        self.current_session_id,
+                        e,
+                    )
 
             with open(raw_file, "a") as f:
                 f.write(json.dumps(interaction.to_dict(), default=str) + "\n")
 
         except Exception as e:
             logger.warning(f"Failed to log raw interaction: {e}")
+
+    def _rotate_raw_log(self, raw_file: Path) -> None:
+        """Move a full raw log aside as ``<session>.<n>_raw.jsonl`` (n counts up).
+
+        The active file keeps its ``<session>_raw.jsonl`` name, so anything
+        tailing it sees the newest entries, and the ``*_raw.jsonl`` glob used
+        by the prune and the viewers still matches every chunk.
+        """
+        stem = raw_file.name.removesuffix("_raw.jsonl")
+        chunk = re.compile(rf"{re.escape(stem)}\.(\d+)_raw\.jsonl")
+        taken = [
+            int(m[1]) for f in raw_file.parent.iterdir() if (m := chunk.fullmatch(f.name))
+        ]
+        target = raw_file.with_name(f"{stem}.{max(taken, default=0) + 1}_raw.jsonl")
+        raw_file.rename(target)
+        logger.info(
+            "Raw log for session %s reached the per-file cap (%d MB); rotated to %s",
+            self.current_session_id,
+            self._raw_max_file_bytes // (1024 * 1024),
+            target.name,
+        )
 
     def _prune_raw_logs(self) -> None:
         """Keep the raw-conversations dir under the total-size ceiling.

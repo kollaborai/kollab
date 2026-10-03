@@ -324,7 +324,10 @@ class TestGeminiResponseTransformer:
                 gemini_response, "gemini-2.0-flash"
             )
 
-            assert response.finish_reason == reason
+            # MAX_TOKENS is reported as "length" (the stop reason auto-continue uses)
+            assert response.finish_reason == (
+                "length" if reason == "MAX_TOKENS" else reason
+            )
 
     def test_empty_response_raises(self):
         """Test that empty response raises ValueError."""

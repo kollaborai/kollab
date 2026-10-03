@@ -147,6 +147,11 @@ SUMMARY_INJECTION_PREFIX = (
 )
 SUMMARY_INJECTION_SUFFIX = "\n\nContinue from where we left off."
 
+# Coordination in flight defers compaction one turn in the normal case (a queued
+# HUD entry drains on the next request), but a hub reply that never arrives kept
+# koordinator deferring ~12 turns in a row. After this many, compact anyway.
+MAX_COORDINATION_DEFERRALS = 3
+
 
 AUTO_THRESHOLD_CAP = 272_000
 
@@ -259,6 +264,13 @@ class ContextCompactionPlugin(BasePlugin):
         self._disabled_for_session: bool = False
         self._compaction_task: Optional[asyncio.Task] = None
         self._compaction_tasks: set[asyncio.Task] = set()
+        # "Can't shrink" stop (see _should_compact): the swap sets just_applied, the
+        # next reported prompt is the compacted one, shrink_floor holds it when it
+        # was still over the threshold, tokens_at_trigger is what fired the round.
+        self._compaction_just_applied: bool = False
+        self._shrink_floor: Optional[int] = None
+        self._tokens_at_trigger: int = 0
+        self._coordination_deferrals: int = 0
 
         # Model-first compaction: the model is asked what to keep and starts
         # compaction itself with <compact>notes</compact>.
@@ -669,14 +681,12 @@ class ContextCompactionPlugin(BasePlugin):
     def _estimate_history_tokens(
         self, history: List[ConversationMessage]
     ) -> int:
-        """Estimate tokens for the conversation about to be sent.
+        """Estimate tokens from message text (~3 chars/token) when no usage was reported.
 
-        The API-reported count lags by one request and reads 0 after a
-        context-window overflow, so on its own it lets an over-budget
-        conversation slip through without ever triggering compaction.
-        Estimating from current message content (~3 chars/token, deliberately
-        conservative) lets compaction react to a single turn that just added a
-        large payload, before that oversized request goes out.
+        Fallback only. It counts content chars (not tool schemas or tool-call
+        args) and overshot the real count 2.3x on 2026-09-30 (101K estimated vs
+        44K reported), so never compare it to the threshold when an
+        API-reported count exists.
         """
         total_chars = 0
         for msg in history:
@@ -781,17 +791,39 @@ class ContextCompactionPlugin(BasePlugin):
         a 2-message conversation with a huge system prompt, and also
         prevents token-blind compaction from agent chatter.
         """
-        # Gate 1: token count. Use the larger of the API-reported count
-        # (accurate, but from the PREVIOUS request and 0 after an overflow) and
-        # a fresh estimate of the history about to be sent. The estimate is what
-        # lets compaction react to a turn that just added a large payload,
-        # before that oversized request goes out.
-        prompt_tokens = max(
-            self._get_prompt_tokens(), self._estimate_history_tokens(history)
-        )
+        # Gate 1: token count. Runs at LLM_REQUEST_POST, so the API-reported
+        # count is for the history that was just sent: exact, and the only
+        # number compaction can move. The chars//3 estimate is the fallback for
+        # a request that reported no usage. Never max() them: the estimate runs
+        # ~2.3x high and counts the system prompt and the verbatim-preserved
+        # tasks/HUD that compaction cannot remove, so it stayed above the
+        # threshold after every compaction and re-fired it every turn.
+        prompt_tokens = self._get_prompt_tokens()
+        estimated = prompt_tokens <= 0
+        if estimated:
+            prompt_tokens = self._estimate_history_tokens(history)
         token_threshold = self._get_token_threshold()
         if prompt_tokens < token_threshold:
+            self._compaction_just_applied = False
+            self._shrink_floor = None
             return False
+
+        # Gate 1b: can't-shrink stop. The first count reported after a compaction
+        # is the compacted prompt: system prompt + summary + pinned tasks/HUD + the
+        # kept window. Still over the threshold means another round rebuilds the
+        # same prompt and re-fires every turn, so pause until the prompt grows by a
+        # tenth of the threshold, then try again.
+        if self._compaction_just_applied:
+            if prompt_tokens == self._tokens_at_trigger:
+                return False  # no fresh usage since the swap, so no verdict yet
+            self._compaction_just_applied = False
+            self._shrink_floor = prompt_tokens
+            self._warn_cannot_shrink(prompt_tokens, token_threshold)
+            return False
+        if self._shrink_floor is not None:
+            if prompt_tokens < self._shrink_floor + token_threshold // 10:
+                return False
+            self._shrink_floor = None
 
         # Gate 2: minimum human turns (safety floor)
         min_turns = int(
@@ -817,11 +849,36 @@ class ContextCompactionPlugin(BasePlugin):
             source = "fallback"
 
         logger.info(
-            f"Compaction triggered: {prompt_tokens} tokens >= {token_threshold} "
+            f"Compaction triggered: {prompt_tokens} tokens"
+            f"{' (estimated)' if estimated else ''} >= {token_threshold} "
             f"[{source}] ({human_turns} human turns, min {min_turns}) "
             f"(round {self._compaction_round})"
         )
+        self._tokens_at_trigger = prompt_tokens
         return True
+
+    def _warn_cannot_shrink(self, prompt_tokens: int, threshold: int) -> None:
+        """Say, once per episode, that a compaction could not get under the threshold."""
+        content = (
+            f"Auto-compaction paused: round {self._compaction_round} left the prompt at "
+            f"{prompt_tokens // 1000}K tokens, still over the {threshold // 1000}K "
+            "threshold (system prompt, summary and pinned tasks fill it). Retrying after "
+            f"{threshold // 10 // 1000}K more tokens; /clear or a larger context window "
+            "gets under it."
+        )
+        logger.warning(content)
+        renderer = self.renderer
+        coordinator = getattr(renderer, "message_coordinator", None)
+        if getattr(renderer, "pipe_mode", False) is True or not hasattr(
+            coordinator, "display_message_sequence"
+        ):
+            return
+        try:
+            coordinator.display_message_sequence(
+                [("system", content, {"display_type": "warning"})]
+            )
+        except Exception:
+            logger.debug("Failed to display compaction warning", exc_info=True)
 
     def _coordination_pending(self) -> bool:
         """Readiness gate: is undelivered coordination state in flight?
@@ -926,16 +983,28 @@ class ContextCompactionPlugin(BasePlugin):
 
         # While the model has been asked, the idle watcher owns the fallback;
         # the model normally answers with <compact> first.
-        if not self._awaiting_model and self._should_compact(history):
-            if self._coordination_pending():
+        if not self._awaiting_model:
+            if not self._should_compact(history):
+                self._coordination_deferrals = 0
+            elif (
+                self._coordination_pending()
+                and self._coordination_deferrals < MAX_COORDINATION_DEFERRALS
+            ):
+                self._coordination_deferrals += 1
                 logger.info(
-                    "Compaction deferred: coordination in flight "
-                    "(queued HUD hub messages or pending hub replies)"
+                    "Compaction deferred (%d/%d): coordination in flight "
+                    "(queued HUD hub messages or pending hub replies)",
+                    self._coordination_deferrals,
+                    MAX_COORDINATION_DEFERRALS,
                 )
-            elif self.config.get("plugins.context_compaction.ask_model_first", True):
-                await self._request_model_curation(wake=False, reason="threshold")
             else:
-                self._start_compaction()
+                self._coordination_deferrals = 0
+                if self.config.get(
+                    "plugins.context_compaction.ask_model_first", True
+                ):
+                    await self._request_model_curation(wake=False, reason="threshold")
+                else:
+                    self._start_compaction()
 
         self._maybe_emit_budget_hud(history)
 
@@ -1283,6 +1352,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._pending_compaction = None
         self._pending_session_id = None
         self._pre_compaction_len = 0
+        self._compaction_just_applied = True
 
         return data
 
@@ -1762,6 +1832,76 @@ class ContextCompactionPlugin(BasePlugin):
         finally:
             self._compaction_in_progress = False
 
+    async def _call_provider_with_retry(self, provider, messages):
+        """provider.call() with the main request path's transient-error retry.
+
+        ApiCommunicationService retries 429/5xx/transport errors with capped
+        exponential backoff, but the summarizer talks to its own provider, so one
+        429 failed the round (three failures disable compaction for the session).
+        Same knob, constants and Retry-After handling as that path.
+        """
+        import random
+
+        from kollabor_ai.api_communication_service import (
+            RETRY_BASE_DELAY_SECONDS,
+            RETRY_JITTER_MAX,
+            RETRY_JITTER_MIN,
+            RETRY_MAX_DELAY_SECONDS,
+        )
+        from kollabor_ai.providers.errors import (
+            APIConnectionError,
+            APITimeoutError,
+            RateLimitError,
+            ServerError,
+            TransientHTTPError,
+        )
+
+        try:
+            max_retries = max(0, int(self.config.get("kollabor.llm.max_retries", 5)))
+        except (TypeError, ValueError):
+            max_retries = 5
+        for attempt in range(max_retries + 1):
+            try:
+                return await provider.call(messages=messages)
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                transient = (
+                    isinstance(
+                        e,
+                        (
+                            RateLimitError,
+                            ServerError,
+                            APIConnectionError,
+                            APITimeoutError,
+                            TransientHTTPError,
+                        ),
+                    )
+                    or status in (408, 409, 429)
+                    or (isinstance(status, int) and 500 <= status < 600)
+                )
+                if not transient or attempt == max_retries:
+                    raise
+                try:
+                    wait = float(getattr(e, "retry_after", None))
+                except (TypeError, ValueError):
+                    wait = None
+                if wait is not None and not 0 <= wait <= RETRY_MAX_DELAY_SECONDS:
+                    raise  # the server asked for longer than we will wait
+                delay = wait if wait is not None else min(
+                    RETRY_BASE_DELAY_SECONDS
+                    * 2**attempt
+                    * random.uniform(RETRY_JITTER_MIN, RETRY_JITTER_MAX),
+                    RETRY_MAX_DELAY_SECONDS,
+                )
+                logger.warning(
+                    "Summarization call failed (attempt %d/%d), retrying in %.0fs: %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    delay,
+                    str(e)[:120],
+                )
+                await asyncio.sleep(delay)
+
     async def _call_summarization_llm(
         self,
         formatted_messages: str,
@@ -1815,7 +1955,7 @@ class ContextCompactionPlugin(BasePlugin):
 
             # provider.call() returns UnifiedResponse
             # max_tokens is determined by the provider config from the profile
-            response = await provider.call(messages=messages)
+            response = await self._call_provider_with_retry(provider, messages)
 
             # UnifiedResponse has get_text_content() helper
             if hasattr(response, "get_text_content"):
@@ -1961,6 +2101,23 @@ class ContextCompactionPlugin(BasePlugin):
           [task reminder]        -- synthetic system note listing active tasks
           [to_keep messages]     -- recent messages kept intact
         """
+        # Every round writes a fresh reminder and older ones ride along (as kept
+        # messages, or as "tasks" because they say "report back"), so five piled up
+        # (23K chars) in the 2026-09-30 r8 checkpoint. Keep one: this round's, or
+        # the newest old one when no task is live.
+        def _is_reminder(m: ConversationMessage) -> bool:
+            return bool(m.metadata.get("compaction_task_reminder"))
+
+        stale = [
+            m
+            for m in (*(ledger_handled or ()), *(preserved_tasks or ()), *to_keep)
+            if _is_reminder(m)
+        ]
+        if stale:
+            ledger_handled = [m for m in ledger_handled or () if not _is_reminder(m)]
+            preserved_tasks = [m for m in preserved_tasks or () if not _is_reminder(m)]
+            to_keep = [m for m in to_keep if not _is_reminder(m)]
+
         compacted: List[ConversationMessage] = []
 
         if system_msg:
@@ -2032,6 +2189,8 @@ class ContextCompactionPlugin(BasePlugin):
                 f"Injected {len(preserved_tasks)} preserved task(s) "
                 f"and task reminder into compacted history"
             )
+        elif stale:
+            compacted.append(stale[-1])
 
         compacted.extend(to_keep)
 

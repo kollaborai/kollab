@@ -632,11 +632,6 @@ class ResponseParser:
             r"<tool_call>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
         )
 
-        # Question gate tags - suspend tool execution when present
-        self.question_pattern = re.compile(
-            r"<question>(.*?)</question>", re.DOTALL | re.IGNORECASE
-        )
-
         # File operations parser
         self.file_ops_parser = FileOperationParser()
 
@@ -811,7 +806,6 @@ class ResponseParser:
             response_without_agent_files
         )
         tool_calls = self._extract_tool_calls(response_without_agent_files)
-        question_content = self._extract_question(response_without_agent_files)
 
         # Clean content (remove all tags) - use cleaned response, then
         # restore any code-span placeholders so the display text is intact.
@@ -853,24 +847,18 @@ class ResponseParser:
             "tool_calls": tool_calls,
             "file_operations": file_operations,
             "plugin_tools": plugin_tools,
-            "question": question_content,
         }
 
         # Count semantic tools after deduplication so status and turn-control
         # decisions match the calls that the queue will actually execute.
         total_tools = len(self.get_all_tools({"components": components}))
 
-        # Question gate: if question present, mark turn as completed but flag tools as pending
-        # This causes the system to stop and wait for user input
-        has_question = question_content is not None
-
-        # Determine if turn is completed
-        # Turn is completed if: no tools OR question present (tools suspended)
+        # Determine if turn is completed: no XML tools to run.
         # NOTE: this counts XML tools only. Native API tool_use blocks are
         # invisible here -- the queue_processor must override turn_completed
         # to False when has_native_tools is True, otherwise the model never
         # sees its tool results.
-        turn_completed = (total_tools == 0) or has_question
+        turn_completed = total_tools == 0
 
         parsed = {
             "raw": raw_response,
@@ -878,7 +866,6 @@ class ResponseParser:
             "display_text": clean_content,
             "spoken_text": spoken_text,
             "turn_completed": turn_completed,
-            "question_gate_active": has_question and total_tools > 0,  # Tools suspended
             "components": components,
             "metadata": {
                 "has_thinking": bool(thinking_blocks),
@@ -886,7 +873,6 @@ class ResponseParser:
                 "has_tool_calls": bool(tool_calls),
                 "has_file_operations": bool(file_operations),
                 "has_plugin_tools": bool(plugin_tools),
-                "has_question": has_question,
                 "total_tools": total_tools,
                 "content_length": len(clean_content),
             },
@@ -911,23 +897,6 @@ class ResponseParser:
         """
         matches = self.thinking_pattern.findall(content)
         return [match.strip() for match in matches if match.strip()]
-
-    def _extract_question(self, content: str) -> Optional[str]:
-        """Extract question gate content.
-
-        When a <question> tag is present, the agent is asking for user input
-        and all tool calls should be suspended until the user responds.
-
-        Args:
-            content: Raw response content
-
-        Returns:
-            Question content if found, None otherwise
-        """
-        match = self.question_pattern.search(content)
-        if match:
-            return str(match.group(1).strip())
-        return None
 
     def _fix_malformed_tool_calls(self, content: str) -> str:
         """Fix common malformed tool call patterns.
@@ -1424,10 +1393,6 @@ class ResponseParser:
 
         # Remove <tool_call> tags
         cleaned = self.tool_call_pattern.sub("", cleaned)
-
-        # Remove question tags but preserve content for display
-        # The question content stays visible, just the tags are removed
-        cleaned = self.question_pattern.sub(r"\1", cleaned)
 
         # Remove file operation tags (all 14 types)
         # Only successfully parsed tags are removed; malformed tags remain visible

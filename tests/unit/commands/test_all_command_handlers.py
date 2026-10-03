@@ -243,9 +243,6 @@ class TestSystemCommandHandler(unittest.TestCase):
             async def get_permission_state(self):
                 return SimpleNamespace(approval_mode="DEFAULT")
 
-            async def get_processing_state(self):
-                return SimpleNamespace(pending_tools_count=2)
-
             async def get_hub_state(self):
                 return SimpleNamespace(my_identity="koordinator", peer_count=3)
 

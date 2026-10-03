@@ -523,7 +523,6 @@ class SystemCommandHandler(BaseCommandHandler):
         profile = await self._maybe_state_snapshot(state_service, "get_active_profile")
         agent = await self._maybe_state_snapshot(state_service, "get_active_agent")
         perm = await self._maybe_state_snapshot(state_service, "get_permission_state")
-        proc = await self._maybe_state_snapshot(state_service, "get_processing_state")
         hub = await self._maybe_state_snapshot(state_service, "get_hub_state")
         attach_runtime = self._get_service("attach_runtime_state") or {}
         rpc_client = self._get_service("rpc_client")
@@ -591,11 +590,6 @@ class SystemCommandHandler(BaseCommandHandler):
                             "value": str(
                                 getattr(perm, "approval_mode", "") or "unknown"
                             ),
-                        },
-                        {
-                            "type": "label",
-                            "label": "Pending Tools",
-                            "value": str(getattr(proc, "pending_tools_count", 0) or 0),
                         },
                         {
                             "type": "label",

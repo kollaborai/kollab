@@ -341,7 +341,6 @@ config = {
     },
     "kollabor": {
         "llm": {
-            "max_history": 999,
             "save_conversations": True,
             "conversation_format": "jsonl",
             "show_status": True,

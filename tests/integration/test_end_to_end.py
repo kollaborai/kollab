@@ -77,7 +77,6 @@ class MockConfig:
             "kollabor.llm.http_limit_per_host": 20,
             "kollabor.llm.keepalive_timeout": 30,
             "kollabor.llm.api_poll_delay": 0.01,
-            "kollabor.llm.max_history": 90,
             "kollabor.llm.timeout": 60.0,
             "kollabor.llm.model": "gpt-4",
             "kollabor.llm.temperature": 0.7,

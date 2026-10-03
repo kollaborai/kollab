@@ -2038,26 +2038,6 @@ class ProfileManager:
             logger.error(f"Failed to delete profile from config: {e}")
             return False
 
-    def get_adapter_for_profile(self, profile: Optional[LLMProfile] = None):
-        """
-        Get the appropriate API adapter for a profile.
-
-        Args:
-            profile: Profile to get adapter for (default: active profile)
-
-        Returns:
-            Configured API adapter instance
-        """
-        if profile is None:
-            profile = self.get_active_profile()
-
-        from kollabor_ai.adapters import get_adapter
-
-        return get_adapter(
-            "native" if profile.get_supports_tools() else "xml",
-            base_url=profile.get_endpoint(),
-        )
-
     def is_active(self, name: str) -> bool:
         """
         Check if a profile is the active one.

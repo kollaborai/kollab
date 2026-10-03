@@ -310,10 +310,16 @@ class GeminiProvider(LLMProvider):
             content = msg.get("content")
 
             if role == "system":
-                # Extract system instruction
-                system_instruction = {
-                    "parts": serialize_gemini_parts(content, self.resolve_media)
-                }
+                # Every system message counts; a later one must not replace an
+                # earlier one, so their parts concatenate in order.
+                sys_parts = serialize_gemini_parts(content, self.resolve_media)
+                if system_instruction is None:
+                    system_instruction = {"parts": sys_parts}
+                else:
+                    system_instruction["parts"] = [
+                        *system_instruction["parts"],
+                        *sys_parts,
+                    ]
             else:
                 # Convert role to Gemini format
                 gemini_role = "model" if role == "assistant" else role
@@ -349,43 +355,6 @@ class GeminiProvider(LLMProvider):
         request_payload.update(kwargs)
 
         return request_payload
-
-    def _format_tool_result(
-        self,
-        tool_call_id: str,
-        tool_name: str,
-        result: str,
-    ) -> Dict[str, Any]:
-        """
-        Format tool result for Gemini API.
-
-        Gemini uses functionResponse parts to return tool results.
-
-        Args:
-            tool_call_id: Tool call identifier
-            tool_name: Name of the tool that was called
-            result: Tool result string (typically JSON)
-
-        Returns:
-            Content dict with functionResponse part
-        """
-        # Parse result as JSON if possible
-        try:
-            result_data = json.loads(result)
-        except json.JSONDecodeError:
-            result_data = {"result": result}
-
-        return {
-            "role": "user",
-            "parts": [
-                {
-                    "functionResponse": {
-                        "name": tool_name,
-                        "response": result_data,
-                    }
-                }
-            ],
-        }
 
     def _build_url(self, stream: bool = False) -> str:
         """

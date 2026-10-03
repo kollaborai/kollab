@@ -93,15 +93,6 @@ def tool_result(
     )
 
 
-def question_gate(session_id: str, question: str, pending_tools: int = 0) -> Dict:
-    return sse_event(
-        "question_gate",
-        session_id,
-        question=question,
-        pending_tools=pending_tools,
-    )
-
-
 def turn_complete(
     session_id: str,
     input_tokens: int = 0,

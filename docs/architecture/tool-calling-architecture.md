@@ -18,14 +18,15 @@ status: reference / current behavior as of 2026-04-11
 
 kollab supports **two tool-calling protocols** for agents:
 
-1. **XML mode** (default) — Agents emit `<read>`, `<terminal>`,
+1. **XML mode** (fallback) — Agents emit `<read>`, `<terminal>`,
    `<edit>`, etc. as xml tags inside assistant content. The host app
    parses them out and runs the tool. Documented in
    `bundles/agents/_base/sections/tool-reference/*.md`.
 
-2. **Native mode** (opt-in) — Agents use native OpenAI/Anthropic
-   `tool_calls` JSON arrays. Requires `native_tool_calling=True` in
-   config AND a provider profile with `supports_tools=True`.
+2. **Native mode** (default) — Agents use native OpenAI/Anthropic
+   `tool_calls` JSON arrays. On unless `kollabor.llm.native_tool_calling`
+   is false in config or the provider profile sets `supports_tools=False`
+   (both default to true).
 
 Both paths route to the same `ToolExecutor` backend. The difference
 is only in how the agent **expresses** the tool request.
@@ -38,7 +39,7 @@ kept in sync manually.
 
 ## The two protocols side by side
 
-### XML mode (default)
+### XML mode (fallback)
 
 Agent response contains xml tags inside the `content` field:
 
@@ -58,7 +59,7 @@ No `tools` array is sent in the API request. The model is told how
 to write xml via the system prompt, which renders markdown from
 `bundles/agents/_base/sections/tool-reference/`.
 
-### Native mode (opt-in)
+### Native mode (default)
 
 Agent response uses the provider's native tool-calling protocol:
 
@@ -587,7 +588,6 @@ error: Session already exited: dev
 | `<think>` | Reasoning (stripped from user display) | `<think>working through the logic</think>` | N/A — content is stripped before storage, never shown to agent again |
 | `<tool>` | MCP tool call (attribute-based) | `<tool name="github:issue_create"><title>bug</title></tool>` | Whatever the MCP server returns, passed through unchanged |
 | `<tool_call>` | Native tool call fallback (content-based) | `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` | Same as the corresponding native tool result |
-| `<question>` | Question gate (suspends pending tools) | `<question>should i also update the tests?</question>` | No synthetic response — agent waits for the human's actual next message, and pending tools execute only after the human replies |
 
 ### Plugin-contributed XML tags
 
@@ -1638,8 +1638,6 @@ On error, the content is prefixed with `"Error: "`:
 }
 ```
 
-Source: `packages/kollabor-ai/src/kollabor_ai/adapters/openai_adapter.py:290-315`
-
 **In native Anthropic mode**, the result becomes a `role: "user"`
 message with a `tool_result` block. No string prefixes — errors
 are indicated by the `is_error: true` flag:
@@ -1657,8 +1655,6 @@ are indicated by the `is_error: true` flag:
   ]
 }
 ```
-
-Source: `packages/kollabor-ai/src/kollabor_ai/adapters/anthropic_adapter.py:358-386`
 
 **Summary of wrapping differences:**
 
@@ -1927,9 +1923,8 @@ and a wrap, no semantic translation.
 5. Results come back as user-role messages with `content` containing
    `tool_result` blocks linked by `tool_use_id`
 
-kollabor's `transformers.py` and `adapters/anthropic_adapter.py`
-normalize between these forms internally so downstream code can treat
-them uniformly.
+kollabor's `transformers.py` normalizes between these forms internally
+so downstream code can treat them uniformly.
 
 
 ## MCP tools
@@ -1993,12 +1988,13 @@ worth doing eventually but is out of scope for any single feature.
 Controlled by the intersection of:
 
 1. **Global config** `native_tool_calling` flag
-   - Default: unknown, check `packages/kollabor-config/` defaults
+   - Default: `true` (`NativeToolsHandler`, `native_tools_handler.py:43`)
    - Enabled: native mode is a candidate
 
 2. **Profile config** `supports_tools` flag
    - Per-profile (in `~/.kollab/config.json` under the active
      profile)
+   - Default: `true` (`profile_manager.py:128`)
    - Must also be true for native mode
 
 3. **Provider capability**
@@ -2024,7 +2020,7 @@ tree is:
    → Keep them in sync manually
 
 2. **Is this a metadata operation on the conversation/context itself?**
-   (e.g., context ledger curation, question gates)
+   (e.g., context ledger curation)
    → XML mode only is usually fine — the operation is cheap, runs
      synchronously, doesn't benefit from native schema validation
    → Skip the native JSON definition to avoid round-trip cost
@@ -2051,7 +2047,6 @@ tree is:
 | `packages/kollabor-ai/src/kollabor_ai/providers/openai_provider.py` | OpenAI-family tool conversion (line 334) |
 | `packages/kollabor-ai/src/kollabor_ai/providers/anthropic_provider.py` | Anthropic tool conversion (line 429) |
 | `packages/kollabor-ai/src/kollabor_ai/providers/transformers.py` | Cross-format response normalization |
-| `packages/kollabor-ai/src/kollabor_ai/adapters/anthropic_adapter.py` | Anthropic content-block normalization |
 | `bundles/agents/_base/sections/tool-reference/` | XML mode agent-facing markdown |
 | `bundles/agents/_base/sections/protocols/tool-execution.md` | XML mode protocol rules in system prompt |
 | `docs/reference/commands.md` | CLI commands (not tool calling — different thing) |
