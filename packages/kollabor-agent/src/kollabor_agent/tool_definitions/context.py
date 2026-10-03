@@ -114,12 +114,48 @@ evict = ToolDefinition(
 )
 
 
+# --- compact ---
+compact = ToolDefinition(
+    name="compact",
+    description=(
+        "Start context compaction now. Old messages are replaced by a summary; "
+        "your notes are kept verbatim at the top of your context."
+    ),
+    category="context",
+    risk_level="low",
+    requires_permission=False,
+    xml_tag="compact",
+    xml_form="body",
+    xml_body_param="notes",
+    parameters=[
+        ToolParameter(
+            name="notes",
+            type="string",
+            description=(
+                "What you must remember: current task, decisions, file paths, next step"
+            ),
+            required=False,
+        ),
+    ],
+    examples=[
+        "<compact>task: fix login bug in auth.py; done: repro + root cause; next: patch verify_token</compact>",
+    ],
+    result_format="Confirmation that compaction started; the turn ends.",
+    notes="Curate heavy items first; unmarked ones are auto-summarized.",
+    key_rules=[
+        "use when asked by the compaction prompt or /compact, or when you are at a clean break",
+        "your <compact> notes are the only text guaranteed to survive verbatim",
+    ],
+)
+
+
 def register_all():
     """Register all context tool definitions."""
     registry = get_registry()
     registry.register(curate)
     registry.register(context_query)
     registry.register(evict)
+    registry.register(compact)
 
 
 # Auto-register on import

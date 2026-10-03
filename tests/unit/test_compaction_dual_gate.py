@@ -39,6 +39,8 @@ def _make_plugin(
         "plugins.context_compaction.keep_recent": keep_recent,
         "plugins.context_compaction.max_summary_tokens": 2000,
         "plugins.context_compaction.log_compaction_events": False,
+        # Direct path; the model-first path is in test_compaction_model_first.py
+        "plugins.context_compaction.ask_model_first": False,
     }
     config.get = lambda key, default=None: values.get(key, default)
 

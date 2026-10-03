@@ -2442,6 +2442,24 @@ class LocalStateService(StateService):
             "display_type": str(getattr(result, "display_type", "info") or "info"),
         }
 
+    async def compact_command(self, sub: str) -> str:
+        """Run /compact daemon-side ("" asks the model, "now" compacts)."""
+        from datetime import datetime as _dt
+
+        from kollabor_events.models import SlashCommand
+
+        registry = self._event_bus.get_service("command_registry")
+        definition = registry.get_command("compact") if registry is not None else None
+        if definition is None or definition.handler is None:
+            return "compact command unavailable"
+        command = SlashCommand(
+            name="compact",
+            args=[sub] if sub else [],
+            raw_input=f"/compact {sub}".strip(),
+            timestamp=_dt.now(),
+        )
+        return str(await definition.handler(command))
+
     async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 

@@ -1582,21 +1582,26 @@ class QueueProcessor:
                                 output_text,
                                 is_error=not result.success,
                             )
-                            self.conversation_history.append(
-                                ConversationMessage(
-                                    role=msg.get("role", "tool"),
-                                    content=str(msg.get("content", result.output)),
-                                    metadata={
-                                        "tool_call_id": tc.id,
-                                        **{
-                                            key: value
-                                            for key, value in (
-                                                result.metadata or {}
-                                            ).items()
-                                            if key.startswith("tool_output_")
-                                        },
+                            native_msg = ConversationMessage(
+                                role=msg.get("role", "tool"),
+                                content=str(msg.get("content", result.output)),
+                                metadata={
+                                    "tool_call_id": tc.id,
+                                    **{
+                                        key: value
+                                        for key, value in (
+                                            result.metadata or {}
+                                        ).items()
+                                        if key.startswith("tool_output_")
                                     },
-                                )
+                                },
+                            )
+                            self.conversation_history.append(native_msg)
+                            # Heavy native results enter the ledger too, so the
+                            # model can curate them (XML results did, native
+                            # ones never did).
+                            self._ingest_tool_results(
+                                [result], tc.id, message=native_msg
                             )
                             break
                     self._track_file_interaction(result)

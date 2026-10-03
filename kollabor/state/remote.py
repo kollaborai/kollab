@@ -119,6 +119,18 @@ class RemoteStateService(StateService):
             )
         return result
 
+    async def compact_command(self, sub: str) -> str:
+        """Run /compact ("" asks the model, "now" compacts) daemon-side,
+        where the history, ledger and LLM loop live."""
+        result = await self._rpc.call(
+            "state.compact_command", {"sub": sub}, timeout=self._timeout
+        )
+        if not isinstance(result, str):
+            raise TypeError(
+                f"state.compact_command expected str, got {type(result).__name__}"
+            )
+        return result
+
     async def save_conversation(self, format: str = "transcript") -> str:
         """Ask the daemon to format the conversation and return the resulting string.
 
