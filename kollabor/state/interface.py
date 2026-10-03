@@ -63,7 +63,14 @@ def enrollment_result(
         if isinstance(note, str) and len(note) <= 200 and note.isprintable():
             approved["note"] = note
         return approved
-    if status == "rejected" or (allow_failed and status == "failed"):
+    if allow_failed and status == "failed":
+        failed = {"status": "failed"}
+        # Why it failed: one line of display text, never a key or an id.
+        reason = result.get("reason")
+        if isinstance(reason, str) and 0 < len(reason) <= 200 and reason.isprintable():
+            failed["reason"] = reason
+        return failed
+    if status == "rejected":
         return {"status": status}
     return None
 
@@ -160,6 +167,26 @@ class StateService(Protocol):
 
     async def list_commands(self) -> list[dict[str, Any]]:
         """Return visible slash-command metadata for interactive clients."""
+        ...
+
+    async def get_panel(
+        self, name: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Describe one panel (``kollabor.panels``) as plain data.
+
+        Raises ``PanelError`` (``.status``, ``.errors``) for an unknown panel or
+        a request the panel cannot serve.
+        """
+        ...
+
+    async def panel_action(
+        self, name: str, action: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run one panel action; returns ``{ok, message, errors, panel, open}``.
+
+        Raises ``PanelError`` like ``get_panel``. Payloads can hold secrets: never
+        log them.
+        """
         ...
 
     async def open_generated_artifact(self, media_id: str) -> bool:

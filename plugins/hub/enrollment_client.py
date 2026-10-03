@@ -31,6 +31,7 @@ from nacl.signing import SigningKey, VerifyKey
 from .device_names import NAME_RE, default_device_name, device_key_fingerprint
 from .dns.discovery import DiscoveryError, _PublicResolver, normalize_target
 from .dns.private_directory import (
+    OwnerMismatchError,
     PrivateDirectory,
     prove_pairing,
     public_key_id,
@@ -72,6 +73,7 @@ _MAX_PROVIDER_CREDENTIAL_BYTES = 8 * 1024
 # relay's 64 KiB request-frame limit while allowing every valid envelope.
 _MAX_HTTP_BODY_BYTES = 40 * 1024
 _MAX_RESPONSE_BYTES = _MAX_HTTP_BODY_BYTES
+_LOGGER = logging.getLogger(__name__)
 _ALLOWED_ERRORS = {
     "invalid_request",
     "invalid_contact",
@@ -87,6 +89,10 @@ _ALLOWED_ERRORS = {
     "capacity",
     "backend_unavailable",
 }
+# What a journal row or the status line may carry: the relay's codes plus the
+# ones this device raises itself. `internal` is a fault on this device (never
+# `transport`, which says the network failed).
+_STORED_ERRORS = _ALLOWED_ERRORS | {"transport", "invalid_response", "internal"}
 _PATH = re.compile(
     r"/relay/v1/enrollment/(?:offers|lookup|offers/[0-9a-f]{32}/(?:request|poll|challenge|proof|decision|reply/poll|ack|ack/poll))\Z"
 )
@@ -97,7 +103,7 @@ class EnrollmentProtocolError(ValueError):
     """A safe fixed enrollment-protocol failure code."""
 
     def __init__(self, code: str, *, retry_after_seconds: float | None = None):
-        local_codes = {"transport", "invalid_response", "session_changed"}
+        local_codes = {"transport", "invalid_response", "session_changed", "internal"}
         self.code = code if code in _ALLOWED_ERRORS | local_codes else "transport"
         self.retry_after_seconds = retry_after_seconds
         super().__init__(self.code)
@@ -767,7 +773,7 @@ def _schedule_destination_retry(
     *,
     now: int | None = None,
 ) -> None:
-    allowed = _ALLOWED_ERRORS | {"transport", "invalid_response"}
+    allowed = _STORED_ERRORS
     safe_error = (
         error_code
         if isinstance(error_code, str) and error_code in allowed
@@ -790,7 +796,7 @@ def _schedule_issuer_recovery_retry(
     *,
     now: int | None = None,
 ) -> None:
-    allowed = _ALLOWED_ERRORS | {"transport", "invalid_response"}
+    allowed = _STORED_ERRORS
     safe_error = (
         error_code
         if isinstance(error_code, str) and error_code in allowed
@@ -919,7 +925,7 @@ def _validate_destination_recovery_record(record: Any, offer_id: str) -> dict[st
         or not isinstance(record["retry_after"], int)
         or record["retry_after"] < 0
         or record["last_error_code"] is not None
-        and record["last_error_code"] not in _ALLOWED_ERRORS | {"transport", "invalid_response"}
+        and record["last_error_code"] not in _STORED_ERRORS
     ):
         raise EnrollmentProtocolError("invalid_response")
     rank = _DESTINATION_RECOVERY_STATUSES[record["status"]]
@@ -1169,6 +1175,38 @@ def _destination_state_empty(client) -> bool:
     return not state.origin and not state.enabled and not state.inviter and not state.approvals
 
 
+def _join_failure(exc: Exception) -> str:
+    """The fixed code for a failed join, with one log line saying so.
+
+    A protocol error carries its own code. Anything else is a fault on this
+    device and is never reported as `transport`. Only the code and the
+    exception's type are logged: its message can carry a code, a path or a key.
+    """
+    if isinstance(exc, EnrollmentProtocolError):
+        _LOGGER.warning("device enrollment failed: %s", exc.code)
+        return exc.code
+    _LOGGER.warning("device enrollment failed: internal (%s)", type(exc).__name__)
+    return "internal"
+
+
+def _destination_directory(client, owner_key: bytes, workspace_id: str) -> PrivateDirectory:
+    """The directory this join pins to the new owner.
+
+    A join starts from no network, or from a network of one that it replaces, so
+    a directory still pinned to another owner (a network this device once
+    issued codes for, or an earlier join) belongs to a network that is gone.
+    Refusing it failed every join with a bare "transport"; it is set aside
+    (kept, not deleted) and the join pins a fresh one.
+    """
+    path = client.state_dir / "private-directory.json"
+    try:
+        return PrivateDirectory(path, owner_public_key=owner_key, workspace_id=workspace_id)
+    except OwnerMismatchError:
+        path.replace(path.with_name(f"private-directory.{int(time.time())}.replaced"))
+        _LOGGER.warning("set aside a private directory pinned to another network's owner")
+        return PrivateDirectory(path, owner_public_key=owner_key, workspace_id=workspace_id)
+
+
 def _destination_state_matches_invite(client, invite: dict[str, str]) -> bool:
     state = client.state
     return (
@@ -1225,11 +1263,10 @@ async def _finish_destination_enrollment(
 ) -> dict[str, str]:
     client = commands.client
     signing_key = client._store.key
-    directory = PrivateDirectory(
-        client.state_dir / "private-directory.json",
-        owner_public_key=owner_key,
-        workspace_id=record["workspace_id"],
-    )
+    # Before the directory: only a join that may go ahead sets an old one aside.
+    if not _destination_state_empty(client) and not _destination_state_matches_invite(client, invite):
+        raise EnrollmentProtocolError("conflict")
+    directory = _destination_directory(client, owner_key, record["workspace_id"])
     credential = directory.validate_device_credential(decision["credential"])
     if (
         credential.owner_id != public_key_id(owner_key)
@@ -1237,9 +1274,6 @@ async def _finish_destination_enrollment(
         or credential.expires_at <= int(time.time())
     ):
         raise EnrollmentProtocolError("invalid_response")
-
-    if not _destination_state_empty(client) and not _destination_state_matches_invite(client, invite):
-        raise EnrollmentProtocolError("conflict")
 
     rank = _DESTINATION_RECOVERY_STATUSES[record["status"]]
     if rank < _DESTINATION_RECOVERY_STATUSES["install_committed"]:
@@ -1801,21 +1835,15 @@ async def enroll_device(
         )
     except asyncio.CancelledError:
         raise
-    except EnrollmentProtocolError as exc:
-        if drive_started and journal is not None and isinstance(record, dict):
-            try:
-                _schedule_destination_retry(journal, record, exc.code)
-            except Exception:
-                pass
-        return {"error": exc.code}
-    except Exception:
-        if drive_started and journal is not None and isinstance(record, dict):
-            try:
-                _schedule_destination_retry(journal, record, "transport")
-            except Exception:
-                pass
+    except Exception as exc:
         # Keep raw input, credentials, paths, and transport exceptions out of UI.
-        return {"error": "transport"}
+        failure = _join_failure(exc)
+        if drive_started and journal is not None and isinstance(record, dict):
+            try:
+                _schedule_destination_retry(journal, record, failure)
+            except Exception:
+                pass
+        return {"error": failure}
     finally:
         if claimed and offer_id is not None:
             _release_destination_recovery(client, offer_id)
@@ -1981,7 +2009,7 @@ class EnrollmentIssuer:
             and not isinstance(record.get("retry_after", 0), bool)
             and record.get("retry_after", 0) > now
         ]
-        allowed = _ALLOWED_ERRORS | {"transport", "invalid_response"}
+        allowed = _STORED_ERRORS
         errors = [
             record["last_error_code"]
             for record in pending
@@ -2142,14 +2170,9 @@ class EnrollmentIssuer:
             )
         except asyncio.CancelledError:
             raise
-        except EnrollmentProtocolError as exc:
+        except Exception as exc:
             try:
-                _schedule_destination_retry(journal, record, exc.code)
-            except Exception:
-                pass
-        except Exception:
-            try:
-                _schedule_destination_retry(journal, record, "transport")
+                _schedule_destination_retry(journal, record, _join_failure(exc))
             except Exception:
                 pass
         finally:
@@ -2282,7 +2305,7 @@ class EnrollmentIssuer:
             recovery.setdefault(key, value)
         now = int(time.time())
         offer_id = recovery["offer_id"]
-        allowed_errors = _ALLOWED_ERRORS | {"transport", "invalid_response"}
+        allowed_errors = _STORED_ERRORS
         if (
             isinstance(recovery["version"], bool)
             or recovery["version"] != 1

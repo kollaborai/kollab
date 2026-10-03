@@ -19,6 +19,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from kollabor.panels.model import dedup_models, fetch_catalog_models
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
@@ -127,9 +128,7 @@ class ModelPickerAltView(AltView):
     async def _fetch_catalog(self) -> None:
         """Fetch the provider catalog and merge it into the model list."""
         try:
-            from kollabor_ai.model_catalog import list_provider_models
-
-            catalog = await list_provider_models(self._profile)
+            catalog = await fetch_catalog_models(self._profile)
             if catalog:
                 self._all_models = self._dedup(self._all_models + catalog)
                 self._apply_filter()
@@ -336,26 +335,7 @@ class ModelPickerAltView(AltView):
     # -- helpers --
 
     def _dedup(self, models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Dedup by id, keep first occurrence, mark the current model.
-
-        Order is preserved so callers control priority (current model first,
-        then saved profiles, then catalog).
-        """
-        seen: set = set()
-        out: List[Dict[str, Any]] = []
-        for m in models:
-            mid = str(m.get("id") or "").strip()
-            if not mid or mid in seen:
-                continue
-            seen.add(mid)
-            out.append(
-                {
-                    "id": mid,
-                    "note": m.get("note") or "",
-                    "current": mid == self._current_model,
-                }
-            )
-        return out
+        return dedup_models(models, self._current_model)
 
     def _apply_filter(self) -> None:
         q = self._query.lower().strip()

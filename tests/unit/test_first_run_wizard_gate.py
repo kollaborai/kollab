@@ -100,3 +100,17 @@ class FirstRunWizardGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstRunWizardNoTerminalTests(unittest.TestCase):
+    def test_no_terminal_defers_setup_instead_of_marking_it_done(self):
+        # A detached daemon or pipe process cannot show the wizard. Marking
+        # setup completed there would hide it from the next real terminal.
+        from kollabor_tui.altview.stack_manager import AltViewUnavailable
+
+        app = _make_app(provider_available=False)
+        app.fullscreen_integrator._fullscreen_manager.launch_plugin.side_effect = (
+            AltViewUnavailable("no terminal")
+        )
+        _run(app)
+        app.config.save_key.assert_not_called()

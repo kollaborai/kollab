@@ -224,12 +224,14 @@ scp -q "${M1_SSH_OPTS[@]}" "$M1_DIR/scan.py" "$M1_DIR/tmuxtype.py" "$M1_HOST:$M1
 pypi_phase() {
   local PY re cfg cache0_mac cache0_srv h up_ok
   say "pypi-upgrade: kollab==$GS_PYPI_FROM from PyPI into $M1_MAC_VENV and $M1_SRV_VENV"
+  # kollab pins kollabor-* with >=, so pin every one or pip mixes in newer ones: a true old install
+  OLD_SET="kollab==$GS_PYPI_FROM"; for p in agent ai config engine events plugins rpc tui webui; do OLD_SET="$OLD_SET kollabor-$p==$GS_PYPI_FROM"; done
   PY=$(m1_pick_python) || abort p0-install "no Python >= 3.12 on the Mac (set M1_PY_MAC)"
   mkdir -p "$M1_MAC_ROOT" "$M1_MAC_WS/.kollab"
-  [ -x "$M1_MAC_VENV/bin/python" ] || "$PY" -m venv "$M1_MAC_VENV"
-  "$M1_MAC_VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir "kollab==$GS_PYPI_FROM" >"$EVID/p0-pip-mac.txt" 2>&1 \
+  "$PY" -m venv --clear "$M1_MAC_VENV"   # fresh each run: no packages left from an earlier upgrade
+  "$M1_MAC_VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir $OLD_SET >"$EVID/p0-pip-mac.txt" 2>&1 \
     || abort p0-install "pip install kollab==$GS_PYPI_FROM failed on the Mac" p0-pip-mac.txt
-  m1_ssh "python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' && mkdir -p '$M1_SRV_ROOT' '$M1_SRV_WS/.kollab' && { [ -x '$M1_SRV_VENV/bin/python' ] || python3 -m venv '$M1_SRV_VENV'; } && '$M1_SRV_VENV/bin/python' -m pip install -q --disable-pip-version-check --no-cache-dir 'kollab==$GS_PYPI_FROM'" >"$EVID/p0-pip-srv.txt" 2>&1 \
+  m1_ssh "python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' && mkdir -p '$M1_SRV_ROOT' '$M1_SRV_WS/.kollab' && { python3 -m venv --clear '$M1_SRV_VENV'; } && '$M1_SRV_VENV/bin/python' -m pip install -q --disable-pip-version-check --no-cache-dir $OLD_SET" >"$EVID/p0-pip-srv.txt" 2>&1 \
     || abort p0-install "pip install kollab==$GS_PYPI_FROM failed on $M1_HOST" p0-pip-srv.txt
   MAC_V=$(version_of mac); SRV_V=$(version_of srv)
   case "$MAC_V|$SRV_V" in

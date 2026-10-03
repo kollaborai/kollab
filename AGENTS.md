@@ -16,12 +16,6 @@ do not invent V2 product tracks, legacy implementations, or compatibility obliga
 for nonexistent users. Preserve actual protocol contracts and private persistent
 state. Temporary rollback artifacts require an explicit retention/cleanup condition.
 
-## in-flight: agent network (#121)
-
-Work in progress on branch `issue-121-network-simple-flow`. Before touching
-`/connect`, the relay or the hub across machines, read
-`docs/handoff/agent-network/HANDOFF.md`. Remove this section when #121 merges.
-
 ## project snapshot
 
 - name: `kollab`

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -401,6 +402,7 @@ async def _run_enrollment(
     issuer_device_name=None,
     network_name=None,
     submitted_probe=None,
+    before_enroll=None,
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
@@ -637,6 +639,8 @@ async def _run_enrollment(
         lambda *_args, **_kwargs: fake_transport,
     )
     monkeypatch.setattr(enrollment_client.asyncio, "sleep", no_sleep)
+    if before_enroll is not None:
+        before_enroll(destination)
     try:
         result = await enroll_device(
             commands,
@@ -726,6 +730,86 @@ async def test_device_enrollment_completes_signed_encrypted_pairing(tmp_path, mo
         "reply/poll",
         "ack",
     ]
+
+
+def _pin_directory_to_another_owner(destination):
+    """What a 0.10.x device that once issued codes (or joined) leaves behind."""
+    PrivateDirectory(
+        destination.state_dir / "private-directory.json",
+        owner_public_key=SigningKey.generate().verify_key.encode(),
+        workspace_id=destination.state.workspace_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_directory_left_pinned_to_another_owner_does_not_break_a_join(
+    tmp_path, monkeypatch
+):
+    """The join pins a fresh directory to the new owner; the old one is kept aside."""
+    result, _commands, destination, _transport, owner_directory = await _run_enrollment(
+        tmp_path, monkeypatch, before_enroll=_pin_directory_to_another_owner
+    )
+
+    assert result == {"status": "approved"}
+    assert destination.state.inviter
+    assert owner_directory.members()
+    assert len(list(destination.state_dir.glob("private-directory.*.replaced"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_failure_is_internal_logged_once_and_leaks_nothing(
+    tmp_path, monkeypatch, caplog
+):
+    """A fault on this device is not "transport"; the log names its type only."""
+
+    def boom(client, owner_key, _workspace_id):
+        raise RuntimeError(f"boom {client.public_key} {owner_key.hex()} SECRET-SENTINEL")
+
+    with caplog.at_level("WARNING"):
+        result, commands, destination, transport, _directory = await _run_enrollment(
+            tmp_path,
+            monkeypatch,
+            before_enroll=lambda _destination: monkeypatch.setattr(
+                enrollment_client, "_destination_directory", boom
+            ),
+        )
+
+    assert result == {"error": "internal"}
+    ours = [r for r in caplog.records if r.name == enrollment_client.__name__]
+    assert [r.getMessage() for r in ours] == [
+        "device enrollment failed: internal (RuntimeError)"
+    ]
+    # Neither the log nor the result carries the exception text, the join code,
+    # or any key or id.
+    for text in (caplog.text, repr(result)):
+        assert "SECRET-SENTINEL" not in text
+        assert destination.public_key not in text
+        assert transport.code_text not in text
+        assert transport.code_text.replace("-", "") not in text
+        assert not re.search(r"[0-9a-f]{64}", text)
+    # The status line tells the same truth as the form: not a network fault.
+    journal = enrollment_client._destination_recovery_journal(destination)
+    assert journal.get("0123456789abcdef0123456789abcdef")["last_error_code"] == "internal"
+    status_issuer = EnrollmentIssuer(
+        SimpleNamespace(
+            commands=commands,
+            _closed=False,
+            owner=SimpleNamespace(state_dir=destination.state_dir),
+        )
+    )
+    assert status_issuer.destination_recovery_status()["last_error_code"] == "internal"
+
+
+@pytest.mark.asyncio
+async def test_a_protocol_failure_logs_its_fixed_code_once(tmp_path, monkeypatch, caplog):
+    with caplog.at_level("WARNING"):
+        result, *_rest = await _run_enrollment(
+            tmp_path, monkeypatch, lose_ack_response=True
+        )
+
+    assert result == {"error": "transport"}
+    ours = [r for r in caplog.records if r.name == enrollment_client.__name__]
+    assert [r.getMessage() for r in ours] == ["device enrollment failed: transport"]
 
 
 @pytest.mark.asyncio

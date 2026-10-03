@@ -92,6 +92,7 @@ _ENROLLMENT_ERRORS = {
     "backend_unavailable",
     "transport",
     "invalid_response",
+    "internal",
 }
 _CONTACT_ERRORS = {
     "invalid_request",

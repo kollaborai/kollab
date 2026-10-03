@@ -557,6 +557,14 @@ type / in the input box to open the command menu.
   /branch [session_id [msg_idx]]  fork from specific message
     deferred to 4.6 (needs state.branch_conversation rpc)
 
+  /compact [now|status|preview]   context compaction
+    (no args)                     ask the model what to keep; it answers with
+                                  <curate> + <compact>notes</compact>, then compacts
+    now                           compact immediately, no question asked
+    status                        threshold, window, tokens, state
+    preview                       what a compaction would remove
+    runs daemon-side in attach mode (state.compact_command rpc)
+
 ### hub (agent mesh)
 
   /hub <sub>                      agent mesh hub

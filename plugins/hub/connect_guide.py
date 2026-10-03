@@ -45,6 +45,29 @@ OTHER_COMPUTER_STEPS = (
 )
 
 
+# Why a join failed, by the fixed code the enrollment client reports. Display
+# text only: nothing here can carry a code, a key or an id.
+JOIN_FAILURE_REASONS = {
+    "unavailable": "that code was not found, was already used, or has expired",
+    "invalid_request": "that is not a valid join code",
+    "bound": "that code is in use by another device",
+    "claimed": "that code is in use by another device",
+    "conflict": "this device is already on a network",
+    "rate_limited": "too many attempts; wait a minute and try again",
+    "capacity": "the relay is full; try again later",
+    "backend_unavailable": "the relay is unavailable; try again later",
+    "transport": "could not reach the relay; check the connection",
+    "invalid_response": "the relay sent a reply this device could not verify",
+    "internal": "this device hit an unexpected error; see the kollab log",
+}
+
+
+def join_failure_reason(code: Any) -> str:
+    """One short line saying why a join failed, for a fixed failure code."""
+    reason = JOIN_FAILURE_REASONS.get(code) if isinstance(code, str) else None
+    return reason or "the relay did not accept the request"
+
+
 def marker_path() -> Path:
     override = os.environ.get(MARKER_ENV)
     return Path(override) if override else Path.home() / ".kollab" / MARKER_NAME

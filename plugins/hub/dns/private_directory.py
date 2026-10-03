@@ -96,6 +96,10 @@ class StateCapacityError(PrivateDirectoryError):
     """A bounded security ledger is full; callers must fail closed."""
 
 
+class OwnerMismatchError(PrivateDirectoryError):
+    """The state file is pinned to a different owner key than the one asked for."""
+
+
 @dataclass(frozen=True)
 class PairingChallenge:
     token: str
@@ -1418,7 +1422,7 @@ class PrivateDirectory:
 
     def _check_owner(self, state: dict[str, Any]) -> None:
         if state.get("owner_id") != self.owner_id:
-            raise PrivateDirectoryError("state file belongs to a different owner key")
+            raise OwnerMismatchError("state file belongs to a different owner key")
 
 
 def _sign_jws(claims: dict[str, Any], signing_key: SigningKey, *, kid: str) -> str:

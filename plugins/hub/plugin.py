@@ -1841,15 +1841,18 @@ class HubPlugin(BasePlugin):
         )
         tool_executor.register_plugin_handler("curate", self._handle_curate_tool)
 
-        # --- Context service: context query (body form) ---
-        # xml_form="body", xml_tag="context_query"
+        # --- Context service: context query ---
+        # <context/> and <context filter="pending"/> are what the agent prompt
+        # and the curator teach; <context_query>...</context_query> is the
+        # tool-definition body form. The handler reads "filter".
         context_pat = _re.compile(
-            r"<context_query>(.*?)</context_query>",
+            r'<context(?:_query)?(?:\s+filter="([^"]*)")?\s*/>'
+            r"|<context_query>(.*?)</context_query>",
             _re.DOTALL | _re.IGNORECASE,
         )
 
         def _extract_context(m):
-            return {"query": m.group(1).strip()}
+            return {"filter": (m.group(1) or m.group(2) or "").strip()}
 
         response_parser.register_plugin_tag(
             "context_query", context_pat, "context_query", _extract_context
@@ -1915,9 +1918,12 @@ class HubPlugin(BasePlugin):
         """Handle <curate> tag — record agent's decision on a ledger entry."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        ctx_id = tool_data.get("ctx_id", "")
+        # XML tags extract ctx_id/body; native calls carry the schema's
+        # id/summary arguments under "input".
+        native = tool_data.get("input") or {}
+        ctx_id = tool_data.get("ctx_id") or native.get("id", "")
         decision = tool_data.get("decision", "")
-        body = tool_data.get("body", "")
+        body = tool_data.get("body") or tool_data.get("summary") or ""
 
         context_svc = self._get_context_service()
         if context_svc is None:
@@ -1977,7 +1983,8 @@ class HubPlugin(BasePlugin):
         """Handle <evict> tag — evict a ledger entry from history."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        ctx_id = tool_data.get("ctx_id", "")
+        # Native calls name the entry with the schema's "identifier" argument.
+        ctx_id = tool_data.get("ctx_id") or tool_data.get("identifier", "")
         reason = tool_data.get("reason", "")
 
         context_svc = self._get_context_service()
@@ -9603,7 +9610,10 @@ class HubPlugin(BasePlugin):
                         return ConnectOutcome.approved()
                 if status == "rejected":
                     return ConnectOutcome.rejected()
-                return ConnectOutcome.error()
+                try:
+                    return ConnectOutcome.error(result.get("reason") or "")
+                except (TypeError, ValueError):
+                    return ConnectOutcome.error()
 
             async def submit(submission):
                 try:
@@ -9687,11 +9697,19 @@ class HubPlugin(BasePlugin):
             return failed
         submitted = asyncio.Event()
 
+        def why(code_: object) -> dict[str, str]:
+            """A failed join and its reason: from a fixed code, never from text."""
+            from .connect_guide import join_failure_reason
+
+            return {"status": "failed", "reason": join_failure_reason(code_)}
+
         async def run() -> dict[str, str]:
             try:
                 result = await enroll(domain, code, on_submitted=submitted.set)
-            except Exception:
-                return failed
+            except Exception as exc:
+                # The message can carry the code; the type alone is safe to log.
+                logger.warning("connect enrollment raised %s", type(exc).__name__)
+                return why("internal")
             status = result.get("status") if isinstance(result, dict) else None
             if status == "approved":
                 try:
@@ -9706,7 +9724,9 @@ class HubPlugin(BasePlugin):
                     }
                 except Exception:
                     return {"status": "approved"}
-            return {"status": "rejected"} if status == "rejected" else failed
+            if status == "rejected":
+                return {"status": "rejected"}
+            return why(result.get("error") if isinstance(result, dict) else None)
 
         joins = self.__dict__.setdefault("_connect_joins", {})
         receipt = secrets.token_hex(8)
@@ -11165,9 +11185,23 @@ class HubPlugin(BasePlugin):
 
     @staticmethod
     def _agent_pid_alive(pid: int) -> bool:
-        """Return True when pid exists and can be signaled."""
+        """Return True when pid exists and can be signaled.
+
+        The default launch forks the agent daemon from the attached window, so
+        that window is the daemon's parent: an exited daemon stays a zombie
+        until reaped, and os.kill(pid, 0) succeeds on zombies. Reap our own
+        exited child first so `/hub stop` typed in that window sees the exit.
+        """
         if not pid:
             return False
+        # ponytail: a zombie whose parent is another live process still reads
+        # alive until that parent reaps or exits; add a /proc or ps state check
+        # if that ever shows up.
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                return False
+        except ChildProcessError:
+            pass  # not our child
         try:
             os.kill(pid, 0)
             return True
