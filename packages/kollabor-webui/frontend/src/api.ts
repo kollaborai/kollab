@@ -138,6 +138,8 @@ export type SlashCommand = {
   plugin?: string;
   icon?: string;
   mode?: string;
+  /** Daemon panel this command opens (`config`, `llm`, ...), when it has one. */
+  panel?: string;
   enabled?: boolean;
   parameters?: SlashParameter[];
   subcommands?: SlashSubcommand[];
@@ -202,6 +204,7 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "setup", description: "Run first-time setup" },
   { name: "doctor", description: "Run a readiness check" },
   { name: "login", description: "Sign in to a provider" },
+  { name: "connect", description: "Open this device's agent network" },
   { name: "llm", description: "Choose a model loadout" },
   { name: "save", description: "Save the current conversation" },
   { name: "resume", description: "Resume a saved conversation" },
@@ -271,6 +274,164 @@ export type SessionEvent = {
   [key: string]: unknown;
 };
 
+/** Panels: daemon-owned screens (spec docs/specs/webui-unified-config.md). */
+
+export type PanelFieldType =
+  | "checkbox"
+  | "slider"
+  | "spinbox"
+  | "dropdown"
+  | "text_input"
+  | "label";
+
+/** One setting, as built by the daemon's `make_field`. */
+export type PanelField = {
+  /** Config path (forms) or payload key (wizards, picker controls). */
+  path: string;
+  type: PanelFieldType;
+  label: string;
+  help?: string | null;
+  /** Always null for a secret; `is_set` says whether one exists. */
+  value?: unknown;
+  min_value?: number | null;
+  max_value?: number | null;
+  step?: number | null;
+  options?: string[] | null;
+  placeholder?: string | null;
+  editable: boolean;
+  managed_by?: string | null;
+  secret?: boolean;
+  is_set?: boolean;
+  /** Picker controls only: action to send on change (default: `path`). */
+  action?: string | null;
+};
+
+export type PanelSection = { id: string; title: string; fields: PanelField[] };
+
+export type PanelAction = {
+  id: string;
+  label?: string | null;
+  /** Save-style actions get one button per target (`local`, `global`). */
+  targets?: string[] | null;
+  /** Ask once more before sending (true, or the question to show). */
+  confirm?: boolean | string | null;
+  /** Row actions: payload key that carries the row id, besides `id`. */
+  payload_key?: string | null;
+};
+
+export type PanelRow = {
+  id: string;
+  label: string;
+  detail?: string | null;
+  group?: string | null;
+  current?: boolean;
+  badges?: string[] | null;
+  /** If set, only these row action ids are offered for the row. */
+  actions?: string[] | null;
+};
+
+type PanelBase = {
+  panel: string;
+  title: string;
+  scope_note?: string | null;
+  /** Read-only label/value rows above a picker. */
+  summary?: unknown;
+  /** Read-only text shown above a picker. */
+  notice?: string | null;
+  /** Opaque state the daemon wants back unchanged in every form action. */
+  context?: Record<string, unknown> | null;
+};
+
+export type PanelForm = PanelBase & {
+  kind: "form";
+  sections: PanelSection[];
+  actions?: PanelAction[];
+  save_targets?: { local?: string | null; global?: string | null } | null;
+};
+
+export type PanelPicker = PanelBase & {
+  kind: "picker";
+  rows: PanelRow[];
+  row_actions?: PanelAction[];
+  toolbar_actions?: PanelAction[];
+  controls?: PanelField[];
+  empty_groups?: { group: string; reason: string }[];
+};
+
+export type PanelWizardStep = {
+  id: string;
+  title: string;
+  fields: PanelField[];
+};
+
+export type PanelWizard = PanelBase & {
+  kind: "wizard";
+  steps: PanelWizardStep[];
+  actions?: PanelAction[];
+};
+
+export type PanelDescription = PanelForm | PanelPicker | PanelWizard;
+
+/** A one-time secret (join code). Never stored; shown with a countdown. */
+export type PanelReveal = {
+  label: string;
+  value: string;
+  /** Epoch seconds. */
+  expires_at?: number | null;
+  status?: string | null;
+};
+
+/** Re-send `action` every `every_s` seconds until a response has no `poll`. */
+export type PanelPoll = {
+  action: string;
+  payload?: Record<string, unknown>;
+  every_s?: number;
+};
+
+export type PanelActionResult = {
+  ok: boolean;
+  message?: string;
+  errors?: Record<string, string>;
+  /** Fresh describe() of the panel the action ran on. */
+  panel?: PanelDescription | null;
+  /** Another panel's describe(): show it on top of this one. */
+  open?: PanelDescription | null;
+  reveal?: PanelReveal | null;
+  poll?: PanelPoll | null;
+};
+
+/** A 400 with per-field `errors`, as a failed result (any body shape). */
+function panelFailure(body: unknown): PanelActionResult | null {
+  if (!body || typeof body !== "object") return null;
+  const record = body as Record<string, unknown>;
+  const detail =
+    record.detail && typeof record.detail === "object"
+      ? (record.detail as Record<string, unknown>)
+      : null;
+  const raw = record.errors ?? detail?.errors;
+  if (!raw || typeof raw !== "object") return null;
+  const errors = Object.fromEntries(
+    Object.entries(raw).map(([path, text]) => [path, String(text)]),
+  );
+  const message = [record.message, detail?.message, record.detail].find(
+    (value): value is string => typeof value === "string" && value !== "",
+  );
+  return { ok: false, message: message ?? "Some values were rejected.", errors };
+}
+
+/** Every non-2xx engine response; `body` is the parsed JSON, if any. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
 export class EngineApi {
   private baseUrl: string;
   private token: string | null;
@@ -336,13 +497,15 @@ export class EngineApi {
     }
     if (!response.ok) {
       let detail = response.statusText;
+      let body: unknown;
       try {
-        const payload = (await response.json()) as { detail?: string };
-        detail = payload.detail || detail;
+        body = await response.json();
+        const raw = (body as { detail?: unknown } | null)?.detail;
+        if (typeof raw === "string" && raw) detail = raw;
       } catch {
         // Keep status text for non-JSON errors.
       }
-      throw new Error(`${response.status}: ${detail}`);
+      throw new ApiError(`${response.status}: ${detail}`, response.status, body);
     }
     return response;
   }
@@ -382,6 +545,48 @@ export class EngineApi {
     return this.json<{ session_id: string; commands: SlashCommand[] }>(
       `/sessions/${encodeURIComponent(sessionId)}/commands`,
     );
+  }
+
+  /** One panel's current screen. Query params carry non-sensitive filters only. */
+  getPanel(
+    sessionId: string,
+    name: string,
+    params: Record<string, string> = {},
+    signal?: AbortSignal,
+  ) {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, value]) => value !== ""),
+    ).toString();
+    return this.json<PanelDescription>(
+      `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${query ? `?${query}` : ""}`,
+      { signal },
+    );
+  }
+
+  /**
+   * Run one panel action. Every payload goes in the POST body (secrets and
+   * join codes never reach a URL). A 400 with per-field `errors` comes back as
+   * `{ ok: false, errors }`; every other failure throws.
+   */
+  async panelAction(
+    sessionId: string,
+    name: string,
+    action: string,
+    payload: Record<string, unknown> = {},
+    signal?: AbortSignal,
+  ): Promise<PanelActionResult> {
+    try {
+      return await this.json<PanelActionResult>(
+        `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}/actions/${encodeURIComponent(action)}`,
+        { method: "POST", body: JSON.stringify(payload), signal },
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 400) {
+        const failure = panelFailure(error.body);
+        if (failure) return failure;
+      }
+      throw error;
+    }
   }
 
   createSession(body: Record<string, unknown> = {}) {

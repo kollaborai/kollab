@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppSidebar } from "@/components/shell/AppSidebar";
+import { PanelHost } from "@/components/panels/PanelHost";
+import type {
+  PanelIntent,
+  PanelOpenRequest,
+  SettingsTab,
+} from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SessionToolbar } from "@/components/shell/SessionToolbar";
 import { Button } from "@/components/ui/button";
@@ -64,12 +70,14 @@ function RuntimeShell({
   profiles,
   agents,
   onSessionUpdated,
+  onOpenSettings,
   refreshSignal,
 }: {
   session: Session;
   profiles: Profile[];
   agents: AgentPoolEntry[];
   onSessionUpdated: (session: Session) => void;
+  onOpenSettings: (request?: PanelOpenRequest) => void;
   refreshSignal: number;
 }) {
   const runtimeState = useEngineRuntimeState();
@@ -164,11 +172,16 @@ function RuntimeShell({
           profiles={profiles}
           onStatus={setStatus}
           onSessionUpdated={onSessionUpdated}
+          onOpenSettings={() => onOpenSettings()}
         />
       </header>
       <div className="flex min-h-0 flex-1 flex-col">
         {view === "chat" ? (
-          <Thread agents={agents} commands={commands} />
+          <Thread
+            agents={agents}
+            commands={commands}
+            onOpenPanel={onOpenSettings}
+          />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
         )}
@@ -186,6 +199,15 @@ export default function App() {
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const [profilesOpen, setProfilesOpen] = useState(false);
+  // Settings (PanelHost): one open state for the sidebar button, the toolbar
+  // button and the composer's /config-style commands.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("session");
+  const [settingsIntent, setSettingsIntent] = useState<{
+    action: PanelIntent;
+    nonce: number;
+  } | null>(null);
+  const intentNonceRef = useRef(0);
   const [selectedBundle, setSelectedBundle] = useState("default");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
@@ -482,6 +504,24 @@ export default function App() {
     }
   };
 
+  const openSettings = useCallback((request?: PanelOpenRequest) => {
+    setSettingsTab(request?.tab ?? "session");
+    setSettingsIntent(
+      request?.intent
+        ? { action: request.intent, nonce: ++intentNonceRef.current }
+        : null,
+    );
+    setSettingsOpen(true);
+  }, []);
+
+  const handleSessionUpdated = useCallback((updated: Session) => {
+    setSessions((current) =>
+      current.map((item) =>
+        item.session_id === updated.session_id ? updated : item,
+      ),
+    );
+  }, []);
+
   return (
     <SidebarProvider>
       <AppSidebar
@@ -499,14 +539,7 @@ export default function App() {
         onProfileChange={setSelectedProfile}
         onIdentityChange={setSelectedIdentity}
         onBundleChange={setSelectedBundle}
-        onSettings={() => {
-          // The active toolbar owns the settings dialog. Keep this callback
-          // for the sidebar affordance; dispatching a click lets the same
-          // dialog be opened from either surface without duplicating state.
-          document.querySelector<HTMLButtonElement>(
-            '[aria-label="Session settings trigger"]',
-          )?.click();
-        }}
+        onSettings={() => openSettings()}
         onManageProfiles={() => setProfilesOpen(true)}
         onSelectSession={(id) => void selectSession(id)}
         onCreate={() => void createSession()}
@@ -521,6 +554,21 @@ export default function App() {
           await loadSessions();
         }}
       />
+      {activeSession ? (
+        <PanelHost
+          key={activeSession.session_id}
+          api={api}
+          session={activeSession}
+          profiles={profiles}
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          tab={settingsTab}
+          onTabChange={setSettingsTab}
+          intent={settingsIntent}
+          onChanged={() => void loadSessions()}
+          onSessionUpdated={handleSessionUpdated}
+        />
+      ) : null}
       <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
         {activeSession && initialState ? (
           <EngineRuntimeProvider
@@ -534,13 +582,8 @@ export default function App() {
               profiles={profiles}
               agents={agents}
               refreshSignal={refreshSignal}
-              onSessionUpdated={(updated) => {
-                setSessions((current) =>
-                  current.map((item) =>
-                    item.session_id === updated.session_id ? updated : item,
-                  ),
-                );
-              }}
+              onSessionUpdated={handleSessionUpdated}
+              onOpenSettings={openSettings}
             />
           </EngineRuntimeProvider>
         ) : (

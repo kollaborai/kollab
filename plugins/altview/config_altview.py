@@ -15,17 +15,18 @@ Keyboard:
     Esc          exit (clears search if active, else exits)
 """
 
-import asyncio
 import json
 import logging
 from typing import Any, List, Optional
 
-from kollabor_config.config_utils import get_global_config_path
-from kollabor_config.managed_config import (
-    ManagedConfig,
-    managed_by,
-    read_managed_config,
+from kollabor.panels.config import (
+    apply_config_changes,
+    build_config_sections,
+    managed_value,
+    read_managed_state,
 )
+from kollabor_config.managed_config import ManagedConfig, managed_by
+from kollabor_config.secrets import is_secret_path
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, S, T, TagBox, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
@@ -81,10 +82,6 @@ class ConfigAltView(AltView):
         # Save prompt
         self._save_prompt: bool = False
 
-        # Background profile-switch tasks started by saves. Keep ownership so
-        # failures are observed and teardown can cancel pending work.
-        self._save_tasks: set[asyncio.Task[Any]] = set()
-
         # What the network's primary manages on this device (None: nothing) and
         # the global settings file it wrote, read fresh each time the view opens.
         self._managed: Optional[ManagedConfig] = None
@@ -112,14 +109,6 @@ class ConfigAltView(AltView):
             len(self._sections),
         )
 
-    async def on_complete(self) -> None:
-        pending = tuple(self._save_tasks)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        await super().on_complete()
-
     # -- widget creation (mirrors modal_renderer._create_widget) ------------
 
     def _create_widget(self, widget_config: dict) -> Any:
@@ -131,6 +120,7 @@ class ConfigAltView(AltView):
         from kollabor_tui.widgets.dropdown import DropdownWidget
         from kollabor_tui.widgets.label import LabelWidget
         from kollabor_tui.widgets.slider import SliderWidget
+        from kollabor_tui.widgets.spin_box import SpinBoxWidget
         from kollabor_tui.widgets.text_input import TextInputWidget
 
         wtype = widget_config.get("type", "label")
@@ -153,6 +143,8 @@ class ConfigAltView(AltView):
             return TextInputWidget(cfg, config_path, self.config_service)
         elif wtype == "slider":
             return SliderWidget(cfg, config_path, self.config_service)
+        elif wtype == "spinbox":
+            return SpinBoxWidget(cfg, config_path, self.config_service)
         elif wtype == "label":
             return LabelWidget(
                 label=widget_config.get("label", ""),
@@ -173,12 +165,10 @@ class ConfigAltView(AltView):
 
     def _load_widgets(self) -> None:
         """Load config definition and create real widget instances."""
-        from kollabor_tui.config_widgets import ConfigWidgetDefinitions
-
-        self._managed = read_managed_config()
-        self._global_settings = self._read_global_settings() if self._managed else {}
-        defn = ConfigWidgetDefinitions.get_config_modal_definition()
-        sections = self._with_loadout_rows(defn.get("sections", []))
+        self._managed, self._global_settings = read_managed_state()
+        sections = build_config_sections(
+            self.config_service, self._managed, self._global_settings
+        )
 
         self._sections = []
         self._section_widgets = []
@@ -205,36 +195,16 @@ class ConfigAltView(AltView):
 
     # -- settings the network's primary manages ------------------------------
 
-    @staticmethod
-    def _read_global_settings() -> dict:
-        try:
-            data = json.loads(get_global_config_path().read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
     def _managed_value(self, config_path: str) -> Any:
-        """A synced key's value as the primary last wrote it, straight from disk.
-
-        In an attached window this process's config service can lag a sync by a
-        moment; the file is the truth, so a synced row never shows a stale value.
-        """
-        for segments in self._managed.keys if self._managed else ():
-            if ".".join(segments) == config_path:
-                node: Any = self._global_settings
-                for part in segments:
-                    node = node.get(part) if isinstance(node, dict) else None
-                return node
-        return None
+        return managed_value(self._managed, self._global_settings, config_path)
 
     def _managed_label(self, widget_config: dict, owner: str) -> Any:
         """A synced setting is a read-only label: value, then who manages it."""
         from kollabor_tui.widgets.label import LabelWidget
 
         config_path = widget_config.get("config_path", "")
-        last = config_path.rsplit(".", 1)[-1].lower()
         value = self._managed_value(config_path)
-        if any(word in last for word in ("key", "token", "secret", "password")):
+        if is_secret_path(config_path, widget_config):
             shown = "set" if value else "empty"  # a secret is never drawn
         elif value is None:
             shown = "unset"
@@ -253,56 +223,6 @@ class ConfigAltView(AltView):
             help_text=widget_config.get("help", ""),
             config_path=config_path,
         )
-
-    def _effective(self, config_path: str) -> Any:
-        if managed_by(config_path, self._managed):
-            return self._managed_value(config_path)
-        return self.config_service.get(config_path) if self.config_service else None
-
-    def _with_loadout_rows(self, sections: List[dict]) -> List[dict]:
-        """Show the active loadout at the top of LLM Settings, read-only.
-
-        Change it with /llm; on a secondary it also says who manages it.
-        """
-        active = self._effective("kollabor.llm.active_profile") or "default"
-        rows = [
-            {
-                "type": "label",
-                "label": "Loadout",
-                "config_path": "kollabor.llm.active_profile",
-                "value": str(active),
-                "help": "The active LLM loadout; change it with /llm",
-            }
-        ]
-        model_path = f"kollabor.llm.profiles.{active}.model"
-        if managed_by(model_path, self._managed):
-            model = self._managed_value(model_path)
-        else:
-            profiles = (
-                self.config_service.get("kollabor.llm.profiles")
-                if self.config_service
-                else None
-            )
-            profile = profiles.get(active) if isinstance(profiles, dict) else None
-            model = profile.get("model") if isinstance(profile, dict) else None
-        if model:
-            rows.append(
-                {
-                    "type": "label",
-                    "label": "Model",
-                    "config_path": model_path,
-                    "value": str(model),
-                    "help": "The model of the active loadout; change it with /llm",
-                }
-            )
-        return [
-            (
-                {**section, "widgets": rows + list(section.get("widgets", []))}
-                if section.get("title") == "LLM Settings"
-                else section
-            )
-            for section in sections
-        ]
 
     # -- filtered views -----------------------------------------------------
 
@@ -823,39 +743,15 @@ class ConfigAltView(AltView):
                 logger.warning("ConfigAltView: no config_service, cannot save")
                 return
 
-            saved = 0
-            new_profile = None
-            dirty_values: List[tuple[str, Any]] = []
-            for ws in self._section_widgets:
-                for w in ws:
-                    if hasattr(w, "has_pending_changes") and w.has_pending_changes():
-                        if hasattr(w, "config_path") and w.config_path:
-                            val = w.get_pending_value()
-                            self.config_service.set(w.config_path, val)
-                            dirty_values.append((w.config_path, val))
-                            saved += 1
-                            logger.debug(
-                                "ConfigAltView: set %s = %r", w.config_path, val
-                            )
-                            if w.config_path == "kollabor.llm.active_profile":
-                                new_profile = val
-
-            ok = True
-            for key_path, val in dirty_values:
-                if not self.config_service.save_key(key_path, val, save_target=target):
-                    ok = False
-
-            if ok:
-                logger.info("ConfigAltView: saved %d changes to %s", saved, target)
-                # Same as modal config save: refresh LLM/plugins that cache config keys.
-                notify = getattr(self.config_service, "_notify_reload_callbacks", None)
-                if callable(notify):
-                    try:
-                        notify()
-                    except Exception as exc:
-                        logger.warning(
-                            "ConfigAltView: reload notify after save failed: %s", exc
-                        )
+            dirty = {
+                w.config_path: w.get_pending_value()
+                for ws in self._section_widgets
+                for w in ws
+                if hasattr(w, "has_pending_changes")
+                and w.has_pending_changes()
+                and getattr(w, "config_path", "")
+            }
+            if apply_config_changes(self.config_service, dirty, target):
                 for ws in self._section_widgets:
                     for w in ws:
                         if (
@@ -863,40 +759,5 @@ class ConfigAltView(AltView):
                             and w.has_pending_changes()
                         ):
                             w._pending_value = None
-            else:
-                logger.error("ConfigAltView: one or more config saves failed")
-
-            # If profile changed, switch it at runtime so the running app updates
-            if new_profile and self.app:
-                llm = getattr(self.app, "llm_service", None)
-                if llm and hasattr(llm, "switch_profile"):
-                    task = asyncio.create_task(llm.switch_profile(new_profile))
-                    self._save_tasks.add(task)
-
-                    def _observe_profile_switch(
-                        completed: asyncio.Task[Any],
-                    ) -> None:
-                        self._save_tasks.discard(completed)
-                        if completed.cancelled():
-                            return
-                        try:
-                            error = completed.exception()
-                        except Exception:
-                            logger.exception(
-                                "ConfigAltView: could not inspect runtime profile switch"
-                            )
-                        else:
-                            if error is not None:
-                                logger.error(
-                                    "ConfigAltView: runtime profile switch failed: %s",
-                                    error,
-                                )
-
-                    task.add_done_callback(_observe_profile_switch)
-                    logger.info(
-                        "ConfigAltView: triggered runtime profile switch -> %s",
-                        new_profile,
-                    )
-
         except Exception as e:
             logger.error("ConfigAltView: save failed: %s", e, exc_info=True)
