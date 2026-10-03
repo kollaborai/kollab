@@ -151,6 +151,16 @@ Fullscreen modal for editing all application and plugin settings.
 - `Ctrl+S` - Save config (prompts Local vs Global target)
 - Arrow keys / Tab - Navigate between widgets
 
+### Panels (`kollabor/panels/`)
+
+Daemon-owned screens the web UI renders as Settings tabs (spec `docs/specs/webui-unified-config.md`, user doc `docs/features/web-settings-panels.md`). The terminal's fullscreen views and the web call the same code, so a save from either shows in both.
+
+- **Contract** (`base.py`): a `Panel` has `name`, `kind` (`form` | `picker` | `wizard`), `async describe(ctx, params)` (the screen as data) and `async act(ctx, action, payload)`. Return `ok_result(...)` / `error_result(msg, {path: text})`, or raise `PanelError(msg, errors=None, status=None)` for a request you cannot serve (400 default; 403 read-only, 404 unknown row/action, 503 service unavailable). Non-empty `errors` makes the route answer 400.
+- **Registry**: each `kollabor.panels.<module>` exports `PANELS: dict[str, Panel]`; a name's first dash segment is its module (`connect-join` lives in `connect.py`). Lookup is lazy (`get_panel`, `require_panel`, `list_panels`) and a missing module or name is "unknown panel" (404), never an import crash. `COMMAND_PANELS` maps slash commands to panels; `PANEL_LOCATIONS` holds the "Settings → Tab" label a web command answers with.
+- **Secrets**: build fields with `make_field(...)` (a secret keeps `is_set`, never its value; labels and managed paths are not editable). The one secret rule is `kollabor_config.secrets.is_secret_path`. Never log a payload: it can hold secrets and join codes.
+- **Add a panel**: `kollabor/panels/<name>.py` with a `Panel` class and `PANELS = {Cls.name: Cls()}`; add the slash command to `COMMAND_PANELS` and a label to `PANEL_LOCATIONS`; keep action bodies to the payload contract in the spec's "deviations" section (row actions declare `payload_key`); add the tab in `packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx`.
+- **Web commands**: a web-originated slash command that opens a fullscreen view (`AltViewStackManager.push`, `FullScreenManager.launch_plugin`) records the attempt in the `unavailable_attempts` ContextVar and raises `AltViewUnavailable`; `LocalStateService._run_web_slash_command` answers with one line and the turn ends. Pipe mode and `--detached` refuse the same way.
+
 ### STDOUT IS SACRED
 
 **CRITICAL: Never use print() or sys.stdout.write() in plugin code.**
@@ -594,6 +604,7 @@ Both initialize `TerminalLLMChat` in `kollabor/application.py`.
 - Local (`L`): Saves to `.kollab/config.json` in cwd (project-specific overrides)
 - Global (`G`): Saves to `~/.kollab/config.json` (user-wide settings)
 - Only overrides (diff from defaults) are persisted, not the full config tree
+- **Reload:** `ConfigService` polls the config files' mtimes once a second on the event loop (no watchdog) and reloads, notifying callbacks, when another process saved. Its own writes refresh the stored mtimes, so a save is not reloaded twice.
 
 ### Dynamic System Prompts with `<trender>` Tags
 

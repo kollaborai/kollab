@@ -1841,15 +1841,18 @@ class HubPlugin(BasePlugin):
         )
         tool_executor.register_plugin_handler("curate", self._handle_curate_tool)
 
-        # --- Context service: context query (body form) ---
-        # xml_form="body", xml_tag="context_query"
+        # --- Context service: context query ---
+        # <context/> and <context filter="pending"/> are what the agent prompt
+        # and the curator teach; <context_query>...</context_query> is the
+        # tool-definition body form. The handler reads "filter".
         context_pat = _re.compile(
-            r"<context_query>(.*?)</context_query>",
+            r'<context(?:_query)?(?:\s+filter="([^"]*)")?\s*/>'
+            r"|<context_query>(.*?)</context_query>",
             _re.DOTALL | _re.IGNORECASE,
         )
 
         def _extract_context(m):
-            return {"query": m.group(1).strip()}
+            return {"filter": (m.group(1) or m.group(2) or "").strip()}
 
         response_parser.register_plugin_tag(
             "context_query", context_pat, "context_query", _extract_context
@@ -1915,9 +1918,12 @@ class HubPlugin(BasePlugin):
         """Handle <curate> tag — record agent's decision on a ledger entry."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        ctx_id = tool_data.get("ctx_id", "")
+        # XML tags extract ctx_id/body; native calls carry the schema's
+        # id/summary arguments under "input".
+        native = tool_data.get("input") or {}
+        ctx_id = tool_data.get("ctx_id") or native.get("id", "")
         decision = tool_data.get("decision", "")
-        body = tool_data.get("body", "")
+        body = tool_data.get("body") or tool_data.get("summary") or ""
 
         context_svc = self._get_context_service()
         if context_svc is None:
@@ -1977,7 +1983,8 @@ class HubPlugin(BasePlugin):
         """Handle <evict> tag — evict a ledger entry from history."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        ctx_id = tool_data.get("ctx_id", "")
+        # Native calls name the entry with the schema's "identifier" argument.
+        ctx_id = tool_data.get("ctx_id") or tool_data.get("identifier", "")
         reason = tool_data.get("reason", "")
 
         context_svc = self._get_context_service()

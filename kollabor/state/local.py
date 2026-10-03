@@ -84,6 +84,16 @@ def parse_hub_mention(text: str) -> tuple[str, str] | None:
     return (target, content) if content else None
 
 
+def _needs_terminal_reply(command_name: str) -> str:
+    """The one line a fullscreen command answers with where no terminal exists."""
+    from kollabor.panels import COMMAND_PANELS, PANEL_LOCATIONS
+
+    panel = COMMAND_PANELS.get(command_name)
+    if panel is None:
+        return f"/{command_name} needs the terminal UI"
+    return f"/{command_name} opens in {PANEL_LOCATIONS[panel]} in the web UI"
+
+
 def _web_command_output(result: Any, command_name: str) -> str:
     """Render terminal UI command results as visible web-chat Markdown.
 
@@ -1014,7 +1024,31 @@ class LocalStateService(StateService):
                     "subcommands": subcommands,
                 }
             )
+        from kollabor.panels import panel_for_command
+
+        for entry in catalog:
+            panel = panel_for_command(entry["name"])
+            if panel:
+                entry["panel"] = panel
         return catalog
+
+    # === Panels (kollabor.panels) ===
+
+    async def get_panel(
+        self, name: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Describe one panel; this service is the panel's ``ctx``."""
+        from kollabor.panels import require_panel
+
+        return await require_panel(name).describe(self, params or {})
+
+    async def panel_action(
+        self, name: str, action: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run one panel action through the same functions the terminal calls."""
+        from kollabor.panels import require_panel
+
+        return await require_panel(name).act(self, action, payload or {})
 
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a generated image through the daemon-owned API service."""
@@ -2400,6 +2434,24 @@ class LocalStateService(StateService):
             "display_type": str(getattr(result, "display_type", "info") or "info"),
         }
 
+    async def compact_command(self, sub: str) -> str:
+        """Run /compact daemon-side ("" asks the model, "now" compacts)."""
+        from datetime import datetime as _dt
+
+        from kollabor_events.models import SlashCommand
+
+        registry = self._event_bus.get_service("command_registry")
+        definition = registry.get_command("compact") if registry is not None else None
+        if definition is None or definition.handler is None:
+            return "compact command unavailable"
+        command = SlashCommand(
+            name="compact",
+            args=[sub] if sub else [],
+            raw_input=f"/compact {sub}".strip(),
+            timestamp=_dt.now(),
+        )
+        return str(await definition.handler(command))
+
     async def send_message(self, message: Any) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
@@ -2642,6 +2694,36 @@ class LocalStateService(StateService):
                 stop_reason="error",
             )
 
+    async def _run_web_slash_command(
+        self, command: Any, executor: Any
+    ) -> tuple[Any, str]:
+        """Execute a command for the web; return (result, one reply string).
+
+        The web has no terminal, so a command that tries to open a fullscreen
+        view gets one line instead of hanging the turn forever.
+        """
+        from kollabor_tui.altview.stack_manager import (
+            AltViewUnavailable,
+            unavailable_attempts,
+        )
+
+        attempts: list[str] = []
+        token = unavailable_attempts.set(attempts)
+        result = None
+        try:
+            result = await executor.execute_command(command, self._event_bus)
+        except AltViewUnavailable:
+            pass  # push() already recorded the attempt
+        finally:
+            unavailable_attempts.reset(token)
+        if not attempts:
+            return result, _web_command_output(result, command.name)
+        registry = getattr(executor, "command_registry", None)
+        definition = registry.get_command(command.name) if registry else None
+        return result, _needs_terminal_reply(
+            getattr(definition, "name", None) or command.name
+        )
+
     async def _execute_slash_command(
         self, text: str, parser: Any, executor: Any
     ) -> None:
@@ -2653,15 +2735,21 @@ class LocalStateService(StateService):
             command = parser.parse_command(text)
             if command is None:
                 raise ValueError(f"Could not parse slash command: {text}")
-            result = await executor.execute_command(command, self._event_bus)
-            output = _web_command_output(result, command.name)
+            result, output = await self._run_web_slash_command(command, executor)
+            # /connect refuses a join code typed as an argument; the saved
+            # conversation must not keep the code either.
+            recorded = text
+            if command.name == "connect":
+                from kollabor.logging.setup import redact_join_codes
+
+                recorded = redact_join_codes(text)
             metadata = {
-                "slash_command": text,
+                "slash_command": recorded,
                 "command_success": bool(getattr(result, "success", False)),
             }
             add_message = getattr(self._llm_service, "_add_conversation_message", None)
             if callable(add_message):
-                add_message("user", text, metadata={"slash_command": text})
+                add_message("user", recorded, metadata={"slash_command": recorded})
                 add_message("assistant", output, metadata=metadata)
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(

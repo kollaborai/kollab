@@ -25,6 +25,7 @@ _EXPLICIT_RESEARCH_TOOLS = [
     "curate",
     "context-query",
     "evict",
+    "compact",
 ]
 
 

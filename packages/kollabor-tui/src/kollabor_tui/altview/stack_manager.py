@@ -1,7 +1,9 @@
 """AltView stack manager -- push/pop navigation with display queue replay."""
 
 import logging
+import sys
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -14,6 +16,36 @@ from .session import AltViewSession
 logger = logging.getLogger(__name__)
 
 MAX_STACK_DEPTH = 6
+
+
+class AltViewUnavailable(RuntimeError):
+    """push() was called where nobody can see or key a fullscreen view.
+
+    Raised in pipe mode, in a detached daemon (its fds 0-2 are /dev/null) and
+    for commands that arrive over the web transport. Without it push() blocks
+    forever: no key can ever close the view.
+    """
+
+
+# A caller that wants to know a command tried to open a view sets this to a
+# list. push() appends the view's name and raises, even when a handler or the
+# command executor swallows the exception (the executor turns every handler
+# error into a failure result).
+unavailable_attempts: ContextVar[Optional[List[str]]] = ContextVar(
+    "altview_unavailable_attempts", default=None
+)
+
+
+def interactive_terminal_available(terminal_renderer=None) -> bool:
+    """False in pipe mode and in a detached daemon.
+
+    Attach clients are fine: they run slash commands in their own terminal.
+    """
+    if getattr(terminal_renderer, "pipe_mode", False) is True:
+        return False
+    # ponytail: argv, because cli_main and daemon.py already key detached mode
+    # off it; an app-registered flag is the upgrade if argv ever misleads.
+    return "--detached" not in sys.argv and "-d" not in sys.argv
 
 
 @dataclass
@@ -114,7 +146,18 @@ class AltViewStackManager:
 
         Returns:
             False if the stack depth limit is reached, True otherwise.
+
+        Raises:
+            AltViewUnavailable: no interactive terminal (see the class).
         """
+        sink = unavailable_attempts.get()
+        if sink is not None or not interactive_terminal_available(
+            self.terminal_renderer
+        ):
+            if sink is not None:
+                sink.append(session_name)
+            raise AltViewUnavailable(f"'{session_name}' needs an interactive terminal")
+
         if self.stack_depth >= MAX_STACK_DEPTH:
             logger.warning(
                 "AltViewStackManager: stack depth limit (%d) reached, "

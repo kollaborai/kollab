@@ -44,6 +44,28 @@ def _screen_text(value: str) -> str:
     return "".join(char for char in value if char.isprintable())[:200]
 
 
+def _panel_answer(result: Any, key: str) -> dict[str, Any]:
+    """The daemon's panel answer, or the PanelError it reported."""
+    from kollabor.panels import PanelError
+
+    if not isinstance(result, dict):
+        raise TypeError(f"panel rpc expected dict, got {type(result).__name__}")
+    if result.get("error"):
+        status = result.get("status")
+        errors = result.get("errors")
+        raise PanelError(
+            _screen_text(str(result["error"])),
+            {str(k): _screen_text(str(v)) for k, v in errors.items()}
+            if isinstance(errors, dict)
+            else None,
+            status if isinstance(status, int) and 400 <= status <= 599 else 502,
+        )
+    value = result.get(key)
+    if not isinstance(value, dict):
+        raise TypeError(f"panel rpc result missing {key!r}")
+    return value
+
+
 class RemoteStateService(StateService):
     """RPC-backed StateService. Wraps a kollabor_rpc.RpcClient.
 
@@ -94,6 +116,18 @@ class RemoteStateService(StateService):
         if not isinstance(result, dict):
             raise TypeError(
                 f"state.goal_command expected dict, got {type(result).__name__}"
+            )
+        return result
+
+    async def compact_command(self, sub: str) -> str:
+        """Run /compact ("" asks the model, "now" compacts) daemon-side,
+        where the history, ledger and LLM loop live."""
+        result = await self._rpc.call(
+            "state.compact_command", {"sub": sub}, timeout=self._timeout
+        )
+        if not isinstance(result, str):
+            raise TypeError(
+                f"state.compact_command expected str, got {type(result).__name__}"
             )
         return result
 
@@ -916,6 +950,30 @@ class RemoteStateService(StateService):
         ):
             raise ValueError("daemon knock decision failed")
         return _screen_text(result["reason"])
+
+    # panel_action can wait on a provider (the setup connection test is
+    # bounded at 25 s), so it outlasts DEFAULT_TIMEOUT.
+    PANEL_ACTION_TIMEOUT: float = 40.0
+
+    async def get_panel(
+        self, name: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._rpc.call(
+            "state.get_panel",
+            {"name": name, "params": params or {}},
+            timeout=self._timeout,
+        )
+        return _panel_answer(result, "panel")
+
+    async def panel_action(
+        self, name: str, action: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._rpc.call(
+            "state.panel_action",
+            {"name": name, "action": action, "payload": payload or {}},
+            timeout=max(self._timeout, self.PANEL_ACTION_TIMEOUT),
+        )
+        return _panel_answer(result, "result")
 
     async def hub_connect(self, command: str) -> str:
         result = await self._rpc.call(

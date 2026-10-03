@@ -1,48 +1,59 @@
 ---
 title: "ContextService"
 created: 2026-04-11
-modified: 2026-04-11
-status: superseded
+modified: 2026-10-02
+status: shipped
 ---
 # ContextService
 
-> ⚠ **SUPERSEDED — DO NOT IMPLEMENT FROM THIS FILE.**
->
-> This spec was authored before the 2026-04-11 tool-calling
-> architecture investigation. It assumes native openai `tool_calls`
-> are kollabor's default tool protocol, which is WRONG —
-> kollabor defaults to XML-in-content (see
-> `docs/architecture/tool-calling-architecture.md`). The examples use
-> `<file_read>` instead of the real `<read>` tag, reference
-> `tool_call_id` instead of `message_uuid`, and show `role: "tool"`
-> messages instead of the real `Tool result: [tag_name] <content>`
-> envelope.
->
-> **Use the new version instead:**
-> [`docs/architecture/rfcs/RFC-2026-04-11-context-service.md`](../architecture/rfcs/RFC-2026-04-11-context-service.md)
->
-> The new version fixes all the XML vs native mode issues, uses
-> real kollabor tag names, and integrates with the hub-loop-prevention,
-> notification system, and unified tool loading specs in the same
-> folder. The core design (ledger, curation, stale hits, diff-on-change)
-> is unchanged — only the surface syntax was wrong.
->
-> This file is kept in place for backward compatibility with
-> cross-references from other docs. Do not extend it. All future
-> edits go to `docs/architecture/rfcs/RFC-2026-04-11-context-service.md`.
+> **Shipped and live.** The context ledger, the curator, file-read dedup
+> and model-first compaction all run in every session. The design doc is
+> [`RFC-2026-04-11-context-service.md`](../architecture/rfcs/RFC-2026-04-11-context-service.md);
+> the "Why" and design sections below are the original April draft, kept
+> for history. Its tag syntax is outdated: use the tags in this section.
+
+## How it works today
+
+The model decides what it keeps. The user does not curate anything.
+
+1. **Ledger.** Every tool result or file read of 8KB or more
+   (`plugins.context_service.heavy_threshold_kb`) becomes a ledger entry
+   `ctx-N` with decision `pending`. Re-reading an unchanged file returns an
+   "already in context" marker instead of the content.
+2. **Curator.** When the ledger passes 300KB (`curate_threshold_kb`) with
+   items pending, at most every 2 turns (`curator_throttle_turns`), the
+   model gets a list of its heavy items and marks each one
+   `<curate id="ctx-N" decision="keep|summary">`. It can curate any turn
+   unprompted, inspect the ledger with `<context/>` or
+   `<context filter="pending"/>`, and drop an item now with `<evict>`.
+3. **Compaction, the model's call.** When context reaches the compaction
+   threshold (75% of the window, capped at 272K), the compaction plugin
+   does not compact right away. It asks the model what to keep: curate the
+   heavy items, then write its own notes and start compaction with
+   `<compact>notes</compact>`. The notes are kept verbatim at the top of
+   the compacted context. If the model's turn ends without `<compact>`,
+   compaction runs anyway. Turn this off with
+   `plugins.context_compaction.ask_model_first: false`.
+4. **Applying decisions.** `keep` stays verbatim, `summary` is replaced
+   by the model's own text, `evicted` keeps its stub, and items left
+   `pending` go to the summarizer LLM along with the rest of the old
+   conversation.
+
+| Command | What it does |
+|---|---|
+| `/compact` | Ask the model what to keep; it compacts when ready |
+| `/compact now` | Compact immediately, no question asked |
+| `/compact status` | Show threshold, window, token count and state |
+| `/compact preview` | Show what a compaction would remove |
+
+Code: `packages/kollabor-ai/src/kollabor_ai/context_service/` (ledger,
+curator), `plugins/context_compaction_plugin.py` (compaction, `<compact>`,
+`/compact`), `plugins/hub/plugin.py` (`<curate>`, `<context/>`, `<evict>`
+handlers). Agent-facing docs:
+`bundles/agents/_base/sections/tool-reference/context.md`. Flow diagram:
+`docs/diagrams/context-compaction.drawio`.
 
 ---
-
-> Unified context ledger for kollab. Tracks every heavy artifact
-> (file reads, tool results, attachments) that enters an agent's
-> conversation. Deduplicates, versions by hash, shares across the hub,
-> and drives curation-aware compaction.
-
-status: superseded / not implemented
-owner: kollabor-ai
-depends on: conversation_manager, compaction plugin, hub plugin, response_parser
-superseded_by: docs/architecture/rfcs/RFC-2026-04-11-context-service.md
-
 
 ## Why
 

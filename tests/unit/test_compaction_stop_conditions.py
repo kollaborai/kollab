@@ -32,8 +32,11 @@ def _msg(role: str, content: str, **meta) -> ConversationMessage:
     )
 
 
-def _make_plugin(history: List[ConversationMessage], reported: int):
+def _make_plugin(
+    history: List[ConversationMessage], reported: int, ask_model_first: bool = False
+):
     values: Dict[str, Any] = {
+        "plugins.context_compaction.ask_model_first": ask_model_first,
         "plugins.context_compaction.enabled": True,
         "plugins.context_compaction.token_threshold_k": 96,
         "plugins.context_compaction.min_human_turns": 4,
@@ -166,6 +169,23 @@ class TestBoundedCoordinationDeferral(unittest.TestCase):
         deferred = [m for m in logs.output if "Compaction deferred" in m]
         self.assertEqual(len(deferred), MAX_COORDINATION_DEFERRALS)
         self.assertEqual(runs, [1])  # the turn after the last deferral compacts
+
+    def test_model_first_asks_the_model_after_the_deferral_cap(self) -> None:
+        history = _history()
+        plugin = _make_plugin(history, reported=100_649, ask_model_first=True)
+        plugin._llm_service._pending_agent_hud = [object()]  # never drains
+        plugin._request_model_curation = AsyncMock()
+
+        async def drive() -> None:
+            for _ in range(MAX_COORDINATION_DEFERRALS + 1):
+                await plugin._on_llm_turn_complete({}, None)
+
+        with self.assertLogs(level="INFO") as logs:
+            asyncio.run(drive())
+
+        deferred = [m for m in logs.output if "Compaction deferred" in m]
+        self.assertEqual(len(deferred), MAX_COORDINATION_DEFERRALS)
+        plugin._request_model_curation.assert_awaited_once()
 
     def test_a_cleared_trigger_resets_the_deferral_count(self) -> None:
         history = _history()

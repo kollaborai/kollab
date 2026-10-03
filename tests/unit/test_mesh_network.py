@@ -840,8 +840,12 @@ async def test_links_between_members_stay_valid_across_thirty_concurrent_refresh
     # round trip past the real 3 s; the timeout measures this machine, not the protocol.
     monkeypatch.setattr(peer_transport, "PEER_EXCHANGE_TIMEOUT", 30)
     # Seven and a half simulated minutes run in seconds of real time, which a
-    # per-real-second send budget was never meant to cover.
+    # per-real-second send budget was never meant to cover. The bucket starts
+    # with SEND_BURST tokens and refills at SEND_RATE_PER_SECOND of real time, so
+    # a runner that finishes the rounds in about ten seconds or less drains it:
+    # replies are dropped, requests time out and the links go stale. Lift both.
     monkeypatch.setattr(relay_client, "SEND_BURST", 10_000.0)
+    monkeypatch.setattr(relay_client, "SEND_RATE_PER_SECOND", 10_000.0)
     await link_everything(mesh3)
     clock = {"now": time.time()}
     monkeypatch.setattr(time, "time", lambda: clock["now"])
