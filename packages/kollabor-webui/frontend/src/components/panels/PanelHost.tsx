@@ -541,6 +541,7 @@ export function PanelHost({
                 {
                   changes: serializeDraft(top.draft),
                   ...(target ? { target } : {}),
+                  ...(panel.context ? { context: panel.context } : {}),
                 },
                 { reset: true },
               )

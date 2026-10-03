@@ -338,6 +338,8 @@ type PanelBase = {
   summary?: unknown;
   /** Read-only text shown above a picker. */
   notice?: string | null;
+  /** Opaque state the daemon wants back unchanged in every form action. */
+  context?: Record<string, unknown> | null;
 };
 
 export type PanelForm = PanelBase & {
