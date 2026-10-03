@@ -7,15 +7,21 @@ member approve every other, and revocation must reach every member.
 
 from __future__ import annotations
 
+import time
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from nacl.signing import SigningKey
 
+from plugins.hub import network_members, relay_client
 from plugins.hub.network_members import METHOD, seal_members
 from plugins.hub.relay_state import RelayError
 
 from .test_mesh_network import deliver_locator, make_node
 from .test_peer_transport import RelayWire, _mint_tls_cert
+
+pytestmark = pytest.mark.usefixtures("unthrottled_relay")
 
 NAMES = {"mac": "lapis", "srv-b": "koordinator", "srv-c": "peridot", "srv-d": "ruby", "odd": "sapphire"}
 
@@ -108,6 +114,43 @@ async def test_the_relay_path_and_the_mesh_path_agree_on_who_is_a_member(chain):
             assert "agents" in reply
         with pytest.raises(RelayError, match="not approved"):
             await node.bridge._receive("ee" * 32, "directory", {}, _secure=True)
+
+
+@pytest.mark.asyncio
+async def test_membership_converges_through_a_starved_send_budget(chain, monkeypatch):
+    """The production self-heal: a refused send is retried on a later tick, after backoff.
+
+    Every device starts with an empty send bucket on a clock the test owns, so each
+    first send is refused; the lists must still arrive once the bucket refills.
+    """
+    a, b, c, nodes, _wire = chain
+    clock = {"now": 1000.0}
+    fake_time = SimpleNamespace(**{**vars(time), "monotonic": lambda: clock["now"]})
+    monkeypatch.setattr(network_members, "time", fake_time)
+    monkeypatch.setattr(relay_client, "time", fake_time)
+    monkeypatch.setattr(relay_client, "SEND_BURST", 20.0)
+    monkeypatch.setattr(relay_client, "SEND_RATE_PER_SECOND", 2)
+    for node in nodes:
+        node.client._tokens = 0.0
+        node.client._token_time = clock["now"]
+        node.bridge.membership_sync._poll = 10.0
+
+    await sync(nodes, rounds=1)
+    assert all(not node.bridge.membership_sync._delivered for node in nodes)
+    assert all(node.bridge.membership_sync._retry_at for node in nodes)
+    assert c.key not in approved(a) and a.key not in approved(c)
+
+    failures = [dict(node.bridge.membership_sync._failures) for node in nodes]
+    await sync(nodes, rounds=1)  # still inside the backoff: nothing is sent
+    assert failures == [dict(node.bridge.membership_sync._failures) for node in nodes]
+
+    for _ in range(40):  # a bounded run of backoff windows; each one refills the bucket
+        if all(approved(node) == {n.key for n in nodes if n is not node} for node in nodes):
+            break
+        clock["now"] += 10.0
+        await sync(nodes, rounds=1)
+    for node in nodes:
+        assert approved(node) == {n.key for n in nodes if n is not node}
 
 
 @pytest.mark.asyncio
