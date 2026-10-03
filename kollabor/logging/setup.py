@@ -7,12 +7,13 @@ defaults during bootstrap.
 
 import logging as _logging
 import logging.handlers  # force-load submodule for TimedRotatingFileHandler
-import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from kollabor_config.config_utils import get_logs_dir
+from kollabor_config.log_redaction import JoinCodeRedactionFilter
+from kollabor_config.log_redaction import redact_join_codes as redact_join_codes
 
 # Third-party loggers that emit one INFO record per operation and flood the
 # file log. httpx/httpcore log every HTTP request — with the Telegram bridge
@@ -28,39 +29,6 @@ _NOISY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3")
 # agent run for weeks without filling the disk.
 DEFAULT_LOG_MAX_BYTES = 200 * 1024 * 1024  # 200 MB per file
 DEFAULT_LOG_BACKUP_COUNT = 3  # keep 3 rotated files (+ the live one)
-
-# Enrollment codes are one-device credentials. A user can still paste one
-# into a command or chat line, so no log record may carry it. Covers the
-# short XXXX-XXXX join code as it is shown, in either case; the no-dash
-# form never matches (false positives).
-_ENROLLMENT_CODE_RE = re.compile(
-    r"\b[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}-[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\b"
-)
-
-
-def redact_join_codes(text: str) -> str:
-    """Replace every join code in *text*, the same way log records are."""
-    return _ENROLLMENT_CODE_RE.sub("[join code redacted]", text)
-
-
-class JoinCodeRedactionFilter(_logging.Filter):
-    """Rewrite any log record that carries a join code, for every formatter.
-
-    One filter attached to each handler this module builds (plus the handlers
-    it adopts), so compact, standard and custom format strings all emit
-    ``[join code redacted]`` instead of the code.
-    """
-
-    def filter(self, record: _logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-        except Exception:
-            return True  # a malformed record is the formatter's problem, not ours
-        redacted = redact_join_codes(message)
-        if redacted != message:
-            record.msg = redacted
-            record.args = None
-        return True
 
 
 def _attach_redaction_filter(handler: _logging.Handler) -> None:

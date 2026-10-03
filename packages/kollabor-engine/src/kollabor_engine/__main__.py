@@ -21,6 +21,15 @@ def _build_engine_log_path(now: datetime | None = None) -> Path:
 _engine_stderr: Any = None
 
 
+def _build_log_handler(log_path: Path) -> logging.Handler:
+    """The engine's file handler; join codes are redacted from every record."""
+    from kollabor_config.log_redaction import JoinCodeRedactionFilter
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.addFilter(JoinCodeRedactionFilter())
+    return handler
+
+
 def _configure_logging(log_level: str, log_path: Path) -> None:
     """Send engine logging and stderr prints to the timestamped log file."""
     global _engine_stderr
@@ -30,7 +39,7 @@ def _configure_logging(log_level: str, log_path: Path) -> None:
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler(log_path, encoding="utf-8")],
+        handlers=[_build_log_handler(log_path)],
         force=True,
     )
     _engine_stderr = open(log_path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
