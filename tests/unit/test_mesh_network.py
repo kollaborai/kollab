@@ -46,6 +46,8 @@ from plugins.hub.relay_state import RelayError
 from .test_peer_transport import RelayWire, _mint_tls_cert
 from .test_relay_agent_bridge import Directory, ModelRecorder
 
+pytestmark = pytest.mark.usefixtures("unthrottled_relay")
+
 ROOM = "ab" * 32
 
 

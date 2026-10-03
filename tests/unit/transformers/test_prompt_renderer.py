@@ -1,5 +1,8 @@
 """Tests for the system prompt dynamic command renderer."""
 
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -178,12 +181,29 @@ Current git status:
 Recent commits:
 <trender>git log --oneline -5 2>/dev/null || echo "No git history"</trender>
 """
-        result = render_system_prompt(prompt)
+        # Its own repo: the answer must not depend on the checkout the suite runs in
+        # (CI clones one shallow commit, and a clean tree prints no status at all).
+        with tempfile.TemporaryDirectory() as repo:
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.com",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.com",
+            }
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "first commit"]):
+                subprocess.run(["git", *args], cwd=repo, env=env, check=True)
+            Path(repo, "scratch.txt").write_text("x")
+            cwd = os.getcwd()
+            os.chdir(repo)
+            try:
+                result = render_system_prompt(prompt)
+            finally:
+                os.chdir(cwd)
 
-        # Should process without errors
         self.assertNotIn("<trender>", result)
-        # Should have some output (either git info or fallback message)
-        self.assertTrue(len(result) > len(prompt) - 100)  # Accounting for tag removal
+        self.assertIn("?? scratch.txt", result)
+        self.assertIn("first commit", result)
 
     def test_session_context_uses_cache_stable_date(self):
         """The base prompt must not churn its cache prefix every second."""

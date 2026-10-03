@@ -19,6 +19,8 @@ from .test_mesh_network import deliver_locator, make_node
 from .test_network_members import joined, sync
 from .test_peer_transport import RelayWire, _mint_tls_cert
 
+pytestmark = pytest.mark.usefixtures("unthrottled_relay")
+
 
 async def build(tmp_path):
     cert, key = _mint_tls_cert(tmp_path)
