@@ -84,6 +84,16 @@ def parse_hub_mention(text: str) -> tuple[str, str] | None:
     return (target, content) if content else None
 
 
+def _needs_terminal_reply(command_name: str) -> str:
+    """The one line a fullscreen command answers with where no terminal exists."""
+    from kollabor.panels import COMMAND_PANELS, PANEL_LOCATIONS
+
+    panel = COMMAND_PANELS.get(command_name)
+    if panel is None:
+        return f"/{command_name} needs the terminal UI"
+    return f"/{command_name} opens in {PANEL_LOCATIONS[panel]} in the web UI"
+
+
 def _web_command_output(result: Any, command_name: str) -> str:
     """Render terminal UI command results as visible web-chat Markdown.
 
@@ -2650,6 +2660,36 @@ class LocalStateService(StateService):
                 stop_reason="error",
             )
 
+    async def _run_web_slash_command(
+        self, command: Any, executor: Any
+    ) -> tuple[Any, str]:
+        """Execute a command for the web; return (result, one reply string).
+
+        The web has no terminal, so a command that tries to open a fullscreen
+        view gets one line instead of hanging the turn forever.
+        """
+        from kollabor_tui.altview.stack_manager import (
+            AltViewUnavailable,
+            unavailable_attempts,
+        )
+
+        attempts: list[str] = []
+        token = unavailable_attempts.set(attempts)
+        result = None
+        try:
+            result = await executor.execute_command(command, self._event_bus)
+        except AltViewUnavailable:
+            pass  # push() already recorded the attempt
+        finally:
+            unavailable_attempts.reset(token)
+        if not attempts:
+            return result, _web_command_output(result, command.name)
+        registry = getattr(executor, "command_registry", None)
+        definition = registry.get_command(command.name) if registry else None
+        return result, _needs_terminal_reply(
+            getattr(definition, "name", None) or command.name
+        )
+
     async def _execute_slash_command(
         self, text: str, parser: Any, executor: Any
     ) -> None:
@@ -2661,8 +2701,7 @@ class LocalStateService(StateService):
             command = parser.parse_command(text)
             if command is None:
                 raise ValueError(f"Could not parse slash command: {text}")
-            result = await executor.execute_command(command, self._event_bus)
-            output = _web_command_output(result, command.name)
+            result, output = await self._run_web_slash_command(command, executor)
             # /connect refuses a join code typed as an argument; the saved
             # conversation must not keep the code either.
             recorded = text
