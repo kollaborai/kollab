@@ -364,3 +364,45 @@ def test_valid_base_url_and_panel_registry():
     assert all(setup_panel.valid_base_url(u) for u in ok)
     assert not any(setup_panel.valid_base_url(u) for u in bad)
     assert get_panel("llm") is LLM and get_panel("model") is MODEL and get_panel("setup") is SETUP
+
+
+# -- action bodies as the browser sends them (CONTRACT-ACTIONS items 3 and 4) ---
+
+
+@pytest.mark.asyncio
+async def test_llm_save_reads_the_form_action_body(llm_ctx):
+    form = (await LLM.act(llm_ctx, "edit", {"name": "claude-x"}))["open"]
+    body = {
+        "changes": {"name": "viaform", "temperature": 0.4, "effort": "low",
+                    "max_tokens": "", "description": " d "},
+        "target": "global",
+        "context": form["context"],
+    }
+    assert (await LLM.act(llm_ctx, "save", body))["ok"]
+    _, name, kw = [c for c in llm_ctx.manager.calls if c[0] == "create"][-1]
+    assert (name, kw["provider_profile"], kw["model"], kw["temperature"], kw["effort"], kw["description"]) == (
+        "viaform", "anthropic", "claude-x", 0.4, "low", "d")
+    for bad, field in (({"temperature": 9}, "temperature"), ({"name": ""}, "name"), ({"effort": "huge"}, "effort")):
+        with pytest.raises(PanelError) as err:
+            # a top-level name must not stand in for the form's own field
+            await LLM.act(llm_ctx, "save", {**body, "name": "ignored", "changes": {**body["changes"], **bad}})
+        assert field in err.value.errors
+
+
+@pytest.mark.asyncio
+async def test_setup_reads_the_wizard_action_body(monkeypatch):
+    seen = []
+
+    async def fake(provider, model, api_key, base_url, timeout=25.0):
+        seen.append((provider, api_key))
+        return True, "connected"
+
+    monkeypatch.setattr(setup_panel, "test_connection", fake)
+    body = {"values": PAYLOAD, "step": "review"}
+    assert (await SETUP.act(FakeDaemon(FakeProfiles()), "test", body))["ok"]
+    assert seen == [("anthropic", KEY)]
+    daemon = FakeDaemon(FakeProfiles())
+    assert (await SETUP.act(daemon, "finish", body))["ok"] and daemon.activated
+    with pytest.raises(PanelError) as err:
+        await SETUP.act(FakeDaemon(FakeProfiles()), "finish", {"values": {**PAYLOAD, "api_key": ""}, "step": "key"})
+    assert "api_key" in err.value.errors and KEY not in str(err.value.errors)

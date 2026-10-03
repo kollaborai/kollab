@@ -492,6 +492,8 @@ class LlmPanel:
 
     async def _save(self, ctx: Any, manager: Any, payload: dict) -> dict:
         form = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        # a form action sends {"changes": {path: value}, "context": {...}}
+        changes = payload.get("changes") if isinstance(payload.get("changes"), dict) else payload
         base_name = str(payload.get("base") or form.get("base") or "").strip()
         if base_name:
             base = _find(manager, base_name)
@@ -511,9 +513,9 @@ class LlmPanel:
         mode = str(payload.get("mode") or form.get("mode") or "create")
         if mode not in ("create", "edit"):
             raise PanelError("mode must be create or edit", errors={"mode": "Unknown mode."})
-        name = base.name if mode == "edit" else str(payload.get("name") or "").strip()
+        name = base.name if mode == "edit" else str(changes.get("name") or "").strip()
         codex = is_chatgpt_codex_profile(ctx._profile_manager, base.provider_profile)
-        values, errors = _loadout_values(payload, codex, base.model)
+        values, errors = _loadout_values(changes, codex, base.model)
         if not name:
             errors["name"] = "Name is required."
         elif mode == "create" and name in {entry.name for entry in manager.list_loadouts()}:
