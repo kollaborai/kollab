@@ -281,6 +281,23 @@ const Composer: FC<{
     onOpenPanel(request);
   };
 
+  // Picking a panel command in the slash menu (Enter or click) opens its tab
+  // instead of leaving "/config" in the box for a second Enter.
+  const openPanelForItem = (item: {
+    id: string;
+    metadata?: Record<string, unknown> | undefined;
+  }) => {
+    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
+    const insert = item.metadata?.insertText;
+    const request = panelCommandRequest(
+      `/${typeof insert === "string" ? insert : item.id}`,
+      commands,
+    );
+    if (!request) return;
+    aui.composer.setText("");
+    onOpenPanel(request);
+  };
+
   const commandItems = useMemo<readonly ComposerPaletteItem[]>(
     () => {
       const visibleCommands = [...commands]
@@ -481,6 +498,7 @@ const Composer: FC<{
           title="Commands"
           emptyMessage="No matching commands"
           emptyHint="Keep typing to refine the command search."
+          onInserted={openPanelForItem}
         />
         <ComposerPalette
           char="@"

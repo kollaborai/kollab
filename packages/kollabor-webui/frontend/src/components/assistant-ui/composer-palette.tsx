@@ -43,6 +43,8 @@ type ComposerPaletteProps = {
   title: string;
   emptyMessage: string;
   emptyHint: string;
+  /** Runs right after a selected item's text lands in the composer. */
+  onInserted?: ((item: Unstable_TriggerItem) => void) | undefined;
 };
 
 /**
@@ -59,6 +61,7 @@ export const ComposerPalette: FC<ComposerPaletteProps> = ({
   title,
   emptyMessage,
   emptyHint,
+  onInserted,
 }) => {
   const triggerItems = useMemo<readonly Unstable_TriggerItem[]>(
     () =>
@@ -116,6 +119,7 @@ export const ComposerPalette: FC<ComposerPaletteProps> = ({
     >
       <ComposerPrimitive.Unstable_TriggerPopover.Directive
         formatter={formatter}
+        onInserted={onInserted}
       />
       <PaletteContent
         char={char}
