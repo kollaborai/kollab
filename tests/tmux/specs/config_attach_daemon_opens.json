@@ -1,0 +1,83 @@
+{
+  "name": "config-attach-daemon-opens",
+  "description": "Default launch (no --no-daemon: a daemon plus an attached window) in a throwaway HOME. The attached terminal still opens the /config modal (the web-transport guard against fullscreen views must not refuse them in an attach client), and a slider change saved to Global persists in $HOME/.kollab/config.json. The hub stays enabled because the daemon-first launch requires it (cli._should_use_daemon -> _hub_is_enabled); isolation is the throwaway HOME, which holds the presence files, sockets and network state. Keys go one per 0.5 s (paste detection eats faster input).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-config-attach-daemon\"; cd \"$H/ws\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 14,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.5,
+    "menu_delay": 0.5
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "throwaway HOME with one workspace, a dummy profile (no setup wizard) and the hub on",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-config-attach-daemon\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\""
+    }
+  ],
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "esc later", "timeout": 40, "description": "attached window up (first run shows the Connect nudge)" },
+    { "action": "escape" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 15, "description": "nudge dismissed, input prompt ready" },
+
+    { "action": "section", "title": "Step 1: this really is daemon mode" },
+    {
+      "action": "shell",
+      "description": "hub status of the throwaway HOME lists the daemon the launch forked",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-config-attach-daemon\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --hub status",
+      "assert_contains": "1 agent\\(s\\) online",
+      "show": true
+    },
+    {
+      "action": "shell",
+      "description": "no render_fps override in the global file yet",
+      "command": "grep -c render_fps \"${TMPDIR:-/tmp}/kollab-spec-config-attach-daemon/.kollab/config.json\" || true",
+      "assert_contains": "^0$"
+    },
+
+    { "action": "section", "title": "Step 2: the attached /config opens" },
+    { "action": "type", "text": "/config", "delay": 0.5 },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "UI Width Mode", "timeout": 15, "description": "config modal painted in the attached terminal" },
+
+    { "action": "section", "title": "Step 3: move the Render FPS slider and save Global" },
+    { "action": "send_keys", "keys": "/" },
+    { "action": "type", "text": "Render FPS", "delay": 0.5 },
+    { "action": "enter" },
+    { "action": "wait_for", "pattern": "Render FPS", "timeout": 5, "description": "filter locked on the Render FPS slider" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "arrow", "direction": "Right" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Render FPS.*23|23.*Render FPS", "description": "slider moved 20 -> 23" },
+    { "action": "control", "key": "s" },
+    { "action": "wait_for", "pattern": "\\(G\\)lobal", "timeout": 5, "description": "save target prompt (Local / Global)" },
+    { "action": "send_keys", "keys": "g" },
+    { "action": "sleep", "seconds": 2 },
+
+    { "action": "section", "title": "Step 4: the Global file holds the change" },
+    {
+      "action": "shell",
+      "description": "render_fps persisted as 23 in the throwaway global config",
+      "command": "grep -o '\"render_fps\": *[0-9]*' \"${TMPDIR:-/tmp}/kollab-spec-config-attach-daemon/.kollab/config.json\"",
+      "assert_contains": "\"render_fps\": *23",
+      "show": true
+    },
+    { "action": "escape" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 8, "description": "modal closed, back at the input prompt" },
+    { "action": "assert_not_contains", "pattern": "UI Width Mode", "description": "modal is gone" }
+  ],
+  "teardown": [
+    { "action": "control", "key": "c" },
+    { "action": "sleep", "seconds": 3 },
+    {
+      "action": "shell",
+      "description": "stop the daemon this launch forked (hub CLI of the throwaway HOME only)",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-config-attach-daemon\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all",
+      "allow_failure": true
+    }
+  ]
+}
