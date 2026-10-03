@@ -17,7 +17,7 @@ from uuid import uuid4
 from kollabor_config.config_utils import resolve_global_path
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.data_models import ConversationMessage
-from kollabor_events.models import CommandCategory, CommandDefinition
+from kollabor_events.models import CommandCategory, CommandDefinition, SubcommandInfo
 from kollabor_plugins import BasePlugin
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,9 @@ SUMMARY_INJECTION_PREFIX = (
 SUMMARY_INJECTION_SUFFIX = "\n\nContinue from where we left off."
 
 
+AUTO_THRESHOLD_CAP = 272_000
+
+
 class ContextCompactionPlugin(BasePlugin):
     """Automatically compacts conversation history by summarizing old messages."""
 
@@ -164,6 +167,7 @@ class ContextCompactionPlugin(BasePlugin):
                     "summarization_profile": None,
                     "max_summary_tokens": 2000,
                     "log_compaction_events": True,
+                    "ask_model_first": True,
                 }
             }
         }
@@ -186,7 +190,7 @@ class ContextCompactionPlugin(BasePlugin):
                     "min_value": 0.50,
                     "max_value": 0.95,
                     "step": 0.05,
-                    "help": "Compact at this fraction of context window (0.75 = 75%)",
+                    "help": "Compact at this fraction of context window (0.75 = 75%), auto threshold capped at 272K",
                 },
                 {
                     "type": "slider",
@@ -230,6 +234,12 @@ class ContextCompactionPlugin(BasePlugin):
                     "config_path": "plugins.context_compaction.log_compaction_events",
                     "help": "Log compaction events to conversation history",
                 },
+                {
+                    "type": "checkbox",
+                    "label": "Ask Model First",
+                    "config_path": "plugins.context_compaction.ask_model_first",
+                    "help": "Ask the model what to keep before compacting; it starts compaction with <compact>",
+                },
             ],
         }
 
@@ -249,6 +259,14 @@ class ContextCompactionPlugin(BasePlugin):
         self._disabled_for_session: bool = False
         self._compaction_task: Optional[asyncio.Task] = None
         self._compaction_tasks: set[asyncio.Task] = set()
+
+        # Model-first compaction: the model is asked what to keep and starts
+        # compaction itself with <compact>notes</compact>.
+        self._awaiting_model: bool = False
+        self._asked_turn: int = 0
+        self._turn_count: int = 0
+        self._model_notes: Optional[str] = None
+        self._watch_task: Optional[asyncio.Task] = None
 
         # References set during initialize()
         self._llm_service = None
@@ -288,8 +306,9 @@ class ContextCompactionPlugin(BasePlugin):
         if llm_service and hasattr(llm_service, "profile_manager"):
             self._profile_manager = llm_service.profile_manager
 
-        # Register /compact command
+        # Register /compact command and the model's <compact> tag
         self._register_compact_command()
+        self._register_compact_tag()
 
         # Register status widget if widget_api available
         self._register_status_widget()
@@ -322,6 +341,8 @@ class ContextCompactionPlugin(BasePlugin):
         logger.info("Context compaction hooks registered")
 
     async def shutdown(self) -> None:
+        if self._watch_task and not self._watch_task.done():
+            self._watch_task.cancel()
         tasks = tuple(self._compaction_tasks)
         for task in tasks:
             if not task.done():
@@ -412,6 +433,8 @@ class ContextCompactionPlugin(BasePlugin):
             return "ctx: off"
         if self._compaction_in_progress:
             return "ctx: compacting..."
+        if self._awaiting_model:
+            return "ctx: asking model..."
         if self._compaction_round > 0:
             return f"ctx: r{self._compaction_round} {token_k}/{thresh_k}"
 
@@ -428,16 +451,39 @@ class ContextCompactionPlugin(BasePlugin):
 
         cmd = CommandDefinition(
             name="compact",
-            description="Show compaction profile and trigger info",
+            description="Ask the model what to keep, then compact",
             plugin_name=self.name,
             category=CommandCategory.SYSTEM,
             handler=self._handle_compact_command,
+            subcommands=[
+                SubcommandInfo("now", "", "Compact immediately, without asking the model"),
+                SubcommandInfo("status", "", "Show compaction profile and trigger info"),
+                SubcommandInfo("preview", "", "Show what a compaction would remove"),
+            ],
         )
         self._command_registry.register_command(cmd)
 
     async def _handle_compact_command(self, command) -> str:
-        """Handle /compact -- show active compaction config."""
+        """Handle /compact.
+
+        /compact          ask the model what to keep, it compacts when ready
+        /compact now      compact immediately, no question asked
+        /compact status   show the compaction profile
+        /compact preview  show what a compaction would remove
+        """
         args = getattr(command, "args", []) or []
+        sub = str(args[0]).lower() if args else ""
+
+        if sub in ("", "now"):
+            remote = self._remote_state()
+            if remote is not None:
+                # Attach client: history, ledger and the LLM loop live in the
+                # daemon, so the request has to run there.
+                try:
+                    return await remote.compact_command(sub)
+                except Exception as e:
+                    return f"daemon compact failed: {e}"
+            return await self._start_manual_compaction(ask=(sub == ""))
 
         # Prefer daemon state so /compact reflects the real conversation in
         # attach mode -- the local llm_service is only a client-side shadow
@@ -701,7 +747,7 @@ class ContextCompactionPlugin(BasePlugin):
 
         Resolution order:
           1. Manual override: token_threshold_k > 0 in config
-          2. Auto-detect: context_window * compaction_ratio
+          2. Auto-detect: context_window * compaction_ratio, capped at 272K
           3. Hardcoded fallback: 100K
         """
         # Manual override takes precedence
@@ -718,7 +764,8 @@ class ContextCompactionPlugin(BasePlugin):
                 self.config.get("plugins.context_compaction.compaction_ratio", 0.75)
             )
             ratio = max(0.50, min(0.95, ratio))
-            return int(context_window * ratio)
+            # OpenAI bills 2x/1.5x past 272K input, so never auto-wait longer.
+            return min(int(context_window * ratio), AUTO_THRESHOLD_CAP)
 
         # Fallback if provider can't be resolved
         return 100_000
@@ -866,6 +913,7 @@ class ContextCompactionPlugin(BasePlugin):
         self, data: Dict[str, Any], event
     ) -> Dict[str, Any]:
         """LLM_REQUEST_POST: check if compaction threshold reached."""
+        self._turn_count += 1
         if self._disabled_for_session or self._compaction_in_progress:
             return data
 
@@ -876,21 +924,250 @@ class ContextCompactionPlugin(BasePlugin):
         if not history:
             return data
 
-        if self._should_compact(history) and not self._coordination_pending():
-            self._compaction_in_progress = True
-            task = asyncio.create_task(self._run_compaction())
-            self._compaction_task = task
-            self._compaction_tasks.add(task)
-            task.add_done_callback(self._compaction_task_done)
-        elif self._should_compact(history) and self._coordination_pending():
-            logger.info(
-                "Compaction deferred: coordination in flight "
-                "(queued HUD hub messages or pending hub replies)"
-            )
+        # While the model has been asked, the idle watcher owns the fallback;
+        # the model normally answers with <compact> first.
+        if not self._awaiting_model and self._should_compact(history):
+            if self._coordination_pending():
+                logger.info(
+                    "Compaction deferred: coordination in flight "
+                    "(queued HUD hub messages or pending hub replies)"
+                )
+            elif self.config.get("plugins.context_compaction.ask_model_first", True):
+                await self._request_model_curation(wake=False, reason="threshold")
+            else:
+                self._start_compaction()
 
         self._maybe_emit_budget_hud(history)
 
         return data
+
+    # ------------------------------------------------------------------
+    # Model-first compaction
+    # ------------------------------------------------------------------
+
+    def _start_compaction(self) -> bool:
+        """Spawn the background compaction run. False if one can't start."""
+        if self._compaction_in_progress or self._disabled_for_session:
+            return False
+        self._awaiting_model = False
+        self._compaction_in_progress = True
+        task = asyncio.create_task(self._run_compaction())
+        self._compaction_task = task
+        self._compaction_tasks.add(task)
+        task.add_done_callback(self._compaction_task_done)
+        return True
+
+    async def _start_manual_compaction(self, ask: bool) -> str:
+        """/compact and /compact now, run where the history lives."""
+        if self._disabled_for_session:
+            return "compaction is disabled for this session (3 failed runs)"
+        if self._compaction_in_progress:
+            return "compaction already running"
+        history = self._get_conversation_history() or []
+        keep = self._keep_recent_count()
+        if self._find_split_point(history, keep) <= 1:
+            return (
+                f"nothing to compact yet: {len(history)} messages, "
+                f"the last {keep} are always kept"
+            )
+        if not ask:
+            if self._start_compaction():
+                return "compacting now, applied before the next request"
+            return "compaction could not start"
+        if self._awaiting_model:
+            return "already asked the model, waiting for its <compact>"
+        await self._request_model_curation(wake=True, reason="requested by user")
+        return (
+            "asked the model what to keep; it compacts when ready "
+            "(or when its turn ends)"
+        )
+
+    def _keep_recent_count(self) -> int:
+        """Messages always kept intact. Scales with the window (~1 per 100K)
+        so 1M-token models don't lose the thread keeping only 8."""
+        keep = self.config.get("plugins.context_compaction.keep_recent", 8)
+        window = self._resolve_context_window()
+        return max(keep, window // 100_000) if window else keep
+
+    def _build_curation_request(self, reason: str) -> str:
+        """The prompt that asks the model what to keep before compacting."""
+        history = self._get_conversation_history() or []
+        used = self._get_prompt_tokens() or self._estimate_history_tokens(history)
+        lines = [
+            "[context compaction: your call]",
+            f"Compaction is due ({reason}): ~{used // 1000}K tokens in context, "
+            f"threshold {self._get_token_threshold() // 1000}K.",
+            "Old messages get replaced by a summary. Decide what you keep first:",
+            "",
+        ]
+        context_svc = self._get_context_service()
+        entries = []
+        if context_svc is not None:
+            try:
+                entries = [
+                    e
+                    for e in context_svc.all_entries()
+                    if e.decision in ("pending", "keep", "summary")
+                ]
+            except Exception:
+                entries = []
+        if entries:
+            lines.append("Heavy items in your context:")
+            for e in entries:
+                lines.append(
+                    f"  {e.ctx_id}  {e.kind:<10} {e.label:<40} "
+                    f"{e.size_bytes // 1024:>5}KB  {e.decision}"
+                )
+            lines += [
+                "Mark each one:",
+                '  <curate id="ctx-N" decision="keep">why you need it verbatim</curate>',
+                '  <curate id="ctx-N" decision="summary">your compressed version</curate>',
+                "Unmarked items are auto-summarized.",
+                "",
+            ]
+        lines += [
+            "Then write what you must remember (current task, decisions, file "
+            "paths, next step) and start compaction in the same reply:",
+            "  <compact>your notes, kept verbatim at the top of your context</compact>",
+            "Durable knowledge can also go to <scratchpad> or <vault_write>, "
+            "both survive compaction.",
+        ]
+        return "\n".join(lines)
+
+    def _get_context_service(self):
+        """The context_service ledger, or None (mock-guarded like the others)."""
+        if not self.event_bus:
+            return None
+        svc = self.event_bus.get_service("context_service")
+        if (
+            svc is None
+            or type(svc).__module__ == "unittest.mock"
+            or not hasattr(svc, "all_entries")
+        ):
+            return None
+        return svc
+
+    async def _request_model_curation(self, wake: bool, reason: str) -> None:
+        """Ask the model what to keep; it answers with <curate>/<compact>.
+
+        wake=False rides the next request (the agent is mid-chain or the
+        user's next message carries it). wake=True starts a turn now when the
+        agent is idle, the /compact path.
+        """
+        prompt = self._build_curation_request(reason)
+        self._awaiting_model = True
+        self._asked_turn = self._turn_count
+        llm = self._llm_service
+        busy = bool(getattr(llm, "is_processing", False))
+        delivered = False
+
+        if wake and not busy and llm is not None and self.event_bus:
+            history = self._get_conversation_history()
+            if history is not None:
+                history.append(
+                    ConversationMessage(
+                        role="user",
+                        content=prompt,
+                        metadata={"compaction_request": True},
+                    )
+                )
+                await self.event_bus.emit_with_hooks(
+                    EventType.TRIGGER_LLM_CONTINUE,
+                    {"source": "context_compaction", "content": prompt},
+                    "context_compaction",
+                )
+                delivered = True
+
+        if not delivered:
+            context_svc = self._get_context_service()
+            if context_svc is not None and hasattr(
+                context_svc, "queue_ephemeral_injection"
+            ):
+                context_svc.queue_ephemeral_injection(prompt)
+            elif llm is not None and hasattr(llm, "queue_agent_hud"):
+                llm.queue_agent_hud(section="context", label="compaction", content=prompt)
+            else:
+                # Nobody can carry the question: compact without asking.
+                logger.info("Compaction: no channel to ask the model, compacting")
+                self._start_compaction()
+                return
+
+        logger.info(f"Compaction: asked the model what to keep ({reason})")
+        if self._watch_task is None or self._watch_task.done():
+            self._watch_task = asyncio.create_task(self._compact_when_idle())
+
+    async def _compact_when_idle(self) -> None:
+        """Fallback: the model saw the question and its turn ended without
+        <compact>, so compact anyway (pending ledger items get auto-summarized).
+        """
+        # ponytail: 1s poll of is_processing; an idle event would be exact.
+        try:
+            while self._awaiting_model:
+                answered = self._turn_count > self._asked_turn
+                busy = bool(getattr(self._llm_service, "is_processing", False))
+                if answered and not busy:
+                    logger.info("Compaction: model turn ended without <compact>, compacting")
+                    self._start_compaction()
+                    return
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+
+    def _register_compact_tag(self) -> None:
+        """Register <compact>notes</compact> so the model can start compaction."""
+        if not self.event_bus:
+            return
+        response_parser = self.event_bus.get_service("response_parser")
+        tool_executor = self.event_bus.get_service("tool_executor")
+        if not response_parser or not tool_executor:
+            logger.debug("pipeline services not available, skipping <compact> tag")
+            return
+        import re
+
+        pattern = re.compile(
+            r"<compact\s*/>|<compact>(.*?)</compact>", re.DOTALL | re.IGNORECASE
+        )
+
+        def _extract(m):
+            return {"notes": (m.group(1) or "").strip()}
+
+        response_parser.register_plugin_tag("compact", pattern, "compact", _extract)
+        tool_executor.register_plugin_handler("compact", self._handle_compact_tool)
+
+    async def _handle_compact_tool(self, tool_data: Dict[str, Any]):
+        """<compact>: the model is ready, keep its notes and compact now."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        if self._compaction_in_progress:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="compact", success=False,
+                error="compaction already running",
+            )
+        notes = tool_data.get("notes", "")
+        if notes:
+            self._model_notes = notes
+        if not self._start_compaction():
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="compact", success=False,
+                error="compaction is disabled for this session",
+            )
+        # End the turn: the swap lands before the next request, nothing to
+        # follow up on.
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="compact",
+            success=True,
+            output=f"[compact] compacting, {len(notes)} chars of notes kept verbatim",
+            metadata={"end_turn": True},
+        )
+
+    def _remote_state(self):
+        """The state service when it is an RPC proxy (attach clients)."""
+        svc = self._get_state_service()
+        if getattr(svc, "_rpc", None) is not None and hasattr(svc, "compact_command"):
+            return svc
+        return None
 
     def _maybe_emit_budget_hud(self, history: List[ConversationMessage]) -> None:
         """Periodically show the agent how full its context window is.
@@ -1287,18 +1564,7 @@ class ContextCompactionPlugin(BasePlugin):
             snapshot_len = len(history_snapshot)
             snapshot_session_id = self._get_current_session_id()
 
-            keep_recent_cfg = self.config.get(
-                "plugins.context_compaction.keep_recent", 8
-            )
-            # Scale keep_recent up for large context windows so agents
-            # don't lose thread with 1M-token models keeping only 8 messages.
-            context_window = self._resolve_context_window()
-            if context_window:
-                # ~1 extra message per 100K of context window
-                auto_keep = max(keep_recent_cfg, context_window // 100_000)
-            else:
-                auto_keep = keep_recent_cfg
-            keep_recent = auto_keep
+            keep_recent = self._keep_recent_count()
             max_summary_tokens = self.config.get(
                 "plugins.context_compaction.max_summary_tokens", 2000
             )
@@ -1414,6 +1680,17 @@ class ContextCompactionPlugin(BasePlugin):
                     summary_text = coordination_block + "\n\n" + summary_text
                 else:
                     summary_text = coordination_block
+            # The model's own <compact> notes go first, verbatim: it chose them.
+            model_notes = self._model_notes
+            if model_notes:
+                notes_block = (
+                    "=== YOUR NOTES (written by you before compaction, verbatim) ===\n"
+                    + model_notes
+                    + "\n=== END NOTES ==="
+                )
+                summary_text = (
+                    notes_block + "\n\n" + summary_text if summary_text else notes_block
+                )
             compacted = self._build_compacted_history(
                 system_msg,
                 summary_text or "",
@@ -1439,6 +1716,7 @@ class ContextCompactionPlugin(BasePlugin):
             self._pending_compaction = compacted
             self._compaction_round += 1
             self._consecutive_failures = 0
+            self._model_notes = None
 
             # Log compaction event (summary_text persisted for rebirth)
             await self._log_compaction_event(
@@ -1563,7 +1841,7 @@ class ContextCompactionPlugin(BasePlugin):
         ledger entries and apply decisions:
           - keep: preserve the original message verbatim
           - summary: replace with agent-written summary
-          - pending: elide with a size marker
+          - pending: left untracked, so the summarizer covers it
           - evicted: keep the already-rewritten stub
 
         Returns (ledger_handled, untracked_msgs).
@@ -1614,12 +1892,9 @@ class ContextCompactionPlugin(BasePlugin):
                 e.decision == "evicted" for e in entries
             )
 
-            if has_keep:
-                # Preserve verbatim
-                ledger_handled.append(msg)
-            elif has_evicted:
-                # Already rewritten, keep the stub
-                ledger_handled.append(msg)
+            if has_keep or has_evicted:
+                # keep: verbatim. evicted: the already-rewritten stub.
+                ledger_handled.append(self._detach_tool_result(msg, ctx_ids))
             elif has_summary:
                 # Replace with agent-written summary
                 summary_parts = []
@@ -1629,7 +1904,7 @@ class ContextCompactionPlugin(BasePlugin):
                             f"[{e.ctx_id} summary] {e.decision_body}"
                         )
                 new_msg = ConversationMessage(
-                    role=msg.role,
+                    role="user" if msg.role == "tool" else msg.role,
                     content="\n".join(summary_parts),
                     metadata={
                         "compacted_from": ctx_ids,
@@ -1638,23 +1913,10 @@ class ContextCompactionPlugin(BasePlugin):
                 )
                 ledger_handled.append(new_msg)
             else:
-                # Pending — elide with marker
-                markers = []
-                for e in entries:
-                    markers.append(
-                        f"[{e.ctx_id} {e.kind} {e.label}, "
-                        f"{e.size_bytes // 1024}KB, elided]"
-                    )
-                new_msg = ConversationMessage(
-                    role=msg.role,
-                    content="\n".join(markers),
-                    metadata={
-                        "compacted_from": ctx_ids,
-                        "ledger_decision": "elided",
-                        "elided": True,
-                    },
-                )
-                ledger_handled.append(new_msg)
+                # Pending (agent never curated it): fall through to the
+                # summarizer, as the curator prompt promises. Eliding it
+                # would drop the content with no summary at all.
+                untracked.append(msg)
 
         if ledger_handled:
             logger.info(
@@ -1664,6 +1926,19 @@ class ContextCompactionPlugin(BasePlugin):
 
         return ledger_handled, untracked
 
+    @staticmethod
+    def _detach_tool_result(
+        msg: ConversationMessage, ctx_ids: List[str]
+    ) -> ConversationMessage:
+        """A native tool result whose tool_call is summarized away would be an
+        orphan the API rejects (400), so it is kept as a plain user message."""
+        if msg.role != "tool":
+            return msg
+        return ConversationMessage(
+            role="user",
+            content=f"[kept tool result {', '.join(ctx_ids)}]\n{msg.content}",
+            metadata={"compacted_from": ctx_ids, "ledger_decision": "keep"},
+        )
 
     def _build_compacted_history(
         self,

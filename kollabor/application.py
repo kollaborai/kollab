@@ -21,6 +21,7 @@ from kollabor_events.models import CommandResult, EventType
 from kollabor_events.ready_message import ReadyMessageCollector
 from kollabor_plugins import KollaborPluginSDK, PluginRegistry
 from kollabor_tui import EventDrivenRenderLoop
+from kollabor_tui.altview.stack_manager import AltViewUnavailable
 from kollabor_tui.input_handler import InputHandler
 from kollabor_tui.status import StatusNavigationManager
 from kollabor_tui.terminal_renderer import TerminalRenderer
@@ -2875,6 +2876,10 @@ class TerminalLLMChat:
             # Mark setup as completed to avoid showing wizard on next startup
             self.config.save_key("application.setup_completed", True)
 
+        except AltViewUnavailable:
+            # No terminal here (detached daemon, pipe mode): leave setup
+            # pending so the next interactive launch still shows the wizard.
+            logger.info("Setup wizard deferred: no interactive terminal")
         except Exception as e:
             logger.error(f"Error launching setup wizard: {e}")
             import traceback

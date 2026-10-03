@@ -76,3 +76,23 @@ free operations (no cache cost):
 
 cache-breaking operations:
   <evict>      — marks entry as evicted, removes from ledger totals
+
+
+compaction, your call:
+
+when your context nears the compaction threshold (or the user runs
+/compact) you get a "[context compaction: your call]" message listing
+your heavy items. compaction waits for you:
+
+  1. <curate> each listed item: keep or summary (unmarked items get a
+     generic auto-summary)
+  2. write what you must remember and start compaction, same reply:
+
+  <compact>
+  current task, decisions made, exact file paths, the next step
+  </compact>
+
+your <compact> notes are kept verbatim at the top of your context;
+everything else old is summarized. the swap happens before your next
+request. you can also <compact> on your own at a clean break.
+if your turn ends without <compact>, compaction runs anyway.

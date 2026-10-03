@@ -2,75 +2,21 @@
 
 import asyncio
 import logging
-import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-try:
-    from watchdog.events import FileSystemEventHandler  # type: ignore[import-not-found]
-    from watchdog.observers import Observer  # type: ignore[import-not-found]
-
-    WATCHDOG_AVAILABLE = True
-except ImportError:
-    WATCHDOG_AVAILABLE = False
-    Observer = None
-    FileSystemEventHandler = None
-
-from .config_utils import get_global_config_path, get_local_config_path
+from .config_utils import (
+    get_global_config_path,
+    get_global_config_path_candidates,
+    get_local_config_path,
+    get_local_config_path_candidates,
+    get_project_data_dir,
+    get_project_data_dir_candidates,
+)
 from .loader import ConfigLoader
 from .manager import ConfigManager
 
 logger = logging.getLogger(__name__)
-
-
-if WATCHDOG_AVAILABLE:
-
-    class ConfigFileWatcher(FileSystemEventHandler):
-        """File system event handler for configuration file changes."""
-
-        def __init__(self, config_service: "ConfigService"):
-            super().__init__()
-            self.config_service = config_service
-            self.last_modified = 0
-            self.debounce_delay = 0.5  # 500ms debounce
-
-        def on_modified(self, event):
-            """Handle file modification events."""
-            if event.is_directory:
-                return
-
-            if event.src_path == str(self.config_service.config_manager.config_path):
-                current_time = time.time()
-
-                # Skip if we wrote the file ourselves (within 2s window)
-                if current_time - self.config_service._last_self_write < 2.0:
-                    logger.debug("Ignoring config change from self-write")
-                    return
-
-                # Debounce rapid file changes
-                if current_time - self.last_modified > self.debounce_delay:
-                    self.last_modified = current_time
-                    logger.info("Configuration file changed, triggering reload")
-                    # Schedule the reload in a thread-safe way
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.call_soon_threadsafe(
-                            self.config_service._schedule_file_change_reload
-                        )
-                    except RuntimeError:
-                        # No event loop running, fall back to sync reload
-                        logger.warning(
-                            "No event loop available, performing synchronous reload"
-                        )
-                        self.config_service.reload()
-
-else:
-
-    class ConfigFileWatcher:  # type: ignore[no-redef]
-        """Stub class when watchdog is not available."""
-
-        def __init__(self, config_service: "ConfigService"):
-            pass
 
 
 class ConfigService:
@@ -79,7 +25,14 @@ class ConfigService:
     This service coordinates between the file-based ConfigManager and
     the plugin-aware ConfigLoader to provide a simple interface for
     all configuration operations.
+
+    Every process that holds a ConfigService (terminal, attach client, daemon)
+    polls the config files' mtimes once a second on its event loop, so a save
+    made by any process reaches all of them.
     """
+
+    # Seconds between mtime checks.
+    POLL_SECONDS = 1.0
 
     def __init__(
         self, config_path: Path, plugin_registry=None, fast_mode: bool = False
@@ -102,19 +55,15 @@ class ConfigService:
         self._config_error: Optional[str] = None
         self._reload_callbacks: list = []
 
-        # Self-write tracking (prevents file watcher from reacting to our own saves)
-        self._last_self_write: float = 0
-
-        # File watching setup
-        self._file_watcher: Any = None
-        self._observer: Any = None
-        self._pending_reload_tasks: set[asyncio.Task] = set()
+        # mtime poll: last seen mtime per config file, and the on-loop task
+        self._mtimes: Dict[Path, Optional[int]] = {}
+        self._poll_task: Optional[asyncio.Task] = None
 
         # Load initial configuration
         self._initialize_config()
 
-        # Start file watching if successful
-        self._start_file_watching()
+        # Start polling for other processes' saves (needs a running loop)
+        self._start_polling()
 
         logger.info(f"Configuration service initialized: {config_path}")
 
@@ -220,7 +169,6 @@ class ConfigService:
 
         try:
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            self._last_self_write = time.time()
             save_path.write_text(
                 json.dumps(raw, indent=2, ensure_ascii=False),
                 encoding="utf-8",
@@ -279,11 +227,12 @@ class ConfigService:
         Returns:
             True if save successful, False otherwise.
         """
-        self._last_self_write = time.time()
         success = self.config_loader.save_merged_config(
             self.config_manager.config, save_target=save_target
         )
         if success:
+            if self._mtimes:
+                self._mtimes = self._stat_mtimes()  # our write is not news
             logger.debug("Configuration saved to disk")
             return True
 
@@ -339,10 +288,10 @@ class ConfigService:
 
         # 5. Write back
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        self._last_self_write = time.time()
         try:
             with open(save_path, "w") as f:
                 json.dump(existing, f, indent=2, ensure_ascii=False)
+            self._note_own_write(save_path)
             logger.info(f"Saved {key_path} to {save_path}")
             return True
         except Exception as e:
@@ -396,8 +345,10 @@ class ConfigService:
         Returns:
             True if update successful, False otherwise.
         """
-        self._last_self_write = time.time()
-        return self.config_loader.update_with_plugins()
+        updated = self.config_loader.update_with_plugins()
+        if self._mtimes:
+            self._mtimes = self._stat_mtimes()  # our write is not news
+        return updated
 
     def get_config_summary(self) -> Dict[str, Any]:
         """Get a summary of the current configuration.
@@ -523,75 +474,68 @@ class ConfigService:
             logger.error(f"Failed to restore from backup: {e}")
             return False
 
-    def _start_file_watching(self) -> None:
-        """Start watching the configuration file for changes."""
-        if not WATCHDOG_AVAILABLE:
-            logger.debug("Watchdog not available, file watching disabled")
-            return
+    def _watched_paths(self) -> list[Path]:
+        """Every config file the loader may merge, including ones not created yet."""
+        paths = [
+            self.config_manager.config_path,
+            *get_global_config_path_candidates(),
+            *(path / "config.json" for path in get_project_data_dir_candidates()),
+            get_project_data_dir() / "config.json",
+            *get_local_config_path_candidates(),
+        ]
+        return list(dict.fromkeys(paths))
 
-        # Prevent duplicate watchers
-        if self._observer is not None:
-            logger.debug("File watcher already running, skipping initialization")
-            return
+    def _stat_mtimes(self) -> Dict[Path, Optional[int]]:
+        """mtime (ns) of every watched file, None where it does not exist."""
+        mtimes: Dict[Path, Optional[int]] = {}
+        for path in self._watched_paths():
+            try:
+                mtimes[path] = path.stat().st_mtime_ns
+            except OSError:
+                mtimes[path] = None
+        return mtimes
 
+    def _note_own_write(self, path: Path) -> None:
+        """Record the mtime of a file this process just wrote.
+
+        The poll then ignores our own save but still sees any other process's.
+        """
+        if path in self._mtimes:
+            try:
+                self._mtimes[path] = path.stat().st_mtime_ns
+            except OSError:
+                pass
+
+    def _start_polling(self) -> None:
+        """Start the mtime poll on the running loop (idempotent).
+
+        A service built before any loop exists starts polling at its next
+        register_reload_callback().
+        """
         try:
-            self._file_watcher = ConfigFileWatcher(self)
-            self._observer = Observer()
-            self._observer.schedule(
-                self._file_watcher,
-                str(self.config_manager.config_path.parent),
-                recursive=False,
-            )
-            self._observer.start()
-            logger.debug("Configuration file watcher started")
-        except RuntimeError as e:
-            if "already scheduled" in str(e):
-                logger.debug(
-                    "File watcher path already being watched by another instance"
-                )
-            else:
-                logger.warning(f"Could not start configuration file watcher: {e}")
-        except Exception as e:
-            logger.warning(f"Could not start configuration file watcher: {e}")
-
-    def _stop_file_watching(self) -> None:
-        """Stop watching the configuration file."""
-        if self._observer:
-            self._observer.stop()
-            self._observer.join()
-            self._observer = None
-            self._file_watcher = None
-            logger.debug("Configuration file watcher stopped")
-
-    async def _handle_file_change(self) -> None:
-        """Handle configuration file changes with hot reload."""
-        success = self.reload()
-        if not success:
-            logger.warning("Configuration reload failed, using cached fallback")
-
-    def _schedule_file_change_reload(self) -> None:
-        """Schedule and retain a hot-reload task until it completes."""
-        task = asyncio.create_task(self._handle_file_change())
-        self._pending_reload_tasks.add(task)
-        task.add_done_callback(self._on_reload_task_done)
-
-    def _on_reload_task_done(self, task: asyncio.Task) -> None:
-        """Remove a reload task and consume any exception it raised."""
-        self._pending_reload_tasks.discard(task)
-        if task.cancelled():
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
             return
+        task = self._poll_task
+        if task is not None and not task.done() and task.get_loop() is loop:
+            return
+        self._mtimes = self._stat_mtimes()
+        self._poll_task = loop.create_task(
+            self._poll_config_files(), name="config-mtime-poll"
+        )
 
-        try:
-            task.result()
-        except Exception:
-            logger.exception("Configuration hot-reload task failed")
-
-    def _cancel_pending_reload_tasks(self) -> None:
-        """Cancel tracked hot-reload tasks during synchronous shutdown."""
-        for task in tuple(self._pending_reload_tasks):
-            if not task.done():
-                task.cancel()
-        self._pending_reload_tasks.clear()
+    async def _poll_config_files(self) -> None:
+        """Reload whenever any config file's mtime changes (every POLL_SECONDS)."""
+        while True:
+            await asyncio.sleep(self.POLL_SECONDS)
+            try:
+                current = self._stat_mtimes()
+                if current != self._mtimes:
+                    self._mtimes = current  # before reload: a bad file is retried
+                    logger.info("Configuration file changed on disk, reloading")
+                    self.reload()  # notifies the reload callbacks on success
+            except Exception:
+                logger.exception("Configuration poll failed")
 
     def register_reload_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback to be notified when configuration reloads.
@@ -600,6 +544,7 @@ class ConfigService:
             callback: Function to call after successful configuration reload.
         """
         self._reload_callbacks.append(callback)
+        self._start_polling()
 
     def _notify_reload_callbacks(self) -> None:
         """Notify all registered callbacks about configuration reload."""
@@ -626,7 +571,11 @@ class ConfigService:
         return self._config_error is not None
 
     def shutdown(self) -> None:
-        """Shutdown the configuration service and file watcher."""
-        self._stop_file_watching()
-        self._cancel_pending_reload_tasks()
+        """Shutdown the configuration service and its mtime poll."""
+        task, self._poll_task = self._poll_task, None
+        if task is not None:
+            try:
+                task.cancel()
+            except RuntimeError:  # its loop is already closed
+                pass
         logger.info("Configuration service shutdown")

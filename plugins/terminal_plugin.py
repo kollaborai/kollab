@@ -997,7 +997,7 @@ Aliases: /t, /term, /tmux"""
     @staticmethod
     def get_config_widgets() -> Optional[Dict[str, Any]]:
         return {
-            "title": "Terminal Settings",
+            "title": "Terminal Sessions",
             "widgets": [
                 {
                     "type": "checkbox",

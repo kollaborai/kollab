@@ -399,6 +399,32 @@ async def list_session_commands(session_id: str):
     return {"session_id": session_id, "commands": commands}
 
 
+def apply_profile_mirror(
+    session: Any, name: str, model: Optional[str] = None
+) -> None:
+    """Keep the engine list response in sync with the daemon's active profile.
+
+    The profile manager here is only a redacted mirror; the daemon remains the
+    authority for the active provider/model. Shared by ``POST /profile`` and the
+    panel routes, so a model change made in a panel never leaves the toolbar or
+    the session list stale. Never raises.
+    """
+    try:
+        from kollabor_ai import ProfileManager
+
+        selected = ProfileManager().get_profile(name)
+        if selected is not None:
+            session.profile = selected
+            if model:
+                selected.model = model
+    except Exception as exc:
+        logger.debug(
+            "Session %s profile mirror update failed: %s",
+            getattr(session, "session_id", "?"),
+            exc,
+        )
+
+
 @router.post("/{session_id}/profile")
 async def set_session_profile(session_id: str, body: SetProfileRequest):
     """Switch the live daemon profile/model without restarting the session."""
@@ -421,19 +447,7 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
         logger.error("Session %s profile switch failed: %s", session_id, exc)
         raise HTTPException(status_code=502, detail=f"daemon unreachable: {exc}")
 
-    # Keep the engine list response in sync with the daemon snapshot. The
-    # profile manager here is only a redacted mirror; the daemon remains the
-    # authority for the active provider/model.
-    try:
-        from kollabor_ai import ProfileManager
-
-        selected = ProfileManager().get_profile(body.name)
-        if selected is not None:
-            session.profile = selected
-            if body.model:
-                selected.model = body.model
-    except Exception as exc:
-        logger.debug("Session %s profile mirror update failed: %s", session_id, exc)
+    apply_profile_mirror(session, body.name, body.model)
 
     result = getattr(snapshot, "to_dict", None)
     return {

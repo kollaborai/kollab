@@ -107,12 +107,15 @@ def normalize_native_tool_call(
         # Some provider envelopes use those same keys inside the arguments
         # (hub_spawn uses ``name`` for the requested identity and ``type`` for
         # the agent bundle), so merging them over the canonical fields routes
-        # the call to the wrong executor and loses the plugin name.
+        # the call to the wrong executor and loses the plugin name. ``id`` is
+        # the call id the result must answer (curate's own ``id`` argument
+        # overwrote it and the provider 400'd: "No tool output found"); the
+        # argument stays readable under ``input``.
         normalized.update(
             {
                 key: value
                 for key, value in input_value.items()
-                if key not in {"type", "name"}
+                if key not in {"type", "name", "id"}
             }
         )
         if resolved_type == "tool_load":

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  CheckCircle2,
   Eraser,
   Pencil,
   Plug,
@@ -18,7 +17,6 @@ import type {
   Profile,
   Session,
   SessionMcp,
-  SessionState,
 } from "@/api";
 import {
   AlertDialog,
@@ -64,12 +62,14 @@ export function SessionToolbar({
   profiles,
   onStatus,
   onSessionUpdated,
+  onOpenSettings,
 }: {
   api: EngineApi;
   session: Session;
   profiles: Profile[];
   onStatus: (message: string) => void;
   onSessionUpdated: (session: Session) => void;
+  onOpenSettings: () => void;
 }) {
   const [mode, setMode] = useState(() =>
     normalizeApprovalMode(session.approval_mode),
@@ -91,15 +91,6 @@ export function SessionToolbar({
     env: string;
   } | null>(null);
   const [hubOpen, setHubOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState<SessionState | null>(null);
-  const [settingsBusy, setSettingsBusy] = useState(false);
-  const [editProfile, setEditProfile] = useState(
-    session.profile || profiles[0]?.name || "default",
-  );
-  const [editModel, setEditModel] = useState(session.model || "");
-  const [editEffort, setEditEffort] = useState(session.effort || "");
-  const [applyBusy, setApplyBusy] = useState(false);
 
   const fail = useCallback(
     (error: unknown) =>
@@ -226,53 +217,14 @@ export function SessionToolbar({
     }
   };
 
-  const loadSettings = async () => {
-    setSettingsBusy(true);
-    try {
-      setSettings(await api.getSessionState(session.session_id));
-    } catch (error) {
-      fail(error);
-    } finally {
-      setSettingsBusy(false);
-    }
-  };
-
   const changeProfile = async (name: string) => {
     try {
       const updated = await api.setSessionProfile(session.session_id, name);
       onSessionUpdated(updated);
       onStatus(`Model: ${updated.model || name}`);
-      await loadSettings();
     } catch (error) {
       fail(error);
     }
-  };
-
-  const applySessionSettings = async () => {
-    setApplyBusy(true);
-    try {
-      const updated = await api.setSessionProfile(
-        session.session_id,
-        editProfile,
-        editModel.trim() || undefined,
-        editEffort.trim() || undefined,
-      );
-      onSessionUpdated(updated);
-      setEditModel(updated.model || "");
-      setEditEffort(updated.effort || "");
-      onStatus(`Session settings applied: ${updated.model || editProfile}`);
-      await loadSettings();
-    } catch (error) {
-      fail(error);
-    } finally {
-      setApplyBusy(false);
-    }
-  };
-
-  const resetSessionSettings = () => {
-    setEditProfile(session.profile || profiles[0]?.name || "default");
-    setEditModel(session.model || "");
-    setEditEffort(session.effort || "");
   };
 
   const clearHistory = async () => {
@@ -290,9 +242,6 @@ export function SessionToolbar({
     new Set([...configuredServerNames, ...servers.map(([name]) => name)]),
   );
   const sessionLabel = formatSessionName(session.name, session.session_id);
-  const workspace = String(
-    settings?.system?.cwd || session.workspace || "current project",
-  );
   const connectedCount = servers.filter(
     ([, info]) => info.status === "connected",
   ).length;
@@ -634,146 +583,16 @@ export function SessionToolbar({
         </DialogContent>
       </Dialog>
 
-      {/* Settings */}
-      <Dialog
-        open={settingsOpen}
-        onOpenChange={(open) => {
-          setSettingsOpen(open);
-          if (open) void loadSettings();
-        }}
+      {/* Settings: the dialog lives in App (PanelHost) so every entry point shares it */}
+      <Button
+        variant="outline"
+        size="sm"
+        aria-label="Session settings trigger"
+        onClick={onOpenSettings}
       >
-        <DialogTrigger asChild>
-          <Button
-            variant="outline"
-            size="sm"
-            aria-label="Session settings trigger"
-          >
-            <Settings2 className="size-4" />
-            Settings
-          </Button>
-        </DialogTrigger>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Session settings</DialogTitle>
-            <DialogDescription>
-              Live settings for this daemon. Changes apply to the current
-              session and do not rewrite your saved profile.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-3 text-sm">
-            <div className="grid grid-cols-[7rem_1fr] items-center gap-2">
-              <span className="text-muted-foreground">Session</span>
-              <span className="break-all font-mono">
-                {sessionLabel}
-              </span>
-              <span className="text-muted-foreground">Agent</span>
-              <span>{session.identity || session.agent || "unassigned"}</span>
-              <span className="text-muted-foreground">Workspace</span>
-              <span className="break-all">{workspace}</span>
-            </div>
-            <div className="grid gap-2">
-              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-profile">
-                Profile
-              </label>
-              <Select
-                value={editProfile}
-                onValueChange={setEditProfile}
-                disabled={applyBusy}
-              >
-                <SelectTrigger id="settings-profile" className="w-full" aria-label="Session profile">
-                  <SelectValue placeholder="default" />
-                </SelectTrigger>
-                <SelectContent>
-                  {profiles.length ? (
-                    profiles.map((profile) => (
-                      <SelectItem key={profile.name} value={profile.name}>
-                        {profile.name}
-                        {profile.model ? ` · ${profile.model}` : ""}
-                      </SelectItem>
-                    ))
-                  ) : (
-                    <SelectItem value={editProfile}>{editProfile}</SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
-              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-model">
-                Model override (optional)
-              </label>
-              <Input
-                id="settings-model"
-                value={editModel}
-                onChange={(event) => setEditModel(event.target.value)}
-                placeholder={session.model || "profile default"}
-                disabled={applyBusy}
-                className="font-mono text-xs"
-              />
-              <label className="text-muted-foreground text-xs font-medium" htmlFor="settings-effort">
-                Effort override (optional)
-              </label>
-              <Input
-                id="settings-effort"
-                value={editEffort}
-                onChange={(event) => setEditEffort(event.target.value)}
-                placeholder={session.effort || "profile default"}
-                disabled={applyBusy}
-                className="font-mono text-xs"
-              />
-            </div>
-            <div className="bg-muted/30 rounded-md border p-3 text-xs">
-              {settingsBusy ? (
-                <span className="text-muted-foreground">Refreshing daemon state…</span>
-              ) : settings ? (
-                <div className="grid gap-1.5">
-                  <div className="flex items-center gap-2 font-medium">
-                    <CheckCircle2 className="size-3.5 text-emerald-500" />
-                    engine connected
-                  </div>
-                  <span className="text-muted-foreground">
-                    pid {String(settings.system?.daemon_pid || session.daemon_pid || "—")} ·{" "}
-                    {String(settings.system?.git_branch || "no git branch")}
-                  </span>
-                  <span className="text-muted-foreground">
-                    hub {String(settings.hub?.my_identity || session.identity || "unassigned")} ·{" "}
-                    {String(settings.processing?.is_processing ? "working" : "idle")}
-                  </span>
-                  {settings.agent?.description ? (
-                    <span className="text-muted-foreground">
-                      {String(settings.agent.description)}
-                    </span>
-                  ) : null}
-                </div>
-              ) : (
-                <span className="text-muted-foreground">No live state available.</span>
-              )}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={resetSessionSettings}
-              disabled={applyBusy}
-            >
-              Reset
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => void loadSettings()}
-            >
-              <RefreshCw className="size-4" />
-              Refresh
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void applySessionSettings()}
-              disabled={applyBusy}
-            >
-              {applyBusy ? "Applying…" : "Apply"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        <Settings2 className="size-4" />
+        Settings
+      </Button>
 
       {/* Clear history */}
       <AlertDialog>

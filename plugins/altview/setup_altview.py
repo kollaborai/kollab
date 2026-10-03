@@ -25,107 +25,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
 from typing import Any, List, Optional
 
+from kollabor.panels.setup import (
+    PROVIDERS,
+    ProviderChoice,
+    create_and_activate_profile,
+    test_connection,
+    unique_profile_name,
+    valid_base_url,
+)
+from kollabor.panels.setup import (
+    load_model_suggestions as _load_model_suggestions,
+)
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
 
 logger = logging.getLogger(__name__)
-
-
-# -- provider catalogue -------------------------------------------------------
-
-
-@dataclass
-class ProviderChoice:
-    """A selectable provider in the setup wizard."""
-
-    key: str  # short internal id, also the default profile name
-    label: str  # menu label
-    provider: str  # ProviderType value stored on the profile
-    blurb: str = ""  # one-line description shown under the list
-    default_base_url: str = ""
-    key_hint: str = ""  # example key format
-    key_url: str = ""  # where to get a key
-    default_model: str = ""
-    needs_key: bool = True  # api key required to continue
-    base_url_required: bool = False  # endpoint must be non-empty (custom)
-    base_url_advanced: bool = True  # endpoint is optional/prefilled (press enter)
-    oauth: bool = False  # delegate to /login instead of asking for a key
-    advanced: bool = False  # route to manual config editing instead of finishing here
-
-
-PROVIDERS: List[ProviderChoice] = [
-    ProviderChoice(
-        key="anthropic",
-        label="Anthropic  (Claude)",
-        provider="anthropic",
-        blurb="Claude models. Key starts with sk-ant-.",
-        default_base_url="https://api.anthropic.com",
-        key_hint="sk-ant-...",
-        key_url="https://console.anthropic.com/settings/keys",
-        default_model="claude-sonnet-5",
-    ),
-    ProviderChoice(
-        key="openai",
-        label="OpenAI  (API key)",
-        provider="openai",
-        blurb="GPT models via an API key. Key starts with sk- or sk-proj-.",
-        default_base_url="https://api.openai.com/v1",
-        key_hint="sk-... / sk-proj-...",
-        key_url="https://platform.openai.com/api-keys",
-        default_model="gpt-5.6-luna",
-    ),
-    ProviderChoice(
-        key="openai-chatgpt",
-        label="OpenAI  (sign in with ChatGPT)",
-        provider="openai_responses",
-        blurb="Use your ChatGPT subscription via OAuth — no API key needed.",
-        oauth=True,
-    ),
-    ProviderChoice(
-        key="gemini",
-        label="Google Gemini",
-        provider="gemini",
-        blurb="Gemini models. Key from Google AI Studio.",
-        default_base_url="https://generativelanguage.googleapis.com",
-        key_hint="AIza...",
-        key_url="https://aistudio.google.com/app/apikey",
-        default_model="gemini-3.6-flash",
-    ),
-    ProviderChoice(
-        key="openrouter",
-        label="OpenRouter  (100+ models)",
-        provider="openrouter",
-        blurb="One key, many models. Model names look like vendor/model.",
-        default_base_url="https://openrouter.ai/api/v1",
-        key_hint="sk-or-...",
-        key_url="https://openrouter.ai/settings/keys",
-        default_model="",
-    ),
-    ProviderChoice(
-        key="local",
-        label="Custom / Local  (OpenAI-compatible)",
-        provider="custom",
-        blurb="Ollama, LM Studio, vLLM, or any OpenAI-compatible endpoint.",
-        default_base_url="http://localhost:1234/v1/chat/completions",
-        key_hint="(optional for local servers)",
-        key_url="",
-        default_model="",
-        needs_key=False,
-        base_url_required=True,
-        base_url_advanced=False,
-    ),
-    ProviderChoice(
-        key="advanced",
-        label="Azure / Advanced  ->  manual config",
-        provider="",
-        blurb="Azure OpenAI and fully-custom endpoints are configured in config.json.",
-        advanced=True,
-    ),
-]
 
 
 # wizard stages
@@ -155,26 +72,6 @@ def _mask_key(key: str) -> str:
         return "•" * len(key)
     return key[:3] + "•" * (len(key) - 7) + key[-4:]
 
-
-def _load_model_suggestions(provider_value: str) -> List[str]:
-    """Curated model names for a provider from the shared model registry."""
-    try:
-        from kollabor_ai.model_registry import get_model_registry
-
-        models = get_model_registry().get("models", {})
-    except Exception as exc:  # registry is best-effort
-        logger.debug("setup: model registry unavailable: %s", exc)
-        return []
-
-    names = [
-        name
-        for name, meta in models.items()
-        if isinstance(meta, dict)
-        and meta.get("provider") == provider_value
-        and not meta.get("retired")
-    ]
-    # Stable, readable order (registry dicts are insertion-ordered already).
-    return names
 
 
 class SetupAltView(AltView):
@@ -399,9 +296,7 @@ class SetupAltView(AltView):
         return False
 
     def _valid_url(self, url: str) -> bool:
-        if "localhost" in url or "127.0.0.1" in url:
-            return True
-        return url.startswith("https://")
+        return valid_base_url(url)
 
     def _enter_model_stage(self) -> None:
         if self._model_options:
@@ -486,49 +381,12 @@ class SetupAltView(AltView):
 
     async def _run_test(self) -> None:
         try:
-            from kollabor_ai.providers.registry import (
-                ProviderRegistry,
-                create_config_from_profile,
+            self._test_ok, self._test_msg = await test_connection(
+                self._provider.provider if self._provider else "custom",
+                self._model,
+                self._api_key,
+                self._base_url,
             )
-
-            profile_dict = {
-                "provider": self._provider.provider if self._provider else "custom",
-                "model": self._model,
-                "api_key": self._api_key or "",
-                "base_url": self._base_url or "",
-            }
-            config = create_config_from_profile(profile_dict)
-            provider = await ProviderRegistry.create_provider(config)
-            try:
-                response = await asyncio.wait_for(
-                    provider.call(
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": "Reply with the single word: OK",
-                            }
-                        ]
-                    ),
-                    timeout=25.0,
-                )
-                text = (response.get_text_content() or "").strip()
-                self._test_ok = True
-                snippet = text[:40] if text else "(empty response)"
-                self._test_msg = f"connected — model replied: {snippet}"
-            finally:
-                try:
-                    await provider.shutdown()
-                except Exception:
-                    pass
-        except asyncio.TimeoutError:
-            self._test_ok = False
-            self._test_msg = "timed out after 25s — check endpoint / network"
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._test_ok = False
-            self._test_msg = self._short_error(str(exc))
-            logger.info("setup: connection test failed: %s", exc)
         finally:
             if self._stage == STAGE_TESTING:
                 self._stage = STAGE_REVIEW
@@ -548,85 +406,30 @@ class SetupAltView(AltView):
 
     async def _run_save(self) -> None:
         try:
-            if not self._profile_manager:
-                raise RuntimeError("profile manager unavailable")
             provider = self._provider
             assert provider is not None
-            pm = self._profile_manager
-
-            # /setup always creates a user profile. Never fill or mutate a
-            # provider-specific built-in/template in place; if the provider
-            # name already exists, mint a suffixed profile instead.
-            name = provider.key
-            existing = pm.get_profile(name)
-            if existing is not None:
-                name = self._unique_profile_name(provider.key)
-            created = pm.create_profile(
-                name=name,
-                base_url=self._base_url or "",
-                model=self._model,
-                api_key=self._api_key or None,
-                provider=provider.provider,
-                supports_tools=True,
-                description=f"Created via /setup ({provider.label.strip()})",
-                save_to_config=True,
+            bus = self._event_bus
+            state_service = (
+                bus.get_service("state_service")
+                if bus and hasattr(bus, "get_service")
+                else None
             )
-            if not created:
-                raise RuntimeError(f"could not create profile '{name}'")
-
-            # Activate through the state service first. In attach mode this is
-            # the RPC bridge to the daemon's ProfileManager; using only the
-            # client-side LLM coordinator leaves the daemon with the previous
-            # profile until restart, so /loadout and the status widget lag.
-            activated = False
-            state_service = None
-            if self._event_bus and hasattr(self._event_bus, "get_service"):
-                state_service = self._event_bus.get_service("state_service")
-            if state_service and hasattr(state_service, "set_active_profile"):
-                try:
-                    await state_service.set_active_profile(
-                        name, persist=True, reload_profile=True
-                    )
-                    activated = True
-                    # Keep the client-side manager aligned for local widgets
-                    # and code paths that still read it directly. Do not write
-                    # config a second time; the state service already did.
-                    try:
-                        self._profile_manager.set_active_profile(name, persist=False)
-                    except TypeError:
-                        self._profile_manager.set_active_profile(name)
-                except Exception as exc:
-                    logger.warning("setup: state-service activation failed: %s", exc)
-
-            # Fallback for legacy/non-RPC wiring: prefer the coordinator
-            # (reinitializes the provider).
-            # Bound it with a timeout — provider init can make a network call,
-            # and a slow/unreachable endpoint must not freeze the wizard on
-            # "Saving...". The profile is already persisted above, and
-            # set_active_profile below guarantees activation regardless.
-            llm = self._llm_service
-            if not activated and llm and hasattr(llm, "switch_profile"):
-                try:
-                    activated = bool(
-                        await asyncio.wait_for(
-                            llm.switch_profile(name, persist=True), timeout=20.0
-                        )
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "setup: switch_profile timed out; activating without reinit"
-                    )
-                except Exception as exc:
-                    logger.warning("setup: switch_profile failed: %s", exc)
-            if not activated:
-                self._profile_manager.set_active_profile(name)
-
+            name = await create_and_activate_profile(
+                self._profile_manager,
+                provider,
+                base_url=self._base_url,
+                model=self._model,
+                api_key=self._api_key,
+                state_service=state_service,
+                llm_service=self._llm_service,
+            )
             self.result_saved = True
             self.result_profile_name = name
 
             endpoint = (
                 self._base_url or provider.default_base_url or "(provider default)"
             )
+
             self._done_summary_lines = [
                 f"profile:  {name}",
                 f"provider: {provider.provider}",
@@ -648,16 +451,7 @@ class SetupAltView(AltView):
             self._stage = STAGE_ERROR
 
     def _unique_profile_name(self, base: str) -> str:
-        existing = set()
-        pm = self._profile_manager
-        if pm is not None and hasattr(pm, "_profiles"):
-            existing = set(pm._profiles.keys())
-        if base not in existing:
-            return base
-        i = 2
-        while f"{base}-{i}" in existing:
-            i += 1
-        return f"{base}-{i}"
+        return unique_profile_name(self._profile_manager, base)
 
     # -- rendering -----------------------------------------------------------
 
