@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The web UI has a Settings dialog with six tabs: Session, Configuration, Loadouts, Model, Setup and Network. They cover what the terminal's `/config`, `/llm`, `/model`, `/setup` and `/connect` screens do, and typing one of those commands in the web chat opens its tab. Secret values are not sent back to the browser, and join codes are redacted from logs and saved conversations. See `docs/features/web-settings-panels.md`.
+
+### Fixed
+- Typing `/config`, `/llm`, `/model`, `/setup`, `/connect` or `/matrix` in the web chat no longer hangs the turn: the web opens the matching Settings tab (or says the command needs the terminal) and the turn ends. Fullscreen views now refuse to open in a process with no terminal instead of waiting for keys nobody can send.
+- A running daemon sees config saves made by another process. It polls the config files once a second; the file watcher it used before was not installed there.
+
 ## [0.11.1] - 2026-10-01
 
 ### Added

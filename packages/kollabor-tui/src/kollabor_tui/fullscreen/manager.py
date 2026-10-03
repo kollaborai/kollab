@@ -139,7 +139,20 @@ class FullScreenManager:
 
         Returns:
             True if plugin launched successfully, False otherwise.
+
+        Raises:
+            AltViewUnavailable: no interactive terminal (pipe mode, a detached
+                daemon, or a command that arrived over the web transport), the
+                same refusal as ``AltViewStackManager.push``. Without it the
+                session blocks forever on keys nobody can send.
         """
+        # lazy: kollabor_tui.altview imports kollabor_tui.fullscreen at load
+        from kollabor_tui.altview.stack_manager import (
+            AltViewUnavailable,
+            interactive_terminal_available,
+            unavailable_attempts,
+        )
+
         try:
             # Check if session is already active
             if self.current_session and self.current_session.running:
@@ -151,6 +164,16 @@ class FullScreenManager:
             if not plugin:
                 logger.error(f"Plugin not found: {name}")
                 return False
+
+            sink = unavailable_attempts.get()
+            if sink is not None or not interactive_terminal_available(
+                self.terminal_renderer
+            ):
+                if sink is not None:
+                    sink.append(plugin.name)
+                raise AltViewUnavailable(
+                    f"'{plugin.name}' needs an interactive terminal"
+                )
 
             logger.info(f"Launching full-screen plugin: {plugin.name}")
 
@@ -177,6 +200,8 @@ class FullScreenManager:
                 await self._exit_modal_mode(plugin)
                 self.current_session = None
 
+        except AltViewUnavailable:
+            raise
         except Exception as e:
             logger.error(f"Failed to launch plugin {name}: {e}")
             return False

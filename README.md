@@ -226,6 +226,8 @@ healthy engine on port `7433`, and cleans up child processes on exit. For separa
 development loops, see the [engine README](packages/kollabor-engine/README.md)
 and [web UI README](packages/kollabor-webui/README.md).
 
+The web UI's Settings dialog (Session, Configuration, Loadouts, Model, Setup, Network) does what the terminal's `/config`, `/llm`, `/model`, `/setup` and `/connect` screens do; see [web settings panels](docs/features/web-settings-panels.md).
+
 ## Why It Exists
 
 Most AI CLIs are either chat windows or opaque automations. Kollab aims for the
