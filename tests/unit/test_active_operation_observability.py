@@ -276,7 +276,6 @@ async def test_local_processing_snapshot_reads_sanitized_llm_operation():
     llm.is_processing = True
     llm.current_processing_tokens = 12
     llm.status_service = None
-    llm.pending_tools = []
     llm.task_manager = None
     llm.get_active_operation_snapshot.return_value = {
         "task_id": TASK_A,

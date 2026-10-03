@@ -711,7 +711,7 @@ without bloating history or fighting the provider protocols.
 ## Agent-facing XML API (ledger metadata tags)
 
 All tags are parsed from assistant responses and stripped from
-user-visible output (same treatment as `<hub_msg>`, `<question>`).
+user-visible output (same treatment as `<hub_msg>`).
 These are the **ledger metadata ops** from the table above —
 `file_read` and other real tools are NOT in this section, they
 use native openai `tool_calls`.

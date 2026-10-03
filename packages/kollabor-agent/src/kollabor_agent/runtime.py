@@ -30,12 +30,11 @@ class AgentLifecycle(Enum):
     State machine:
       BOOTING -> READY -> WORKING -> READY (loop)
                    |         |
-                   v         v
-                BLOCKED   THINKING
+                   |         v
+                   |      THINKING
                    |         |
-                   v         v
-                 READY     READY
-                   |
+                   |         v
+                   |       READY
                    v
                DREAMING -> READY
                    |
@@ -49,7 +48,6 @@ class AgentLifecycle(Enum):
     READY       idle, waiting for input or messages
     WORKING     executing a task (tool calls, file ops, shell)
     THINKING    waiting on LLM response (streaming or not)
-    BLOCKED     suspended, waiting on human input (question gate)
     DREAMING    processing vault -- distilling working memory
                 into crystallized knowledge (background, future)
     SUSPENDED   paused by user or coordinator, can be resumed
@@ -61,7 +59,6 @@ class AgentLifecycle(Enum):
     READY = "ready"
     WORKING = "working"
     THINKING = "thinking"
-    BLOCKED = "blocked"
     DREAMING = "dreaming"
     SUSPENDED = "suspended"
     DYING = "dying"
@@ -505,7 +502,7 @@ class AgentRuntime:
     def state_duration_seconds(self) -> float:
         """Seconds since the last state change.
 
-        Useful for display: 'thinking for 4s', 'blocked for 2m'.
+        Useful for display: 'thinking for 4s', 'working for 2m'.
         """
         return time.time() - self.state_changed_at
 

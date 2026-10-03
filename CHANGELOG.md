@@ -9,10 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - The web UI has a Settings dialog with six tabs: Session, Configuration, Loadouts, Model, Setup and Network. They cover what the terminal's `/config`, `/llm`, `/model`, `/setup` and `/connect` screens do, and typing one of those commands in the web chat opens its tab. Secret values are not sent back to the browser, and join codes are redacted from logs and saved conversations. See `docs/features/web-settings-panels.md`.
+- A model with no entry in the model registry logs one warning naming the default context window it falls back to.
+
+### Changed
+- Requests are no longer trimmed to fit the context window. A pre-send guard silently dropped the oldest messages from every request without telling the model, so agents could lose their place mid-task. Large tool output is already capped where it is produced, compaction shrinks the history, and a real overflow now shows a visible error instead.
+- The `kollabor.llm.max_history` setting is gone. Every request sends the whole conversation instead of the last N messages, and compaction is what keeps it inside the model's window. The Max History slider is removed from `/config`.
+- The question gate is removed. A `<question>` tag no longer pauses a reply's tool calls until you answer, and agents are no longer told to use it. Tools in a reply always run.
+- `kollabor.llm.context_overhead_tokens` defaults to 48,000 instead of 60,000. Measured on 169 real first turns, the system prompt and tool schemas take 34K tokens at the median and 45K at most, so the old guess took room from tool output.
 
 ### Fixed
 - Typing `/config`, `/llm`, `/model`, `/setup`, `/connect` or `/matrix` in the web chat no longer hangs the turn: the web opens the matching Settings tab (or says the command needs the terminal) and the turn ends. Fullscreen views now refuse to open in a process with no terminal instead of waiting for keys nobody can send.
 - A running daemon sees config saves made by another process. It polls the config files once a second; the file watcher it used before was not installed there.
+- Context compaction no longer re-fires every turn. The trigger compared a rough character estimate (about 2.3x too high, and counting text compaction can't remove) instead of the prompt size the API reported, so one compaction never got under the threshold and every turn summarized the summary again. It now uses the reported count, and the estimate only when no usage was reported.
+- Truncated replies now auto-continue on Anthropic, Gemini, ChatGPT/Codex (OpenAI Responses) and custom-provider streams: each reports a max-output-tokens stop as `length`. Responses streams no longer drop `response.incomplete` (it carried the final usage), and custom streams keep `finish_reason` past a trailing usage-only chunk or a server that omits usage.
+- Auto-compaction pauses with a visible warning when a round can't get the prompt under the threshold, and retries once the prompt has grown, instead of re-summarizing the summary every turn. A compaction deferred for in-flight hub coordination now runs after 3 deferrals, only the newest task reminder survives a round, and the summarizer retries rate limits and server errors.
+- A restarted hub agent's rebirth context lists its active TaskLedger cards, or says it has none, so it no longer asks its peers for its own assignments.
+- Hub wake chains stop after 3 identical tool errors in a row instead of running up to 500 turns. They share the queue drain's breaker, which now trips at 3 as its log line always said.
+- The hub's background (dreaming) LLM call retries rate limits and server errors.
+- ChatGPT sign-in sessions survive an expired access token: a 401 refreshes the token, rebuilds the provider and replays the request once.
+- Responses streams report the server's own error on `response.failed`, `error` and malformed final events instead of "Stream ended without response.completed".
+- Tool-call stops are reported as `tool_calls` on Anthropic and Responses streams, including the ChatGPT/Codex backend, which sends its calls only as stream items, so the inconsistent-stop warning can fire. Codex calls made through the non-streaming path keep their tool calls.
+- OpenAI chat and OpenRouter streams keep each tool call's real id and read every call in a chunk; tool calls with no arguments are no longer dropped; Gemini and Responses requests keep every system message.
+- A reply that is still cut off after auto-continue, or whose continuation comes back empty, now says so instead of ending mid-word.
+- The raw request log rotates to a new file at `raw_log_max_file_mb` instead of dropping interactions.
+- A plugin that initializes twice (startups with a plugin CLI argument such as `kollab --hub status`) no longer logs "Command name conflict" for its own commands.
+- The API-format error points at the profile's real `provider` and `base_url` settings and `/setup` instead of a `tool_format` setting that doesn't exist.
+
+### Removed
+- Unused code: the `kollabor_ai.adapters` package, `ProfileManager.get_adapter_for_profile`, `LLMService._call_llm`, `AgentLifecycle.BLOCKED`, the never-set `force_continue` flag on `LLM_RESPONSE`, the Responses and Gemini `_format_tool_result` helpers, and the `previous_response_id` / `prompt_cache_*` pass-through.
 
 ## [0.11.1] - 2026-10-01
 
@@ -1026,7 +1050,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [0.1.1]: https://github.com/kollaborai/kollab/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kollaborai/kollab/releases/tag/v0.1.0
-
 
 ## [0.5.0] - 2026-01-16
 

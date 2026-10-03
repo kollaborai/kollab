@@ -490,7 +490,6 @@ class ConfigLoader:
                     # Note: api_url, api_token, model, temperature, timeout are now in profiles
                     # See kollabor.llm.profiles.* for LLM connection settings
                     "auto_detect_provider": True,
-                    "max_history": 999,
                     "save_conversations": True,
                     "conversation_format": "jsonl",
                     "show_status": True,

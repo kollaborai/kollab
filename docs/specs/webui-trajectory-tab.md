@@ -128,7 +128,7 @@ logger JSONL, **not** in history metadata.
 
 `GET /sessions/{id}/events` (SSE) emits typed events (sse.py):
 `token`, `thinking`, `tool_start`, `tool_result`,
-`permission_request/granted/denied`, `question_gate`, `turn_complete`,
+`permission_request/granted/denied`, `turn_complete`,
 `error`. `api.streamEvents()` already parses these frames.
 
 ### frontend

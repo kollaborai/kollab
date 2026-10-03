@@ -59,7 +59,7 @@ def test_managed_by_names_the_primary_for_synced_keys_only(tmp_path, monkeypatch
     assert managed_by("kollabor.llm.profiles.gpt-5.4.model") == "laptop-kollab"
     # a section that holds a managed key is marked; a sibling key is not
     assert managed_by("kollabor.llm") == "laptop-kollab"
-    assert managed_by("kollabor.llm.max_history") is None
+    assert managed_by("kollabor.llm.terminal_timeout") is None
     assert managed_by("terminal.render_fps") is None
     assert managed_by("") is None
 

@@ -479,7 +479,7 @@ def create_config_from_profile(
     if effort:
         base_fields["effort"] = effort
 
-    # Bound the context-budget guard to the model's real window: an explicit
+    # Give compaction and the tool-output budget the model's real window: an explicit
     # profile value wins, otherwise resolve it from the model registry by
     # name/provider. Falls through to the config default if unresolved.
     context_window = profile.get("context_window")

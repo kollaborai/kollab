@@ -399,7 +399,7 @@ The unified pipeline processes all LLM responses through a single path:
 3. LLM_RESPONSE event fires (observation-only, no tag stripping needed)
 4. Clean text displayed (all tags already stripped by parser)
 5. Native tools execute (batch)
-6. XML/plugin tools execute (incremental with question gate)
+6. XML/plugin tools execute (incremental)
 7. Tool results logged and added to conversation history
 
 Your plugin tags are stripped from display text automatically. They appear

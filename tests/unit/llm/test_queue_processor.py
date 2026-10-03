@@ -5,7 +5,7 @@ import time
 import unittest
 from dataclasses import dataclass, field
 from typing import Optional
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
@@ -49,7 +49,6 @@ class TestQueueProcessor(unittest.TestCase):
             "total_output_tokens": 0,
         }
         self.stats = {"total_thinking_time": 0}
-        self.pending_tools = []
         self.queue_metrics = {
             "total_enqueue_attempts": 0,
             "total_enqueue_successes": 0,
@@ -82,14 +81,11 @@ class TestQueueProcessor(unittest.TestCase):
         self.native_tools_handler.discovery_complete.set()
 
         self.add_message_fn = MagicMock()
-        self.max_history = 90
-        self.question_gate_enabled = False
 
         self.processor = QueueProcessor(
             conversation_history=self.conversation_history,
             session_stats=self.session_stats,
             stats=self.stats,
-            pending_tools=self.pending_tools,
             queue_metrics=self.queue_metrics,
             task_config=self.task_config,
             api_service=self.api_service,
@@ -103,8 +99,6 @@ class TestQueueProcessor(unittest.TestCase):
             streaming_handler=self.streaming_handler,
             native_tools_handler=self.native_tools_handler,
             add_message_fn=self.add_message_fn,
-            max_history=self.max_history,
-            question_gate_enabled=self.question_gate_enabled,
             max_queue_size=10,
         )
         # Default to turn_completed=True so process_queue doesn't enter
@@ -307,6 +301,29 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.assertTrue(self.processor.turn_completed)
 
+    def test_loop2_stops_on_identical_tool_errors(self):
+        """LOOP 2 stops once 3 identical failing tool batches have run in a row.
+
+        The turn that led into LOOP 2 counts as the first one. (The old loop
+        needed 5 and its log line claimed 3.)
+        """
+        calls = {"n": 0}
+
+        async def continue_fn():
+            calls["n"] += 1
+            self.processor._last_tool_error_sig = "terminal:boom"
+            if calls["n"] >= 50:
+                self.processor.turn_completed = True
+
+        self.processor.turn_completed = False
+        self.processor._last_tool_error_sig = "terminal:boom"
+        self.loop.run_until_complete(
+            self.processor.process_queue(MagicMock(), AsyncMock(), continue_fn)
+        )
+        self.assertEqual(calls["n"], 2)
+        self.assertTrue(self.processor.turn_completed)
+        self.message_display_service.display_error_message.assert_called_once()
+
     def test_process_queue_empty(self):
         """Test processing empty queue returns immediately."""
         task_manager = MagicMock()
@@ -386,7 +403,6 @@ class TestQueueProcessor(unittest.TestCase):
             "content": "test response",
             "components": {},
             "turn_completed": True,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = []
         self.conversation_logger.log_assistant_message = AsyncMock(
@@ -395,7 +411,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
-            return_value=("test response", False, False, False)
+            return_value=("test response", False, False)
         )
 
         self.loop.run_until_complete(
@@ -447,7 +463,6 @@ class TestQueueProcessor(unittest.TestCase):
             "content": "intermediate answer",
             "components": {},
             "turn_completed": False,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = [
             {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
@@ -460,7 +475,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
-            return_value=("intermediate answer", False, False, False)
+            return_value=("intermediate answer", False, False)
         )
 
         self.loop.run_until_complete(
@@ -472,6 +487,61 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.message_display_service.display_complete_response.assert_not_called()
         self.message_display_service.display_tool_results.assert_called_once()
+
+    def _truncated_turn(self, continuation_text, continuation_stop):
+        """Run one turn whose first reply is cut at the output limit."""
+        replies = iter([("one two se", "length"), (continuation_text, continuation_stop)])
+
+        async def call_llm(**kwargs):
+            text, stop = next(replies)
+            self.api_service.last_stop_reason = stop
+            return text
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls = MagicMock(return_value=False)
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.take_executed_count.return_value = 0
+        self.response_parser.parse_response.side_effect = lambda text: {
+            "content": text,
+            "components": {},
+            "turn_completed": True,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.conversation_logger.log_assistant_message = AsyncMock(return_value="a-uuid")
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            side_effect=lambda raw, clean, *a, **k: (clean, False, False)
+        )
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+    def test_empty_continuation_of_a_cut_reply_is_announced(self):
+        """Live 2026-10-02: a local model answered the continue request with
+        nothing, and the reply silently ended mid-word."""
+        self._truncated_turn("", "stop")
+        notices = [
+            c.args[0] for c in self.message_display_service.display_system_message.call_args_list
+        ]
+        self.assertTrue(any("output limit" in n for n in notices), notices)
+
+    def test_completed_continuation_is_not_announced(self):
+        self._truncated_turn("venteen", "stop")
+        notices = [
+            c.args[0] for c in self.message_display_service.display_system_message.call_args_list
+        ]
+        self.assertFalse(any("output limit" in n for n in notices), notices)
 
     def test_voice_update_is_queued_before_tools_and_final_reply_uses_same_identity(self):
         order = []
@@ -513,7 +583,6 @@ class TestQueueProcessor(unittest.TestCase):
             "spoken_text": "I'll recheck the voice mode files.",
             "components": {},
             "turn_completed": False,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = [
             {"id": "read", "type": "terminal", "command": "true"}
@@ -522,7 +591,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
-            return_value=("I'll recheck the voice mode files.", False, False, False)
+            return_value=("I'll recheck the voice mode files.", False, False)
         )
         self.loop.run_until_complete(self.processor._execute_llm_turn_inner(True, "parent"))
         self.assertEqual(order, [("I'll recheck the voice mode files.", voice), "tools"])
@@ -535,7 +604,6 @@ class TestQueueProcessor(unittest.TestCase):
             "The check is finished.",
             False,
             False,
-            False,
         )
         self.loop.run_until_complete(
             self.processor._execute_llm_turn_inner(False, "parent")
@@ -543,9 +611,18 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(order[-1], ("The check is finished.", voice))
         self.assertIsNone(self.processor.active_voice)
 
-    def test_pipe_mode_displays_question_gate_response(self):
-        """Pipe mode keeps a response that is waiting for user input visible."""
-        self.renderer.pipe_mode = True
+    def test_question_tag_does_not_suspend_xml_tools(self):
+        """A <question> tag is plain text: the XML tool in the same reply runs."""
+        from kollabor_ai.response_parser import ResponseParser
+
+        parser = ResponseParser()
+        parsed = parser.parse_response(
+            "<question>Which file should I inspect?</question>\n"
+            "<terminal>printf ''</terminal>"
+        )
+        self.assertFalse(parsed["turn_completed"])
+        self.assertNotIn("question", parsed["components"])
+
         self.native_tools_handler.tool_calling_enabled = False
         self.api_service.has_pending_tool_calls.return_value = False
         self.api_service.get_last_token_usage = MagicMock(return_value=None)
@@ -553,26 +630,30 @@ class TestQueueProcessor(unittest.TestCase):
         self.api_service.last_stop_reason = ""
         self.api_service.model = "test-model"
         self.api_service.provider_type = "test"
-        self.response_parser.parse_response.return_value = {
-            "content": "Which file should I inspect?",
-            "components": {},
-            "turn_completed": True,
-            "question_gate_active": True,
-        }
-        self.response_parser.get_all_tools.return_value = [
-            {"id": "terminal_1", "type": "terminal", "command": "printf ''"}
-        ]
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = "ok"
+        self.tool_executor.execute_tool = AsyncMock(
+            return_value=ToolExecutionResult(
+                tool_id="terminal_1",
+                tool_type="terminal",
+                success=True,
+                output="",
+            )
+        )
+        self.response_parser.parse_response.return_value = parsed
+        self.response_parser.get_all_tools.return_value = parser.get_all_tools(parsed)
         self.conversation_logger.log_assistant_message = AsyncMock(
             return_value="assistant-uuid"
         )
+        self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
         self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
-            return_value=("Which file should I inspect?", False, False, False)
+            return_value=("Which file should I inspect?", False, False)
         )
 
-        self.processor.question_gate_enabled = True
         self.loop.run_until_complete(
             self.processor._execute_llm_turn_inner(
                 user_message_provided=True,
@@ -580,13 +661,49 @@ class TestQueueProcessor(unittest.TestCase):
             )
         )
 
-        self.message_display_service.display_complete_response.assert_called_once()
-        self.message_display_service.display_complete_response.assert_called_once_with(
-            thinking_duration=ANY,
-            response="Which file should I inspect?",
-            tool_results=None,
-            thinking_content=[],
+        self.tool_executor.execute_tool.assert_awaited_once()
+        self.message_display_service.display_tool_results.assert_called_once()
+
+    def test_repeated_tool_error_breaker_trips_on_third_identical_signature(self):
+        from kollabor_agent.queue_processor import RepeatedToolErrorBreaker
+
+        breaker = RepeatedToolErrorBreaker()
+        self.assertFalse(breaker.observe("terminal:boom"))
+        self.assertFalse(breaker.observe("terminal:boom"))
+        self.assertTrue(breaker.observe("terminal:boom"))
+        self.assertEqual(breaker.count, 3)
+
+    def test_repeated_tool_error_breaker_resets_on_change_or_success(self):
+        from kollabor_agent.queue_processor import RepeatedToolErrorBreaker
+
+        breaker = RepeatedToolErrorBreaker()
+        for sig in ("a", "a", "b", "b", None, "b", "b"):
+            self.assertFalse(breaker.observe(sig))
+        self.assertTrue(breaker.observe("b"))
+
+    def test_tool_history_budget_defaults_to_measured_overhead(self):
+        """Default overhead is 48K tokens (measured 2026-10-02), not the old 60K guess."""
+        self.api_service._provider = MagicMock()
+        self.api_service._provider.config = {
+            "context_window": 128000,
+            "max_tokens": 16384,
+        }
+        self.processor.config = {}
+        self.processor._tool_output_batch_override = 0
+        self.processor._tool_output_max_chars = 10**9
+        limit = self.processor._tool_history_limit_chars(
+            response="", raw_tool_calls=[], xml_tool_calls=[]
         )
+        # window - max_tokens - overhead - margin - 2 one-token estimates - 512
+        self.assertEqual(limit, (128000 - 16384 - 48000 - 4000 - 2 - 512) * 3)
+
+    def test_api_format_mismatch_message_names_real_profile_settings(self):
+        from kollabor_agent import queue_processor
+
+        text = queue_processor._API_FORMAT_MISMATCH_MESSAGE
+        self.assertNotIn("tool_format", text)
+        self.assertIn("provider", text)
+        self.assertIn("base_url", text)
 
     # ------------------------------------------------------------------
     # Tests for _emit_llm_response_and_handle
@@ -602,7 +719,7 @@ class TestQueueProcessor(unittest.TestCase):
                 thinking_duration=0.5,
             )
         )
-        self.assertEqual(result, ("hello", False, False, False))
+        self.assertEqual(result, ("hello", False, False))
 
     def test_emit_llm_response_basic(self):
         """Emits LLM_RESPONSE event and returns clean response when no modifications."""
@@ -614,14 +731,14 @@ class TestQueueProcessor(unittest.TestCase):
                 thinking_duration=1.2,
             )
         )
-        self.assertEqual(result, ("some text", False, False, False))
+        self.assertEqual(result, ("some text", False, False))
         self.event_bus.emit_with_hooks.assert_called_once()
 
-    def test_emit_llm_response_force_continue_from_hook(self):
-        """Sets force_continue=True when a hook sets it in final_data."""
+    def test_emit_llm_response_turn_complete_from_hook(self):
+        """Sets turn_complete=True when a hook sets it in final_data."""
         self.event_bus.emit_with_hooks = AsyncMock(
             return_value={
-                "pre": {"final_data": {"force_continue": True}},
+                "pre": {"final_data": {"turn_complete": True}},
             }
         )
         result = self.loop.run_until_complete(
@@ -629,7 +746,7 @@ class TestQueueProcessor(unittest.TestCase):
                 response_text="x", clean_response="x", thinking_duration=0.0
             )
         )
-        self.assertEqual(result, ("x", True, False, False))
+        self.assertEqual(result, ("x", False, True))
 
     def test_emit_llm_response_suppress_display_from_hook(self):
         """Sets suppress_display=True when a hook sets it in final_data."""
@@ -643,7 +760,7 @@ class TestQueueProcessor(unittest.TestCase):
                 response_text="y", clean_response="y", thinking_duration=0.0
             )
         )
-        self.assertEqual(result, ("y", False, True, False))
+        self.assertEqual(result, ("y", True, False))
 
     def test_emit_llm_response_clean_response_modified_by_hook(self):
         """Hook can replace clean_response via final_data."""
@@ -657,7 +774,7 @@ class TestQueueProcessor(unittest.TestCase):
                 response_text="original", clean_response="original", thinking_duration=0.0
             )
         )
-        self.assertEqual(result, ("HOOKED", False, False, False))
+        self.assertEqual(result, ("HOOKED", False, False))
 
     def test_emit_llm_response_multiple_phases_last_wins(self):
         """Multiple phases can modify clean_response; last one wins."""
@@ -673,13 +790,13 @@ class TestQueueProcessor(unittest.TestCase):
                 response_text="orig", clean_response="orig", thinking_duration=0.0
             )
         )
-        self.assertEqual(result, ("THIRD", False, False, False))
+        self.assertEqual(result, ("THIRD", False, False))
 
-    def test_emit_llm_response_force_continue_and_suppress_combined(self):
-        """Both flags can be set simultaneously."""
+    def test_emit_llm_response_turn_complete_and_suppress_combined(self):
+        """Both flags can be set simultaneously, from different phases."""
         self.event_bus.emit_with_hooks = AsyncMock(
             return_value={
-                "pre": {"final_data": {"force_continue": True}},
+                "pre": {"final_data": {"turn_complete": True}},
                 "main": {"final_data": {"suppress_display": True}},
             }
         )
@@ -688,7 +805,7 @@ class TestQueueProcessor(unittest.TestCase):
                 response_text="x", clean_response="x", thinking_duration=0.0
             )
         )
-        self.assertEqual(result, ("x", True, True, False))
+        self.assertEqual(result, ("x", True, True))
 
     def test_emit_llm_response_hub_tags_in_original_strips_logging(self):
         """When response_text contains hub tags, hook modifications are logged."""
@@ -705,7 +822,7 @@ class TestQueueProcessor(unittest.TestCase):
             )
         )
         # Should still return modified clean_response
-        self.assertEqual(result, ("cleaned", False, False, False))
+        self.assertEqual(result, ("cleaned", False, False))
 
     def test_emit_llm_response_empty_response(self):
         """Handles empty/None response_text gracefully."""
@@ -715,7 +832,7 @@ class TestQueueProcessor(unittest.TestCase):
                 response_text="", clean_response="", thinking_duration=0.0
             )
         )
-        self.assertEqual(result, ("", False, False, False))
+        self.assertEqual(result, ("", False, False))
 
     def test_emit_llm_response_with_log_prefix(self):
         """Log prefix parameter doesn't affect return value."""
@@ -726,7 +843,7 @@ class TestQueueProcessor(unittest.TestCase):
                 log_prefix="native",
             )
         )
-        self.assertEqual(result, ("x", False, False, False))
+        self.assertEqual(result, ("x", False, False))
 
     # ------------------------------------------------------------------
     # Tests for _bridge_relay
@@ -930,7 +1047,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
         self.response_parser.parse_response.return_value = {
             "content": "final", "components": {}, "turn_completed": True,
-            "question_gate_active": False,
         }
         self.response_parser.get_all_tools.return_value = []
         self.api_service.has_pending_tool_calls.return_value = False
@@ -941,7 +1057,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="id")
         self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
-        self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("final", False, False, False))
+        self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("final", False, False))
 
         self.loop.run_until_complete(
             self.processor._execute_llm_turn_inner(user_message_provided=True, current_parent_uuid="parent")

@@ -79,7 +79,6 @@ class TestStreamingHandler(unittest.TestCase):
         result = self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=conversation_history,
-                max_history=90,
                 native_tools=native_tools,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=is_cancelled_fn,
@@ -102,7 +101,6 @@ class TestStreamingHandler(unittest.TestCase):
         self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=[],
-                max_history=90,
                 native_tools=None,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=lambda: False,
@@ -124,18 +122,15 @@ class TestStreamingHandler(unittest.TestCase):
         self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=[],
-                max_history=90,
                 native_tools=None,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=lambda: False,
-                prompt_cache_key="stable-key",
-                previous_response_id="response-123",
+                effort="high",
             )
         )
 
         call_kwargs = self.api_service.call_llm.call_args.kwargs
-        self.assertEqual(call_kwargs["prompt_cache_key"], "stable-key")
-        self.assertEqual(call_kwargs["previous_response_id"], "response-123")
+        self.assertEqual(call_kwargs["effort"], "high")
 
     def test_call_llm_cancelled_before_start(self):
         """Test LLM call cancelled before starting."""
@@ -151,7 +146,6 @@ class TestStreamingHandler(unittest.TestCase):
             self.loop.run_until_complete(
                 self.handler.call_llm(
                     conversation_history=conversation_history,
-                    max_history=90,
                     native_tools=native_tools,
                     mcp_discovery_complete=mcp_complete,
                     is_cancelled_fn=is_cancelled_fn,
@@ -178,7 +172,6 @@ class TestStreamingHandler(unittest.TestCase):
         result = self.loop.run_until_complete(
             self.handler.call_llm(
                 conversation_history=conversation_history,
-                max_history=90,
                 native_tools=native_tools,
                 mcp_discovery_complete=mcp_complete,
                 is_cancelled_fn=is_cancelled_fn,

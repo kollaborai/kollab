@@ -463,11 +463,14 @@ class CustomProvider(LLMProvider):
                                 cache_creation_tokens=cache_creation,
                             )
 
-                        # Finish reason
-                        finish_reason = choices[0].get("finish_reason")
+                        # Finish reason: keep the last one seen. The trailing
+                        # usage-only chunk carries none and must not erase the
+                        # "length" reported by the chunk before it.
+                        finish_reason = choices[0].get("finish_reason") or finish_reason
 
-                # Yield final usage info
-                if usage_info:
+                # Yield the final chunk. A server that omits usage still owes
+                # the caller its finish_reason (auto-continue keys off "length").
+                if usage_info or finish_reason:
                     yield StreamingResponse(
                         delta=TextDelta(content=""),
                         usage=usage_info,

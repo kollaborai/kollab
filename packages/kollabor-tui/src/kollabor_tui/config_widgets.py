@@ -569,15 +569,6 @@ class ConfigWidgetDefinitions:
                     "title": "LLM Settings",
                     "widgets": [
                         {
-                            "type": "slider",
-                            "label": "Max History",
-                            "config_path": "kollabor.llm.max_history",
-                            "min_value": 10,
-                            "max_value": 200,
-                            "step": 10,
-                            "help": "Maximum conversation history entries to keep",
-                        },
-                        {
                             "type": "checkbox",
                             "label": "Enable Streaming",
                             "config_path": "kollabor.llm.enable_streaming",

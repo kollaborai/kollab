@@ -359,12 +359,9 @@ class OpenRouterProvider(LLMProvider):
             assert self._client is not None  # guaranteed by _validate_initialized
             stream = await self._client.chat.completions.create(**request_params)
 
-            async for chunk in stream:
-                # Transform chunk to unified format
-                streaming_response = OpenAIResponseTransformer.transform_openai_chunk(
-                    chunk.model_dump(), self.model
-                )
-
+            async for streaming_response in OpenAIResponseTransformer.iter_chunks(
+                stream, self.model
+            ):
                 if streaming_response:
                     # Pass every delta (text, tool-call, usage) straight through.
                     # The APICommunicationService layer owns the authoritative

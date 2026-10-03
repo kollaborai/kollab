@@ -42,7 +42,6 @@ class WidgetState:
     is_processing: bool = False
     current_processing_tokens: int = 0
     bg_tasks: int = 0
-    pending_tools: int = 0
 
     # --- System ---
     tmux_sessions: int = 0

@@ -228,7 +228,6 @@ def test_mixed_native_and_xml_tool_history_shape_is_stable():
                 "total_output_tokens": 0,
             },
             stats={"total_thinking_time": 0},
-            pending_tools=[],
             queue_metrics={},
             task_config=SimpleNamespace(
                 queue=SimpleNamespace(
@@ -256,8 +255,6 @@ def test_mixed_native_and_xml_tool_history_shape_is_stable():
             ),
             native_tools_handler=FakeNativeToolsHandler(),
             add_message_fn=add_message,
-            max_history=50,
-            question_gate_enabled=False,
             max_queue_size=10,
         )
 

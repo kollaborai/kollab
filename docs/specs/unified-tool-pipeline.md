@@ -1,7 +1,7 @@
 ---
 title: Unified Tool Pipeline
 created: 2026-04-12
-modified: 2026-04-12
+modified: 2026-10-02
 status: complete
 author: maintainers
 ---
@@ -103,20 +103,20 @@ the two paths.
       -> display clean_response
 ```
 
-### three plugin regex parsers
+### three plugin regex parsers (as of 2026-04-12, before the migration)
 
 all on LLM_RESPONSE_POST, all racing on the same text:
 
 ```
   hub plugin (_parse_hub_messages):
     ~30 tag types, regex parsed, results injected
-    sets force_continue, suppress_display
+    sets force_continue (since removed), suppress_display
     strips tags from clean_response
 
   agent_orchestrator (_on_llm_response):
     ~8 tag types, custom xml_parser
     executes commands, injects results
-    sets force_continue
+    sets force_continue (since removed)
 
   deep_thought (child_reporter._on_response):
     reads clean_response, sends to parent
@@ -146,9 +146,11 @@ through the same parse -> extract -> execute -> display flow.
        |
        v
   STEP 3: emit LLM_RESPONSE
-    data = {response_text, clean_response, native_tools, xml_tools}
-    plugins can still hook for read-only observation
-    but NOT for tag stripping (parser already did it)
+    data = {response_text, clean_response, all_tools, has_native_tools,
+            turn_completed, ...}
+    hooks can rewrite clean_response, set suppress_display, or set
+    turn_complete; the handler reads all three back from final_data
+    (the parser, not a hook, strips tool tags)
        |
        v
   STEP 4: execute ALL tools
@@ -428,7 +430,8 @@ clean_response = parsed_response["content"]
 xml_tools = self.response_parser.get_all_tools(parsed_response)
 plugin_tools = parsed_response["components"].get("plugin_tools", [])
 
-# Step 3: emit LLM_RESPONSE (observation only, no tag stripping)
+# Step 3: emit LLM_RESPONSE (hooks may rewrite clean_response, set
+# suppress_display / turn_complete; they no longer strip tool tags)
 thinking_duration = time.time() - thinking_start
 response_context = await self.event_bus.emit_with_hooks(
     EventType.LLM_RESPONSE,
@@ -443,16 +446,18 @@ response_context = await self.event_bus.emit_with_hooks(
     "llm_service",
 )
 
-# read back any plugin modifications (force_continue, etc)
-force_continue = False
+# read back hook modifications (_emit_llm_response_and_handle)
 suppress_display = False
+turn_complete = False
 for phase in ["pre", "main", "post"]:
     phase_data = response_context.get(phase, {})
     final_data = phase_data.get("final_data", {})
-    if final_data.get("force_continue"):
-        force_continue = True
     if final_data.get("suppress_display"):
         suppress_display = True
+    if final_data.get("turn_complete"):
+        turn_complete = True
+    if "clean_response" in final_data:
+        clean_response = final_data["clean_response"]  # last phase wins
 
 # Step 4: display (clean text, never has raw tags)
 if not suppress_display:
@@ -484,11 +489,13 @@ for tool_data in plugin_tools:
     all_results.append(result)
     self._display_tool_result(tool_data, result)
 
-# determine continuation
-if native_tool_calls or xml_tools:
-    self.turn_completed = False  # tools need continuation
-elif force_continue:
-    self.turn_completed = False  # plugin requested continuation
+# a hook can end the turn (applied right after the LLM_RESPONSE emit)
+if turn_complete:
+    self.turn_completed = True
+
+# determine continuation: tool results go back to the model unless every
+# result succeeded and one carries metadata["end_turn"] (hub_msg wait="true");
+# see _tool_results_requiring_followup in queue_processor.py
 ```
 
 
@@ -509,12 +516,14 @@ elif force_continue:
   4. regex races on LLM_RESPONSE_POST
      plugins no longer need LLM_RESPONSE_POST for tag parsing.
      they register tags at init, parser handles them.
-     LLM_RESPONSE_POST becomes observation-only.
+     hooks still rewrite clean_response / suppress_display /
+     turn_complete (the handler reads them back), just not tags.
 
-  5. force_continue / suppress_display fragility
+  5. force_continue fragility
      plugin tool handlers return ToolExecutionResult.
      the pipeline decides continuation based on tool results,
-     not on plugins secretly mutating event data.
+     not on plugins secretly mutating event data. (the force_continue
+     flag was later removed: nothing ever set it true.)
 
 
 ## what this does NOT change
@@ -523,8 +532,9 @@ elif force_continue:
     <agent>, <scratchpad>, etc. no prompt changes.
   - native tool calling: still works via MCP registration.
     providers that support function calling use it.
-  - LLM_RESPONSE_POST hooks: still fire for observation
-    (logging, metrics, deep_thought child reporter).
+  - LLM_RESPONSE hooks: still fire, and can still change the turn
+    (clean_response, suppress_display, turn_complete) as well as
+    observe (logging, metrics, deep_thought child reporter).
     just no longer needed for tag parsing/stripping.
   - tool permissions: still checked via TOOL_CALL_PRE hook.
   - tool display: still rendered by message_display_service.
@@ -564,7 +574,8 @@ elif force_continue:
 ### phase 5: SDK documentation
   - document register_plugin_tag / register_plugin_handler
   - update plugin development guide
-  - update hooks-reference (LLM_RESPONSE_POST is observation-only)
+  - update hooks-reference (LLM_RESPONSE hooks can set clean_response,
+    suppress_display, turn_complete)
   - add examples for common plugin tool patterns
 
 
@@ -619,7 +630,7 @@ elif force_continue:
     recommendation: skip permissions for now, add later if
     needed. plugins can do their own validation in handlers.
 
-  - should force_continue be automatic for any plugin tool
+  - should continuation be automatic for any plugin tool
     that returns success? or should the handler control it?
     recommendation: handler controls it via a flag in
     ToolExecutionResult metadata. some tools (scratchpad_get)
@@ -667,5 +678,7 @@ all 5 phases shipped across these commits (2026-04-12):
   open questions resolved:
     - display: plugin tools show in same tool display as core tools
     - permissions: skipped for now, plugins do own validation
-    - force_continue: handler controls via force_continue in event data
+    - continuation: any tool result goes back to the model; a handler ends
+      the turn with ToolExecutionResult metadata["end_turn"] (the
+      force_continue flag was later removed: nothing ever set it true)
     - registration timing: confirmed parser exists before plugins init

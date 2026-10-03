@@ -12,7 +12,7 @@ and, on a slow cadence, detects two wedge modes and self-heals:
 
 - **stuck-busy**: ``is_processing`` has been True with no forward progress for
   longer than the stuck threshold, and nothing legitimately explains it — no
-  API call is in flight, no question gate is open, no cancel is pending. The
+  API call is in flight, no cancel is pending. The
   turn is wedged. Heal: reset the flags, close the phantom turn, re-kick the
   queue if work remains.
 - **orphaned-queue**: ``is_processing`` is False but the processing queue is
@@ -111,10 +111,6 @@ class TurnWatchdog:
 
         # A cancel in progress is an intentional stop, not a wedge.
         if getattr(qp, "cancel_processing", False):
-            self._orphan_strikes = 0
-            return None
-        # A question gate is intentionally waiting on the user.
-        if getattr(qp, "question_gate_active", False):
             self._orphan_strikes = 0
             return None
 

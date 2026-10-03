@@ -33,7 +33,7 @@ def test_registry_passes_validator():
 
 
 def test_actively_used_models_present():
-    # Models the app actually runs must exist so the budget guard can resolve
+    # Models the app actually runs must exist so compaction can resolve
     # their real context window instead of falling back to the default.
     models = json.loads(REGISTRY.read_text())["models"]
     for expected in ("glm-4.7", "glm-5.2"):

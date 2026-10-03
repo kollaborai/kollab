@@ -108,7 +108,7 @@ name from `agent.json`'s `skills` field.
 
 `AgentRuntime` (`runtime.py`) is the canonical runtime representation of an
 agent. It merges static definition (from disk) with live state (process, hub,
-vault). Lifecycle states: BOOTING -> READY -> WORKING -> THINKING -> BLOCKED ->
+vault). Lifecycle states: BOOTING -> READY -> WORKING -> THINKING ->
 DREAMING -> SUSPENDED -> DYING -> DEAD.
 
 ### Queue Processing

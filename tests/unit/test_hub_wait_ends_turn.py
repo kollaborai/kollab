@@ -98,7 +98,6 @@ class _Turn:
                 "total_output_tokens": 0,
             },
             stats={"total_thinking_time": 0},
-            pending_tools=[],
             queue_metrics={},
             task_config=SimpleNamespace(
                 queue=SimpleNamespace(overflow_strategy="drop_oldest")
@@ -121,8 +120,6 @@ class _Turn:
                 config=SimpleNamespace(get=lambda key, default=None: default),
             ),
             add_message_fn=MagicMock(),
-            max_history=90,
-            question_gate_enabled=False,
             max_queue_size=10,
         )
         self.processor._drain_env_block = MagicMock(return_value=None)

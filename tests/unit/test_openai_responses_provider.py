@@ -8,7 +8,6 @@ Tests for:
 - call() - Non-streaming requests
 - stream() - Streaming requests with SSE parsing
 - _prepare_request() - Request payload building
-- _format_tool_result() - Tool result formatting
 
 Target: 75%+ coverage
 """
@@ -264,39 +263,6 @@ class TestOpenAIResponsesProviderCall:
             assert response.content[0].name == "get_weather"
 
     @pytest.mark.asyncio
-    async def test_call_with_previous_response_id(
-        self, provider_config, sample_messages
-    ):
-        """Test call with previous_response_id for state chaining."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "id": "resp_002",
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "text", "text": "Continued conversation"}],
-                }
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_client_class.return_value = mock_client
-
-            provider = OpenAIResponsesProvider(provider_config)
-            await provider.initialize()
-
-            await provider.call(sample_messages, previous_response_id="resp_001")
-
-            # Verify previous_response_id was sent
-            call_args = mock_client.post.call_args
-            request_payload = call_args[1]["json"]
-            assert request_payload.get("previous_response_id") == "resp_001"
-
-    @pytest.mark.asyncio
     async def test_call_api_error(self, provider_config, sample_messages):
         """Test handling of API errors."""
         mock_response = MagicMock()
@@ -511,47 +477,6 @@ class TestOpenAIResponsesProviderStream:
                     pass
 
 
-class TestOpenAIResponsesProviderFormatToolResult:
-    """Test tool result formatting."""
-
-    def test_format_tool_result(self, provider_config):
-        """Test formatting tool result for Responses API."""
-        provider = OpenAIResponsesProvider(provider_config)
-
-        tool_result = provider._format_tool_result(
-            tool_call_id="call_001", result="Weather is sunny, 72°F"
-        )
-
-        assert tool_result["type"] == "function_call_output"
-        assert tool_result["call_id"] == "call_001"
-        assert tool_result["output"] == "Weather is sunny, 72°F"
-
-    def test_format_tool_result_with_dict(self, provider_config):
-        """Test formatting tool result with dict output."""
-        provider = OpenAIResponsesProvider(provider_config)
-
-        result = {"temp": 72, "condition": "sunny"}
-        tool_result = provider._format_tool_result(
-            tool_call_id="call_001", result=result
-        )
-
-        # Should JSON-serialize the dict
-        import json
-
-        assert json.loads(tool_result["output"]) == result
-
-    def test_format_tool_result_caps_oversized_output(self, provider_config):
-        """The helper should obey Responses API's function output limit too."""
-        provider = OpenAIResponsesProvider(provider_config)
-        max_output_chars = 10_485_760
-        oversized_output = "x" * (max_output_chars + 30)
-
-        tool_result = provider._format_tool_result("call_001", oversized_output)
-
-        assert len(tool_result["output"]) == max_output_chars
-        assert "truncated" in tool_result["output"]
-
-
 class TestOpenAIResponsesProviderPrepareRequest:
     """Test request preparation."""
 
@@ -719,21 +644,6 @@ class TestOpenAIResponsesProviderPrepareRequest:
         # This is an optimization for simple prompts
         assert "input" in request
 
-    def test_prepare_request_omits_empty_input_for_continuation(self, provider_config):
-        """A continuation may rely on the server-side response state."""
-        provider = OpenAIResponsesProvider(provider_config)
-
-        request = provider._prepare_request(
-            [{"role": "system", "content": "Continue the prior task."}],
-            tools=None,
-            stream=False,
-            previous_response_id="resp_previous",
-        )
-
-        assert "input" not in request
-        assert request["previous_response_id"] == "resp_previous"
-        assert request["instructions"] == "Continue the prior task."
-
     def test_prepare_request_rejects_empty_initial_request(self, provider_config):
         """Do not send the Responses API's invalid empty-input request."""
         provider = OpenAIResponsesProvider(provider_config)
@@ -745,24 +655,20 @@ class TestOpenAIResponsesProviderPrepareRequest:
                 stream=False,
             )
 
-    def test_prepare_request_preserves_cache_controls(self, provider_config):
-        """Responses cache controls survive request preparation."""
+    def test_prepare_request_stores_responses_on_the_public_api(self, provider_config):
+        """The public Responses API keeps server-side storage on by default."""
         provider = OpenAIResponsesProvider(provider_config)
 
         request = provider._prepare_request(
-            [{"role": "user", "content": "Use the cached context."}],
+            [{"role": "user", "content": "Store this."}],
             tools=None,
             stream=False,
-            prompt_cache_key="harness-context-v1",
-            prompt_cache_retention="24h",
         )
 
-        assert request["prompt_cache_key"] == "harness-context-v1"
-        assert request["prompt_cache_retention"] == "24h"
         assert request["store"] is True
 
-    def test_codex_request_omits_public_state_and_cache_controls(self):
-        """The ChatGPT/Codex transport rejects public Responses controls."""
+    def test_codex_request_never_stores_responses(self):
+        """The ChatGPT/Codex transport rejects store=true even when configured."""
         config = OpenAIResponsesConfig(
             provider=ProviderType.OPENAI_RESPONSES,
             api_key="oauth-test-token",
@@ -776,12 +682,6 @@ class TestOpenAIResponsesProviderPrepareRequest:
             [{"role": "user", "content": "Use the backend cache."}],
             tools=None,
             stream=True,
-            previous_response_id="resp_previous",
-            prompt_cache_key="harness-context-v1",
-            prompt_cache_retention="24h",
         )
 
         assert request["store"] is False
-        assert "previous_response_id" not in request
-        assert "prompt_cache_key" not in request
-        assert "prompt_cache_retention" not in request

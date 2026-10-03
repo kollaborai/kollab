@@ -158,7 +158,9 @@ class OpenAIResponsesTransformer:
                 usage=usage,
                 model=model,
                 provider=ProviderType.OPENAI_RESPONSES,
-                finish_reason=response.get("status") if response else None,
+                finish_reason=OpenAIResponsesTransformer._stop_reason(
+                    response, response.get("status") if response else None
+                ),
                 raw_response=redact_generated_image_data(response),
             )
 
@@ -176,7 +178,9 @@ class OpenAIResponsesTransformer:
                 usage=usage,
                 model=model,
                 provider=ProviderType.OPENAI_RESPONSES,
-                finish_reason=response.get("status"),
+                finish_reason=OpenAIResponsesTransformer._stop_reason(
+                    response, response.get("status")
+                ),
                 raw_response=redact_generated_image_data(response),
             )
 
@@ -267,9 +271,36 @@ class OpenAIResponsesTransformer:
             usage=usage,
             model=model,
             provider=ProviderType.OPENAI_RESPONSES,
-            finish_reason=response.get("status"),
+            finish_reason=OpenAIResponsesTransformer._stop_reason(
+                response, response.get("status")
+            ),
             raw_response=redact_generated_image_data(response),
         )
+
+    # Terminal events. response.incomplete (token cap or filter) still carries
+    # the partial output, the usage and incomplete_details.
+    FINAL_EVENTS = ("response.done", "response.completed", "response.incomplete")
+
+    @staticmethod
+    def _stop_reason(
+        response: Optional[Dict[str, Any]], default: Optional[str] = None
+    ) -> Optional[str]:
+        """Map a token-cap stop (incomplete, max_output_tokens) to "length".
+
+        auto-continue keys off "length" and INCONSISTENT_TOOL_STOP off "tool_calls"
+        (a function_call in the output); any other stop keeps ``default``.
+        """
+        response = response or {}
+        details = response.get("incomplete_details") or {}
+        if details.get("reason") == "max_output_tokens":
+            return "length"
+        output = response.get("output")
+        if isinstance(output, list) and any(
+            isinstance(item, dict) and item.get("type") == "function_call"
+            for item in output
+        ):
+            return "tool_calls"
+        return default
 
     @staticmethod
     def _transform_image_generation_item(
@@ -420,7 +451,7 @@ class OpenAIResponsesTransformer:
             return None
 
         # response.done - final chunk with usage
-        if event_type in ("response.done", "response.completed"):
+        if event_type in OpenAIResponsesTransformer.FINAL_EVENTS:
             response_data = chunk.get("response", {})
             usage = OpenAIResponsesTransformer._usage_info(response_data.get("usage"))
 
@@ -428,6 +459,7 @@ class OpenAIResponsesTransformer:
                 delta=TextDelta(content=""),
                 usage=usage,
                 is_final=True,
+                finish_reason=OpenAIResponsesTransformer._stop_reason(response_data),
                 raw_chunk=redact_generated_image_data(chunk),
             )
 

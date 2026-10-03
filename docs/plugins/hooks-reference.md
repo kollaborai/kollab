@@ -129,12 +129,13 @@ EventType.LLM_THINKING         # LLM is "thinking"
 * `thinking_duration` (float) - Time spent waiting for response
 * `tool_results` (None at this point) - Tool results come later
 
-**Note:** LLM_RESPONSE is now observation-only. Plugin XML tags are
-extracted and stripped by the response_parser before this event fires.
-To register custom XML tags, use `register_plugin_tag()` and
-`register_plugin_handler()` (see Plugin Development Guide). Hooks on
-LLM_RESPONSE should only read data for logging/metrics, not parse or
-strip tags.
+**Note:** Plugin XML tags are extracted and stripped by the
+response_parser before this event fires. To register custom XML tags, use
+`register_plugin_tag()` and `register_plugin_handler()` (see Plugin
+Development Guide); hooks on LLM_RESPONSE should not parse or strip tags.
+A hook may set three fields that the queue processor reads back:
+`clean_response` (the text to display), `suppress_display` (skip the text
+display) and `turn_complete` (end the turn).
 
 **Use cases:** Response logging, metrics collection, bridge relay,
 read-only monitoring

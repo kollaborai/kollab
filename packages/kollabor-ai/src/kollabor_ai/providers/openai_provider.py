@@ -254,15 +254,9 @@ class OpenAIProvider(LLMProvider):
                 raise RuntimeError("OpenAI client not initialized")
             stream = await self._client.chat.completions.create(**request_params)
 
-            async for chunk in stream:
-                # Convert chunk to dict
-                chunk_dict = chunk.model_dump()
-
-                # Transform chunk
-                streaming_response = OpenAIResponseTransformer.transform_openai_chunk(
-                    chunk_dict, self.model
-                )
-
+            async for streaming_response in OpenAIResponseTransformer.iter_chunks(
+                stream, self.model
+            ):
                 if streaming_response:
                     # Handle tool call accumulation
                     if streaming_response.delta.type == "tool_call_delta":

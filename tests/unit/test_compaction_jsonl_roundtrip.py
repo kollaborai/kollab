@@ -99,7 +99,6 @@ class TestLoaderReplaysCompaction(unittest.TestCase):
         from kollabor_ai.conversation_manager import ConversationManager
 
         m = ConversationManager.__new__(ConversationManager)
-        m.max_history = 100
         return m
 
     def _session_file(self, d: Path) -> Path:

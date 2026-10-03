@@ -5,7 +5,6 @@ Tests for:
 - Provider initialization and configuration
 - Request preparation (messages -> contents, tools -> functionDeclarations)
 - Non-streaming and streaming API calls
-- Tool result formatting (functionResponse)
 - Error handling
 
 Target: 75%+ coverage
@@ -172,6 +171,21 @@ class TestGeminiProviderPrepareRequest:
         assert len(request["tools"]) == 1
         assert "functionDeclarations" in request["tools"][0]
         assert request["tools"][0]["functionDeclarations"][0]["name"] == "get_weather"
+
+    def test_prepare_request_keeps_every_system_message(self, provider_config):
+        """Two system messages both reach systemInstruction, in order."""
+        provider = GeminiProvider(provider_config)
+        messages = [
+            {"role": "system", "content": "first rule"},
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "second rule"},
+        ]
+
+        request = provider._prepare_request(messages, tools=None)
+
+        texts = [part["text"] for part in request["systemInstruction"]["parts"]]
+        assert texts == ["first rule", "second rule"]
+        assert [c["role"] for c in request["contents"]] == ["user"]
 
     def test_prepare_request_no_system_message(self, provider_config):
         """Test request preparation without system message."""
@@ -403,26 +417,6 @@ class TestGeminiProviderStream:
                 responses.append(response)
 
             assert len(responses) >= 1
-
-
-class TestGeminiProviderToolResult:
-    """Test tool result formatting."""
-
-    def test_format_tool_result(self, provider_config):
-        """Test formatting tool result for Gemini."""
-        provider = GeminiProvider(provider_config)
-
-        tool_result = provider._format_tool_result(
-            tool_call_id="call_123",
-            tool_name="get_weather",
-            result='{"temp": 72, "condition": "sunny"}',
-        )
-
-        assert tool_result["role"] == "user"
-        assert len(tool_result["parts"]) == 1
-        assert "functionResponse" in tool_result["parts"][0]
-        assert tool_result["parts"][0]["functionResponse"]["name"] == "get_weather"
-        assert tool_result["parts"][0]["functionResponse"]["response"]["temp"] == 72
 
 
 class TestGeminiProviderShutdown:
