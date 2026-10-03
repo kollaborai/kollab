@@ -352,7 +352,12 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
         "title": "Edit Loadout" if mode == "edit" else "New Loadout",
         "sections": [{"id": "s0", "title": "Loadout", "fields": fields}],
         "actions": [{"id": "save", "label": "Save and Use"}],
-        "context": {"mode": mode, "base": base.name},
+        "context": {
+            "mode": mode,
+            "base": base.name,
+            "provider_profile": base.provider_profile,
+            "model": base.model,
+        },
     }
 
 
@@ -487,7 +492,22 @@ class LlmPanel:
 
     async def _save(self, ctx: Any, manager: Any, payload: dict) -> dict:
         form = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-        base = _find(manager, str(payload.get("base") or form.get("base") or "").strip())
+        base_name = str(payload.get("base") or form.get("base") or "").strip()
+        if base_name:
+            base = _find(manager, base_name)
+        else:  # a form started from the active profile's own model: no loadout name yet
+            from kollabor_ai.loadout_manager import Loadout
+
+            profile_name = str(form.get("provider_profile") or "")
+            model = str(form.get("model") or "")
+            if (
+                not model
+                or len(model) > 200
+                or not model.isprintable()
+                or ctx._profile_manager.get_profile(profile_name) is None
+            ):
+                raise PanelError("unknown base model", errors={"name": "Start again from a model."})
+            base = Loadout(name="", provider_profile=profile_name, model=model, implicit=True)
         mode = str(payload.get("mode") or form.get("mode") or "create")
         if mode not in ("create", "edit"):
             raise PanelError("mode must be create or edit", errors={"mode": "Unknown mode."})

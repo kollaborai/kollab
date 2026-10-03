@@ -118,7 +118,8 @@ async def test_llm_activate_delete_default_refresh_map_to_manager(llm_ctx):
 @pytest.mark.asyncio
 async def test_llm_edit_opens_form_and_save_validates_then_creates(llm_ctx):
     implicit = (await LLM.act(llm_ctx, "edit", {"name": "claude-x"}))["open"]
-    assert implicit["kind"] == "form" and implicit["context"] == {"mode": "create", "base": "claude-x"}
+    assert implicit["kind"] == "form"
+    assert (implicit["context"]["mode"], implicit["context"]["base"]) == ("create", "claude-x")
     name_field = implicit["sections"][0]["fields"][0]
     assert name_field["value"] == "claude-x-custom" and name_field["editable"]
     explicit = (await LLM.act(llm_ctx, "edit", {"name": "mine"}))["open"]
@@ -136,6 +137,19 @@ async def test_llm_edit_opens_form_and_save_validates_then_creates(llm_ctx):
         with pytest.raises(PanelError) as err:
             await LLM.act(llm_ctx, "save", {**good, **bad})
         assert field in err.value.errors
+
+
+@pytest.mark.asyncio
+async def test_llm_new_from_the_active_model_saves_without_a_base_name(llm_ctx):
+    form = (await LLM.act(llm_ctx, "new", {}))["open"]
+    assert form["context"]["base"] == "" and form["context"]["model"] == "claude-x"
+    payload = {"context": form["context"], "name": "fresh", "temperature": 0.7, "effort": "default"}
+    assert (await LLM.act(llm_ctx, "save", payload))["ok"]
+    _, name, kw = [c for c in llm_ctx.manager.calls if c[0] == "create"][-1]
+    assert (name, kw["provider_profile"], kw["model"]) == ("fresh", "anthropic", "claude-x")
+    forged = {**payload, "context": {**form["context"], "model": "x" * 300}}
+    with pytest.raises(PanelError):
+        await LLM.act(llm_ctx, "save", forged)
 
 
 # -- /model -------------------------------------------------------------------
