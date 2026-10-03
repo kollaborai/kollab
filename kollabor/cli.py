@@ -1671,6 +1671,8 @@ async def _handle_cli_hub(hub_args: list) -> None:
             to=target,
             content=content,
             scope=MessageScope.DIRECT.value,
+            # The operator typed this: it wakes the agent whatever it says.
+            metadata={"operator_message": True, "source": "cli"},
         )
         if await AgentMessenger.send_to_agent(socket_path, msg):
             print(f"sent to {target}")

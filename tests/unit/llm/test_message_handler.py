@@ -524,6 +524,82 @@ class TestMessageHandler(unittest.TestCase):
         self.assertEqual(turns, len(sigs))
         self.coordinator.message_display_service.display_error_message.assert_not_called()
 
+    def test_wake_while_typing_waits_then_fires(self):
+        """A half-typed input defers the wake; clearing it fires the turn."""
+        coord = _make_coordinator()
+        coord.renderer.input_handler.buffer_manager.content = "half typed"
+        handler = MessageHandler(coordinator=coord)
+
+        async def run():
+            result = await handler.handle_llm_continue({"source": "hub:cli"}, MagicMock())
+            self.assertEqual(result["status"], "queued_for_retry")
+            retry_factory = coord.create_background_task.call_args[0][0]
+            coord.create_background_task.reset_mock()
+
+            async def fake_sleep(_secs):
+                coord.renderer.input_handler.buffer_manager.content = ""
+
+            with patch("kollabor.llm.message_handler.asyncio.sleep", fake_sleep):
+                await retry_factory()
+            self.assertTrue(coord.create_background_task.called)
+            coord.create_background_task.call_args[0][0]().close()
+
+        self.loop.run_until_complete(run())
+
+    def test_wake_while_typing_skips_when_user_turn_takes_it(self):
+        """Submitting the typed message starts a turn that already sees it."""
+        coord = _make_coordinator()
+        coord.renderer.input_handler.buffer_manager.content = "half typed"
+        handler = MessageHandler(coordinator=coord)
+
+        async def run():
+            await handler.handle_llm_continue({"source": "hub:cli"}, MagicMock())
+            retry_factory = coord.create_background_task.call_args[0][0]
+            coord.create_background_task.reset_mock()
+
+            async def fake_sleep(_secs):
+                coord.renderer.input_handler.buffer_manager.content = ""
+                coord.is_processing = True
+
+            with patch("kollabor.llm.message_handler.asyncio.sleep", fake_sleep):
+                await retry_factory()
+            self.assertFalse(coord.create_background_task.called)
+            self.assertFalse(handler._retry_pending)
+
+        self.loop.run_until_complete(run())
+
+    def test_hub_continue_delivers_buffered_hub_message(self):
+        """A message buffered while busy must reach the turn its retry starts."""
+        coord = _make_coordinator()
+        coord.drain_pending_agent_hud = MagicMock(return_value="what is 17 times 3?")
+        handler = MessageHandler(coordinator=coord)
+
+        async def run():
+            await handler.handle_llm_continue({"source": "hub:cli"}, MagicMock())
+            await coord.create_background_task.call_args[0][0]()
+
+        self.loop.run_until_complete(run())
+        added = coord._add_conversation_message.call_args[0][0]
+        self.assertEqual(added.role, "user")
+        self.assertEqual(added.content, "what is 17 times 3?")
+        coord._continue_conversation.assert_awaited()
+
+    def test_stale_esc_latch_does_not_block_a_new_wake(self):
+        coord = _make_coordinator()
+        qp = coord._queue_processor
+        qp.cancel_processing = True
+        qp.cancel_origin = "human"
+        qp.turn_completed = True
+        handler = MessageHandler(coordinator=coord)
+
+        async def run():
+            await handler.handle_llm_continue({"source": "hub:cli"}, MagicMock())
+            await coord.create_background_task.call_args[0][0]()
+
+        self.loop.run_until_complete(run())
+        self.assertFalse(qp.cancel_processing)
+        coord._continue_conversation.assert_awaited()
+
     def test_retry_continue_never_cancels_busy_session(self):
         """A hub trigger during a long busy chain must wait, not cancel.
 

@@ -419,15 +419,10 @@ class MessageHandler:
             logger.info("TRIGGER_LLM_CONTINUE: Pipe mode active, skipping")
             return {"status": "pipe_mode"}
 
-        # Don't trigger during cooldown (user hit ESC to get a word in)
-        if time.monotonic() < self._hub_continue_paused_until:
-            logger.info("TRIGGER_LLM_CONTINUE: Cooldown active, skipping")
-            return {"status": "cooldown"}
-
-        # Don't trigger if user is typing (they're composing a message)
-        if self._user_is_typing():
-            logger.info("TRIGGER_LLM_CONTINUE: User is typing, deferring")
-            return {"status": "user_typing"}
+        # Cooldown (user hit ESC to get a word in) or a half-typed message:
+        # wait it out below instead of dropping the wake. A dropped wake left
+        # the agent silent for good.
+        blocked = self._hub_continue_blocked()
 
         try:
             # Hub continue: wraps _continue_conversation in a tool loop
@@ -436,14 +431,14 @@ class MessageHandler:
             async def _hub_continue():
                 qp = coord._queue_processor
                 if qp.cancel_processing:
-                    logger.info("Hub continue: cancel flag set, skipping")
-                    return
-                # Re-check cooldown and typing at execution time
-                if time.monotonic() < self._hub_continue_paused_until:
-                    logger.info("Hub continue: cooldown active at exec time, skipping")
-                    return
-                if self._user_is_typing():
-                    logger.info("Hub continue: user typing at exec time, skipping")
+                    if qp.is_processing or qp.cancel_origin == "remote_task":
+                        logger.info("Hub continue: cancel flag set, skipping")
+                        return
+                    # ESC latch from a drain that already stopped: the cooldown
+                    # gave the human their window, so a new wake runs.
+                    qp.cancel_processing = False
+                if qp.is_processing:
+                    logger.info("Hub continue: a turn is already running, it sees the message")
                     return
                 qp.is_processing = True
                 # Set turn_completed=False so _continue_conversation does not
@@ -463,6 +458,23 @@ class MessageHandler:
                 # error breaks. The checkpoint just logs progress every 5min.
                 chain_start = time.monotonic()
                 checkpoint_at = chain_start + 300
+                # A message that arrived while busy was buffered as HUD, and
+                # turn_completed=False keeps _continue_conversation from
+                # injecting it. Deliver it once, at chain start, or the turn it
+                # woke never sees it. (A direct wake already drained it: no-op.)
+                drain = getattr(coord, "drain_pending_agent_hud", None)
+                hud = drain() if callable(drain) else ""
+                if isinstance(hud, str) and hud:
+                    from kollabor_events.data_models import ConversationMessage
+
+                    coord.current_parent_uuid = coord._add_conversation_message(
+                        ConversationMessage(
+                            role="user",
+                            content=hud,
+                            metadata={"agent_hud": True, "agent_hud_sources": ["hub"]},
+                        ),
+                        parent_uuid=coord.current_parent_uuid,
+                    )
                 try:
                     await coord._continue_conversation()
                     turn_count = 0
@@ -545,7 +557,7 @@ class MessageHandler:
                             name="process_queue_drain_after_hub_continue",
                         )
 
-            if coord.is_processing:
+            if coord.is_processing or blocked:
                 # Coalesce: only one pending retry at a time. Peer messages
                 # arriving during a busy turn get added to conversation_history
                 # by the hub plugin before this handler runs, so a single
@@ -558,7 +570,8 @@ class MessageHandler:
 
                 self._retry_pending = True
                 logger.info(
-                    "TRIGGER_LLM_CONTINUE: Processing active, queuing for retry"
+                    "TRIGGER_LLM_CONTINUE: %s, queuing for retry",
+                    blocked or "Processing active",
                 )
 
                 async def _retry_continue():
@@ -574,8 +587,22 @@ class MessageHandler:
                         retry_start = time.monotonic()
                         checkpoint_at = retry_start + 300
                         give_up_at = retry_start + 3600  # drop retry, not session
-                        while coord.is_processing:
+                        # A chain running at trigger time may end without
+                        # answering, so it gets a retry. A turn that STARTS
+                        # while we wait (the human submitting their input,
+                        # another wake) already has the message in history.
+                        initial_busy = coord.is_processing
+                        while True:
                             now = time.monotonic()
+                            if not coord.is_processing:
+                                initial_busy = False
+                                if not self._hub_continue_blocked():
+                                    break
+                            elif not initial_busy:
+                                logger.info(
+                                    "TRIGGER_LLM_CONTINUE: a later turn took the message"
+                                )
+                                return
                             if now > give_up_at:
                                 logger.warning(
                                     "TRIGGER_LLM_CONTINUE: processing busy for "
@@ -591,21 +618,6 @@ class MessageHandler:
                                 )
                                 checkpoint_at = now + 300
                             await asyncio.sleep(1)
-                        if coord.cancel_processing:
-                            logger.info(
-                                "TRIGGER_LLM_CONTINUE: Cancelled by user, skipping retry"
-                            )
-                            return
-                        if time.monotonic() < self._hub_continue_paused_until:
-                            logger.info(
-                                "TRIGGER_LLM_CONTINUE: Cooldown active, skipping retry"
-                            )
-                            return
-                        if self._user_is_typing():
-                            logger.info(
-                                "TRIGGER_LLM_CONTINUE: User typing, skipping retry"
-                            )
-                            return
                         logger.info(
                             "TRIGGER_LLM_CONTINUE: Retrying after processing completed"
                         )
@@ -633,6 +645,14 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in TRIGGER_LLM_CONTINUE handler: {e}")
             return {"status": "error", "error": str(e)}
+
+    def _hub_continue_blocked(self) -> str:
+        """Why a hub wake must wait right now ("" when it may run)."""
+        if time.monotonic() < self._hub_continue_paused_until:
+            return "Cooldown active"
+        if self._user_is_typing():
+            return "User is typing"
+        return ""
 
     def _user_is_typing(self) -> bool:
         """Check if user has text in the input buffer.

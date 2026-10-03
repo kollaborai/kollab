@@ -543,6 +543,35 @@ class TestQueueProcessor(unittest.TestCase):
         ]
         self.assertFalse(any("output limit" in n for n in notices), notices)
 
+    def test_voice_ignore_period_is_not_drawn_on_screen(self):
+        self.processor.active_voice = {"epoch": "e", "reply_id": "r"}
+        self.renderer.pipe_mode = False
+        self.config.get = lambda key, default=None: 0 if key.endswith("delay") else default
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = ""
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.api_service.has_pending_tool_calls = MagicMock(return_value=False)
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.response_parser.parse_response.return_value = {
+            "content": ".",
+            "components": {},
+            "turn_completed": True,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.conversation_logger.log_assistant_message = AsyncMock(return_value="a")
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=(".", False, False)
+        )
+        self.message_display_service.display_complete_response = MagicMock()
+
+        self.loop.run_until_complete(self.processor._execute_llm_turn_inner(True, "parent"))
+
+        self.message_display_service.display_complete_response.assert_not_called()
+
     def test_voice_update_is_queued_before_tools_and_final_reply_uses_same_identity(self):
         order = []
         voice = {"epoch": "e", "reply_id": "request"}

@@ -414,3 +414,26 @@ async def test_no_flag_without_wait_and_none_on_a_failure(tmp_path):
     )
     assert not failed.success
     assert "end_turn" not in failed.metadata
+
+
+@pytest.mark.asyncio
+async def test_auto_wait_only_for_a_short_idle_line(tmp_path):
+    turn = _Turn(tmp_path)
+    idle = await turn.hub._handle_hub_msg_tool(
+        {"id": "t1", "to": "lapis", "content": "standing by."}
+    )
+    working = await turn.hub._handle_hub_msg_tool(
+        {
+            "id": "t2",
+            "to": "lapis",
+            "content": (
+                "kicked off the deploy for the relay service and the publisher, "
+                "waiting for CI on both branches, then I'll merge them and "
+                "verify the containers come back healthy on the host"
+            ),
+        }
+    )
+
+    assert idle.metadata["end_turn"] is True
+    assert working.metadata["wait"] is False
+    assert "end_turn" not in working.metadata

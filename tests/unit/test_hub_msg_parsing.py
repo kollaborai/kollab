@@ -370,6 +370,67 @@ class TestHubWakeDecision:
         assert decision.should_trigger is False
         assert decision.reason == "ack only"
 
+    def test_report_with_ack_inside_a_word_wakes(self):
+        # "stacks" contains "ack": substring matching parked a real report.
+        plugin = self._plugin()
+        message = _hub_message(
+            "I checked Docker on alzan-prod-home: daemon is reachable; 41 "
+            "containers are running. Compose stacks also report exited "
+            "services for buzz-prod and dsk."
+        )
+
+        decision = self._decide(plugin, message)
+
+        assert decision.mode == "wake"
+        assert decision.should_trigger is True
+
+    def test_long_report_opening_with_thanks_wakes(self):
+        plugin = self._plugin()
+        message = _hub_message(
+            "Thanks. Docker is reachable, 41 containers running and 14 stopped; "
+            "jellyfin exited with 137 and htpc-deluge with 128, both stopped "
+            "for about two weeks, so those services are down right now."
+        )
+
+        assert self._decide(plugin, message).should_trigger is True
+
+    def test_report_markers_need_whole_words(self):
+        plugin = self._plugin()
+        for text in (
+            "the migration is incomplete, still blocked on the schema",
+            "the old branch was abandoned",
+        ):
+            assert not plugin._has_report_evidence(
+                text, sender_has_active_task=False
+            ), text
+        assert plugin._has_report_evidence(
+            "migration completed", sender_has_active_task=False
+        )
+
+    def test_operator_message_always_wakes(self):
+        plugin = self._plugin()
+        meta = {"operator_message": True, "source": "cli"}
+        first = self._decide(plugin, _hub_message("thanks", msg_id="a", metadata=meta))
+        again = self._decide(plugin, _hub_message("thanks", msg_id="b", metadata=meta))
+        redelivered = self._decide(
+            plugin, _hub_message("thanks", msg_id="b", metadata=meta)
+        )
+
+        assert (first.mode, first.reason) == ("wake", "operator message")
+        assert again.should_trigger is True
+        assert redelivered.reason == "duplicate message id"
+
+    def test_operator_message_while_busy_buffers(self):
+        plugin = self._plugin()
+        message = _hub_message(
+            "hi", metadata={"operator_message": True, "source": "cli"}
+        )
+
+        decision = self._decide(plugin, message, is_processing=True)
+
+        assert decision.mode == "buffer"
+        assert decision.should_trigger is True
+
     def test_direct_question_wakes(self):
         plugin = self._plugin()
         message = _hub_message("Can you review the docs/gate commits?")
@@ -497,3 +558,30 @@ class TestNudgeEngine:
     def test_hub_loop_threshold_value(self):
         """Sanity check: threshold is 2 as defined in source."""
         assert HUB_LOOP_THRESHOLD == 3
+
+
+@pytest.mark.asyncio
+async def test_launch_prompt_is_not_broadcast_as_the_human():
+    """A spawned agent's task must not reach peers as '<user> -> lapis'."""
+    from unittest.mock import AsyncMock
+
+    hub = HubPlugin()
+    hub._started = True
+    hub._identity = SimpleNamespace(state="idle", identity="lapis")
+    hub._presence = SimpleNamespace(
+        discover_agents_async=AsyncMock(
+            return_value=[SimpleNamespace(identity="koordinator")]
+        )
+    )
+    hub._cli_args = None
+    hub._deliver_to_agent = AsyncMock()
+
+    await hub._broadcast_user_input(
+        {"message": "review the startup tips"}, SimpleNamespace(source="cli_initial")
+    )
+    hub._deliver_to_agent.assert_not_awaited()
+
+    await hub._broadcast_user_input(
+        {"message": "typed by the human"}, SimpleNamespace(source="user")
+    )
+    hub._deliver_to_agent.assert_awaited_once()

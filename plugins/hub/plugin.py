@@ -2974,7 +2974,11 @@ class HubPlugin(BasePlugin):
                 "going quiet",
                 "staying quiet",
             )
-            if any(phrase in content_lower for phrase in idle_phrases):
+            # Only a short idle line parks the sender: "waiting for CI, then
+            # I'll merge" inside a working message must not end the turn.
+            if len(content_lower.split()) <= self._ACK_MAX_WORDS and any(
+                phrase in content_lower for phrase in idle_phrases
+            ):
                 any_wait = True
                 logger.info(
                     f"Auto-wait: idle chatter in hub_msg to {target}: "
@@ -6646,6 +6650,12 @@ class HubPlugin(BasePlugin):
     )
 
     _request_marker_re = _compile_marker_pattern(_REQUEST_MARKERS)
+    _ack_marker_re = _compile_marker_pattern(_ACK_MARKERS)
+    _report_marker_re = _compile_marker_pattern(_REPORT_MARKERS)
+    _completion_marker_re = _compile_marker_pattern(("complete", "shipped", "resolved"))
+    # An acknowledgement is a line, not a report: "thanks" inside a paragraph
+    # of findings must not silence the findings.
+    _ACK_MAX_WORDS = 25
     _task_assignment_marker_re = _compile_marker_pattern(_TASK_ASSIGNMENT_MARKERS)
 
     def _normalize_hub_wake_content(self, content: str) -> str:
@@ -6666,7 +6676,9 @@ class HubPlugin(BasePlugin):
             return False
         if self._request_marker_re.search(text):
             return False
-        return any(marker in text for marker in self._ACK_MARKERS)
+        if len(text.split()) > self._ACK_MAX_WORDS:
+            return False
+        return bool(self._ack_marker_re.search(text))
 
     def _sender_has_active_task(self, message: HubMessage) -> bool:
         sender = getattr(message, "from_identity", "")
@@ -6723,9 +6735,9 @@ class HubPlugin(BasePlugin):
             return True
         if self._task_ledger_matches_report(content):
             return True
-        if any(marker in text for marker in self._REPORT_MARKERS):
-            if "done" in text and not sender_has_active_task:
-                return any(m in text for m in ("complete", "shipped", "resolved"))
+        if self._report_marker_re.search(text):
+            if re.search(r"\bdone\b", text) and not sender_has_active_task:
+                return bool(self._completion_marker_re.search(text))
             return True
         return False
 
@@ -6866,6 +6878,18 @@ class HubPlugin(BasePlugin):
             return HubWakeDecision("observe", False, "departure")
 
         metadata = message.metadata or {}
+        if message.scope == MessageScope.DIRECT.value and (
+            metadata.get("operator_message") or metadata.get("manual_wake")
+        ):
+            # A human addressed this agent (CLI, @agent, /hub wake): no content
+            # heuristic may park it. Only a true redelivery (same id) is dropped.
+            msg_id = getattr(message, "id", "") or ""
+            self._prune_hub_wake_cache(time.time())
+            if msg_id and msg_id in self._hub_wake_seen_ids:
+                return HubWakeDecision("observe", False, "duplicate message id")
+            if msg_id:
+                self._touch_wake_cache(self._hub_wake_seen_ids, msg_id, time.time())
+            return self._wake_or_buffer(message, llm_service, "operator message")
         if metadata.get("lifecycle_event") == "model_switch":
             return HubWakeDecision("observe", False, "model switch")
         if metadata.get("task_cron_ack"):
@@ -6902,6 +6926,11 @@ class HubPlugin(BasePlugin):
         if duplicate_reason:
             return HubWakeDecision("observe", False, duplicate_reason)
 
+        return self._wake_or_buffer(message, llm_service, wake_reason)
+
+    def _wake_or_buffer(
+        self, message: HubMessage, llm_service: Any, wake_reason: str
+    ) -> HubWakeDecision:
         is_busy = bool(getattr(llm_service, "is_processing", False))
         if not is_busy:
             self._hub_buffer_retry_queued = False
@@ -8135,6 +8164,13 @@ class HubPlugin(BasePlugin):
         # User typing wakes externally parked agents before broadcasting.
         if self._identity.state == "waiting":
             await self._exit_waiting_state()
+
+        # A launch prompt (`kollab "task"`, hub_spawn's task) is not the human
+        # typing here: broadcasting it showed a spawner's task to every peer as
+        # "<user> -> lapis". It never broadcast before ee60e38 routed it
+        # through USER_INPUT hooks.
+        if getattr(event, "source", None) == "cli_initial":
+            return data
 
         user_content = content_to_text(data.get("message") or "").strip()
         if not user_content:

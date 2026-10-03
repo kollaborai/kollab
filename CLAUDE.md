@@ -302,7 +302,8 @@ kollab --hub status                              # verify
 **Hub message attributes:**
 - `<hub_msg to="lapis">msg</hub_msg>` -- send, continue working (default)
 - `<hub_msg to="lapis" wait="true">msg</hub_msg>` -- send, then STOP: the sender's turn ends once the send succeeds (the result's `metadata["end_turn"]`, read by `_tool_results_requiring_followup` in `queue_processor.py`, for XML tags and native calls alike). Other tools in the reply still run; a rejected send, a "not online" warning or any failed tool keeps the turn going so the model sees the error
-- Auto-wait: messages with "standing by", "waiting for", "going quiet", "staying quiet" auto-set wait
+- Auto-wait: a short message (25 words or fewer) with "standing by", "waiting for", "going quiet", "staying quiet" auto-sets wait; a longer working message never does
+- `kollab --hub msg <agent>` / `@agent` / `/hub wake` are operator messages: they always wake the target (only a redelivered message id is dropped); a wake that lands while the human is typing or in the ESC cooldown waits instead of being dropped
 - Attributes come in any order and either quote style; tags with two or more attributes are built with `tag_pattern` / read with `tag_attrs` (`plugins/hub/xml_tags.py`), never a fixed-order regex
 
 **LLM response processing (unified pipeline):**
