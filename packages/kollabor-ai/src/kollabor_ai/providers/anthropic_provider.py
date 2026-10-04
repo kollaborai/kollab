@@ -32,7 +32,7 @@ from .models import (
 )
 from .registry import register_provider
 from .transformers import AnthropicResponseTransformer
-from .tuning import EffortStyle, effort_params, sampling_params
+from .tuning import EffortStyle, effort_params, sampling_params, thinking_params
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +511,7 @@ class AnthropicProvider(LLMProvider):
         # Mythos 5); effort is opt-in. Both decided in providers/tuning.py.
         request.update(sampling_params(self.config, self.model))
         request.update(effort_params(self.config, EffortStyle.ANTHROPIC))
+        request.update(thinking_params(self.model))
 
         # Add system message as cacheable content block
         # Anthropic prompt caching requires content block array format
