@@ -7,7 +7,8 @@ model picker. The input box stays usable during setup.
 
 Use `/voicemode status` to inspect setup/download progress, microphone activity,
 model warmup, transcription, speech playback and errors. The transcript file uses
-UTC timestamps. The compact status-row integration is currently under repair.
+UTC timestamps. The compact status row shows mic state and, when space permits,
+the latest transcript; it does not show the selected classifier or input-level meter.
 
 - `/voicemode` toggles voice for this chat.
 - `/voicemode on` makes this chat the responding conversation.
@@ -20,6 +21,82 @@ UTC timestamps. The compact status-row integration is currently under repair.
 - `/voicemode context` shows the recent transcript window (default 10 lines).
 - `/voicemode context 20` changes it to 20 lines; the allowed range is 1–50.
 - `/vm` and `/voice` are aliases. `/voicemodels` now shows status.
+
+## Flow at a glance
+
+```mermaid
+flowchart TD
+    Start["/voicemode on"] --> Plugin["VoicePlugin connects to device voice service"]
+    Plugin --> Prepare["Prepare local Whisper and Kokoro<br/>Prepare Laya if selected"]
+    Prepare --> Ready{"Service and selected classifier ready?"}
+    Ready -->|waiting| Poll["Poll readiness"]
+    Poll --> Ready
+    Ready -->|error| Failed["Show error; do not claim microphone"]
+    Ready -->|ready| Lease["Claim device microphone lease"]
+
+    Lease --> Capture["Recorder captures audio frames"]
+    Capture --> Segment["Segmenter groups speech into utterances"]
+    Segment --> STT["Local Whisper transcribes"]
+    STT --> Log["Append timestamped transcript"]
+    Log -.-> Status["Status row: mic state + latest transcript"]
+    Log --> Observe["VoicePlugin reads final transcript<br/>waits for speech to settle"]
+
+    Observe --> Classifier{"Selected classifier"}
+    Classifier -->|Laya default| Laya["Local Laya worker<br/>transcript + conversation context"]
+    Classifier -->|Provider option| Provider["Configured provider classifier"]
+    Laya --> Intent{"Decision"}
+    Provider --> Intent
+    Intent -->|Ignore| NoTurn["No chat turn; transcript stays logged"]
+    Intent -->|Respond or Laya defer| Admit["Admit selected IDs<br/>Laya-deferred IDs flagged uncertain"]
+    Admit --> Agent["Normal Kollab conversation and permission flow<br/>local or attached/Hub agent"]
+    Agent --> Reply["Voice-tagged reply<br/>display_text + spoken_text"]
+    Reply --> Review["Review spoken text<br/>one rewrite; provider final check if Laya rejects"]
+    Review -->|approved| Synthesize["Local speech queue + Kokoro synthesis"]
+    Review -->|rejected| Skip["Skip spoken output; written reply remains"]
+    Synthesize --> Play["Play on the microphone-owning device"]
+```
+
+## Intent decision detail
+
+The classifier selects which transcript IDs should wake the responding agent; it
+does not draft the answer. Provider classification is respond/ignore. Laya can
+also defer uncertain or unsupported speech to the main agent.
+
+```mermaid
+flowchart TD
+    Batch["Settled transcript batch<br/>up to 8 pending records + recent context"] --> Fresh{"Within 30 seconds<br/>or explicitly retried?"}
+    Fresh -->|No| Pending["Keep pending; retry explicitly<br/>(/voicemode retry)"]
+    Fresh -->|Yes| Route{"Selected classifier"}
+    Pending -->|/voicemode retry| Batch
+
+    Route -->|Laya default| Laya["Local Laya worker<br/>on the microphone-owning device"]
+    Route -->|Provider| Provider["Tool-free provider observer<br/>configured provider or attached agent"]
+
+    Laya --> Assess["Group connected utterances; consider<br/>conversation, transcript history,<br/>and assistant playback"]
+    Assess -->|Unsupported language, oversized,<br/>low confidence, or history conflict| Defer["Defer those IDs to main agent"]
+    Assess -->|Confident| LIntent{"Does the speaker address<br/>or continue with Kollab?"}
+    LIntent -->|Yes| LSelect["Select response IDs"]
+    LIntent -->|No| LIgnore["Ignore; keep as context"]
+    Defer --> LResult["Return response IDs plus deferred IDs<br/>with deferred IDs marked uncertain"]
+    LSelect --> LResult
+    LIgnore --> LResult
+
+    Provider --> PContext["Review transcript and limited context;<br/>do not run tools"]
+    PContext --> PResult["Return respond/ignore<br/>with transcript IDs"]
+    LResult --> Validate["Validate classifier result and IDs"]
+    PResult --> Validate
+
+    Validate -->|Error, timeout, invalid IDs| Retry["Keep speech pending; show error;<br/>explicit retry"]
+    Retry -->|/voicemode retry| Batch
+    Validate -->|Valid| Current{"Classifier and lease<br/>still current?"}
+    Current -->|No| Recheck["Do not admit a stale result"]
+    Current -->|Yes| Any{"Any response or deferred IDs?"}
+    Any -->|No: ignored only| NoTurn["No chat turn;<br/>retain transcript for context"]
+    Any -->|Yes| Expand["Include the full connected utterance<br/>when any segment is selected"]
+    Expand --> Guard["Recheck device ownership<br/>and duplicate-admission state"]
+    Guard --> Admit["Dispatch selected + deferred IDs<br/>deferred IDs marked uncertain"]
+    Admit --> Main["Main agent decides whether to answer;<br/>then normal permission/tool flow"]
+```
 
 Voice activates only through an explicit command. Starting another agent or
 inheriting an old enabled setting never starts its microphone. The latest
