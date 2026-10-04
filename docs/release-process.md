@@ -2,7 +2,7 @@
 title: "Release Process"
 doc_type: release-process
 created: 2026-05-04
-modified: 2026-05-04
+modified: 2026-10-03
 status: active
 ---
 # Release Process
@@ -31,6 +31,44 @@ Kollab uses SemVer-style versions:
 - major: breaking CLI, config, plugin, package, or API changes
 
 Use a `vX.Y.Z` Git tag for public releases.
+
+## Isolate Release Work From the Active Checkout
+
+Always prepare a release in a dedicated worktree based on the fetched target
+commit. This keeps release work isolated even when the active checkout is clean.
+Before starting, record the active checkout's `git status --short --branch`,
+`git rev-parse HEAD`, and the target remote commit. Review staged, unstaged, and
+untracked changes.
+
+- If the active checkout has any changes, do not edit or stage release files
+  there. Do not reset, stash, clean, restore, or switch that checkout.
+- Fetch the intended base and create a dedicated worktree and release branch at
+  that exact commit. Choose a path that does not already exist:
+
+  ```bash
+  git fetch origin main
+  git worktree add -b release/X.Y.Z ../kollab-release-X.Y.Z origin/main
+  cd ../kollab-release-X.Y.Z
+  git status --short --branch
+  git rev-parse HEAD
+  ```
+
+- Make and validate release changes only in that worktree. Stage explicit
+  release-owned paths; never use `git add -A` or `git add .` in a shared or
+  previously dirty checkout.
+- Before committing, verify the staged path list and diff contain only the
+  intended release metadata, lockfile, and changelog. Keep unrelated code and
+  documentation changes out of the release unless they are explicitly included
+  in the approved release scope.
+- Open the release-prep PR from the isolated branch. Wait for required CI checks,
+  merge it through the repository's normal process, and tag the exact resulting
+  commit on `main` only after verifying versions, changelog parity, and a clean
+  release commit. Push the tag deliberately to trigger publishing.
+- After merge or publication, do not automatically fast-forward, reset, clean,
+  or otherwise reconcile the original active checkout. Report that it remains
+  behind if applicable. Reconcile it only when explicitly requested, after
+  recording its status and proving the upstream commit does not overlap local
+  staged, unstaged, or untracked work; verify every local edit is preserved.
 
 ## Pre-Release Checklist
 
