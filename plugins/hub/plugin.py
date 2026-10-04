@@ -6445,7 +6445,7 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
-        profile_name, provider, model = self._active_model_details()
+        profile_name, provider, model, effort = self._active_model_details()
 
         # Build a summary of everyone on the hub for the announcement
         roster_lines = []
@@ -6467,6 +6467,7 @@ class HubPlugin(BasePlugin):
                     f"in project {self._identity.project}.\n"
                     f"cwd: {os.getcwd()}\n"
                     f"model: {model or 'unknown'}\n"
+                    f"effort: {effort or 'default'}\n"
                     f"provider: {provider or 'unknown'}\n"
                     f"profile: {profile_name or 'unknown'}\n"
                     f"current hub roster:\n{roster_summary}\n"
@@ -6479,29 +6480,39 @@ class HubPlugin(BasePlugin):
             await self._deliver_to_agent(peer, intro)
             logger.info(f"Announced to {peer.identity}")
 
-    def _active_model_details(self) -> Tuple[str, str, str]:
-        """Return the active profile name, provider, and model for notices."""
+    def _active_model_details(self) -> Tuple[str, str, str, str]:
+        """Return the active profile name, provider, model, and effort for notices."""
         if not self.event_bus or not hasattr(self.event_bus, "get_service"):
-            return "", "", ""
+            return "", "", "", ""
         try:
             profile_manager = self.event_bus.get_service("profile_manager")
             if not profile_manager or not hasattr(
                 profile_manager, "get_active_profile"
             ):
-                return "", "", ""
+                return "", "", "", ""
             profile = profile_manager.get_active_profile()
             if not profile:
-                return "", "", ""
+                return "", "", "", ""
             provider = profile.get_provider()
             model = profile.get_model()
-            return (
-                str(getattr(profile, "name", "") or ""),
-                str(provider or ""),
-                str(model or ""),
-            )
         except Exception as exc:
             logger.debug("active model lookup for hub notice failed: %s", exc)
-            return "", "", ""
+            return "", "", "", ""
+
+        effort = ""
+        get_effort = getattr(profile, "get_effort", None)
+        if callable(get_effort):
+            try:
+                effort = str(get_effort() or "")
+            except Exception as exc:
+                logger.debug("active effort lookup for hub notice failed: %s", exc)
+
+        return (
+            str(getattr(profile, "name", "") or ""),
+            str(provider or ""),
+            str(model or ""),
+            effort,
+        )
 
     async def announce_model_switch(
         self,
