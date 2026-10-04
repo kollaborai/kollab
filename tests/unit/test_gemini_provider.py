@@ -172,8 +172,23 @@ class TestGeminiProviderPrepareRequest:
         assert "functionDeclarations" in request["tools"][0]
         assert request["tools"][0]["functionDeclarations"][0]["name"] == "get_weather"
 
-    def test_prepare_request_keeps_every_system_message(self, provider_config):
-        """Two system messages both reach systemInstruction, in order."""
+    def test_prepare_request_leading_system_messages_concatenate(self, provider_config):
+        """Every leading system message reaches systemInstruction, in order."""
+        provider = GeminiProvider(provider_config)
+        messages = [
+            {"role": "system", "content": "first rule"},
+            {"role": "system", "content": "second rule"},
+            {"role": "user", "content": "hi"},
+        ]
+
+        request = provider._prepare_request(messages, tools=None)
+
+        texts = [part["text"] for part in request["systemInstruction"]["parts"]]
+        assert texts == ["first rule", "second rule"]
+        assert [c["role"] for c in request["contents"]] == ["user"]
+
+    def test_prepare_request_later_system_message_stays_in_place(self, provider_config):
+        """A mid-conversation system note must not touch systemInstruction."""
         provider = GeminiProvider(provider_config)
         messages = [
             {"role": "system", "content": "first rule"},
@@ -184,8 +199,10 @@ class TestGeminiProviderPrepareRequest:
         request = provider._prepare_request(messages, tools=None)
 
         texts = [part["text"] for part in request["systemInstruction"]["parts"]]
-        assert texts == ["first rule", "second rule"]
-        assert [c["role"] for c in request["contents"]] == ["user"]
+        assert texts == ["first rule"]
+        assert request["contents"] == [
+            {"role": "user", "parts": [{"text": "hi"}, {"text": "second rule"}]}
+        ]
 
     def test_prepare_request_no_system_message(self, provider_config):
         """Test request preparation without system message."""

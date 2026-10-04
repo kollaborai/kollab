@@ -14,7 +14,10 @@ current tool open, dropping" and returned nothing.
 
 import json
 
-from kollabor_ai.providers.gemini_transformer import GeminiResponseTransformer
+from kollabor_ai.providers.gemini_transformer import (
+    GeminiResponseTransformer,
+    GeminiStreamState,
+)
 from kollabor_ai.providers.models import ToolCallDelta
 from kollabor_ai.providers.transformers import ToolCallAccumulator
 
@@ -33,11 +36,17 @@ def _chunk(name, args, finish=None):
     }
 
 
-def _delta(name, args):
-    response = GeminiResponseTransformer.transform_streaming_chunk(
-        _chunk(name, args), "gemini-3.6-flash"
+def _only(chunk):
+    """The single response a one-part chunk yields."""
+    responses = GeminiResponseTransformer.transform_streaming_chunk(
+        chunk, "gemini-3.6-flash", GeminiStreamState()
     )
-    assert response is not None
+    assert len(responses) == 1
+    return responses[0]
+
+
+def _delta(name, args):
+    response = _only(_chunk(name, args))
     assert isinstance(response.delta, ToolCallDelta)
     return response.delta
 
@@ -101,9 +110,8 @@ def test_empty_args_still_complete():
 
 
 def test_text_chunks_are_untouched():
-    response = GeminiResponseTransformer.transform_streaming_chunk(
-        {"candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]}}]},
-        "gemini-3.6-flash",
+    response = _only(
+        {"candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]}}]}
     )
     assert response.delta.content == "hi"
 
@@ -149,9 +157,7 @@ def test_usage_survives_a_final_chunk_that_also_has_text():
     The early `return` on that part used to skip the usage block entirely, so
     the status bar read `0 tok | $0.00` for every Gemini turn.
     """
-    response = GeminiResponseTransformer.transform_streaming_chunk(
-        _usage_chunk([{"text": "done"}]), "gemini-3.6-flash"
-    )
+    response = _only(_usage_chunk([{"text": "done"}]))
     assert response.usage.total_tokens == 33
     assert response.usage.prompt_tokens == 11
     assert response.usage.completion_tokens == 22
@@ -159,24 +165,16 @@ def test_usage_survives_a_final_chunk_that_also_has_text():
 
 
 def test_usage_survives_a_final_chunk_that_also_has_a_tool_call():
-    response = GeminiResponseTransformer.transform_streaming_chunk(
-        _usage_chunk([{"functionCall": {"name": "a", "args": {}}}]),
-        "gemini-3.6-flash",
-    )
+    response = _only(_usage_chunk([{"functionCall": {"name": "a", "args": {}}}]))
     assert response.usage.total_tokens == 33
 
 
 def test_usage_only_chunk_still_works():
-    response = GeminiResponseTransformer.transform_streaming_chunk(
-        _usage_chunk([]), "gemini-3.6-flash"
-    )
+    response = _only(_usage_chunk([]))
     assert response.usage.total_tokens == 33
     assert response.is_final
 
 
 def test_mid_stream_chunk_without_usage_reports_none():
-    response = GeminiResponseTransformer.transform_streaming_chunk(
-        {"candidates": [{"content": {"parts": [{"text": "hi"}]}}]},
-        "gemini-3.6-flash",
-    )
+    response = _only({"candidates": [{"content": {"parts": [{"text": "hi"}]}}]})
     assert response.usage is None

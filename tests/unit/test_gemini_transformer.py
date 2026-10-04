@@ -10,7 +10,10 @@ Target: 75%+ coverage
 
 import pytest
 
-from kollabor_ai.providers.gemini_transformer import GeminiResponseTransformer
+from kollabor_ai.providers.gemini_transformer import (
+    GeminiResponseTransformer,
+    GeminiStreamState,
+)
 from kollabor_ai.providers.models import (
     ProviderType,
     TextContent,
@@ -377,9 +380,11 @@ class TestGeminiResponseTransformer:
             ],
         }
 
-        response = GeminiResponseTransformer.transform_streaming_chunk(
-            chunk, "gemini-2.0-flash"
+        responses = GeminiResponseTransformer.transform_streaming_chunk(
+            chunk, "gemini-2.0-flash", GeminiStreamState()
         )
+        assert len(responses) == 1
+        response = responses[0]
 
         assert response is not None
         assert isinstance(response.delta, TextDelta)
@@ -407,9 +412,11 @@ class TestGeminiResponseTransformer:
             ],
         }
 
-        response = GeminiResponseTransformer.transform_streaming_chunk(
-            chunk, "gemini-2.0-flash"
+        responses = GeminiResponseTransformer.transform_streaming_chunk(
+            chunk, "gemini-2.0-flash", GeminiStreamState()
         )
+        assert len(responses) == 1
+        response = responses[0]
 
         assert response is not None
         assert isinstance(response.delta, ToolCallDelta)
@@ -432,9 +439,11 @@ class TestGeminiResponseTransformer:
             },
         }
 
-        response = GeminiResponseTransformer.transform_streaming_chunk(
-            chunk, "gemini-2.0-flash"
+        responses = GeminiResponseTransformer.transform_streaming_chunk(
+            chunk, "gemini-2.0-flash", GeminiStreamState()
         )
+        assert len(responses) == 1
+        response = responses[0]
 
         assert response is not None
         assert response.is_final is True
@@ -443,10 +452,10 @@ class TestGeminiResponseTransformer:
 
     def test_streaming_empty_chunk(self):
         """Test handling empty streaming chunk."""
-        response = GeminiResponseTransformer.transform_streaming_chunk(
-            {}, "gemini-2.0-flash"
+        responses = GeminiResponseTransformer.transform_streaming_chunk(
+            {}, "gemini-2.0-flash", GeminiStreamState()
         )
-        assert response is None
+        assert responses == []
 
     def test_usage_metadata_parsing(self):
         """Test usage metadata is correctly parsed."""

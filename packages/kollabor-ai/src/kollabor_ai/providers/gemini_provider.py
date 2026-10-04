@@ -11,14 +11,19 @@ Implements LLMProvider interface for Google Gemini API with:
 
 import json
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+import re
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
-from ..message_content import serialize_gemini_parts
+from ..message_content import content_to_text, serialize_gemini_parts
 from .base import LLMProvider
 from .errors import map_httpx_error
-from .gemini_transformer import GeminiResponseTransformer
+from .gemini_transformer import (
+    SIGNATURE_KEY,
+    GeminiResponseTransformer,
+    GeminiStreamState,
+)
 from .models import (
     GeminiConfig,
     ProviderType,
@@ -34,6 +39,25 @@ logger = logging.getLogger(__name__)
 
 # Default Gemini API endpoint
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
+
+# Documented stand-in for a functionCall whose real thought signature is gone
+# (https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures).
+SKIP_SIGNATURE_VALIDATION = "skip_thought_signature_validator"
+
+
+def _requires_signature(model: str) -> bool:
+    """Gemini 3+ validates thought signatures on functionCall parts (400 if absent)."""
+    match = re.search(r"gemini-(\d+)", model)
+    return bool(match) and int(match.group(1)) >= 3
+
+
+def _parse_args(raw: Any) -> Dict[str, Any]:
+    """functionCall args must be an object; history stores them as a JSON string."""
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return {}
+    return args if isinstance(args, dict) else {}
 
 
 @register_provider(ProviderType.GEMINI)
@@ -222,6 +246,7 @@ class GeminiProvider(LLMProvider):
             url = self._build_url(stream=True)
 
             logger.debug(f"Gemini streaming call (model={self.model})")
+            state = GeminiStreamState()
 
             # Make streaming API call
             assert self._client is not None
@@ -253,14 +278,12 @@ class GeminiProvider(LLMProvider):
                         try:
                             chunk_data = json.loads(data_str)
 
-                            # Transform chunk
-                            streaming_response = (
-                                GeminiResponseTransformer.transform_streaming_chunk(
-                                    chunk_data, self.model
-                                )
-                            )
-
-                            if streaming_response:
+                            # One chunk can carry several parts
+                            for (
+                                streaming_response
+                            ) in GeminiResponseTransformer.transform_streaming_chunk(
+                                chunk_data, self.model, state
+                            ):
                                 yield streaming_response
 
                         except json.JSONDecodeError as e:
@@ -301,33 +324,7 @@ class GeminiProvider(LLMProvider):
         Returns:
             Gemini request payload
         """
-        # Extract system message
-        system_instruction = None
-        contents = []
-
-        for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content")
-
-            if role == "system":
-                # Every system message counts; a later one must not replace an
-                # earlier one, so their parts concatenate in order.
-                sys_parts = serialize_gemini_parts(content, self.resolve_media)
-                if system_instruction is None:
-                    system_instruction = {"parts": sys_parts}
-                else:
-                    system_instruction["parts"] = [
-                        *system_instruction["parts"],
-                        *sys_parts,
-                    ]
-            else:
-                # Convert role to Gemini format
-                gemini_role = "model" if role == "assistant" else role
-
-                # Build content parts
-                parts = serialize_gemini_parts(content, self.resolve_media)
-
-                contents.append({"role": gemini_role, "parts": parts})
+        system_parts, contents = self._convert_messages(messages)
 
         # Build request payload
         generation_config: Dict[str, Any] = {
@@ -343,8 +340,8 @@ class GeminiProvider(LLMProvider):
         }
 
         # Add system instruction if present
-        if system_instruction:
-            request_payload["systemInstruction"] = system_instruction
+        if system_parts:
+            request_payload["systemInstruction"] = {"parts": system_parts}
 
         # Transform tools to Gemini format
         if tools:
@@ -355,6 +352,145 @@ class GeminiProvider(LLMProvider):
         request_payload.update(kwargs)
 
         return request_payload
+
+    def _convert_messages(
+        self, messages: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Convert OpenAI-style history to (systemInstruction parts, contents).
+
+        - Only LEADING system messages go into systemInstruction. A later one
+          (hub roster, nudges) becomes a user-role text part at its position:
+          rewriting the early prefix would break implicit caching every time.
+        - Assistant ``tool_calls`` become functionCall parts, ``role: "tool"``
+          results become functionResponse parts (Gemini roles are user/model).
+        - Consecutive same-role contents merge, so all results of one step land
+          in ONE user content as Gemini requires.
+        """
+        system_parts: List[Dict[str, Any]] = []
+        contents: List[Dict[str, Any]] = []
+        calls: Dict[str, Tuple[str, bool]] = {}  # tool_call_id -> (name, echo id)
+        leading = True
+
+        for msg in messages:
+            role = msg.get("role")
+            if role == "system" and leading:
+                system_parts.extend(
+                    serialize_gemini_parts(msg.get("content"), self.resolve_media)
+                )
+                continue
+            leading = False
+
+            if role == "assistant":
+                contents.append(
+                    {"role": "model", "parts": self._model_parts(msg, calls)}
+                )
+            elif role == "tool":
+                contents.append(
+                    {"role": "user", "parts": [self._function_response(msg, calls)]}
+                )
+            else:  # user, or a mid-conversation system note
+                parts = serialize_gemini_parts(msg.get("content"), self.resolve_media)
+                contents.append({"role": "user", "parts": parts})
+
+        merged: List[Dict[str, Any]] = []
+        for content in contents:
+            if merged and merged[-1]["role"] == content["role"]:
+                merged[-1]["parts"].extend(content["parts"])
+            else:
+                merged.append(
+                    {"role": content["role"], "parts": list(content["parts"])}
+                )
+        for content in merged:
+            # A result must open its turn; a note that landed between a call and
+            # its result goes after it. sort() is stable.
+            content["parts"].sort(key=lambda part: "functionResponse" not in part)
+        return system_parts, merged
+
+    def _model_parts(
+        self, msg: Dict[str, Any], calls: Dict[str, Tuple[str, bool]]
+    ) -> List[Dict[str, Any]]:
+        """Parts of one assistant message, with its thought signatures re-attached.
+
+        Signatures come from ``msg["provider_reasoning"]`` and are sent ONLY
+        when it was captured from this provider AND model: a signature from
+        another model is invalid and 400s.
+        """
+        reasoning = msg.get("provider_reasoning") or {}
+        items: List[Dict[str, Any]] = []
+        if (
+            reasoning.get("provider") == ProviderType.GEMINI.value
+            and reasoning.get("model") == self.model
+        ):
+            items = reasoning.get("items") or []
+
+        tool_calls = msg.get("tool_calls") or []
+        content = msg.get("content")
+        parts: List[Dict[str, Any]] = (
+            serialize_gemini_parts(content or "", self.resolve_media)
+            if content or not tool_calls
+            else []
+        )
+
+        # Docs: the signature of a text response sits on its final part.
+        text_signature = next(
+            (
+                item[SIGNATURE_KEY]
+                for item in reversed(items)
+                if item.get("type") == "text" and item.get(SIGNATURE_KEY)
+            ),
+            None,
+        )
+        if text_signature:
+            for part in reversed(parts):
+                if "text" in part:
+                    part[SIGNATURE_KEY] = text_signature
+                    break
+
+        by_id = {i["id"]: i for i in items if i.get("type") == "functionCall"}
+        signed = any(
+            by_id.get(tc.get("id"), {}).get(SIGNATURE_KEY) for tc in tool_calls
+        )
+        for index, tool_call in enumerate(tool_calls):
+            function = tool_call.get("function") or {}
+            call_id = tool_call.get("id") or ""
+            item = by_id.get(call_id, {})
+            call: Dict[str, Any] = {
+                "name": function.get("name", ""),
+                "args": _parse_args(function.get("arguments")),
+            }
+            if item.get("api_id"):
+                call["id"] = call_id
+            part: Dict[str, Any] = {"functionCall": call}
+            if item.get(SIGNATURE_KEY):
+                part[SIGNATURE_KEY] = item[SIGNATURE_KEY]
+            elif index == 0 and not signed and _requires_signature(self.model):
+                # History without a real signature (another provider, an older
+                # session): the documented stand-in keeps validation quiet.
+                part[SIGNATURE_KEY] = SKIP_SIGNATURE_VALIDATION
+            parts.append(part)
+            calls[call_id] = (call["name"], bool(item.get("api_id")))
+        return parts
+
+    @staticmethod
+    def _function_response(
+        msg: Dict[str, Any], calls: Dict[str, Tuple[str, bool]]
+    ) -> Dict[str, Any]:
+        """One ``role: "tool"`` message as a functionResponse part.
+
+        The tool message carries no name; it comes from the assistant call it
+        answers. A result whose call is gone (compaction) goes in as text, since
+        a functionResponse with no matching functionCall is a 400.
+        """
+        call_id = msg.get("tool_call_id") or ""
+        text = content_to_text(msg.get("content") or "")
+        if call_id not in calls:
+            return {"text": f"[tool result {call_id}] {text}"}
+        name, echo_id = calls[call_id]
+        response: Dict[str, Any] = {"name": name, "response": {"result": text}}
+        if echo_id:
+            response["id"] = call_id
+        return {"functionResponse": response}
 
     def _build_url(self, stream: bool = False) -> str:
         """

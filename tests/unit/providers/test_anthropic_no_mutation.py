@@ -82,12 +82,20 @@ class AnthropicProviderMutationTests(unittest.TestCase):
 
         request = self.provider._prepare_request(messages)
 
+        # Local metadata is gone; the only addition is the cache breakpoint the
+        # provider puts on the newest user turn.
         self.assertEqual(
             request["messages"],
             [
                 {
                     "role": "user",
-                    "content": "<agent_hud>\n+ done\n</agent_hud>",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "<agent_hud>\n+ done\n</agent_hud>",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
                 }
             ],
         )

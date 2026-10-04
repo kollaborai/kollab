@@ -11,7 +11,10 @@ import json
 import pytest
 
 from kollabor_ai.providers.custom_provider import CustomConfig, CustomProvider
-from kollabor_ai.providers.gemini_transformer import GeminiResponseTransformer
+from kollabor_ai.providers.gemini_transformer import (
+    GeminiResponseTransformer,
+    GeminiStreamState,
+)
 from kollabor_ai.providers.models import OpenAIResponsesConfig, ProviderType
 from kollabor_ai.providers.openai_responses_provider import OpenAIResponsesProvider
 from kollabor_ai.providers.openai_responses_transformer import (
@@ -82,8 +85,13 @@ _GEMINI_USAGE = {
 
 
 def _gemini(*wire):
+    state = GeminiStreamState()
     return [
-        GeminiResponseTransformer.transform_streaming_chunk(c, "gemini") for c in wire
+        r
+        for c in wire
+        for r in GeminiResponseTransformer.transform_streaming_chunk(
+            c, "gemini", state
+        )
     ]
 
 
