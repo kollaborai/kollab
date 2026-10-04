@@ -93,8 +93,7 @@ class EveryPayloadBuilderIsGatedTests(unittest.TestCase):
 
     BUILDER_SOURCES = (
         "anthropic_provider.py",
-        "openai_provider.py",
-        "azure_provider.py",
+        "openai_provider.py",  # azure_provider.py builds through this one
         "gemini_provider.py",
         "custom_provider.py",
         "openrouter_provider.py",

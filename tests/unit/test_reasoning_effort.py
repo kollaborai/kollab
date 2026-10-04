@@ -212,7 +212,7 @@ class ModelEffortCommandTests(unittest.TestCase):
         sends_effort = {
             "anthropic": "anthropic_provider.py",
             "openai": "openai_provider.py",
-            "azure_openai": "azure_provider.py",
+            "azure_openai": "openai_provider.py",  # azure builds through it
             "openai_responses": "openai_responses_provider.py",
             "openrouter": "openrouter_provider.py",
             "custom": "custom_provider.py",

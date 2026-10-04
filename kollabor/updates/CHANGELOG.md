@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The prompt cache holds across new user and hub messages. Context blocks (session, hub status, `[env]` events) stay on the message they were first sent with; moving them to each new message rewrote history, so ChatGPT/Codex sessions fell back to the cached system prompt at every message.
+- ChatGPT/Codex requests send session headers and pass encrypted reasoning back, so the conversation stays cached and reasoning carries across turns and `/resume`.
+- Anthropic, OpenRouter (Anthropic routes) and Gemini requests keep their prompt cache across turns and send signed thinking or thought signatures back. Gemini tool calls and results are no longer dropped.
+- OpenAI-compatible providers report cache reads for DeepSeek, Kimi, Qwen, xAI and Z.AI, Azure streams report usage, and DeepSeek V4, GLM and Kimi get their reasoning back during tool loops.
+- Cost estimates no longer charge Anthropic and Gemini cache reads at full price on top of the cache discount.
+
 ## [0.11.2] - 2026-10-03
 
 ### Added

@@ -564,6 +564,7 @@ class KollaborConversationLogger:
         model: Optional[str] = None,
         thinking_content: Optional[List[str]] = None,
         tool_calls: Optional[List[Dict]] = None,
+        provider_reasoning: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Log assistant response with usage statistics.
 
@@ -574,6 +575,8 @@ class KollaborConversationLogger:
             model: Optional model name from API response (defaults to configured model)
             thinking_content: Optional list of thinking content blocks
             tool_calls: Optional list of tool call dicts with id, name, input keys
+            provider_reasoning: Provider-native reasoning artifacts, stored
+                verbatim so a resumed session can hand them back to the model
         """
         message_uuid = str(uuid4())
 
@@ -636,6 +639,9 @@ class KollaborConversationLogger:
                     usage_stats.get("thinking_duration") if usage_stats else None
                 ),
             }
+
+        if provider_reasoning:
+            message["provider_reasoning"] = provider_reasoning
 
         await self._append_to_jsonl(message)
 

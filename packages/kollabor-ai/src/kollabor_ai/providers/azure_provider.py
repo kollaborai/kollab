@@ -8,9 +8,7 @@ for Azure-specific endpoint format.
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
-from .message_sanitizer import strip_local_message_metadata
 from .models import (
     AzureOpenAIConfig,
     ProviderType,
@@ -19,7 +17,6 @@ from .models import (
 )
 from .openai_provider import OpenAIProvider
 from .registry import register_provider
-from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -210,58 +207,11 @@ class AzureOpenAIProvider(OpenAIProvider):
         stream: bool,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        """Build the request like OpenAIProvider, addressed to the deployment.
+
+        Sharing the parent's builder keeps Azure on the same stream_options
+        (usage and cached_tokens on streams), local-metadata stripping and
+        sampling rules; only the model name differs.
         """
-        Prepare request parameters for Azure OpenAI API.
-
-        Extends OpenAI provider to add Azure-specific parameters.
-
-        Args:
-            messages: Conversation messages
-            tools: Tool definitions (Anthropic format)
-            stream: Whether to enable streaming
-            **kwargs: Additional parameters
-
-        Returns:
-            Dictionary of API parameters
-        """
-        # Get base params from parent
-        # Note: We need to import OpenAIProvider's method reference
-        # Since we can't call super()._prepare_request_params due to inheritance,
-        # we'll replicate the logic here
-
-        from .transformers import ToolSchemaTransformer
-
-        prepared_messages = strip_local_message_metadata(messages)
-        for message in prepared_messages:
-            content = message.get("content")
-            if isinstance(content, (str, list)):
-                message["content"] = serialize_openai_chat_content(
-                    content, self.resolve_media
-                )
-
-        params: Dict[str, Any] = {
-            "model": self.config.deployment_id or self.model,
-            "messages": prepared_messages,
-            "stream": stream,
-            "max_tokens": self.config.max_tokens,
-        }
-
-        # Sampling params + opt-in effort. Matched on the model name, not the
-        # Azure deployment id.
-        params.update(sampling_params(self.config, self.model))
-        params.update(effort_params(self.config, EffortStyle.OPENAI))
-
-        # Transform tools to OpenAI format
-        if tools:
-            openai_tools = ToolSchemaTransformer.to_openai_format(tools)
-            params["tools"] = openai_tools
-
-        # Add any additional kwargs
-        params.update(kwargs)
-
-        # Azure-specific: extra_query parameters
-        # Some Azure OpenAI deployments require extra parameters
-        if "extra_query" in kwargs:
-            kwargs.pop("extra_query")
-
-        return params
+        kwargs.setdefault("model", self.config.deployment_id or self.model)
+        return super()._prepare_request_params(messages, tools, stream, **kwargs)

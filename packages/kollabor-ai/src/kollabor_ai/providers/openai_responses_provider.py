@@ -18,6 +18,7 @@ Chat Completions in several key ways:
 import copy
 import json
 import logging
+import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ..generated_image_artifacts import redact_generated_image_data
@@ -177,6 +178,24 @@ def _merge_function_call_items(
             output.append(copy.deepcopy(call))
 
 
+def _codex_session_headers(session_id: Optional[str]) -> Dict[str, str]:
+    """Routing headers that keep one conversation on one ChatGPT/Codex cache.
+
+    Names follow the Codex CLI (openai/codex, codex-rs/codex-api/src/requests/
+    headers.rs: ``session-id`` and ``thread-id``; client.rs also sends the
+    thread id as ``x-client-request-id``). Without them consecutive requests
+    land on different machines and miss the cached instructions+tools prefix.
+    """
+    if not session_id:
+        return {}
+    try:
+        ident = str(uuid.UUID(str(session_id)))
+    except ValueError:
+        # Codex ids are UUIDs; derive a stable one from any other session key.
+        ident = str(uuid.uuid5(uuid.NAMESPACE_URL, f"kollab:{session_id}"))
+    return {"session-id": ident, "thread-id": ident, "x-client-request-id": ident}
+
+
 def _stream_failure(event: str, data: Dict[str, Any]) -> ProviderError:
     """ProviderError carrying the server's own message for a failed stream.
 
@@ -255,6 +274,7 @@ class OpenAIResponsesProvider(LLMProvider):
         # httpx client (initialized in initialize())
         self._client: Optional[Any] = None
         self._generated_image_store: Optional[Any] = None
+        self._session_headers: Dict[str, str] = {}
 
         logger.debug(
             f"OpenAI Responses provider created (model={config.model}, store_responses={config.store_responses})"
@@ -344,6 +364,12 @@ class OpenAIResponsesProvider(LLMProvider):
     def set_generated_image_store(self, store: Optional[Any]) -> None:
         """Attach the private store used for completed hosted images."""
         self._generated_image_store = store
+
+    def set_session_context(self, session_id: Optional[str]) -> None:
+        """Take the conversation id that keys ChatGPT/Codex cache routing."""
+        self._session_headers = (
+            _codex_session_headers(session_id) if self._requires_streaming else {}
+        )
 
     async def call(
         self,
@@ -473,7 +499,10 @@ class OpenAIResponsesProvider(LLMProvider):
             # Use stream() context manager so httpx doesn't consume the body
             assert self._client is not None  # validated by _validate_initialized
             async with self._client.stream(
-                "POST", "/responses", json=request_params
+                "POST",
+                "/responses",
+                json=request_params,
+                headers=self._session_headers or None,
             ) as response:
                 if response.status_code >= 400:
                     error_data = {}
@@ -506,6 +535,7 @@ class OpenAIResponsesProvider(LLMProvider):
                 # Also accumulate text deltas in case the final payload
                 # has empty output (codex backend sends text via deltas only)
                 final_response = None
+                provider_reasoning = None
                 accumulated_text_parts: List[str] = []
                 async for chunk in self._parse_sse_stream(response):
                     if not chunk:
@@ -523,6 +553,7 @@ class OpenAIResponsesProvider(LLMProvider):
                         evt = raw_event.get("event", "")
                         if evt in OpenAIResponsesTransformer.FINAL_EVENTS:
                             final_response = raw_event.get("response", {})
+                            provider_reasoning = chunk.provider_reasoning
 
             if not final_response:
                 raise ProviderError(
@@ -571,6 +602,8 @@ class OpenAIResponsesProvider(LLMProvider):
                 self.model,
                 artifact_store=self._generated_image_store,
             )
+            if provider_reasoning:
+                unified.provider_reasoning = provider_reasoning
 
             image_items = [
                 item
@@ -640,7 +673,10 @@ class OpenAIResponsesProvider(LLMProvider):
             # Use stream() context manager for true SSE streaming
             assert self._client is not None  # validated by _validate_initialized
             async with self._client.stream(
-                "POST", "/responses", json=request_params
+                "POST",
+                "/responses",
+                json=request_params,
+                headers=self._session_headers or None,
             ) as response:
                 # Check for errors
                 if response.status_code >= 400:
@@ -682,6 +718,31 @@ class OpenAIResponsesProvider(LLMProvider):
         finally:
             await self._track_request_end()
 
+    def _reasoning_replay(
+        self, msg: Dict[str, Any], store: bool
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        """Reasoning items and message phase to re-send ahead of an assistant turn.
+
+        Only artifacts this provider and model produced go back; after a model
+        or provider switch the API would reject them. An encrypted item works
+        statelessly, an id-only item only when the server stored it.
+        """
+        reasoning = msg.get("provider_reasoning")
+        if (
+            not isinstance(reasoning, dict)
+            or reasoning.get("provider") != ProviderType.OPENAI_RESPONSES.value
+            or reasoning.get("model") != self.model
+        ):
+            return [], None
+        items = [
+            dict(item)
+            for item in reasoning.get("items") or []
+            if isinstance(item, dict)
+            and item.get("type") == "reasoning"
+            and (item.get("encrypted_content") or (store and item.get("id")))
+        ]
+        return items, reasoning.get("phase")
+
     def _prepare_request(
         self,
         messages: List[Dict[str, Any]],
@@ -717,6 +778,10 @@ class OpenAIResponsesProvider(LLMProvider):
             "stream": stream,
             "store": store_responses,
         }
+        if self._requires_streaming:
+            # Stateless ChatGPT/Codex turns carry reasoning forward as
+            # encrypted items; the Codex CLI requests them on every call.
+            params["include"] = ["reasoning.encrypted_content"]
         # An explicitly empty tool list is a tool-free request (for example the
         # voice observer). Hosted tools must not bypass that caller boundary.
         auto_hosted_images = (
@@ -751,19 +816,23 @@ class OpenAIResponsesProvider(LLMProvider):
                 )
             elif role == "assistant" and "tool_calls" in msg:
                 # Convert assistant tool_calls to Responses API function_call items
-                # First add the text content if any
+                # Reasoning goes first: the API pairs it with the items after it.
+                reasoning_items, phase = self._reasoning_replay(msg, store_responses)
+                input_messages.extend(reasoning_items)
+                # Then add the text content if any
                 text = msg.get("content")
                 if text:
                     if isinstance(text, list):
                         text = serialize_openai_responses_content(
                             text, self.resolve_media
                         )
-                    input_messages.append(
-                        {
-                            "role": "assistant",
-                            "content": text,
-                        }
-                    )
+                    assistant_item: Dict[str, Any] = {
+                        "role": "assistant",
+                        "content": text,
+                    }
+                    if phase:
+                        assistant_item["phase"] = phase
+                    input_messages.append(assistant_item)
                 # Then add each tool call as a function_call item
                 for tc in msg.get("tool_calls") or []:
                     func = tc.get("function", {})
@@ -781,12 +850,15 @@ class OpenAIResponsesProvider(LLMProvider):
                     content = serialize_openai_responses_content(
                         content, self.resolve_media
                     )
-                input_messages.append(
-                    {
-                        "role": role,
-                        "content": content,
-                    }
-                )
+                item: Dict[str, Any] = {"role": role, "content": content}
+                if role == "assistant":
+                    reasoning_items, phase = self._reasoning_replay(
+                        msg, store_responses
+                    )
+                    input_messages.extend(reasoning_items)
+                    if phase:
+                        item["phase"] = phase
+                input_messages.append(item)
             else:
                 input_messages.append(strip_local_message_metadata_from_message(msg))
 
@@ -914,6 +986,9 @@ class OpenAIResponsesProvider(LLMProvider):
         max_line_bytes = RESPONSES_MAX_SSE_LINE_BYTES
         completed_image_items: Dict[str, Dict[str, Any]] = {}
         completed_function_calls: List[Dict[str, Any]] = []
+        # Reasoning and message items from output_item.done: the Codex backend
+        # ends with an empty final output, so these are the only copy.
+        completed_output_items: List[Dict[str, Any]] = []
         pending_final: Optional[StreamingResponse] = None
 
         def accept_event(event_chunk: Optional[StreamingResponse]) -> bool:
@@ -933,6 +1008,11 @@ class OpenAIResponsesProvider(LLMProvider):
                         and done_item.get("type") == "function_call"
                     ):
                         completed_function_calls.append(done_item)
+                    elif isinstance(done_item, dict) and done_item.get("type") in (
+                        "reasoning",
+                        "message",
+                    ):
+                        completed_output_items.append(done_item)
                 elif event_name in OpenAIResponsesTransformer.FINAL_EVENTS:
                     response_payload = raw_payload.get("response")
                     if isinstance(response_payload, dict):
@@ -948,7 +1028,8 @@ class OpenAIResponsesProvider(LLMProvider):
                     )
                 pending_final = event_chunk
                 return True
-            return False
+            # A capture-only chunk (no raw_chunk) carries nothing to stream.
+            return event_chunk.raw_chunk is None
 
         def flush_event() -> Optional[StreamingResponse]:
             nonlocal current_event, current_data_lines
@@ -1042,6 +1123,18 @@ class OpenAIResponsesProvider(LLMProvider):
                 # the final payload alone.
                 if completed_function_calls and pending_final.finish_reason != "length":
                     pending_final.finish_reason = "tool_calls"
+                pending_final.provider_reasoning = (
+                    OpenAIResponsesTransformer.provider_reasoning(
+                        completed_output_items
+                        or (
+                            response_payload.get("output")
+                            if isinstance(response_payload, dict)
+                            else None
+                        )
+                        or [],
+                        self.model,
+                    )
+                )
                 yield pending_final
 
         except ProviderError:
@@ -1106,6 +1199,16 @@ class OpenAIResponsesProvider(LLMProvider):
                 chunk = OpenAIResponsesTransformer.transform_streaming_chunk(
                     event_data, self.model
                 )
+                if (
+                    chunk is None
+                    and event == "response.output_item.done"
+                    and isinstance(item, dict)
+                    and item.get("type") in ("reasoning", "message")
+                ):
+                    # Nothing to stream (encrypted reasoning, output_text), but
+                    # the item is a continuity artifact; the stream parser
+                    # records it and drops this chunk (raw_chunk is None).
+                    chunk = StreamingResponse(delta=TextDelta(content=""))
                 if chunk and event == "response.output_item.done":
                     chunk._raw_payload = event_data
                 return chunk

@@ -875,7 +875,21 @@ class ConversationManager:
                                 "content": content,
                                 "timestamp": data.get("timestamp"),
                                 "parent_uuid": None,
-                                "metadata": {},
+                                # Resume rebuilds text-only history (tool_calls are
+                                # not restored), so only a turn without tool_use can
+                                # take its reasoning back in its original shape.
+                                "metadata": (
+                                    {"provider_reasoning": data["provider_reasoning"]}
+                                    if data.get("provider_reasoning")
+                                    and not any(
+                                        isinstance(item, dict)
+                                        and item.get("type") == "tool_use"
+                                        for item in (
+                                            data.get("message", {}).get("content") or []
+                                        )
+                                    )
+                                    else {}
+                                ),
                                 "session_id": session_file.stem.replace("session_", ""),
                             }
                         )

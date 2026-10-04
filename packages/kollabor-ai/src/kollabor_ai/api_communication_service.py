@@ -24,6 +24,7 @@ from kollabor_ai.generated_image_artifacts import (
 )
 from kollabor_ai.message_content import (
     contains_image_content,
+    prepend_text,
     redact_media_data,
 )
 from kollabor_ai.model_registry import supports_vision
@@ -152,6 +153,11 @@ class APICommunicationService:
 
         # Reasoning/thinking content from last response
         self.last_thinking_content: Optional[str] = None
+
+        # Provider-native reasoning artifacts from the last response (encrypted
+        # reasoning items, signed thinking blocks). The caller stores them on
+        # the assistant history message; the provider re-sends them next turn.
+        self.last_provider_reasoning: Optional[Dict[str, Any]] = None
 
         # Raw upstream payload from last response. For streaming providers
         # this is a list of raw SSE chunk dicts; for non-streaming it is the
@@ -350,12 +356,20 @@ class APICommunicationService:
             )
 
     def _configure_generated_image_store(self) -> None:
-        """Attach the session-private artifact store to providers that support it."""
+        """Push per-conversation state into the provider before each call.
+
+        Attaches the session-private artifact store and the session id (the
+        ChatGPT/Codex backend keys cache routing on it) to providers that
+        accept them.
+        """
         if self._provider is None:
             return
         set_store = getattr(self._provider, "set_generated_image_store", None)
         if callable(set_store):
             set_store(self._ensure_generated_image_store())
+        set_session = getattr(self._provider, "set_session_context", None)
+        if callable(set_session):
+            set_session(self.current_session_id)
 
     def open_generated_artifact(self, media_id: str) -> bool:
         """Open one generated image by opaque media ID."""
@@ -1007,6 +1021,7 @@ class APICommunicationService:
         logger.debug(f"Provider non-streaming call (model={self.model})")
         self._configure_generated_image_store()
         self.last_generated_images = []
+        self.last_provider_reasoning = None
 
         # Call provider
         response: UnifiedResponse = await self._provider.call(
@@ -1014,6 +1029,7 @@ class APICommunicationService:
             tools=tools,
             **getattr(self, "_provider_kwargs", {}),
         )
+        self.last_provider_reasoning = response.provider_reasoning
 
         # Extract token usage
         self.last_token_usage = {
@@ -1075,6 +1091,8 @@ class APICommunicationService:
         logger.debug(f"Provider streaming call (model={self.model})")
         self._configure_generated_image_store()
         self.last_generated_images = []
+        self.last_provider_reasoning = None
+        provider_reasoning: Optional[Dict[str, Any]] = None
 
         # A failed/missing usage trailer must not inherit the previous turn's
         # estimate state.
@@ -1231,6 +1249,10 @@ class APICommunicationService:
                 if streaming_response.finish_reason:
                     final_stop_reason = streaming_response.finish_reason
 
+                # A provider emits its complete reasoning dict once.
+                if streaming_response.provider_reasoning:
+                    provider_reasoning = streaming_response.provider_reasoning
+
                 # Accumulate usage from any chunk that carries it
                 # Anthropic sends input_tokens in message_start and
                 # output_tokens in message_delta (not message_stop)
@@ -1343,6 +1365,7 @@ class APICommunicationService:
             self.last_thinking_content = (
                 "".join(thinking_parts) if thinking_parts else None
             )
+            self.last_provider_reasoning = provider_reasoning
 
             logger.debug(
                 f"Provider streaming complete (tokens={self.last_token_usage.get('total_tokens', 0)}, "
@@ -1473,6 +1496,14 @@ class APICommunicationService:
                 role, content = msg["role"], msg["content"]
                 meta = msg.get("metadata", {}) or {}
 
+            # Context blocks the model was given with this message (the queue
+            # processor's injection rail). They go out with it on every later
+            # request too, so the prompt prefix a provider cached never changes.
+            if meta.get("injected_context"):
+                content = prepend_text(
+                    f"{meta['injected_context']}\n\n---\n\n", content
+                )
+
             formatted: dict[str, Any] = {"role": role, "content": content}
 
             # Preserve tool_calls for assistant messages
@@ -1484,6 +1515,12 @@ class APICommunicationService:
             # (needed by Responses API to build function_call_output items)
             if meta.get("tool_call_id"):
                 formatted["tool_call_id"] = meta["tool_call_id"]
+
+            # Provider-native reasoning artifacts for continuity. The key is
+            # local-only: a provider reads it before stripping and re-sends it
+            # only when provider and model match its own.
+            if meta.get("provider_reasoning"):
+                formatted["provider_reasoning"] = meta["provider_reasoning"]
 
             # Preserve HUD labels for raw logs. Provider adapters ignore
             # these keys, but _raw.jsonl consumers need to distinguish
@@ -1864,6 +1901,14 @@ class APICommunicationService:
             List of ToolUseContent objects from last response
         """
         return self.last_tool_calls
+
+    def get_last_provider_reasoning(self) -> Optional[Dict[str, Any]]:
+        """Get the provider-native reasoning artifacts from the last response.
+
+        Returns:
+            {"provider", "model", "items"} or None when the response had none.
+        """
+        return self.last_provider_reasoning
 
     def format_tool_result(
         self, tool_id: str, result: Any, is_error: bool = False

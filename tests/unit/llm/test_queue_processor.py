@@ -109,6 +109,44 @@ class TestQueueProcessor(unittest.TestCase):
         """Clean up."""
         self.loop.close()
 
+    def test_context_blocks_never_move_off_a_message_the_model_saw(self):
+        """Blocks stay where they were attached; state is re-sent only on change.
+
+        Moving them to each new user message rewrote the previous one, and a
+        prefix-caching provider fell back to the system prompt every turn.
+        """
+        history = self.conversation_history
+        attach = self.processor._attach_context
+        injected = lambda m: m.metadata.get("injected_context")  # noqa: E731
+
+        first = ConversationMessage(role="user", content="task")
+        history.append(first)
+        attach([("context:session", "S1"), ("hub_live", "H1"), ("", "[env] +mcp:a")])
+        self.assertEqual(injected(first), "S1\n\n---\n\nH1\n\n---\n\n[env] +mcp:a")
+        self.assertEqual(first.content, "task")
+
+        # tool loop: unchanged state is not re-sent, a one-shot rides the tail
+        history.append(ConversationMessage(role="assistant", content="calling"))
+        tool = ConversationMessage(role="tool", content="out", metadata={"tool_call_id": "t1"})
+        history.append(tool)
+        attach([("context:session", "S1"), ("hub_live", "H1")])
+        self.assertIsNone(injected(tool))
+        attach([("context:session", "S1"), ("", "[env] +mcp:b")])
+        self.assertEqual(injected(tool), "[env] +mcp:b")
+
+        # next user message: only what changed, and the first message is untouched
+        second = ConversationMessage(role="user", content="next")
+        history.append(second)
+        attach([("context:session", "S1"), ("hub_live", "H2")])
+        self.assertEqual(injected(second), "H2")
+        self.assertEqual(injected(first), "S1\n\n---\n\nH1\n\n---\n\n[env] +mcp:a")
+
+        # compaction dropped the carrier: the state goes out again
+        third = ConversationMessage(role="user", content="after compaction")
+        history[:] = [second, third]
+        attach([("context:session", "S1"), ("hub_live", "H2")])
+        self.assertEqual(injected(third), "S1")
+
     def test_cancelled_pre_request_never_calls_provider(self):
         self.event_bus.emit_with_hooks.return_value = {"cancelled": True}
         with self.assertRaises(asyncio.CancelledError):
@@ -355,8 +393,8 @@ class TestQueueProcessor(unittest.TestCase):
         process_batch_fn.assert_called_once_with(["msg1", "msg2"])
         self.assertFalse(self.processor.is_processing)
 
-    def test_context_injection_is_ephemeral_for_wire_request(self):
-        """Context blocks reach the request but do not persist in history."""
+    def test_context_blocks_ride_in_metadata_not_content(self):
+        """Context blocks reach the request without rewriting the message text."""
 
         class ContextService:
             def increment_turn(self):
@@ -375,13 +413,16 @@ class TestQueueProcessor(unittest.TestCase):
                 return None
 
             def drain_ephemeral_injections(self):
-                return ["[legacy context]"]
+                return [("", "[legacy context]")]
 
         wire_contents = []
 
         async def capture_request(**kwargs):
             wire_contents.append(
-                [message.content for message in kwargs["conversation_history"]]
+                [
+                    (message.content, message.metadata.get("injected_context"))
+                    for message in kwargs["conversation_history"]
+                ]
             )
             return "test response"
 
@@ -423,12 +464,7 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.assertEqual(
             wire_contents,
-            [
-                [
-                    "[ephemeral context]\n\n---\n\n"
-                    "[legacy context]\n\n---\n\noriginal prompt"
-                ]
-            ],
+            [[("original prompt", "[ephemeral context]\n\n---\n\n[legacy context]")]],
         )
         native_tools_provider = self.streaming_handler.call_llm.call_args.kwargs[
             "native_tools_provider"

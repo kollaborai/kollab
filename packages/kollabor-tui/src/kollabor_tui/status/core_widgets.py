@@ -372,7 +372,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
     """Render message/token/cost stats widget.
 
     Width-aware formats (dynamic thresholds based on actual content length):
-    - Extended: "0 msg | 0 tok | $0.00 | cache 0"
+    - Extended: "0 msg | 0 tok | $0.00 | ⟳ 0"  (⟳ = cache-read tokens, green)
     - Full:     "0 msg | 0 tok | $0.00"
     - Compact:  "0m|0t|$0"
     - Minimal:  "$0.42"

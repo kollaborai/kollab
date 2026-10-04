@@ -975,7 +975,14 @@ class ResumeConversationPlugin:
         for msg in raw_messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            loaded_messages.append(ConversationMessage(role=role, content=content))
+            reasoning = (msg.get("metadata") or {}).get("provider_reasoning")
+            loaded_messages.append(
+                ConversationMessage(
+                    role=role,
+                    content=content,
+                    metadata={"provider_reasoning": reasoning} if reasoning else {},
+                )
+            )
 
             if role in ("user", "assistant"):
                 visible = content
@@ -1027,7 +1034,14 @@ class ResumeConversationPlugin:
         for msg in raw_messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            loaded_messages.append(ConversationMessage(role=role, content=content))
+            reasoning = (msg.get("metadata") or {}).get("provider_reasoning")
+            loaded_messages.append(
+                ConversationMessage(
+                    role=role,
+                    content=content,
+                    metadata={"provider_reasoning": reasoning} if reasoning else {},
+                )
+            )
 
             if role in ("user", "assistant"):
                 messages_for_display.append({"role": role, "content": content})

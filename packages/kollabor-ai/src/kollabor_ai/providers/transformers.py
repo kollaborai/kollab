@@ -36,9 +36,10 @@ def _openai_cache_tokens(usage: Dict[str, Any]) -> tuple[int, int]:
     details = usage.get("prompt_tokens_details", {}) or {}
     read = 0
     for key in (
-        "cached_tokens",
+        "cached_tokens",  # OpenAI, Azure, z.ai, xAI, Qwen (nested); Kimi (top level)
         "cache_read_tokens",
         "cache_read_input_tokens",
+        "prompt_cache_hit_tokens",  # DeepSeek (top level)
     ):
         read = details.get(key, usage.get(key, 0)) or 0
         if read:
@@ -69,11 +70,107 @@ def _has_openai_usage_fields(usage: Dict[str, Any]) -> bool:
         "cache_creation_tokens",
         "cache_creation_input_tokens",
         "cache_write_tokens",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
     }
     if any(usage.get(key) for key in known):
         return True
     details = usage.get("prompt_tokens_details")
     return isinstance(details, dict) and bool(details)
+
+
+# reasoning_content continuity for OpenAI-compatible chat endpoints. Matched on
+# the model id with any "vendor/" path stripped. Sources (checked 2026-10-03):
+#   deepseek-v4*: with `tools` in the request every assistant message must
+#     return its reasoning_content or the API answers 400 ("all"); without
+#     tools it is ignored. https://api-docs.deepseek.com/guides/thinking_mode/
+#   glm-*: the thinking must be returned unmodified inside a tool loop for
+#     coherence and cache hits; earlier turns are cleared server-side unless
+#     preserved thinking is on ("loop").
+#     https://docs.z.ai/guides/capabilities/thinking-mode
+#   kimi-*: keep reasoning_content across the tool-call loop; across user
+#     turns it is ignored unless thinking.keep is set ("loop").
+#     https://platform.kimi.ai/docs/guide/use-kimi-k2-thinking-model
+# Not replayed: qwen* (read only when preserve_thinking=true is also sent),
+# grok-*, and every model whose chat endpoint does not return reasoning_content.
+_REASONING_REPLAY = (
+    ("deepseek-v4", "all"),
+    ("glm-", "loop"),
+    ("kimi-", "loop"),
+)
+
+
+def reasoning_replay_mode(model: str) -> Optional[str]:
+    """How `model` wants reasoning_content back: "all", "loop" or None."""
+    name = (model or "").lower().rsplit("/", 1)[-1]
+    for prefix, mode in _REASONING_REPLAY:
+        if name.startswith(prefix):
+            return mode
+    return None
+
+
+def chat_provider_reasoning(
+    provider: Any, model: str, text: str
+) -> Optional[Dict[str, Any]]:
+    """Wrap captured reasoning_content in the shared provider_reasoning dict.
+
+    Captured only for models that replay it, so history does not carry thinking
+    nobody will send back.
+    """
+    if not text or reasoning_replay_mode(model) is None:
+        return None
+    return {
+        "provider": getattr(provider, "value", provider),
+        "model": model,
+        "items": [{"type": "reasoning_content", "text": text}],
+    }
+
+
+def replay_reasoning_content(
+    raw_messages: List[Dict[str, Any]],
+    prepared_messages: List[Dict[str, Any]],
+    provider: Any,
+    model: str,
+    has_tools: bool,
+) -> None:
+    """Re-emit stored reasoning_content on assistant messages, in place.
+
+    `raw_messages` are the messages before strip_local_message_metadata (which
+    drops provider_reasoning); `prepared_messages` the same list after it. Only
+    reasoning captured from this provider and model is sent back.
+    """
+    mode = reasoning_replay_mode(model)
+    if mode is None or (mode == "all" and not has_tools):
+        return
+    provider_value = getattr(provider, "value", provider)
+    start = 0
+    if mode == "loop":
+        last_user = max(
+            (i for i, m in enumerate(raw_messages) if m.get("role") == "user"),
+            default=-1,
+        )
+        start = last_user + 1
+    for index, (raw, out) in enumerate(zip(raw_messages, prepared_messages)):
+        if index < start or raw.get("role") != "assistant":
+            continue
+        stored = raw.get("provider_reasoning")
+        text = ""
+        if (
+            isinstance(stored, dict)
+            and stored.get("provider") == provider_value
+            and stored.get("model") == model
+        ):
+            text = "".join(
+                item.get("text", "")
+                for item in stored.get("items") or []
+                if isinstance(item, dict) and item.get("type") == "reasoning_content"
+            )
+        if text:
+            out["reasoning_content"] = text
+        elif mode == "all":
+            # History from before this model (resume, model switch): the API
+            # wants the field on every assistant message.
+            out["reasoning_content"] = ""
 
 
 # Gemini's function_declarations take a restricted OpenAPI 3.0 Schema subset,
@@ -524,7 +621,9 @@ class OpenAIResponseTransformer:
         return None
 
     @staticmethod
-    async def iter_chunks(stream: Any, model: str) -> AsyncIterator[StreamingResponse]:
+    async def iter_chunks(
+        stream: Any, model: str, provider: Any = None
+    ) -> AsyncIterator[StreamingResponse]:
         """Unified chunks for an OpenAI chat stream, one delta per response.
 
         A chunk may carry several tool_calls entries (backends that send
@@ -532,12 +631,21 @@ class OpenAIResponseTransformer:
         finish_reason on the last. Only a call's first chunk carries its real
         ``id``; later fragments have just the ``index``, so ids are resolved
         here per stream (a synthetic one if the backend never sends any).
+
+        With ``provider`` set, ``delta.reasoning_content`` is collected for
+        models that replay it and attached as ``provider_reasoning`` to the
+        first final chunk (reasoning always precedes the answer).
         """
         tool_ids: Dict[Any, str] = {}
+        reasoning_parts: List[str] = []
+        reasoning_sent = False
+        collect = provider is not None and reasoning_replay_mode(model) is not None
         async for raw in stream:
             chunk = raw.model_dump()
             choice = (chunk.get("choices") or [{}])[0]
             delta = choice.get("delta") or {}
+            if collect and delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
             entries = delta.get("tool_calls") or []
             pieces = [] if entries else [chunk]
             for pos, entry in enumerate(entries):
@@ -554,11 +662,16 @@ class OpenAIResponseTransformer:
             for piece in pieces:
                 response = OpenAIResponseTransformer.transform_openai_chunk(piece, model)
                 if response:
+                    if collect and response.is_final and not reasoning_sent:
+                        response.provider_reasoning = chat_provider_reasoning(
+                            provider, model, "".join(reasoning_parts)
+                        )
+                        reasoning_sent = response.provider_reasoning is not None
                     yield response
 
     @staticmethod
     def transform_openai_response(
-        response: Dict[str, Any], model: str
+        response: Dict[str, Any], model: str, provider: Any = None
     ) -> UnifiedResponse:
         """
         Transform complete OpenAI response to unified format.
@@ -566,6 +679,8 @@ class OpenAIResponseTransformer:
         Args:
             response: Raw OpenAI response dict
             model: Model name
+            provider: Calling provider type; when set, message.reasoning_content
+                is kept as provider_reasoning for models that replay it
 
         Returns:
             UnifiedResponse with all content blocks
@@ -629,6 +744,12 @@ class OpenAIResponseTransformer:
             cache_creation_tokens=cache_creation,
         )
 
+        reasoning = (
+            chat_provider_reasoning(provider, model, message.get("reasoning_content"))
+            if provider is not None
+            else None
+        )
+
         return UnifiedResponse(
             content=content_blocks,
             usage=usage,
@@ -636,6 +757,7 @@ class OpenAIResponseTransformer:
             provider=ProviderType.OPENAI,
             finish_reason=finish_reason,
             raw_response=response,
+            provider_reasoning=reasoning,
         )
 
 

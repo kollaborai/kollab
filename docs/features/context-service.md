@@ -179,17 +179,28 @@ failure mode we're trying to fix.
 
 ### The solution
 
-Inject runtime state as an **ephemeral user message** at the tail of
-the request, using a bracketed prefix convention. The injection:
+Attach runtime state to the **newest message** in the conversation (a
+user message or tool result the provider has never seen), using a
+bracketed prefix convention. The block:
 
-1. Is built at request-time by `context_service.curator.build_injection()`
-2. Is added to the request `messages` list just before sending
-3. Is NOT persisted to `conversation_manager.messages`
-4. Is DISCARDED after the request completes
-5. Uses `role: "user"` (not `system`) for provider compatibility
-6. Has content starting with `[context service]` or
-   `[context service: curator]` as a runtime marker the model
-   recognizes from the static system prompt
+1. Is built at request time (curator, snapshot, confirmation, the
+   `[context]` session/hub blocks, the hub's live status, `[env]` events)
+2. Rides in that message's `metadata["injected_context"]`;
+   `APICommunicationService._prepare_messages` puts it in front of the
+   message content on the wire
+3. Stays on that message for every later request: what the model saw
+   never changes
+4. Never touches `content`, so display, the conversation log, saves and
+   resume never see it
+5. Is keyed when it is state (`context:session`, `hub_live`, ...): a keyed
+   block is sent again only when its text changed or the message carrying
+   it left the history (compaction, resume). Unkeyed blocks are one-shot
+   notices
+6. Has content starting with a bracketed marker such as
+   `[context service]` or `[context]` that the model recognizes from the
+   static system prompt
+
+The attach logic is `QueueProcessor._attach_context`.
 
 ### Why user role, not system role
 
@@ -212,10 +223,10 @@ tool_result, both of which are user-role in openai format),
 appending the injection as its own message would produce a
 consecutive user pair on those strict providers.
 
-**ContextService's default strategy is to MERGE** the injection
-into the existing last user message (or append if the last message
-is assistant-role) using a `---` separator. This always produces a
-valid request on every provider, no capability detection needed.
+So the block is **merged** into the newest user or tool message with a
+`---` separator instead of being sent as its own message. This always
+produces a valid request on every provider, no capability detection
+needed.
 
 The static system prompt teaches the model:
 
@@ -227,23 +238,23 @@ showing you the tool output AND a runtime notice together. Treat
 each section independently.
 ```
 
-The merge is lexical — literally `msg.content += "\n\n---\n\n" +
-injection_payload` at request build time. After the request, only
-the tool_result (or original user text) portion is persisted back
-to `conversation_manager.messages`; the `---` and everything after
-it are stripped. The injection never ends up in history.
+The merge is lexical, `injected_context + "\n\n---\n\n" + content`, and
+happens only on the wire (`_prepare_messages`). The stored message keeps
+its original content.
 
 ### Why this preserves cache
 
-Prefix caching works by hashing messages from position 0 up to the
-last unchanged message. Because the ephemeral injection happens at
-the TAIL of the request and is NEVER written back to history, the
-prefix up to the last real message is bit-identical between turns.
-Providers with prefix caching (anthropic, openrouter, xai) can reuse
-the cached KV state for everything before the injection.
+Prefix caching reuses everything up to the first byte that differs from
+an earlier request. A block attached once and never moved keeps every
+earlier message byte-identical, so each request is the previous one plus
+new messages and reads the whole conversation from cache.
 
-Only the last ~1KB (the injection + any new user input) has to be
-reprocessed. That's the whole point.
+The earlier design re-attached the blocks to each new user message and
+stripped them from the previous one. That rewrote an already-sent message
+at every user or hub turn, and the cache fell back to the system prompt:
+the ChatGPT/Codex backend reuses only a previous request's whole prompt,
+never part of one (measured 2026-10-03: 32,256 cached tokens out of a
+possible 44,544).
 
 ### What triggers an injection
 
@@ -268,9 +279,8 @@ paragraph so the model knows how to interpret injections:
 Messages whose content begins with `[context service` are automated
 runtime notices from the context ledger. They are not from the user.
 Treat them the same way you'd treat a system reminder. They may
-appear between the user's real messages and your own assistant
-replies, and they exist only for one turn — do not reference them
-as if they were persistent conversation history.
+appear in front of a user message or a tool result. A newer block of
+the same kind supersedes an older one.
 ```
 
 ### Consecutive-user-role edge case

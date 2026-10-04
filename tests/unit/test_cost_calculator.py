@@ -148,11 +148,13 @@ class TestCostCalculator(unittest.TestCase):
         cost = calculate_cost("openai", "gpt-4o", 1000, 100, 500)
         self.assertAlmostEqual(cost, 0.002875, places=7)
 
-    def test_anthropic_formula_does_not_subtract_cache(self):
-        # spec: 1000*0.000003 + 100*0.000015 + 500*0.000003*0.1
-        #     = 0.003 + 0.0015 + 0.00015 = 0.00465
+    def test_anthropic_cache_reads_are_billed_once_at_the_discount(self):
+        # prompt_tokens includes the 500 cache reads, so they must not also
+        # be billed at list price:
+        # (1000-500)*0.000003 + 100*0.000015 + 500*0.000003*0.1
+        #     = 0.0015 + 0.0015 + 0.00015 = 0.00315
         cost = calculate_cost("anthropic", "claude-sonnet-4-6", 1000, 100, 500)
-        self.assertAlmostEqual(cost, 0.00465, places=7)
+        self.assertAlmostEqual(cost, 0.00315, places=7)
 
     def test_unknown_provider_returns_zero(self):
         cost = calculate_cost("nobody", "xyz", 1000, 100, 0)

@@ -206,6 +206,49 @@ class TestHubVaultRebirth(unittest.TestCase):
 
         self.assertNotIn("active TaskLedger cards", context)
 
+    def test_rebirth_render_is_pure_so_prompt_cache_survives(self):
+        """Rendering must not mutate the session counter.
+
+        The vault block is re-rendered into the prompt every turn. If the
+        counter moved on render, it counted renders instead of sessions and
+        the block differed on every turn, which no provider prompt cache can
+        reuse. Rendering twice must yield a byte-identical ``sessions:`` line
+        and leave ``session_count`` untouched.
+        """
+        before = self.vault.get_meta().get("session_count", 0)
+
+        first = self.vault.get_rebirth_context()
+        second = self.vault.get_rebirth_context()
+
+        def sessions_line(ctx):
+            return next(
+                line for line in ctx.splitlines() if line.startswith("sessions:")
+            )
+
+        self.assertEqual(sessions_line(first), sessions_line(second))
+        self.assertEqual(self.vault.get_meta().get("session_count", 0), before)
+
+    def test_rebirth_block_holds_still_as_the_stream_grows(self):
+        """Each turn appends to the stream; the block must not change with it,
+        or the whole vault block is sent to the model again every turn."""
+        self.vault.append_stream("received", "first message")
+        before = self.vault.get_rebirth_context()
+        self.vault.append_stream("received", "second message")
+
+        self.assertEqual(self.vault.get_rebirth_context(), before)
+
+    def test_advance_session_bumps_counter_once_and_render_reflects_it(self):
+        start = self.vault.get_meta().get("session_count", 0)
+
+        self.assertEqual(self.vault.advance_session(), start + 1)
+        self.assertEqual(
+            self.vault.get_meta().get("session_count", 0), start + 1
+        )
+
+        # Rebirth from a fresh process sees the advanced count, stably.
+        reborn = self._open_vault()
+        self.assertIn(f"sessions: {start + 1} ", reborn.get_rebirth_context())
+
 
 if __name__ == "__main__":
     unittest.main()
