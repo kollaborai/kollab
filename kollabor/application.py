@@ -37,6 +37,22 @@ from .version import __version__
 logger = logging.getLogger(__name__)
 
 
+class UnknownLLMError(ValueError):
+    """``--llm`` named neither a profile nor a loadout.
+
+    Startup stops instead of running on the default model: a typo that
+    silently picks another model (and bills it) is worse than no session.
+    """
+
+    def __init__(self, name: str, suggestions: list[str]):
+        hint = (
+            f" Did you mean: {', '.join(suggestions)}?"
+            if suggestions
+            else " Run /llm to list them."
+        )
+        super().__init__(f"--llm {name!r} is not a profile or loadout.{hint}")
+
+
 def merge_widget_state_snapshot(
     current: dict[str, Any], event: dict[str, Any]
 ) -> dict[str, Any]:
@@ -371,10 +387,18 @@ class TerminalLLMChat:
                         profile_name = loadout.provider_profile
 
                 if not activated_via_loadout:
-                    msg = f"Profile '{profile_name}' not found, using default"
-                    if suggestions:
-                        msg += f". Did you mean: {', '.join(suggestions)}?"
-                    logger.warning(msg)
+                    from difflib import get_close_matches
+
+                    # loadout suggestions are model names; a typo'd profile
+                    # name ("openai-oath") needs the profiles too
+                    near_profiles = get_close_matches(
+                        profile_name, self.profile_manager.get_profile_names(), n=3
+                    )
+                    error = UnknownLLMError(
+                        profile_name, near_profiles + list(suggestions)
+                    )
+                    logger.error(str(error))
+                    raise error
             elif save_profile or make_default_profile:
                 # Save profile values to config if --save/--default was used
                 profile = self.profile_manager.get_profile(profile_name)

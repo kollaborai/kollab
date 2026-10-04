@@ -1,8 +1,8 @@
 {
   "name": "llm-launch-flags",
-  "description": "--llm/--model/--effort replace --profile: the model override reaches the status bar, an unlisted model id still launches, and the removed flag names its replacement",
+  "description": "--llm/--model/--effort replace --profile: the model override reaches the status bar, an unlisted model id still launches, an unknown --llm stops the launch, and the removed flag names its replacement",
   "config": {
-    "command": "python main.py --no-daemon --llm gemini --model gemini-3.6-flash-lite --effort high",
+    "command": "python main.py --no-daemon --llm default --model gemini-3.6-flash-lite --effort high",
     "app_init_sleep": 6,
     "show_captures": false
   },
@@ -18,8 +18,35 @@
     },
     {
       "action": "assert_not_contains",
-      "pattern": "not found, using default",
-      "description": "--llm gemini resolves to the provider profile, not a fallback"
+      "pattern": "is not a profile or loadout",
+      "description": "--llm default resolves; 'default' always exists"
+    },
+
+    { "action": "section", "name": "an unknown --llm stops the launch" },
+    {
+      "action": "shell",
+      "command": "python main.py -p --llm no-such-llm-xyz --no-daemon hi </dev/null 2>&1 | tail -2",
+      "description": "launch with a name that is neither a profile nor a loadout"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "--llm 'no-such-llm-xyz' is not a profile or loadout",
+      "description": "fails with the name instead of running the default model"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback",
+      "description": "one clean error line, no stack trace"
+    },
+    {
+      "action": "shell",
+      "command": "python main.py -p --llm no-such-llm-xyz --no-daemon hi </dev/null >/dev/null 2>&1; echo \"llm-exit=$?\"",
+      "description": "exit status of the rejected launch"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "llm-exit=2",
+      "description": "usage-error exit status, so scripts and the daemon launcher can tell"
     },
 
     { "action": "section", "name": "--profile names its replacement" },

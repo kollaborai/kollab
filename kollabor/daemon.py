@@ -27,6 +27,14 @@ DAEMON_READY_FD_ENV = "KOLLAB_DAEMON_READY_FD"
 LAUNCH_ARGS_ENV = "KOLLAB_LAUNCH_ARGS"
 
 
+class DaemonExited(RuntimeError):
+    """The daemon exited before it was ready; ``exit_code`` says how."""
+
+    def __init__(self, exit_code: int):
+        super().__init__(f"daemon exited with status {exit_code}")
+        self.exit_code = exit_code
+
+
 def fork_daemon(argv: list[str]) -> tuple[int, str]:
     """Fork a daemon process and wait for it to signal readiness.
 
@@ -34,6 +42,7 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
         (daemon_pid, socket_path) on success.
 
     Raises:
+        DaemonExited: If the daemon exited before it was ready.
         RuntimeError: If daemon fails to start within timeout.
     """
     # Create pipe for ready signaling (daemon writes, parent reads)
@@ -46,8 +55,10 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
         os.close(write_fd)
 
         # Wait for daemon to write socket path (timeout 15s)
-        socket_path = _wait_for_ready(read_fd, pid, timeout=15.0)
-        os.close(read_fd)
+        try:
+            socket_path = _wait_for_ready(read_fd, pid, timeout=15.0)
+        finally:
+            os.close(read_fd)
 
         if not socket_path:
             os.kill(pid, signal.SIGKILL)
@@ -216,8 +227,8 @@ def _wait_for_ready(read_fd: int, daemon_pid: int, timeout: float) -> str | None
         try:
             wpid, status = os.waitpid(daemon_pid, os.WNOHANG)
             if wpid != 0:
-                # Daemon exited before signaling ready
-                return None
+                # Daemon exited before signaling ready (reaped, so not "hung")
+                raise DaemonExited(os.waitstatus_to_exitcode(status))
         except ChildProcessError:
             # Already reaped or not our child
             return None
@@ -231,8 +242,10 @@ def _wait_for_ready(read_fd: int, daemon_pid: int, timeout: float) -> str | None
                 return None
 
             if not chunk:
-                # Pipe closed without data = daemon failed
-                return None
+                # Pipe closed without data: the daemon is exiting. Loop so the
+                # waitpid above reports how (DaemonExited), not a "hang".
+                time.sleep(0.05)
+                continue
 
             buf += chunk
             if b"\n" in buf:

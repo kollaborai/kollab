@@ -704,7 +704,8 @@ class ProfileManager:
 
         Args:
             config: Configuration object with get() method
-            cli_profile: CLI --llm override (skips auto-detection when set)
+            cli_profile: CLI --llm override (auto-detected profiles are
+                registered but never activated over it)
         """
         self.config = config
         self._profiles: Dict[str, LLMProfile] = {}
@@ -723,15 +724,15 @@ class ProfileManager:
         # auto-activation guard inside _detect_oauth_provider checks
         # _profile_explicitly_set (which we just flipped to True above
         # when cli_profile is set) so it won't clobber a CLI selection.
-        # Env detection, on the other hand, creates an ephemeral profile
-        # and auto-activates unconditionally, so we still skip it when
-        # the user explicitly asked for a profile by name.
+        # Env detection follows the same rule: it always registers its
+        # ephemeral profiles and only activates one when nothing was
+        # explicitly selected, so `--llm anthropic-auto` can resolve.
         #
-        # Bug history: previously both detections were gated behind
-        # `not cli_profile`, which meant `--llm openai-oauth` would
-        # skip the oauth registration step -- the profile would not exist
-        # in the registry, set_active_profile would fall back to "default",
-        # and the user would see their explicit flag silently ignored.
+        # Bug history: both detections were once gated behind
+        # `not cli_profile`, which meant `--llm openai-oauth` (and later
+        # `--llm anthropic-auto`) skipped registration -- the profile did
+        # not exist in the registry, set_active_profile fell back to
+        # "default", and the explicit flag was silently ignored.
         self._detect_oauth_provider()
 
         # Now that oauth profiles are registered, apply the persisted
@@ -741,8 +742,7 @@ class ProfileManager:
         # env detection won the race.
         self._apply_pending_active_profile()
 
-        if not cli_profile:
-            self._detect_env_provider()
+        self._detect_env_provider()
         # Note: Default profile initialization is now handled by config_utils.initialize_config()
         # which runs earlier in app startup and creates global/local config with profiles
 
