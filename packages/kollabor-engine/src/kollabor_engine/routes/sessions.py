@@ -12,9 +12,9 @@ from pydantic import BaseModel
 from kollabor_ai import LLMProfile
 from kollabor_ai.session_naming import generate_session_name
 
+from ..hub_bridge import HubBridge
 from ..server import get_session_registry
 from ..session import EngineSession
-from ..hub_bridge import HubBridge
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
