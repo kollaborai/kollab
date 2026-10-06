@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-10-05
+
 ### Changed
 - `--llm` with a name that is neither a profile nor a loadout stops with exit status 2 and the closest names, instead of running the default model.
 - Claude models that think by default (Opus and Sonnet 5.x, Fable, Mythos) are asked for summarized thinking, so their reasoning shows in the thinking display instead of arriving empty.
 
 ### Added
 - Agent bundles can set `"hub": false`. The engine then runs that session's daemon solo: the engine still attaches to it, but it never sees, messages, broadcasts to or receives from other agents, never becomes coordinator or joins the network, and its prompt has no hub instructions. Embedded assistants (one web session per user) use it so one user's input is not broadcast into every other session.
+- A hub agent's online announcement names its active profile, provider, model and configured reasoning effort (`default` when none is set).
 
 ### Fixed
 - Engine sessions pass `MENTIKO_SESSION_ID` and the caller's `MENTIKO_SESSION_TOKEN` to their daemon, and through it to MCP servers. Without them a Mentiko MCP server could not authenticate as the user and sent UI actions (such as page navigation) to no session.
