@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from kollabor.hub_env import hub_disabled_by_env
+from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
 from kollabor_ai.message_content import content_to_text
@@ -996,6 +996,7 @@ class HubPlugin(BasePlugin):
                 getattr(profile_mgr, "active_profile_name", "") if profile_mgr else ""
             )
             or None,
+            solo=hub_solo_by_env(),
         )
 
         # Start presence + clean up orphan sockets from past crashes
@@ -4292,6 +4293,47 @@ class HubPlugin(BasePlugin):
         if not self.event_bus or not self._is_enabled():
             return
 
+        # Track when agent is working vs idle
+        working_hook = Hook(
+            name="hub_working_state",
+            plugin_name=self.name,
+            event_type=EventType.LLM_REQUEST_PRE,
+            callback=self._set_working,
+            priority=HookPriority.SYSTEM.value,
+        )
+        await self.event_bus.register_hook(working_hook)
+
+        idle_hook = Hook(
+            name="hub_idle_state",
+            plugin_name=self.name,
+            event_type=EventType.LLM_RESPONSE_POST,
+            callback=self._set_idle,
+            priority=HookPriority.POSTPROCESSING.value,
+        )
+        await self.event_bus.register_hook(idle_hook)
+
+        # A solo agent serves its host (socket, presence, working/idle state)
+        # and nothing else: no relay, roster, <hub_msg>, broadcast or nudges.
+        if not self._solo:
+            await self._register_mesh_hooks()
+
+        # Start the hub after all plugins initialized
+        # Skip in attach mode - we're a viewer, not a peer on the mesh
+        if self._cli_args and getattr(self._cli_args, "attach", None):
+            logger.info("Hub: attach mode, skipping mesh join")
+        else:
+
+            async def _safe_start():
+                try:
+                    await self._start_hub()
+                except Exception as e:
+                    logger.error(f"Hub _start_hub failed: {e}", exc_info=True)
+
+            loop = asyncio.get_running_loop()
+            self._startup_task = loop.create_task(_safe_start())
+
+    async def _register_mesh_hooks(self) -> None:
+        """Register the hooks that make this agent a peer on the mesh."""
         # These guards share the normal model/tool pipeline. The final tool
         # guard runs after an awaited host permission prompt, so revocation
         # during that prompt cannot authorize a stale remote request.
@@ -4331,25 +4373,6 @@ class HubPlugin(BasePlugin):
             priority=HookPriority.PREPROCESSING.value,
         )
         await self.event_bus.register_hook(roster_hook)
-
-        # Track when agent is working vs idle
-        working_hook = Hook(
-            name="hub_working_state",
-            plugin_name=self.name,
-            event_type=EventType.LLM_REQUEST_PRE,
-            callback=self._set_working,
-            priority=HookPriority.SYSTEM.value,
-        )
-        await self.event_bus.register_hook(working_hook)
-
-        idle_hook = Hook(
-            name="hub_idle_state",
-            plugin_name=self.name,
-            event_type=EventType.LLM_RESPONSE_POST,
-            callback=self._set_idle,
-            priority=HookPriority.POSTPROCESSING.value,
-        )
-        await self.event_bus.register_hook(idle_hook)
 
         # Parse <hub_msg> tags from LLM responses
         msg_hook = Hook(
@@ -4391,21 +4414,6 @@ class HubPlugin(BasePlugin):
                 priority=HookPriority.DISPLAY.value,
             )
         )
-
-        # Start the hub after all plugins initialized
-        # Skip in attach mode - we're a viewer, not a peer on the mesh
-        if self._cli_args and getattr(self._cli_args, "attach", None):
-            logger.info("Hub: attach mode, skipping mesh join")
-        else:
-
-            async def _safe_start():
-                try:
-                    await self._start_hub()
-                except Exception as e:
-                    logger.error(f"Hub _start_hub failed: {e}", exc_info=True)
-
-            loop = asyncio.get_running_loop()
-            self._startup_task = loop.create_task(_safe_start())
 
     async def _reconcile_agent_bundle(self, bundle: str) -> None:
         """Switch the active agent bundle to match this agent's hub role.
@@ -4476,14 +4484,18 @@ class HubPlugin(BasePlugin):
 
         try:
             # Clean stale state first (discovers and removes dead agents)
-            self._presence.discover_agents()
+            self._presence.discover_agents(include_solo=True)
 
-            # Try to become coordinator
-            is_coordinator = self._election.try_become_coordinator(self._identity)
+            # Try to become coordinator. A solo agent never leads the mesh.
+            is_coordinator = (
+                not self._solo
+                and self._election.try_become_coordinator(self._identity)
+            )
             self._identity.is_coordinator = is_coordinator
 
-            # Discover existing agents to get taken identities
-            existing = self._presence.discover_agents()
+            # Discover existing agents to get taken identities (solo ones
+            # too: their sockets are named by identity)
+            existing = self._presence.discover_agents(include_solo=True)
             taken = [a.identity for a in existing]
 
             # Resolve active agent for identity and vault config
@@ -5147,7 +5159,8 @@ class HubPlugin(BasePlugin):
             self._started = True
             # Elect one transport owner for this workspace; every local agent
             # keeps its own model, permissions and durable receiving queue.
-            self._relay_startup_task = asyncio.create_task(self._resume_relay())
+            if not self._solo:
+                self._relay_startup_task = asyncio.create_task(self._resume_relay())
         except Exception as e:
             logger.error(f"Hub startup failed: {e}", exc_info=True)
         finally:
@@ -7124,6 +7137,13 @@ class HubPlugin(BasePlugin):
 
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
+        if self._solo:
+            # Peers cannot discover a solo agent; this covers direct sends by
+            # name (`kollab --hub send`) so nothing reaches its conversation.
+            logger.info(
+                "solo agent dropped hub message from %s", message.from_identity
+            )
+            return
         relay = getattr(self, "_relay_agent", None)
         if relay and await relay.defer_local(message):
             return
@@ -10290,6 +10310,8 @@ class HubPlugin(BasePlugin):
     async def _start_relay_agent(self):
         if self._relay_agent is not None:
             return
+        if self._solo:
+            raise RuntimeError("solo agents are not on the network")
         from .project_scope import resolve_project_root
         from .relay_agent import RelayAgentBridge
 
@@ -12863,6 +12885,11 @@ class HubPlugin(BasePlugin):
 
         except Exception as e:
             return f"console error: {e}"
+
+    @property
+    def _solo(self) -> bool:
+        """Serving a host (the engine) only: never on the mesh or network."""
+        return getattr(getattr(self, "_identity", None), "solo", False) is True
 
     def _is_enabled(self) -> bool:
         if hub_disabled_by_env():

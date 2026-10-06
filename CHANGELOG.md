@@ -11,8 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--llm` with a name that is neither a profile nor a loadout stops with exit status 2 and the closest names, instead of running the default model.
 - Claude models that think by default (Opus and Sonnet 5.x, Fable, Mythos) are asked for summarized thinking, so their reasoning shows in the thinking display instead of arriving empty.
 
+### Added
+- Agent bundles can set `"hub": false`. The engine then runs that session's daemon solo: the engine still attaches to it, but it never sees, messages, broadcasts to or receives from other agents, never becomes coordinator or joins the network, and its prompt has no hub instructions. Embedded assistants (one web session per user) use it so one user's input is not broadcast into every other session.
+
 ### Fixed
 - Engine sessions pass `MENTIKO_SESSION_ID` and the caller's `MENTIKO_SESSION_TOKEN` to their daemon, and through it to MCP servers. Without them a Mentiko MCP server could not authenticate as the user and sent UI actions (such as page navigation) to no session.
+- A process with the hub disabled by environment (`KOLLAB_HUB_DISABLED`, `KOLLAB_NO_HUB`) no longer gets the hub collaboration instructions in its system prompt.
 - The prompt cache holds across new user and hub messages. Context blocks (session, hub status, `[env]` events) stay on the message they were first sent with; moving them to each new message rewrote history, so ChatGPT/Codex sessions fell back to the cached system prompt at every message.
 - ChatGPT/Codex requests send session headers and pass encrypted reasoning back, so the conversation stays cached and reasoning carries across turns and `/resume`.
 - Anthropic, OpenRouter (Anthropic routes) and Gemini requests keep their prompt cache across turns and send signed thinking or thought signatures back. Gemini tool calls and results are no longer dropped.

@@ -424,14 +424,19 @@ class PromptRenderer:
         """Get the hub plugin from event bus service registry.
 
         Returns:
-            HubPlugin instance or None if hub is not active.
+            HubPlugin instance or None if hub is not active. A solo hub
+            (serving the engine only) is not on the mesh, so hub tags
+            render nothing for it.
         """
         if not self.event_bus:
             return None
         try:
-            return self.event_bus.get_service("hub_plugin")
+            hub = self.event_bus.get_service("hub_plugin")
         except Exception:
             return None
+        if getattr(hub, "_solo", False) is True:
+            return None
+        return hub
 
     def _process_hub_identity(self, content: str) -> str:
         """Process all hub_identity tags in content.

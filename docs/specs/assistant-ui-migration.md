@@ -159,7 +159,11 @@ The current UI is ugly but it does real work. Do not lose:
   default | auto_approve_edits | trust_all`.
 - **MCP per session** — `GET /sessions/{id}/mcp`, connect/disconnect, tools.
 - **hub** — `GET /hub/agents`, `POST /hub/messages`. Web sessions are real mesh agents
-  named `web-<id>`; they show up in `kollab --hub status`.
+  with pool identities; they show up in `kollab --hub status`. A session whose agent
+  bundle sets `"hub": false` (an embedded product assistant) runs **solo**: the engine
+  spawns its daemon with `KOLLAB_HUB_SOLO=1`, so it keeps presence and its socket for the
+  engine but never discovers, messages, broadcasts to, or is reachable by peers, never
+  runs for coordinator or joins the network, and gets no hub prompt docs.
 - **session env** — the engine exports `MENTIKO_SESSION_ID` (the engine session id) and,
   when the caller sent `user_token`, `MENTIKO_SESSION_TOKEN` into the daemon env; the
   daemon's MCP layer forwards both to MCP subprocesses.

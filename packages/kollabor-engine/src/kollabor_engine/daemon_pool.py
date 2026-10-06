@@ -402,6 +402,7 @@ class DaemonPool:
         workspace: Optional[str] = None,
         system_prompt: Optional[str] = None,
         user_token: Optional[str] = None,
+        solo: bool = False,
     ) -> DaemonHandle:
         """Start a daemon for `session_id` and attach to it.
 
@@ -447,6 +448,12 @@ class DaemonPool:
                 env["MENTIKO_SESSION_TOKEN"] = user_token
             else:
                 env.pop("MENTIKO_SESSION_TOKEN", None)
+            # Solo: keep presence + socket for this pool, stay off the mesh
+            # (kollabor.hub_env.hub_solo_by_env).
+            if solo:
+                env["KOLLAB_HUB_SOLO"] = "1"
+            else:
+                env.pop("KOLLAB_HUB_SOLO", None)
 
             cwd = workspace or os.getcwd()
             if not Path(cwd).is_dir():

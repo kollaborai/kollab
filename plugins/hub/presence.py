@@ -153,7 +153,23 @@ class PresenceManager:
         except Exception as e:
             logger.error(f"Failed to remove presence: {e}")
 
-    def discover_agents(self, include_self: bool = False) -> List[AgentRuntime]:
+    def _mesh_peers(
+        self, agents: List[AgentRuntime], include_solo: bool
+    ) -> List[AgentRuntime]:
+        """Drop solo agents: they are present for their host, not the mesh.
+
+        A solo agent sees no peers at all. ``include_solo`` is for identity
+        claims, which must still see every live holder of a name.
+        """
+        if include_solo:
+            return agents
+        if getattr(self.identity, "solo", False) is True:
+            return []
+        return [a for a in agents if not a.solo]
+
+    def discover_agents(
+        self, include_self: bool = False, include_solo: bool = False
+    ) -> List[AgentRuntime]:
         """Scan presence directory for live agents.
 
         Validates PID liveness AND socket connectivity.
@@ -194,10 +210,10 @@ class PresenceManager:
                 agents.append(agent)
             except (json.JSONDecodeError, Exception) as e:
                 logger.debug(f"Bad presence file {f}: {e}")
-        return agents
+        return self._mesh_peers(agents, include_solo)
 
     async def discover_agents_async(
-        self, include_self: bool = False
+        self, include_self: bool = False, include_solo: bool = False
     ) -> List[AgentRuntime]:
         """Async version of discover_agents.
 
@@ -242,9 +258,11 @@ class PresenceManager:
             except (json.JSONDecodeError, Exception) as e:
                 logger.debug(f"Bad presence file {f}: {e}")
 
-        self._cached_agents = agents
+        # The cache feeds the roster, so it always holds the mesh view.
+        peers = self._mesh_peers(agents, include_solo=False)
+        self._cached_agents = peers
         self._cache_time = time.time()
-        return agents
+        return agents if include_solo else peers
 
     def get_cached_agents(self) -> List[AgentRuntime]:
         """Return the last-known agent list without any I/O.
