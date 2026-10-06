@@ -16,6 +16,17 @@ do not invent V2 product tracks, legacy implementations, or compatibility obliga
 for nonexistent users. Preserve actual protocol contracts and private persistent
 state. Temporary rollback artifacts require an explicit retention/cleanup condition.
 
+## release worktree safety
+
+For every release, read `docs/release-process.md` and prepare it in a dedicated
+worktree from the fetched target commit. Leave the active checkout unchanged; if
+it contains staged, unstaged, or untracked user changes, do not edit or stage
+release files there. Stage only explicit release paths. Never broadly stage,
+reset, stash, clean, restore, or automatically fast-forward the user's checkout
+after the release merges. Preserve local edits and their staged/unstaged state;
+reconcile only on an explicit request after checking overlap and verifying the
+result.
+
 ## project snapshot
 
 - name: `kollab`

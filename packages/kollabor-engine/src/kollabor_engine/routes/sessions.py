@@ -12,9 +12,9 @@ from pydantic import BaseModel
 from kollabor_ai import LLMProfile
 from kollabor_ai.session_naming import generate_session_name
 
+from ..hub_bridge import HubBridge
 from ..server import get_session_registry
 from ..session import EngineSession
-from ..hub_bridge import HubBridge
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -162,12 +162,14 @@ def _resolve_agent(name: str) -> Optional[dict]:
 
         # Read mcp_servers from agent.json directly (not parsed by Agent.from_directory)
         mcp_servers: list = []
+        hub = True
         config_file = agent_obj.directory / "agent.json" if agent_obj.directory else None
         if config_file and config_file.exists():
             try:
                 import json as _json
                 cfg = _json.loads(config_file.read_text())
                 mcp_servers = list(cfg.get("mcp_servers", []) or [])
+                hub = cfg.get("hub", True) is not False
             except Exception:
                 pass
 
@@ -176,6 +178,7 @@ def _resolve_agent(name: str) -> Optional[dict]:
             "profile": getattr(agent_obj, "profile", None),
             "mcp_servers": mcp_servers,
             "tools": list(getattr(agent_obj, "tools", []) or []),
+            "hub": hub,
         }
     except Exception as e:
         logger.warning(f"Failed to resolve agent '{name}': {e}")
@@ -267,6 +270,9 @@ async def create_session(body: CreateSessionRequest, request: Request):
                 user_token=user_token,
                 agent=body.agent,
                 identity=body.identity,
+                # Bundles with "hub": false (product assistants) get a solo
+                # daemon: attachable by this engine, invisible to the mesh.
+                solo=bool(agent_data) and agent_data.get("hub") is False,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e

@@ -37,7 +37,7 @@ if sys.platform == "win32":
 # Import from the same directory
 from kollabor_ai.profile_manager import EFFORT_LEVELS
 
-from .application import TerminalLLMChat
+from .application import TerminalLLMChat, UnknownLLMError
 from .hub_env import hub_disabled_by_env
 from .logging import setup_bootstrap_logging
 from .version import __version__
@@ -1107,6 +1107,9 @@ async def async_main() -> None:
     except KeyboardInterrupt:
         # print("\n\nApplication interrupted by user")
         logger.info("Application interrupted by user")
+    except UnknownLLMError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
     except Exception as e:
         print(f"\n\nApplication failed to start: {e}")
         logger.error(f"Application startup failed: {type(e).__name__}: {e}")
@@ -2112,8 +2115,11 @@ def cli_main() -> None:
                 sys.argv[1:]
             ) or fork_daemon(sys.argv)
         except RuntimeError as e:
-            print(f"daemon startup failed: {e}", file=sys.stderr)
-            print("falling back to single-process mode", file=sys.stderr)
+            # Exit status 2 is a rejected argument (an unknown --llm); the
+            # in-process run below prints that error itself, so stay quiet.
+            if getattr(e, "exit_code", None) != 2:
+                print(f"daemon startup failed: {e}", file=sys.stderr)
+                print("falling back to single-process mode", file=sys.stderr)
             # Fall through to normal async_main()
         else:
             # Parent: re-enter the CLI as a lightweight attach client.

@@ -12,7 +12,7 @@ XML tags. File reads are deduplicated by content hash.
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .file_tracker import FileTracker
 from .hash_utils import compute_hash
@@ -62,9 +62,10 @@ class ContextService:
         # Divergent-hash warnings pending inline injection (fallback
         # path until the agent notification system lands)
         self._divergence_warnings_pending: List[Dict[str, Any]] = []
-        # Compatibility rail for legacy keyword-trigger context. These
-        # blocks are request-local and must never enter the ledger/history.
+        # Context blocks for the next request (keyword triggers, the hub's
+        # live status). They ride on a message, never into the ledger.
         self._ephemeral_injections: List[str] = []
+        self._keyed_injections: Dict[str, str] = {}
 
     def set_event_bus(self, event_bus: Any) -> None:
         """Set the event bus reference.
@@ -129,15 +130,27 @@ class ContextService:
         """Return the attached HubBridge, or None if disabled."""
         return self._hub_bridge
 
-    def queue_ephemeral_injection(self, content: str) -> None:
-        """Queue request-local context without persisting it in history."""
-        if content:
+    def queue_ephemeral_injection(self, content: str, key: str = "") -> None:
+        """Queue a context block for the next request.
+
+        An unkeyed block is a one-shot notice. A keyed block is state (the
+        hub's live status): it replaces an undrained one with the same key, and
+        the queue processor sends it only when it differs from the copy already
+        in the conversation.
+        """
+        if not content:
+            return
+        if key:
+            self._keyed_injections[key] = content
+        else:
             self._ephemeral_injections.append(content)
 
-    def drain_ephemeral_injections(self) -> List[str]:
-        """Drain legacy request-local context blocks for the next API call."""
-        injections = self._ephemeral_injections
+    def drain_ephemeral_injections(self) -> List[Tuple[str, str]]:
+        """Drain queued blocks as (key, block); key is "" for one-shots."""
+        injections = [("", block) for block in self._ephemeral_injections]
+        injections += list(self._keyed_injections.items())
         self._ephemeral_injections = []
+        self._keyed_injections = {}
         return injections
 
     def queue_divergence_warning(self, warning: Dict[str, Any]) -> None:

@@ -28,6 +28,7 @@ from .transformers import (
     OpenAIResponseTransformer,
     ToolCallAccumulator,
     ToolSchemaTransformer,
+    replay_reasoning_content,
 )
 from .tuning import EffortStyle, effort_params, sampling_params
 
@@ -180,7 +181,7 @@ class OpenAIProvider(LLMProvider):
 
             # Transform to unified format
             unified_response = OpenAIResponseTransformer.transform_openai_response(
-                response_dict, self.model
+                response_dict, self.model, self.provider_type
             )
 
             logger.debug(
@@ -191,22 +192,13 @@ class OpenAIProvider(LLMProvider):
 
         except Exception as e:
             logger.error(f"OpenAI call failed: {e}")
-            # Debug: log full exception details
-            import sys
-
-            print(
-                f"[OPENAI-ERROR] Call failed: {type(e).__name__}: {e}", file=sys.stderr
-            )
-            if hasattr(e, "response"):
-                print(
-                    f"[OPENAI-ERROR] Response status: {getattr(e.response, 'status_code', 'unknown')}",
-                    file=sys.stderr,
+            response = getattr(e, "response", None)
+            if response is not None:
+                logger.debug(
+                    "OpenAI error response: status=%s body=%s",
+                    getattr(response, "status_code", "unknown"),
+                    getattr(response, "text", ""),
                 )
-                if hasattr(e.response, "text"):
-                    print(
-                        f"[OPENAI-ERROR] Response body: {e.response.text}",
-                        file=sys.stderr,
-                    )
             raise map_openai_error(e, "openai") from e
         finally:
             await self._track_request_end()
@@ -255,7 +247,7 @@ class OpenAIProvider(LLMProvider):
             stream = await self._client.chat.completions.create(**request_params)
 
             async for streaming_response in OpenAIResponseTransformer.iter_chunks(
-                stream, self.model
+                stream, self.model, self.provider_type
             ):
                 if streaming_response:
                     # Handle tool call accumulation
@@ -342,6 +334,12 @@ class OpenAIProvider(LLMProvider):
         if tools:
             openai_tools = ToolSchemaTransformer.to_openai_format(tools)
             params["tools"] = openai_tools
+
+        # reasoning_content for models that take it back (DeepSeek V4, GLM,
+        # Kimi); stored on the raw messages, which the strip above dropped.
+        replay_reasoning_content(
+            messages, prepared_messages, self.provider_type, self.model, bool(tools)
+        )
 
         # Add any additional kwargs
         params.update(kwargs)

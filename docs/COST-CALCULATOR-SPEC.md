@@ -51,17 +51,15 @@ architecture: pricing registry pattern
 token accounting (CRITICAL - get this wrong = wrong costs)
 ----------------------------------------------------------
 
-  openai / openai_responses / azure_openai / custom / openrouter:
-    prompt_tokens INCLUDES cache_read_tokens (subset)
+  every provider: prompt_tokens INCLUDES cache_read_tokens (subset)
+    - openai family: cached_tokens is a subset of prompt_tokens
+    - anthropic: prompt_tokens = input_tokens + cache_creation + cache_read
+    - gemini: promptTokenCount includes cachedContentTokenCount
     so: unique_prompt = prompt_tokens - cache_read_tokens
+    cache_read gets its OWN discounted line, never also the list price
 
-  anthropic:
-    prompt_tokens = input_tokens + cache_creation + cache_read
-    prompt_tokens ALREADY includes cache_read_tokens
-    so: unique_prompt = prompt_tokens  (do NOT subtract cache_read)
-    cache_read gets its OWN discounted line
-
-  this difference is why we can't use one formula for all providers.
+  one formula for all providers. (an earlier version skipped the subtraction
+  for anthropic and billed every cache read twice.)
 
 
 files to create:
@@ -84,17 +82,12 @@ files to create:
      - looks up pricing from PricingRegistry.get_pricing()
      - returns 0.0 if no pricing found (no crash, no warning spam)
      - formula (per-token prices, no division needed):
-       if provider in (openai, openai_responses, azure_openai, custom, openrouter):
-         unique_prompt = prompt_tokens - cache_read_tokens
-         cost = unique_prompt * prompt_price
-              + completion_tokens * completion_price
-              + cache_read_tokens * prompt_price * cache_discount
-       if provider == anthropic:
-         cost = prompt_tokens * prompt_price
-              + completion_tokens * completion_price
-              + cache_read_tokens * prompt_price * cache_discount
-       else:
-         cost = 0.0
+       unique_prompt = max(0, prompt_tokens - cache_read_tokens)
+       cost = unique_prompt * prompt_price
+            + completion_tokens * completion_price
+            + cache_read_tokens * prompt_price * cache_discount
+     - cache writes bill at list price (anthropic's 1.25x/2x write premium
+       is not modelled yet)
      - all prices are per-token floats (not per-M), so no division needed
 
   3. packages/kollabor-ai/src/kollabor_ai/default_pricing.json (bundled)
@@ -227,9 +220,9 @@ verification:
 
   - unit test: model matching (exact, segment prefix, openrouter namespace, dot segments)
   - unit test: cost calculation with known inputs/expected outputs
-    - specifically test anthropic vs openai formula difference
+    - specifically test that cache reads are billed once, for every provider
     - test anthropic: prompt=1000, completion=100, cache_read=500, sonnet pricing
-      expected: 1000*0.000003 + 100*0.000015 + 500*0.000003*0.1 = 0.003 + 0.0015 + 0.00015 = 0.00465
+      expected: (1000-500)*0.000003 + 100*0.000015 + 500*0.000003*0.1 = 0.0015 + 0.0015 + 0.00015 = 0.00315
     - test openai: prompt=1000, completion=100, cache_read=500, gpt-4o pricing
       expected: (1000-500)*0.0000025 + 100*0.00001 + 500*0.0000025*0.5 = 0.00125 + 0.001 + 0.000625 = 0.002875
   - unit test: from_dict with unknown keys doesn't crash

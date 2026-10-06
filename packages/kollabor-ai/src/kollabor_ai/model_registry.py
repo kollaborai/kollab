@@ -147,6 +147,17 @@ def supports_sampling(model: str) -> bool:
     return _best_match(model, "supports_sampling") is not False
 
 
+def thinking_default(model: str) -> Optional[str]:
+    """What a model does with no ``thinking`` field: ``"adaptive"`` or None.
+
+    ``"adaptive"`` marks the Claude models that think by default but hide the
+    text (``display: "omitted"``) unless a request asks for the summary.
+    Unmarked models (thinking off by default, or not Claude) get nothing.
+    """
+    value = _best_match(model, "thinking_default")
+    return value if isinstance(value, str) else None
+
+
 def supports_vision(model: str, provider: Optional[str] = None) -> bool:
     """Whether the catalog explicitly allows image input for a model.
 

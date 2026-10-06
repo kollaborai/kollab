@@ -401,6 +401,8 @@ class DaemonPool:
         identity: Optional[str] = None,
         workspace: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        user_token: Optional[str] = None,
+        solo: bool = False,
     ) -> DaemonHandle:
         """Start a daemon for `session_id` and attach to it.
 
@@ -437,6 +439,21 @@ class DaemonPool:
             env = dict(os.environ)
             if system_prompt:
                 env["KOLLAB_SYSTEM_PROMPT"] = system_prompt
+            # The daemon's MCP layer forwards these to MCP subprocesses (see
+            # MCPIntegration's ambient-env fallback); the session id routes UI
+            # effects back to this session. Never inherit another identity's
+            # token from the engine's own env.
+            env["MENTIKO_SESSION_ID"] = session_id
+            if user_token:
+                env["MENTIKO_SESSION_TOKEN"] = user_token
+            else:
+                env.pop("MENTIKO_SESSION_TOKEN", None)
+            # Solo: keep presence + socket for this pool, stay off the mesh
+            # (kollabor.hub_env.hub_solo_by_env).
+            if solo:
+                env["KOLLAB_HUB_SOLO"] = "1"
+            else:
+                env.pop("KOLLAB_HUB_SOLO", None)
 
             cwd = workspace or os.getcwd()
             if not Path(cwd).is_dir():

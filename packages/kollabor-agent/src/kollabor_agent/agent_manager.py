@@ -29,6 +29,7 @@ Directory structure:
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -748,6 +749,18 @@ class Agent:
             if local_system.is_dir():
                 for md_file in sorted(local_system.glob("*.md")):
                     files_by_name[md_file.name] = md_file
+
+        # Hub docs teach the mesh. A solo or hub-disabled process is not on
+        # it (env set by the engine / kollabor.hub_env), so it gets none.
+        if any(
+            os.environ.get(key, "").strip().lower() in {"1", "true", "yes", "on"}
+            for key in ("KOLLAB_HUB_SOLO", "KOLLAB_HUB_DISABLED", "KOLLAB_NO_HUB")
+        ):
+            files_by_name = {
+                name: path
+                for name, path in files_by_name.items()
+                if not name.startswith("hub-")
+            }
 
         if not files_by_name:
             return ""

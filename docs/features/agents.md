@@ -79,6 +79,10 @@ another:
   A profile owns endpoint and credential settings. A loadout can layer a model
   and parameters such as effort or output budget on top of that connection.
 
+When a hub agent comes online, its announcement includes the active model,
+provider, profile, and configured reasoning effort. The effort is shown as
+`default` when no explicit effort is configured.
+
 For example:
 
 ```bash

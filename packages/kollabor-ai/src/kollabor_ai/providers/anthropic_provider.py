@@ -14,6 +14,13 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ..message_content import content_to_text, serialize_anthropic_content
+from .anthropic_reasoning import (
+    PrefixHasher,
+    ThinkingStreamCollector,
+    build_reasoning,
+    replayable_items,
+    request_fingerprint,
+)
 from .base import LLMProvider
 from .errors import ProviderError, map_anthropic_error, map_http_status_error
 from .message_sanitizer import strip_local_message_metadata_from_message
@@ -25,9 +32,24 @@ from .models import (
 )
 from .registry import register_provider
 from .transformers import AnthropicResponseTransformer
-from .tuning import EffortStyle, effort_params, sampling_params
+from .tuning import EffortStyle, effort_params, sampling_params, thinking_params
 
 logger = logging.getLogger(__name__)
+
+# Per request, across tools + system + messages.
+# https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+_MAX_CACHE_BREAKPOINTS = 4
+
+
+def _count_cache_controls(obj: Any) -> int:
+    """How many cache_control markers a request fragment already carries."""
+    if isinstance(obj, dict):
+        return ("cache_control" in obj) + sum(
+            _count_cache_controls(v) for v in obj.values()
+        )
+    if isinstance(obj, list):
+        return sum(_count_cache_controls(v) for v in obj)
+    return 0
 
 
 @register_provider(ProviderType.ANTHROPIC)
@@ -186,6 +208,17 @@ class AnthropicProvider(LLMProvider):
                 )
             )
 
+            # Signed thinking blocks the next turn must send back unmodified.
+            reasoning = build_reasoning(
+                response_dict.get("content") or [],
+                self.model,
+                lambda: request_fingerprint(request_data),
+            )
+            if reasoning:
+                unified_response = unified_response.model_copy(
+                    update={"provider_reasoning": reasoning}
+                )
+
             logger.debug(
                 f"Anthropic response received (tokens={unified_response.usage.total_tokens})"
             )
@@ -260,7 +293,9 @@ class AnthropicProvider(LLMProvider):
                     ) from error
 
                 # Parse SSE stream
+                collector = ThinkingStreamCollector()
                 async for chunk in self._parse_sse_stream(response):
+                    collector.feed(chunk)
                     # Transform chunk
                     streaming_response = (
                         AnthropicResponseTransformer.transform_anthropic_chunk(
@@ -269,6 +304,16 @@ class AnthropicProvider(LLMProvider):
                     )
 
                     if streaming_response:
+                        if streaming_response.is_final:
+                            # message_stop: every block is complete, so the
+                            # signed thinking goes out exactly once, here.
+                            reasoning = collector.reasoning(
+                                self.model, lambda: request_fingerprint(request_data)
+                            )
+                            if reasoning:
+                                streaming_response = streaming_response.model_copy(
+                                    update={"provider_reasoning": reasoning}
+                                )
                         yield streaming_response
 
         except Exception as e:
@@ -344,17 +389,22 @@ class AnthropicProvider(LLMProvider):
         """
         # Anthropic uses a different message format
         # Ensure system message is separate
-        system_message = None
+        system_parts: List[str] = []
         anthropic_messages = []
 
         for msg in messages:
             if msg.get("role") == "system":
-                # Extract system content
-                if system_message is None:
-                    system_message = content_to_text(msg.get("content", ""))
+                text = content_to_text(msg.get("content", ""))
+                if anthropic_messages:
+                    # Mid-conversation: folding it into `system` would rewrite
+                    # the cached prefix (and invalidate every signed thinking
+                    # block after it) on every request, so it stays where it
+                    # was said, as a user turn.
+                    anthropic_messages.append(
+                        {"role": "user", "content": f"<sys_msg>{text}</sys_msg>"}
+                    )
                 else:
-                    # Append to existing system message
-                    system_message += "\n\n" + content_to_text(msg.get("content", ""))
+                    system_parts.append(text)
             elif msg.get("role") == "tool":
                 # Convert OpenAI-style tool results to Anthropic format:
                 # role="tool" -> role="user" with tool_result content block
@@ -404,12 +454,13 @@ class AnthropicProvider(LLMProvider):
                             "input": args,
                         }
                     )
-                anthropic_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": content_blocks,
-                    }
-                )
+                assistant_msg: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": content_blocks,
+                }
+                if msg.get("provider_reasoning"):
+                    assistant_msg["_reasoning"] = msg["provider_reasoning"]
+                anthropic_messages.append(assistant_msg)
             else:
                 # Shallow copy so the merger below cannot mutate dicts the
                 # caller still holds a reference to (e.g. api_service's
@@ -424,6 +475,10 @@ class AnthropicProvider(LLMProvider):
                     cleaned["content"] = serialize_anthropic_content(
                         content, self.resolve_media
                     )
+                # Read before the strip above drops it; _replay_thinking
+                # consumes the marker, so it never reaches the wire.
+                if msg.get("role") == "assistant" and msg.get("provider_reasoning"):
+                    cleaned["_reasoning"] = msg["provider_reasoning"]
                 anthropic_messages.append(cleaned)
 
         # Merge consecutive same-role messages (Anthropic requires alternating roles)
@@ -443,6 +498,8 @@ class AnthropicProvider(LLMProvider):
             else:
                 merged_messages.append(msg)
 
+        system_message = "\n\n".join(system_parts)
+
         # Build request
         request: Dict[str, Any] = {
             "model": self.model,
@@ -454,6 +511,7 @@ class AnthropicProvider(LLMProvider):
         # Mythos 5); effort is opt-in. Both decided in providers/tuning.py.
         request.update(sampling_params(self.config, self.model))
         request.update(effort_params(self.config, EffortStyle.ANTHROPIC))
+        request.update(thinking_params(self.model))
 
         # Add system message as cacheable content block
         # Anthropic prompt caching requires content block array format
@@ -474,10 +532,72 @@ class AnthropicProvider(LLMProvider):
                 normalized[-1]["cache_control"] = {"type": "ephemeral"}
             request["tools"] = normalized
 
+        self._replay_thinking(request)
+        self._place_message_breakpoints(request)
+
         # Add any additional kwargs
         request.update(kwargs)
 
         return request
+
+    def _replay_thinking(self, request: Dict[str, Any]) -> None:
+        """Resend signed thinking blocks on the assistant turns that produced them.
+
+        Only while everything before the turn is byte-identical to the request
+        that produced the blocks (see anthropic_reasoning): a block is bound to
+        its prefix, and an edited history is a 400 on enforcing accounts. A
+        dropped block is always safe. Consumes the private ``_reasoning``
+        marker either way.
+        """
+        if not any("_reasoning" in m for m in request["messages"]):
+            return  # nothing to replay: skip hashing the whole history
+        hasher = PrefixHasher(request.get("system"), request.get("tools"))
+        for message in request["messages"]:
+            payload = message.pop("_reasoning", None)
+            if payload and message["role"] == "assistant":
+                items = replayable_items(payload, self.model)
+                blocks = message["content"]
+                if isinstance(blocks, str):
+                    blocks = [{"type": "text", "text": blocks}] if blocks else []
+                if (
+                    items
+                    and blocks
+                    and payload.get("prefix_sha256") == hasher.hexdigest()
+                ):
+                    message["content"] = [*items, *blocks]
+            hasher.add(message)
+
+    def _place_message_breakpoints(self, request: Dict[str, Any]) -> None:
+        """Rolling cache breakpoints on the last two user turns.
+
+        tools + system already hold two of the API's four breakpoints. The
+        newest user turn gets the fresh cache write; the one before it is where
+        the previous request wrote, so each request reads what the last cached
+        however many blocks the turn added (the API looks back only 20 blocks).
+        """
+        room = min(2, _MAX_CACHE_BREAKPOINTS - _count_cache_controls(request))
+        for message in reversed(request["messages"]):
+            if room <= 0:
+                break
+            if message["role"] == "user" and self._mark_last_block(message):
+                room -= 1
+
+    @staticmethod
+    def _mark_last_block(message: Dict[str, Any]) -> bool:
+        """Put a breakpoint on the message's last block without touching the caller's dicts."""
+        content = message["content"]
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}] if content else []
+        if not content:
+            return False
+        last = content[-1]
+        if last.get("type") == "text" and not last.get("text"):
+            return False  # the API cannot cache an empty text block
+        message["content"] = [
+            *content[:-1],
+            {**last, "cache_control": {"type": "ephemeral"}},
+        ]
+        return True
 
     def _normalize_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert tools to Anthropic format, handling both generic and pre-formatted tools.

@@ -8,6 +8,10 @@ LOCAL_ONLY_MESSAGE_KEYS = frozenset(
     {
         "agent_hud",
         "agent_hud_sources",
+        # Provider-native reasoning artifacts stored on assistant messages.
+        # A provider that supports continuity reads it before stripping and
+        # sends it back only when provider and model match its own.
+        "provider_reasoning",
     }
 )
 

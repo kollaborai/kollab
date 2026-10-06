@@ -523,6 +523,11 @@ class StreamingResponse(BaseModel):
     is_final: bool = Field(default=False)
     finish_reason: Optional[str] = None
     raw_chunk: Optional[Dict[str, Any]] = None
+    # Opaque reasoning artifacts the provider needs back on later turns
+    # (encrypted reasoning items, signed thinking blocks, thought signatures).
+    # Shape: {"provider": str, "model": str, "items": [...]}. A stream emits
+    # the complete dict once, on or before its final chunk.
+    provider_reasoning: Optional[Dict[str, Any]] = None
     _raw_payload: Optional[Dict[str, Any]] = PrivateAttr(default=None)
 
     # Note: usage is intentionally optional even on final chunks.
@@ -543,6 +548,8 @@ class UnifiedResponse(BaseModel):
     provider: ProviderType
     finish_reason: Optional[str] = None
     raw_response: Optional[Dict[str, Any]] = None
+    # Same contract as StreamingResponse.provider_reasoning.
+    provider_reasoning: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def validate_content_not_empty(self) -> "UnifiedResponse":

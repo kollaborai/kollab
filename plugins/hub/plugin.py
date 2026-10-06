@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from kollabor.hub_env import hub_disabled_by_env
+from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
 from kollabor_ai.message_content import content_to_text
@@ -996,6 +996,7 @@ class HubPlugin(BasePlugin):
                 getattr(profile_mgr, "active_profile_name", "") if profile_mgr else ""
             )
             or None,
+            solo=hub_solo_by_env(),
         )
 
         # Start presence + clean up orphan sockets from past crashes
@@ -4292,6 +4293,47 @@ class HubPlugin(BasePlugin):
         if not self.event_bus or not self._is_enabled():
             return
 
+        # Track when agent is working vs idle
+        working_hook = Hook(
+            name="hub_working_state",
+            plugin_name=self.name,
+            event_type=EventType.LLM_REQUEST_PRE,
+            callback=self._set_working,
+            priority=HookPriority.SYSTEM.value,
+        )
+        await self.event_bus.register_hook(working_hook)
+
+        idle_hook = Hook(
+            name="hub_idle_state",
+            plugin_name=self.name,
+            event_type=EventType.LLM_RESPONSE_POST,
+            callback=self._set_idle,
+            priority=HookPriority.POSTPROCESSING.value,
+        )
+        await self.event_bus.register_hook(idle_hook)
+
+        # A solo agent serves its host (socket, presence, working/idle state)
+        # and nothing else: no relay, roster, <hub_msg>, broadcast or nudges.
+        if not self._solo:
+            await self._register_mesh_hooks()
+
+        # Start the hub after all plugins initialized
+        # Skip in attach mode - we're a viewer, not a peer on the mesh
+        if self._cli_args and getattr(self._cli_args, "attach", None):
+            logger.info("Hub: attach mode, skipping mesh join")
+        else:
+
+            async def _safe_start():
+                try:
+                    await self._start_hub()
+                except Exception as e:
+                    logger.error(f"Hub _start_hub failed: {e}", exc_info=True)
+
+            loop = asyncio.get_running_loop()
+            self._startup_task = loop.create_task(_safe_start())
+
+    async def _register_mesh_hooks(self) -> None:
+        """Register the hooks that make this agent a peer on the mesh."""
         # These guards share the normal model/tool pipeline. The final tool
         # guard runs after an awaited host permission prompt, so revocation
         # during that prompt cannot authorize a stale remote request.
@@ -4331,25 +4373,6 @@ class HubPlugin(BasePlugin):
             priority=HookPriority.PREPROCESSING.value,
         )
         await self.event_bus.register_hook(roster_hook)
-
-        # Track when agent is working vs idle
-        working_hook = Hook(
-            name="hub_working_state",
-            plugin_name=self.name,
-            event_type=EventType.LLM_REQUEST_PRE,
-            callback=self._set_working,
-            priority=HookPriority.SYSTEM.value,
-        )
-        await self.event_bus.register_hook(working_hook)
-
-        idle_hook = Hook(
-            name="hub_idle_state",
-            plugin_name=self.name,
-            event_type=EventType.LLM_RESPONSE_POST,
-            callback=self._set_idle,
-            priority=HookPriority.POSTPROCESSING.value,
-        )
-        await self.event_bus.register_hook(idle_hook)
 
         # Parse <hub_msg> tags from LLM responses
         msg_hook = Hook(
@@ -4391,21 +4414,6 @@ class HubPlugin(BasePlugin):
                 priority=HookPriority.DISPLAY.value,
             )
         )
-
-        # Start the hub after all plugins initialized
-        # Skip in attach mode - we're a viewer, not a peer on the mesh
-        if self._cli_args and getattr(self._cli_args, "attach", None):
-            logger.info("Hub: attach mode, skipping mesh join")
-        else:
-
-            async def _safe_start():
-                try:
-                    await self._start_hub()
-                except Exception as e:
-                    logger.error(f"Hub _start_hub failed: {e}", exc_info=True)
-
-            loop = asyncio.get_running_loop()
-            self._startup_task = loop.create_task(_safe_start())
 
     async def _reconcile_agent_bundle(self, bundle: str) -> None:
         """Switch the active agent bundle to match this agent's hub role.
@@ -4476,14 +4484,18 @@ class HubPlugin(BasePlugin):
 
         try:
             # Clean stale state first (discovers and removes dead agents)
-            self._presence.discover_agents()
+            self._presence.discover_agents(include_solo=True)
 
-            # Try to become coordinator
-            is_coordinator = self._election.try_become_coordinator(self._identity)
+            # Try to become coordinator. A solo agent never leads the mesh.
+            is_coordinator = (
+                not self._solo
+                and self._election.try_become_coordinator(self._identity)
+            )
             self._identity.is_coordinator = is_coordinator
 
-            # Discover existing agents to get taken identities
-            existing = self._presence.discover_agents()
+            # Discover existing agents to get taken identities (solo ones
+            # too: their sockets are named by identity)
+            existing = self._presence.discover_agents(include_solo=True)
             taken = [a.identity for a in existing]
 
             # Resolve active agent for identity and vault config
@@ -4933,6 +4945,12 @@ class HubPlugin(BasePlugin):
             # Initialize scratchpad (live notes, survives compaction)
             if self._vault:
                 self._scratchpad = Scratchpad(self._vault._vault_dir)
+                # Advance the session counter exactly once per boot, before
+                # rebirth renders. get_rebirth_context() is now a pure read,
+                # so this is the only place the counter moves -- the count
+                # means sessions, and the per-turn vault block stays
+                # byte-stable.
+                self._vault.advance_session()
 
             # Build rebirth context from the vault audit/memory layers. Do not
             # append scratchpad or session-state text here: both are mutable
@@ -5141,7 +5159,8 @@ class HubPlugin(BasePlugin):
             self._started = True
             # Elect one transport owner for this workspace; every local agent
             # keeps its own model, permissions and durable receiving queue.
-            self._relay_startup_task = asyncio.create_task(self._resume_relay())
+            if not self._solo:
+                self._relay_startup_task = asyncio.create_task(self._resume_relay())
         except Exception as e:
             logger.error(f"Hub startup failed: {e}", exc_info=True)
         finally:
@@ -6445,7 +6464,7 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
-        profile_name, provider, model = self._active_model_details()
+        profile_name, provider, model, effort = self._active_model_details()
 
         # Build a summary of everyone on the hub for the announcement
         roster_lines = []
@@ -6467,6 +6486,7 @@ class HubPlugin(BasePlugin):
                     f"in project {self._identity.project}.\n"
                     f"cwd: {os.getcwd()}\n"
                     f"model: {model or 'unknown'}\n"
+                    f"effort: {effort or 'default'}\n"
                     f"provider: {provider or 'unknown'}\n"
                     f"profile: {profile_name or 'unknown'}\n"
                     f"current hub roster:\n{roster_summary}\n"
@@ -6479,29 +6499,39 @@ class HubPlugin(BasePlugin):
             await self._deliver_to_agent(peer, intro)
             logger.info(f"Announced to {peer.identity}")
 
-    def _active_model_details(self) -> Tuple[str, str, str]:
-        """Return the active profile name, provider, and model for notices."""
+    def _active_model_details(self) -> Tuple[str, str, str, str]:
+        """Return the active profile name, provider, model, and effort for notices."""
         if not self.event_bus or not hasattr(self.event_bus, "get_service"):
-            return "", "", ""
+            return "", "", "", ""
         try:
             profile_manager = self.event_bus.get_service("profile_manager")
             if not profile_manager or not hasattr(
                 profile_manager, "get_active_profile"
             ):
-                return "", "", ""
+                return "", "", "", ""
             profile = profile_manager.get_active_profile()
             if not profile:
-                return "", "", ""
+                return "", "", "", ""
             provider = profile.get_provider()
             model = profile.get_model()
-            return (
-                str(getattr(profile, "name", "") or ""),
-                str(provider or ""),
-                str(model or ""),
-            )
         except Exception as exc:
             logger.debug("active model lookup for hub notice failed: %s", exc)
-            return "", "", ""
+            return "", "", "", ""
+
+        effort = ""
+        get_effort = getattr(profile, "get_effort", None)
+        if callable(get_effort):
+            try:
+                effort = str(get_effort() or "")
+            except Exception as exc:
+                logger.debug("active effort lookup for hub notice failed: %s", exc)
+
+        return (
+            str(getattr(profile, "name", "") or ""),
+            str(provider or ""),
+            str(model or ""),
+            effort,
+        )
 
     async def announce_model_switch(
         self,
@@ -7107,6 +7137,13 @@ class HubPlugin(BasePlugin):
 
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
+        if self._solo:
+            # Peers cannot discover a solo agent; this covers direct sends by
+            # name (`kollab --hub send`) so nothing reaches its conversation.
+            logger.info(
+                "solo agent dropped hub message from %s", message.from_identity
+            )
+            return
         relay = getattr(self, "_relay_agent", None)
         if relay and await relay.defer_local(message):
             return
@@ -7817,17 +7854,27 @@ class HubPlugin(BasePlugin):
         self._render_hub_box(my_name, self._outgoing_label(to_name), content)
 
     async def _inject_roster_context(self, context, event=None):
-        """Inject hub roster into conversation history before LLM calls.
+        """Put hub context in front of the model before each LLM call.
 
         The LLM sees who is available; presence alone does not authorize contact.
 
-        Injects roster as the first system message in conversation_history
-        (the actual list the API call uses), updating it each turn.
+        Split for prompt caching. The system message is the head of every
+        request, so one byte that changes there re-processes the whole prompt
+        on a prefix-caching provider (OpenAI, DeepSeek, GLM, Anthropic):
+
+        - static (identity, network, the tag reference): written into the first
+          system message; changes only when identity or network do.
+        - live (who is online and doing what, active tasks, lane claims,
+          subscribed file changes): queued on the injection rail under the
+          "hub_live" key, which attaches it to the newest message only when it
+          changed. Rendered once per user message so a tool loop does not
+          re-send it after every call. Trade-off: a peer that changes state
+          mid-turn shows up at the next user message; <hub_status/> reads it
+          live.
         """
         if not self._identity:
             return context
 
-        # Build roster block
         lines = []
         lines.append("--- hub context ---")
         lines.append(f'you are "{self._identity.identity}" on the kollabor hub.')
@@ -7846,6 +7893,136 @@ class HubPlugin(BasePlugin):
                 lines.append(f"this device: {device_name}")
 
         lines.append("")
+
+        lines.append(
+            "Only contact other agents when directed by the human or an authorized task."
+        )
+        relay = getattr(self, "_relay_agent", None)
+        if relay:
+            lines.extend(await relay.harness_context())
+
+        lines.append("to message an agent, ALWAYS use this exact format:")
+        lines.append('<hub_msg to="identity">your message</hub_msg>')
+        lines.append("remote agents use the same tag with their full name:")
+        lines.append('<hub_msg to="infra@home-server">your message</hub_msg>')
+        lines.append(
+            "a remote agent runs your message with its own tools on its own machine "
+            "and answers with the same tag."
+        )
+        lines.append("")
+        lines.append(
+            "IMPORTANT: when asked to delegate, coordinate, or assign tasks "
+            "to other agents, you MUST use <hub_msg> tags. without them, "
+            "your message will NOT reach the other agent. never describe "
+            "what you would say -- actually say it with the tag."
+        )
+
+        route_untagged = False
+        if self.config:
+            route_untagged = self.config.get(
+                "plugins.hub.route_untagged_to_coordinator", False
+            )
+        if route_untagged and not self._identity.is_coordinator:
+            lines.append(
+                "note: your untagged responses are auto-routed to "
+                "the coordinator. use <hub_msg> tags only when you "
+                "need to message a specific non-coordinator agent."
+            )
+
+        lines.append("")
+        lines.append("agent operations (XML tags parsed from your responses):")
+        lines.append('  <hub_spawn name="lapis">task description</hub_spawn>')
+        lines.append(
+            '  <hub_spawn name="sapphire" type="research">' "research task</hub_spawn>"
+        )
+        lines.append(
+            "  note: name is a hub identity. to choose an agent bundle, "
+            'use type="coder" or type="research".'
+        )
+        lines.append("  <hub_work/>  -- view work queue")
+        lines.append("  <hub_queue>task description</hub_queue>  -- add to queue")
+        lines.append('  <hub_claim/>  or  <hub_claim id="slot-id"/>  -- claim work')
+        lines.append('  <hub_vault name="identity"/>  -- read agent vault summary')
+        lines.append("  <hub_vaults/>  -- list all vaults")
+        lines.append(
+            '  <hub_cron_add to="name" interval="5m">message</hub_cron_add>'
+            "  -- to is optional (you); agent@device for a remote agent"
+        )
+        lines.append("  <hub_cron_list/>  -- list cron jobs")
+        lines.append("  <hub_cron_delete>job-id</hub_cron_delete>")
+        lines.append(
+            '  <hub_capture name="agent-name" lines="50"/>' "  -- capture agent output"
+        )
+
+        lines.append("--- end hub context ---")
+
+        static_block = "\n".join(lines)
+
+        llm_service = (
+            self.event_bus.get_service("llm_service") if self.event_bus else None
+        )
+        history = getattr(llm_service, "conversation_history", None)
+        turn_msg = None
+        if isinstance(history, list):
+            turn_msg = next(
+                (m for m in reversed(history) if getattr(m, "role", None) == "user"),
+                None,
+            )
+        memo = getattr(self, "_hub_live_memo", None)
+        if turn_msg is not None and memo is not None and memo[0] is turn_msg:
+            live_block = memo[1]
+        else:
+            live_block = await self._hub_live_context()
+            if turn_msg is not None:
+                self._hub_live_memo = (turn_msg, live_block)
+
+        context_svc = (
+            self.event_bus.get_service("context_service") if self.event_bus else None
+        )
+        queue = getattr(context_svc, "queue_ephemeral_injection", None)
+        if callable(queue) and type(context_svc).__module__ != "unittest.mock":
+            queue(live_block, key="hub_live")
+            roster_block = static_block
+        else:
+            # No injection rail (single-agent shells, tests): keep the old
+            # behavior and carry the live block in the system message.
+            roster_block = static_block + "\n\n" + live_block
+
+        # Inject into actual conversation history that gets sent to the API.
+        # Find the llm_service's conversation_history and prepend/update
+        # a hub context system message.
+        try:
+            llm_service = (
+                self.event_bus.get_service("llm_service") if self.event_bus else None
+            )
+            if llm_service and hasattr(llm_service, "conversation_history"):
+                history = llm_service.conversation_history
+                if history:
+                    # Check if first message is system prompt - append to it
+                    first = history[0]
+                    if getattr(first, "role", None) == "system":
+                        content = getattr(first, "content", "") or ""
+                        # Remove old hub context if present
+                        if "--- hub context ---" in content:
+                            idx = content.index("--- hub context ---")
+                            content = content[:idx].rstrip()
+                        first.content = content + "\n\n" + roster_block
+                    else:
+                        # No system message - inject one
+                        from kollabor_events.data_models import ConversationMessage
+
+                        history.insert(
+                            0,
+                            ConversationMessage(role="system", content=roster_block),
+                        )
+        except Exception as e:
+            logger.debug(f"Roster injection error: {e}")
+
+        return context
+
+    async def _hub_live_context(self) -> str:
+        """Hub state that changes turn to turn; never part of the system prompt."""
+        lines = ["--- hub status ---"]
 
         remote_rows = await self._refresh_remote_agent_rows()
         if self._roster or remote_rows:
@@ -7888,34 +8065,9 @@ class HubPlugin(BasePlugin):
         else:
             lines.append("no other agents online.")
 
-        lines.append("")
-
         auto_help = False
         if self.config:
             auto_help = self.config.get("plugins.hub.auto_help", False)
-
-        lines.append(
-            "Only contact other agents when directed by the human or an authorized task."
-        )
-        relay = getattr(self, "_relay_agent", None)
-        if relay:
-            lines.extend(await relay.harness_context())
-
-        lines.append("to message an agent, ALWAYS use this exact format:")
-        lines.append('<hub_msg to="identity">your message</hub_msg>')
-        lines.append("remote agents use the same tag with their full name:")
-        lines.append('<hub_msg to="infra@home-server">your message</hub_msg>')
-        lines.append(
-            "a remote agent runs your message with its own tools on its own machine "
-            "and answers with the same tag."
-        )
-        lines.append("")
-        lines.append(
-            "IMPORTANT: when asked to delegate, coordinate, or assign tasks "
-            "to other agents, you MUST use <hub_msg> tags. without them, "
-            "your message will NOT reach the other agent. never describe "
-            "what you would say -- actually say it with the tag."
-        )
 
         if auto_help and self._roster:
             lines.append(
@@ -7923,49 +8075,11 @@ class HubPlugin(BasePlugin):
                 "proactively offer help via hub_msg."
             )
 
-        route_untagged = False
-        if self.config:
-            route_untagged = self.config.get(
-                "plugins.hub.route_untagged_to_coordinator", False
-            )
-        if route_untagged and not self._identity.is_coordinator:
-            lines.append(
-                "note: your untagged responses are auto-routed to "
-                "the coordinator. use <hub_msg> tags only when you "
-                "need to message a specific non-coordinator agent."
-            )
-
-        lines.append("")
-        lines.append("agent operations (XML tags parsed from your responses):")
-        lines.append('  <hub_spawn name="lapis">task description</hub_spawn>')
-        lines.append(
-            '  <hub_spawn name="sapphire" type="research">' "research task</hub_spawn>"
-        )
-        lines.append(
-            "  note: name is a hub identity. to choose an agent bundle, "
-            'use type="coder" or type="research".'
-        )
-        lines.append("  <hub_work/>  -- view work queue")
-        lines.append("  <hub_queue>task description</hub_queue>  -- add to queue")
-        lines.append('  <hub_claim/>  or  <hub_claim id="slot-id"/>  -- claim work')
-        lines.append('  <hub_vault name="identity"/>  -- read agent vault summary')
-        lines.append("  <hub_vaults/>  -- list all vaults")
-        lines.append(
-            '  <hub_cron_add to="name" interval="5m">message</hub_cron_add>'
-            "  -- to is optional (you); agent@device for a remote agent"
-        )
-        lines.append("  <hub_cron_list/>  -- list cron jobs")
-        lines.append("  <hub_cron_delete>job-id</hub_cron_delete>")
-        lines.append(
-            '  <hub_capture name="agent-name" lines="50"/>' "  -- capture agent output"
-        )
-
-        lines.append("--- end hub context ---")
-
+        lines.append("--- end hub status ---")
         roster_block = "\n".join(lines)
 
-        # Inject active tasks (compaction-proof -- lives on disk, injected
-        # into system prompt every LLM turn, survives any compaction)
+        # Active tasks (compaction-proof: they live on disk and are injected
+        # every user turn, so they survive any compaction)
         if self._identity and self._task_ledger:
             my_tasks = self._task_ledger.get_active_for(self._identity.identity)
             if my_tasks:
@@ -8071,37 +8185,7 @@ class HubPlugin(BasePlugin):
                     change_lines.append("--- end changes ---")
                     roster_block += "\n".join(change_lines)
 
-        # Inject into actual conversation history that gets sent to the API.
-        # Find the llm_service's conversation_history and prepend/update
-        # a hub context system message.
-        try:
-            llm_service = (
-                self.event_bus.get_service("llm_service") if self.event_bus else None
-            )
-            if llm_service and hasattr(llm_service, "conversation_history"):
-                history = llm_service.conversation_history
-                if history:
-                    # Check if first message is system prompt - append to it
-                    first = history[0]
-                    if getattr(first, "role", None) == "system":
-                        content = getattr(first, "content", "") or ""
-                        # Remove old hub context if present
-                        if "--- hub context ---" in content:
-                            idx = content.index("--- hub context ---")
-                            content = content[:idx].rstrip()
-                        first.content = content + "\n\n" + roster_block
-                    else:
-                        # No system message - inject one
-                        from kollabor_events.data_models import ConversationMessage
-
-                        history.insert(
-                            0,
-                            ConversationMessage(role="system", content=roster_block),
-                        )
-        except Exception as e:
-            logger.debug(f"Roster injection error: {e}")
-
-        return context
+        return roster_block
 
     async def _set_working(self, context, event=None):
         """Mark agent as working when LLM request starts.
@@ -10226,6 +10310,8 @@ class HubPlugin(BasePlugin):
     async def _start_relay_agent(self):
         if self._relay_agent is not None:
             return
+        if self._solo:
+            raise RuntimeError("solo agents are not on the network")
         from .project_scope import resolve_project_root
         from .relay_agent import RelayAgentBridge
 
@@ -12799,6 +12885,11 @@ class HubPlugin(BasePlugin):
 
         except Exception as e:
             return f"console error: {e}"
+
+    @property
+    def _solo(self) -> bool:
+        """Serving a host (the engine) only: never on the mesh or network."""
+        return getattr(getattr(self, "_identity", None), "solo", False) is True
 
     def _is_enabled(self) -> bool:
         if hub_disabled_by_env():

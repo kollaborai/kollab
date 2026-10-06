@@ -73,6 +73,28 @@ def test_anthropic_auth_token_auto_detects_anthropic_compatible_profile(
         keyring_set.assert_not_called()
 
 
+def test_llm_flag_can_select_env_profile_and_env_never_overrides_flag(
+    monkeypatch, tmp_path
+):
+    """`--llm anthropic-auto` must resolve; any other --llm must still win."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "zai-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-4.7")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ProfileManager, "_detect_oauth_provider", lambda self: None)
+
+    manager = ProfileManager(cli_profile="anthropic-auto")
+    assert manager.set_active_profile("anthropic-auto", persist=False)
+    assert manager.get_active_profile().model == "glm-4.7"
+
+    other = ProfileManager(cli_profile="some-other-profile")
+    assert "anthropic-auto" in other._profiles
+    assert other.get_active_profile().name != "anthropic-auto"
+    assert other.is_auto_detected is False
+
+
 def test_anthropic_api_key_auto_detect_still_uses_standard_model_env(
     monkeypatch, tmp_path
 ):

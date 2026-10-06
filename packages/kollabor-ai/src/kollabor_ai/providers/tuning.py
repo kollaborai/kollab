@@ -17,7 +17,7 @@ Usage in a payload builder::
 import logging
 from typing import Any, Dict
 
-from ..model_registry import supports_sampling
+from ..model_registry import supports_sampling, thinking_default
 
 logger = logging.getLogger(__name__)
 
@@ -65,3 +65,17 @@ def effort_params(config: Any, style: str) -> Dict[str, Any]:
     if style == EffortStyle.RESPONSES:
         return {"reasoning": {"effort": effort}}
     return {"reasoning_effort": effort}
+
+
+def thinking_params(model: str) -> Dict[str, Any]:
+    """Anthropic's ``thinking`` field, or ``{}`` to keep the model's default.
+
+    Claude models that think by default (Opus/Sonnet 5.x, Fable, Mythos) send
+    empty thinking blocks unless the request asks for ``display: "summarized"``.
+    It changes what comes back, not what is billed. Models where thinking is
+    off by default stay off: turning it on costs output tokens, and on 4.6 it
+    also rejects temperature.
+    """
+    if thinking_default(model) == "adaptive":
+        return {"thinking": {"type": "adaptive", "display": "summarized"}}
+    return {}

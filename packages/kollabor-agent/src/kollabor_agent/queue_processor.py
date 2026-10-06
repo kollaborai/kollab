@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -169,17 +169,33 @@ def _cap_tool_output(text: str, max_chars: int) -> str:
     )
 
 
+def _last_provider_reasoning(api_service: Any) -> Optional[Dict[str, Any]]:
+    """The last response's provider-native reasoning dict, or None."""
+    getter = getattr(api_service, "get_last_provider_reasoning", None)
+    reasoning = getter() if callable(getter) else None
+    return reasoning if isinstance(reasoning, dict) and reasoning else None
+
+
 def _assistant_history_usage_metadata(
-    session_stats: Dict[str, Any], thinking_duration: float
-) -> Dict[str, Dict[str, Any]]:
-    """Return the usage payload shared by native and XML history writes."""
-    return {
+    session_stats: Dict[str, Any],
+    thinking_duration: float,
+    provider_reasoning: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the metadata shared by native and XML assistant history writes.
+
+    ``provider_reasoning`` rides on the assistant message so the next request
+    can hand the model its own reasoning back.
+    """
+    metadata: Dict[str, Any] = {
         "usage": {
             "input_tokens": session_stats.get("input_tokens", 0),
             "output_tokens": session_stats.get("output_tokens", 0),
             "thinking_duration": thinking_duration,
         }
     }
+    if provider_reasoning:
+        metadata["provider_reasoning"] = provider_reasoning
+    return metadata
 
 
 class QueueProcessor:
@@ -415,6 +431,48 @@ class QueueProcessor:
             return render_env_block(queue.drain())
         except Exception:
             return ""
+
+    def _attach_context(self, blocks: List[Tuple[str, str]]) -> None:
+        """Give the model this request's context blocks without editing history.
+
+        Blocks ride on the newest user or tool message, one no provider has
+        seen yet, in ``metadata["injected_context"]``; the API service puts them
+        in front of that message on this and every later request. A message the
+        model saw never changes, so every provider's prompt-prefix cache holds
+        across tool loops and user turns. (Moving the blocks to each new user
+        message rewrote the previous one: the cache fell to the system prompt.)
+
+        A keyed block is state (session context, hub status): it is sent again
+        only when its text changed or the message carrying it left the history
+        (compaction, resume). A block keyed "" is a one-shot notice.
+        """
+        history = self.conversation_history
+        carried = getattr(self, "_carried_context", {})
+        fresh = [
+            (key, text)
+            for key, text in blocks
+            if text
+            and not (
+                key in carried
+                and carried[key][1] == text
+                and any(m is carried[key][0] for m in history)
+            )
+        ]
+        target = next(
+            (m for m in reversed(history) if getattr(m, "role", "") in ("user", "tool")),
+            None,
+        )
+        if not fresh or target is None:
+            return
+        block = "\n\n---\n\n".join(text for _, text in fresh)
+        prior = target.metadata.get("injected_context")
+        target.metadata["injected_context"] = (
+            f"{prior}\n\n---\n\n{block}" if prior else block
+        )
+        for key, text in fresh:
+            if key:
+                carried[key] = (target, text)
+        self._carried_context = carried
 
     async def enqueue(self, message: MessageContent) -> None:
         """Enqueue message with overflow strategy."""
@@ -907,12 +965,10 @@ class QueueProcessor:
 
         response = None
         parent_uuid = current_parent_uuid
-        ephemeral_user_message = None
-        ephemeral_user_content = None
 
         try:
-            # Context service: inject ephemeral prompts (curator,
-            # snapshot, confirmation) before the API call.
+            # Context service: attach context blocks (curator, snapshot,
+            # confirmation, live state) before the API call.
             context_svc = None
             if self.event_bus:
                 _svc = self.event_bus.get_service("context_service")
@@ -924,24 +980,26 @@ class QueueProcessor:
                 ):
                     context_svc = _svc
             if context_svc is not None:
-                injections: list[str] = []
+                # (key, block): a keyed block is state, sent only when it
+                # changed; "" is a one-shot notice. See _attach_context.
+                injections: list[tuple[str, str]] = []
 
                 # Curator prompt has highest priority
                 curator = context_svc.build_curator_injection()
                 if curator:
-                    injections.append(curator)
+                    injections.append(("", curator))
                 else:
                     # Snapshot and confirmation only when curator isn't active
                     snapshot = context_svc.build_context_snapshot()
                     if snapshot:
-                        injections.append(snapshot)
+                        injections.append(("", snapshot))
                     confirmation = context_svc.build_confirmation_injection()
                     if confirmation:
-                        injections.append(confirmation)
+                        injections.append(("", confirmation))
                     if hasattr(context_svc, "build_divergence_warnings"):
                         divergence = context_svc.build_divergence_warnings()
                         if divergence:
-                            injections.append(divergence)
+                            injections.append(("", divergence))
 
                 if hasattr(context_svc, "drain_ephemeral_injections"):
                     injections.extend(context_svc.drain_ephemeral_injections())
@@ -958,14 +1016,16 @@ class QueueProcessor:
                             and legacy is not context_svc
                             and hasattr(legacy, "drain_pending_injections")
                         ):
-                            injections.extend(legacy.drain_pending_injections())
+                            injections.extend(
+                                ("", block)
+                                for block in legacy.drain_pending_injections()
+                            )
 
                 # Stable-prefix mode: the system message has had its volatile
                 # trenders (session-context, hub roster/vault/queue, active_llm)
                 # stripped so its byte prefix is identical across sessions for
-                # oMLX KV-cache reuse. Re-emit them here on the user turn so
-                # nothing is lost. Returns "" when stable_prefix is off. Rides
-                # and is stripped post-call exactly like the [env] block below.
+                # oMLX KV-cache reuse. They come back here as keyed blocks so
+                # nothing is lost. Empty when stable_prefix is off.
                 if self.event_bus:
                     _llm_vol = self.event_bus.get_service("llm_service")
                     if (
@@ -974,28 +1034,15 @@ class QueueProcessor:
                     ):
                         build_vol = getattr(_llm_vol, "build_volatile_context", None)
                         if callable(build_vol):
-                            vol_block = build_vol()
-                            if vol_block:
-                                injections.append(vol_block)
+                            injections.extend(build_vol() or [])
 
                 # Env notification queue drains regardless of curator state —
                 # capability / peer events shouldn't wait for the curator.
                 env_block = self._drain_env_block()
                 if env_block:
-                    injections.append(env_block)
+                    injections.append(("", env_block))
 
-                if injections:
-                    combined = "\n\n---\n\n".join(injections)
-                    # Prepend to last user message in conversation history
-                    for i in range(len(self.conversation_history) - 1, -1, -1):
-                        msg = self.conversation_history[i]
-                        if getattr(msg, "role", "") == "user":
-                            ephemeral_user_message = msg
-                            ephemeral_user_content = msg.content
-                            msg.content = prepend_text(
-                                combined + "\n\n---\n\n", msg.content
-                            )
-                            break
+                self._attach_context(injections)
 
             # Call LLM API via streaming handler (with auto-continuation on truncation)
             MAX_CONTINUATIONS = 3
@@ -1082,8 +1129,17 @@ class QueueProcessor:
                 accumulated_response += response or ""
 
                 # Add partial response as assistant, then ask to continue
+                truncated_reasoning = _last_provider_reasoning(self.api_service)
                 self.conversation_history.append(
-                    ConversationMessage(role="assistant", content=response or "")
+                    ConversationMessage(
+                        role="assistant",
+                        content=response or "",
+                        metadata=(
+                            {"provider_reasoning": truncated_reasoning}
+                            if truncated_reasoning
+                            else {}
+                        ),
+                    )
                 )
                 self.conversation_history.append(
                     ConversationMessage(
@@ -1548,6 +1604,7 @@ class QueueProcessor:
                 },
                 thinking_content=thinking_list,
                 tool_calls=tool_call_entries,
+                provider_reasoning=_last_provider_reasoning(self.api_service),
             )
 
             # Add assistant message to conversation history
@@ -1556,7 +1613,9 @@ class QueueProcessor:
                 # Native path: store tool_calls in metadata so Responses API
                 # can rebuild function_call items with proper call_ids
                 assistant_metadata = _assistant_history_usage_metadata(
-                    self.session_stats, thinking_duration
+                    self.session_stats,
+                    thinking_duration,
+                    _last_provider_reasoning(self.api_service),
                 )
                 if raw_tool_calls:
                     assistant_metadata["tool_calls"] = [
@@ -1664,7 +1723,9 @@ class QueueProcessor:
                         role="assistant",
                         content=response,
                         metadata=_assistant_history_usage_metadata(
-                            self.session_stats, thinking_duration
+                            self.session_stats,
+                            thinking_duration,
+                            _last_provider_reasoning(self.api_service),
                         ),
                     ),
                     parent_uuid=parent_uuid,
@@ -1753,13 +1814,6 @@ class QueueProcessor:
             self.message_display_service.display_error_message(error_msg)
             self.last_turn_error = error_msg
             self.turn_completed = True
-
-        finally:
-            # Context-service blocks are request-local. Restore the persisted
-            # history object after the initial call and any continuations so
-            # ephemeral context cannot become part of the next cached prefix.
-            if ephemeral_user_message is not None:
-                ephemeral_user_message.content = ephemeral_user_content
 
         # A turn is only done once no tool results need to go back to the model.
         # Publishing earlier would tell remote clients the turn ended while its

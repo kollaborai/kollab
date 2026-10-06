@@ -275,7 +275,50 @@ class OpenAIResponsesTransformer:
                 response, response.get("status")
             ),
             raw_response=redact_generated_image_data(response),
+            provider_reasoning=OpenAIResponsesTransformer.provider_reasoning(
+                output_items, model
+            ),
         )
+
+    @staticmethod
+    def provider_reasoning(output: List[Any], model: str) -> Optional[Dict[str, Any]]:
+        """Reasoning artifacts the next request must carry (the shared contract).
+
+        Reasoning items keep the fields the Codex CLI re-sends (id, summary,
+        encrypted_content); the assistant message ``phase`` rides along because
+        the Responses docs require it back when assistant history is replayed.
+        """
+        items: List[Dict[str, Any]] = []
+        phase: Optional[str] = None
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "reasoning" and (
+                item.get("encrypted_content") or item.get("id")
+            ):
+                items.append(
+                    {
+                        "type": "reasoning",
+                        "summary": item.get("summary") or [],
+                        **{
+                            key: item[key]
+                            for key in ("id", "encrypted_content")
+                            if item.get(key)
+                        },
+                    }
+                )
+            elif item.get("type") == "message" and item.get("phase"):
+                phase = item["phase"]
+        if not items and not phase:
+            return None
+        result: Dict[str, Any] = {
+            "provider": ProviderType.OPENAI_RESPONSES.value,
+            "model": model,
+            "items": items,
+        }
+        if phase:
+            result["phase"] = phase
+        return result
 
     # Terminal events. response.incomplete (token cap or filter) still carries
     # the partial output, the usage and incomplete_details.

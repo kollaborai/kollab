@@ -219,6 +219,7 @@
       "supports_streaming": true,
       "supports_vision": true,
       "supports_sampling": false,
+      "thinking_default": "adaptive",
       "released": "2026-09-01",
       "notes": "Frontier Anthropic model for long-running agents. Sampling/thinking behavior assumed to match claude-fable-5 -- re-verify."
     },
@@ -235,6 +236,7 @@
       "supports_streaming": true,
       "supports_vision": true,
       "supports_sampling": false,
+      "thinking_default": "adaptive",
       "released": "2026-09-22",
       "notes": "Matches Fable 5.1 on most work at ~40% less than Opus 5. Sampling behavior assumed to match claude-opus-5 -- re-verify."
     },
@@ -251,6 +253,7 @@
       "supports_streaming": true,
       "supports_vision": true,
       "supports_sampling": false,
+      "thinking_default": "adaptive",
       "released": "2026-09-28",
       "notes": "Latest Sonnet. Cached rate assumed 10% of input; sampling behavior assumed to match claude-sonnet-5 -- re-verify."
     },
@@ -267,6 +270,7 @@
       "supports_streaming": true,
       "supports_vision": true,
       "supports_sampling": false,
+      "thinking_default": "adaptive",
       "notes": "Most capable Anthropic model. Thinking is always on -- sending any thinking config (including disabled) is a 400. No assistant prefill. Requires 30-day data retention (unavailable under ZDR)."
     },
     "claude-mythos-5": {
@@ -282,6 +286,7 @@
       "supports_streaming": true,
       "supports_vision": true,
       "supports_sampling": false,
+      "thinking_default": "adaptive",
       "notes": "Same specs and API behavior as claude-fable-5. Access limited to Project Glasswing."
     },
     "claude-opus-5": {
@@ -297,6 +302,7 @@
       "supports_streaming": true,
       "supports_vision": true,
       "supports_sampling": false,
+      "thinking_default": "adaptive",
       "notes": "Current Opus flagship. Thinking is on by default (omitting it runs adaptive); disabling thinking is only valid at effort high or below. Separate rate-limit bucket from Opus 4.x."
     },
     "claude-opus-4-8": {
@@ -356,6 +362,7 @@
       "supports_streaming": true,
       "supports_vision": true,
       "supports_sampling": false,
+      "thinking_default": "adaptive",
       "notes": "Introductory pricing of 2.00/10.00 applies through 2026-08-31. Rejects non-default temperature/top_p/top_k, so they are omitted entirely. New tokenizer: same text is ~30% more tokens than Sonnet 4.6."
     },
     "claude-sonnet-4-6": {

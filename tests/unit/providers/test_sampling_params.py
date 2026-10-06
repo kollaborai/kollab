@@ -51,6 +51,20 @@ class AnthropicSamplingTests(unittest.TestCase):
             self.assertEqual(request.get("temperature"), 0.7, model)
             self.assertEqual(request.get("top_p"), 0.9, model)
 
+    def test_thinking_summary_requested_where_thinking_hides_by_default(self):
+        """5.x Claude models think by default but return empty blocks
+        (display "omitted") unless asked; models with thinking off stay off."""
+        for model in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
+                      "claude-mythos-5-1", "claude-opus-5", "claude-sonnet-5"):
+            self.assertEqual(
+                self._request(model).get("thinking"),
+                {"type": "adaptive", "display": "summarized"},
+                model,
+            )
+        # thinking off by default (4.6 would also reject temperature), or not Claude
+        for model in ("claude-opus-4-8", "claude-opus-4-6", "claude-haiku-4-5", "glm-4.7"):
+            self.assertNotIn("thinking", self._request(model), model)
+
 
 class OpenAICompatibleSamplingTests(unittest.TestCase):
     def test_openai_provider_honors_flag(self):
@@ -93,8 +107,7 @@ class EveryPayloadBuilderIsGatedTests(unittest.TestCase):
 
     BUILDER_SOURCES = (
         "anthropic_provider.py",
-        "openai_provider.py",
-        "azure_provider.py",
+        "openai_provider.py",  # azure_provider.py builds through this one
         "gemini_provider.py",
         "custom_provider.py",
         "openrouter_provider.py",

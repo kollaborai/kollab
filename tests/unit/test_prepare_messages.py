@@ -51,6 +51,21 @@ class TestPrepareMessages(unittest.TestCase):
         out = _service()._prepare_messages(history)
         self.assertEqual(out, [_msg("user", "q2")])
 
+    def test_injected_context_goes_out_in_front_of_its_message(self):
+        """Context the model got with a message is re-sent with it, unchanged."""
+        tool = _tool("result")
+        tool["metadata"]["injected_context"] = "[env: 1 events] +mcp:a"
+        history = [
+            {"role": "user", "content": "task", "metadata": {"injected_context": "[context]\nS1\n"}},
+            {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "t1"}]}},
+            tool,
+        ]
+        out = _service()._prepare_messages(history)
+        self.assertEqual(out[0]["content"], "[context]\nS1\n\n\n---\n\ntask")
+        self.assertEqual(out[2]["content"], "[env: 1 events] +mcp:a\n\n---\n\nresult")
+        self.assertEqual(history[0]["content"], "task")  # history itself is untouched
+        self.assertNotIn("injected_context", out[0])
+
     def test_sole_orphan_tool_result_becomes_recovery_input(self):
         """Never send a function output without its function call."""
         out = APICommunicationService._strip_leading_orphans(

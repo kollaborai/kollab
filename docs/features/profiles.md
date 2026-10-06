@@ -367,6 +367,17 @@ kollab --llm openai-oauth   # Use OAuth profile (requires --login first)
 The `--llm` flag takes highest priority in the resolution order,
 overriding persisted active_profile and all auto-detection.
 
+A name that is neither a profile nor a loadout stops the launch with exit
+status 2 instead of running the default model:
+
+```text
+$ kollab --llm openai-oath
+Error: --llm 'openai-oath' is not a profile or loadout. Did you mean: openai-oauth?
+```
+
+`--detached` forks before it reads flags, so there the error goes to the
+project log (`~/.kollab/projects/<encoded-path>/logs/kollab.log`).
+
 Use `--default` with `--llm` to set startup default in config:
 
 ```bash

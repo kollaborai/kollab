@@ -90,3 +90,27 @@ async def test_spawn_closes_dead_existing_handle_before_replacement():
     assert pool._daemons["sess_stale"] is replacement
     stale.close.assert_awaited_once()
     replacement.connect.assert_awaited_once_with("/tmp/kollab-stale.sock")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("user_token", "solo"), [("jwt-abc", True), (None, False)])
+async def test_spawn_exports_session_env(user_token, solo, monkeypatch):
+    # The daemon's MCP layer reads these from its env; without them the
+    # mentiko MCP server dispatches UI effects to "global" and has no auth.
+    # KOLLAB_HUB_SOLO keeps product sessions off the hub mesh.
+    monkeypatch.setenv("MENTIKO_SESSION_TOKEN", "ambient-other-identity")
+    monkeypatch.setenv("KOLLAB_HUB_SOLO", "1")
+    pool = daemon_pool.DaemonPool()
+    handle = SimpleNamespace(connect=AsyncMock(), identity="web-env")
+
+    with (
+        patch.object(daemon_pool.subprocess, "Popen", return_value=SimpleNamespace()) as popen,
+        patch.object(daemon_pool, "DaemonHandle", return_value=handle),
+        patch.object(pool, "_await_socket", AsyncMock(return_value="/tmp/k.sock")),
+    ):
+        await pool.spawn("sess_env", workspace="/tmp", user_token=user_token, solo=solo)
+
+    env = popen.call_args.kwargs["env"]
+    assert env["MENTIKO_SESSION_ID"] == "sess_env"
+    assert env.get("MENTIKO_SESSION_TOKEN") == user_token
+    assert (env.get("KOLLAB_HUB_SOLO") == "1") is solo

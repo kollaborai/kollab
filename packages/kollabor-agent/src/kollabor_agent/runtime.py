@@ -243,6 +243,11 @@ class AgentRuntime:
     Coordinator assigns identities, manages work queue,
     resolves conflicts. Only one per project."""
 
+    solo: bool = False
+    """Keeps presence + socket for its host (the engine) but stays off the
+    mesh: peers never discover or message it and it sees no peers.
+    Set from KOLLAB_HUB_SOLO."""
+
     peer_count: int = 0
     """Number of known live peers on the hub.
     Cached here for quick access (status bar, mobile app).
@@ -619,6 +624,7 @@ class AgentRuntime:
             "last_heartbeat": self.last_heartbeat,
             "state": self.state,
             "is_coordinator": self.is_coordinator,
+            "solo": self.solo,
             "current_task": self.current_task,
             "capabilities": self.capabilities,
             # new fields (ignored by old readers)
@@ -657,6 +663,7 @@ class AgentRuntime:
             "last_heartbeat",
             "state",
             "is_coordinator",
+            "solo",
             "current_task",
             "capabilities",
             "org_name",

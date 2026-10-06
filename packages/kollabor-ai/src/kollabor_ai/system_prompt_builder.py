@@ -15,7 +15,7 @@ either:
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from kollabor_events.data_models import ConversationMessage
 
@@ -79,6 +79,10 @@ class SystemPromptBuilder:
         # Lazy shell-alias state (load only after first real submit)
         self._shell_alias_prompt: Optional[str] = None
         self._shell_aliases_loaded = False
+
+        # (user message, rendered blocks) of the turn build_volatile_context
+        # last rendered for; see there.
+        self._volatile_memo: Optional[Tuple[Any, List[Tuple[str, str]]]] = None
 
     def _get_utils(self):
         """Lazy import kollabor utils if not provided."""
@@ -249,19 +253,21 @@ class SystemPromptBuilder:
         prompt_parts = [base_prompt]
         return self._finalize_system_prompt(prompt_parts)
 
-    def build_volatile_context(self) -> str:
+    def build_volatile_context(self) -> List[Tuple[str, str]]:
         """Render the per-turn volatile context stripped from the stable prefix.
 
         Returns the session-context (date/git/cwd/probes), the live hub blocks
         (identity/roster/vault/work_queue) and active_llm — exactly what build()
-        omits when stable_prefix is on — wrapped as one ``[context]`` block for
-        the user-turn injection rail. Returns "" when stable_prefix is off (that
+        omits when stable_prefix is on — as keyed ``[context]`` blocks for the
+        injection rail. Each part is keyed on its own: the queue processor sends
+        a block only when it changed, so a peer flipping idle re-sends the
+        roster, not the vault. Returns [] when stable_prefix is off (that
         content is already inline) or when nothing renders.
         """
         if not self.config.get(
             "kollabor.llm.system_prompt.stable_prefix", True
         ):
-            return ""
+            return []
 
         utils = self._get_utils()
         event_bus = (
@@ -270,9 +276,17 @@ class SystemPromptBuilder:
             else None
         )
 
+        # One render per user message. A tool loop asks on every request; a
+        # re-render mid-turn (git status after an edit, a peer flipping
+        # idle/working) would re-send that block on the next tool result.
+        turn_msg = self._latest_user_message(event_bus)
+        memo = self._volatile_memo
+        if turn_msg is not None and memo is not None and memo[0] is turn_msg:
+            return memo[1]
+
         # Re-emit the same installed session-context template the stable build
         # strips, so date/git/cwd/probes reach the model verbatim (and fresh).
-        parts: List[str] = []
+        parts: List[Tuple[str, str]] = []
         base_path = None
         try:
             from kollabor_config.config_utils import get_global_agents_dir
@@ -285,7 +299,10 @@ class SystemPromptBuilder:
             )
             if sess.exists():
                 parts.append(
-                    '<trender type="include" path="01-session-context.md" />'
+                    (
+                        "session",
+                        '<trender type="include" path="01-session-context.md" />',
+                    )
                 )
                 base_path = sess.parent
         except Exception as e:
@@ -293,27 +310,49 @@ class SystemPromptBuilder:
 
         # Live hub state + active model info (also stripped from the prefix).
         parts += [
-            '<trender type="hub_identity" />',
-            '<trender type="hub_roster" />',
-            '<trender type="hub_vault" />',
-            '<trender type="hub_work_queue" />',
-            '<trender type="active_llm" />',
+            (name, f'<trender type="{name}" />')
+            for name in (
+                "hub_identity",
+                "hub_roster",
+                "hub_vault",
+                "hub_work_queue",
+                "active_llm",
+            )
         ]
 
         # ponytail: re-runs the session-context shell probes every turn (5s cap
         # each). Fine at current turn rates; if latency shows, cache the probe
         # output per session and re-run only date/git.
-        rendered = utils["render_system_prompt"](
-            "\n".join(parts),
-            timeout=5,
-            base_path=base_path,
-            event_bus=event_bus,
-            profile_manager=self.profile_manager,
-            conversation_logger=self.conversation_logger,
-            skip_volatile=False,
-        ).strip()
+        blocks: List[Tuple[str, str]] = []
+        for name, tag in parts:
+            rendered = utils["render_system_prompt"](
+                tag,
+                timeout=5,
+                base_path=base_path,
+                event_bus=event_bus,
+                profile_manager=self.profile_manager,
+                conversation_logger=self.conversation_logger,
+                skip_volatile=False,
+            ).strip()
+            if rendered:
+                blocks.append((f"context:{name}", f"[context]\n{rendered}\n"))
 
-        return f"[context]\n{rendered}\n" if rendered else ""
+        if turn_msg is not None:
+            # holding the message (not its id) keeps a freed id from matching
+            self._volatile_memo = (turn_msg, blocks)
+        return blocks
+
+    @staticmethod
+    def _latest_user_message(event_bus: Any) -> Optional[Any]:
+        """The newest user message in the live conversation, or None."""
+        llm = event_bus.get_service("llm_service") if event_bus else None
+        history = getattr(llm, "conversation_history", None)
+        if not isinstance(history, list):
+            return None
+        for msg in reversed(history):
+            if getattr(msg, "role", None) == "user":
+                return msg
+        return None
 
     def rebuild(self, conversation_history: List[ConversationMessage]) -> bool:
         """Rebuild the system prompt and update conversation history.

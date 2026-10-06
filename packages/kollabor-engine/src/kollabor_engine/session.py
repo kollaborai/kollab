@@ -103,8 +103,10 @@ class EngineSession:
         user_token: Optional[str] = None,
         agent: Optional[str] = None,
         identity: Optional[str] = None,
+        solo: bool = False,
     ):
         self.session_id = session_id
+        self.solo = solo
         self.user_token = user_token
         self.workspace = self._resolve_workspace(workspace)
         self.system_prompt = system_prompt or ""
@@ -155,6 +157,8 @@ class EngineSession:
             identity=self.requested_identity,
             workspace=self.workspace,
             system_prompt=self.system_prompt or None,
+            user_token=self.user_token,
+            solo=self.solo,
         )
 
         if self.approval_mode:

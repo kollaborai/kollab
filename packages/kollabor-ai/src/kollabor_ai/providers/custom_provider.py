@@ -32,6 +32,11 @@ from .models import (
     UsageInfo,
 )
 from .registry import ProviderRegistry
+from .transformers import (
+    _openai_cache_tokens,
+    chat_provider_reasoning,
+    replay_reasoning_content,
+)
 from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
@@ -86,6 +91,61 @@ class CustomProvider(LLMProvider):
         if not config.model:
             raise ValueError("Custom provider requires 'model' to be specified")
 
+    def _build_payload(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        stream: bool,
+    ) -> Dict[str, Any]:
+        """Chat-completions request body, shared by the streaming and plain paths."""
+        prepared_messages = strip_local_message_metadata(messages)
+        for message in prepared_messages:
+            content = message.get("content")
+            if isinstance(content, (str, list)):
+                message["content"] = serialize_openai_chat_content(
+                    content, self.resolve_media
+                )
+        # reasoning_content for models that take it back (DeepSeek V4, GLM,
+        # Kimi); stored on the raw messages, which the strip above dropped.
+        replay_reasoning_content(
+            messages, prepared_messages, self.provider_type, self.model, bool(tools)
+        )
+
+        payload: Dict[str, Any] = {
+            "model": self.config.model,
+            "messages": prepared_messages,
+            "stream": stream,
+        }
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
+
+        if tools:
+            # MCP returns {"name", "description", "parameters"}; OpenAI wants
+            # {"type": "function", "function": {...same keys...}}.
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name"),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {}),
+                    },
+                }
+                for tool in tools
+            ]
+
+        if self.config.max_tokens:
+            payload["max_tokens"] = self.config.max_tokens
+
+        # Sampling params (omitted for reasoning models that reject them) plus
+        # opt-in reasoning effort, spelled reasoning_effort on OpenAI-compatible
+        # endpoints. See providers/tuning.py.
+        payload.update(sampling_params(self.config, self.model))
+        payload.update(effort_params(self.config, EffortStyle.OPENAI))
+
+        self.last_request_payload = payload
+        return payload
+
     async def _make_request(
         self,
         messages: List[Dict[str, Any]],
@@ -108,50 +168,7 @@ class CustomProvider(LLMProvider):
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
-        prepared_messages = strip_local_message_metadata(messages)
-        for message in prepared_messages:
-            content = message.get("content")
-            if isinstance(content, (str, list)):
-                message["content"] = serialize_openai_chat_content(
-                    content, self.resolve_media
-                )
-
-        payload = {
-            "model": self.config.model,
-            "messages": prepared_messages,
-            "stream": stream,
-        }
-
-        # Add optional parameters
-        if tools:
-            # Transform tools to OpenAI format (wrap in type: function)
-            # MCP returns: {"name": "...", "description": "...", "parameters": {...}}
-            # OpenAI expects: {"type": "function", "function": {"name": "...",
-            #     "description": "...", "parameters": {...}}}
-            openai_tools = []
-            for tool in tools:
-                openai_tools.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.get("name"),
-                            "description": tool.get("description", ""),
-                            "parameters": tool.get("parameters", {}),
-                        },
-                    }
-                )
-            payload["tools"] = openai_tools
-
-        if self.config.max_tokens:
-            payload["max_tokens"] = self.config.max_tokens
-
-        # Sampling params (omitted for reasoning models that reject them) plus
-        # opt-in reasoning effort, spelled reasoning_effort on OpenAI-compatible
-        # endpoints. See providers/tuning.py.
-        payload.update(sampling_params(self.config, self.model))
-        payload.update(effort_params(self.config, EffortStyle.OPENAI))
-
-        self.last_request_payload = payload
+        payload = self._build_payload(messages, tools, stream)
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -252,17 +269,9 @@ class CustomProvider(LLMProvider):
                 error_code="empty_response",
             )
 
-        # Parse usage (check both OpenAI and Anthropic cache field formats)
-        usage_info = response_data.get("usage", {})
-        details = usage_info.get("prompt_tokens_details", {}) or {}
-        cache_read = (
-            details.get("cached_tokens", 0)
-            or usage_info.get("cache_read_input_tokens", 0)
-            or usage_info.get("cache_read_tokens", 0)
-        )
-        cache_creation = usage_info.get(
-            "cache_creation_input_tokens", 0
-        ) or usage_info.get("cache_creation_tokens", 0)
+        # Parse usage (OpenAI, Azure, z.ai, xAI, Kimi, DeepSeek cache fields)
+        usage_info = response_data.get("usage") or {}
+        cache_read, cache_creation = _openai_cache_tokens(usage_info)
         usage = UsageInfo(
             prompt_tokens=usage_info.get("prompt_tokens", 0),
             completion_tokens=usage_info.get("completion_tokens", 0),
@@ -277,6 +286,9 @@ class CustomProvider(LLMProvider):
             finish_reason=choice.get("finish_reason", "stop"),
             model=self.model,
             provider=self.provider_type,
+            provider_reasoning=chat_provider_reasoning(
+                self.provider_type, self.model, message.get("reasoning_content")
+            ),
         )
 
     async def stream(  # type: ignore[override]
@@ -327,52 +339,8 @@ class CustomProvider(LLMProvider):
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
-        prepared_messages = strip_local_message_metadata(messages)
-        for message in prepared_messages:
-            content = message.get("content")
-            if isinstance(content, (str, list)):
-                message["content"] = serialize_openai_chat_content(
-                    content, self.resolve_media
-                )
-
-        payload = {
-            "model": self.config.model,
-            "messages": prepared_messages,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-
+        payload = self._build_payload(messages, tools, True)
         logger.debug(f"Custom provider stream: POST {url} model={self.config.model}")
-
-        if tools:
-            # Transform tools to OpenAI format (wrap in type: function)
-            # MCP returns: {"name": "...", "description": "...", "parameters": {...}}
-            # OpenAI expects: {"type": "function", "function": {"name": "...",
-            #     "description": "...", "parameters": {...}}}
-            openai_tools = []
-            for tool in tools:
-                openai_tools.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.get("name"),
-                            "description": tool.get("description", ""),
-                            "parameters": tool.get("parameters", {}),
-                        },
-                    }
-                )
-            payload["tools"] = openai_tools
-
-        if self.config.max_tokens:
-            payload["max_tokens"] = self.config.max_tokens
-
-        # Sampling params (omitted for reasoning models that reject them) plus
-        # opt-in reasoning effort, spelled reasoning_effort on OpenAI-compatible
-        # endpoints. See providers/tuning.py.
-        payload.update(sampling_params(self.config, self.model))
-        payload.update(effort_params(self.config, EffortStyle.OPENAI))
-
-        self.last_request_payload = payload
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -398,6 +366,7 @@ class CustomProvider(LLMProvider):
                 # Parse SSE stream
                 usage_info = None
                 finish_reason = None
+                reasoning_parts: List[str] = []
 
                 async for line in response.content:
                     line_str = line.decode("utf-8").strip()
@@ -422,6 +391,11 @@ class CustomProvider(LLMProvider):
                         choices = data.get("choices") or [{}]
                         delta = choices[0].get("delta", {})
 
+                        # Thinking models (DeepSeek, GLM, Kimi) stream it apart
+                        # from the answer; kept to send back on the next request.
+                        if delta.get("reasoning_content"):
+                            reasoning_parts.append(delta["reasoning_content"])
+
                         # Text content
                         if "content" in delta and delta["content"]:
                             yield StreamingResponse(
@@ -445,16 +419,8 @@ class CustomProvider(LLMProvider):
 
                         # Usage info (final chunk)
                         if "usage" in data:
-                            usage = data["usage"]
-                            details = usage.get("prompt_tokens_details", {}) or {}
-                            cache_read = (
-                                details.get("cached_tokens", 0)
-                                or usage.get("cache_read_input_tokens", 0)
-                                or usage.get("cache_read_tokens", 0)
-                            )
-                            cache_creation = usage.get(
-                                "cache_creation_input_tokens", 0
-                            ) or usage.get("cache_creation_tokens", 0)
+                            usage = data["usage"] or {}
+                            cache_read, cache_creation = _openai_cache_tokens(usage)
                             usage_info = UsageInfo(
                                 prompt_tokens=usage.get("prompt_tokens", 0),
                                 completion_tokens=usage.get("completion_tokens", 0),
@@ -477,4 +443,7 @@ class CustomProvider(LLMProvider):
                         is_final=True,
                         finish_reason=finish_reason,
                         raw_chunk={"finish_reason": finish_reason},
+                        provider_reasoning=chat_provider_reasoning(
+                            self.provider_type, self.model, "".join(reasoning_parts)
+                        ),
                     )

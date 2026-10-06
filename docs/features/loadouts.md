@@ -84,7 +84,9 @@ kollab --llm terra        # implicit (unique match against the catalog)
 ```
 
 `--llm` resolves in order: existing profile name → loadout (exact, then
-unique substring). At launch the loadout's fields are applied to its provider
+unique substring). No match stops the launch with exit status 2 and the
+closest names; it never falls back to the default model. At launch the
+loadout's fields are applied to its provider
 profile **in memory only** — a launch flag never rewrites your saved config.
 Activating from inside the app (`/llm`, picker) does persist, matching how
 `/model` behaves.

@@ -59,6 +59,18 @@ This table must list every provider in `EFFORT_SUPPORTED_PROVIDERS`
 (`providers/tuning.py`) — a test asserts it, so adding a provider there without
 documenting it fails the suite.
 
+### Claude thinking text
+
+Claude models that think by default (Opus and Sonnet 5.x, Fable, Mythos;
+`thinking_default: "adaptive"` in `bundles/data/models.json`) return empty
+thinking blocks unless the request asks for the summary, so the `anthropic`
+provider also sends `thinking: {"type": "adaptive", "display": "summarized"}`
+to them. That changes what comes back, not what is billed. Models where
+thinking is off by default (Opus 4.6–4.8, Sonnet 4.6, Haiku 4.5) get no
+`thinking` field and keep it off: turning it on costs output tokens, and on
+the 4.6 models it also rejects `temperature`
+([Anthropic thinking docs](https://platform.claude.com/docs/en/build-with-claude/thinking)).
+
 ## Related
 
 Sampling params (`temperature`, `top_p`, `top_k`) are the opposite case: newer
