@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude models that think by default (Opus and Sonnet 5.x, Fable, Mythos) are asked for summarized thinking, so their reasoning shows in the thinking display instead of arriving empty.
 
 ### Fixed
+- Engine sessions pass `MENTIKO_SESSION_ID` and the caller's `MENTIKO_SESSION_TOKEN` to their daemon, and through it to MCP servers. Without them a Mentiko MCP server could not authenticate as the user and sent UI actions (such as page navigation) to no session.
 - The prompt cache holds across new user and hub messages. Context blocks (session, hub status, `[env]` events) stay on the message they were first sent with; moving them to each new message rewrote history, so ChatGPT/Codex sessions fell back to the cached system prompt at every message.
 - ChatGPT/Codex requests send session headers and pass encrypted reasoning back, so the conversation stays cached and reasoning carries across turns and `/resume`.
 - Anthropic, OpenRouter (Anthropic routes) and Gemini requests keep their prompt cache across turns and send signed thinking or thought signatures back. Gemini tool calls and results are no longer dropped.

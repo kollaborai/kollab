@@ -160,6 +160,9 @@ The current UI is ugly but it does real work. Do not lose:
 - **MCP per session** — `GET /sessions/{id}/mcp`, connect/disconnect, tools.
 - **hub** — `GET /hub/agents`, `POST /hub/messages`. Web sessions are real mesh agents
   named `web-<id>`; they show up in `kollab --hub status`.
+- **session env** — the engine exports `MENTIKO_SESSION_ID` (the engine session id) and,
+  when the caller sent `user_token`, `MENTIKO_SESSION_TOKEN` into the daemon env; the
+  daemon's MCP layer forwards both to MCP subprocesses.
 - **history** — `GET /sessions/{id}/history`, `DELETE` to clear.
 - **cancel** — `POST /sessions/{id}/cancel`.
 

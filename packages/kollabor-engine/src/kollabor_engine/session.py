@@ -155,6 +155,7 @@ class EngineSession:
             identity=self.requested_identity,
             workspace=self.workspace,
             system_prompt=self.system_prompt or None,
+            user_token=self.user_token,
         )
 
         if self.approval_mode:
