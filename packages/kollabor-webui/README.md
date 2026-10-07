@@ -74,6 +74,15 @@ Then open:
 http://127.0.0.1:8080
 ```
 
+To open it from another device, such as a phone on your VPN, list the extra
+addresses in `KOLLAB_WEBUI_HOSTS` (comma-separated; it also works with
+`kollab --web-ui`). Pages opened there reach the engine through the web UI's
+`/engine` proxy, and they get the engine token, so list private addresses only:
+
+```bash
+KOLLAB_WEBUI_HOSTS=10.8.0.1 kollab --web-ui
+```
+
 For an editable checkout without installed console scripts:
 
 ```bash

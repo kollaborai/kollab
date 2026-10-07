@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Web UI: the Kollabor K logo heads the sidebar and is the browser tab icon.
+- Web UI: `KOLLAB_WEBUI_HOSTS` (comma-separated) serves the web UI on more addresses than 127.0.0.1, such as a VPN address, so a phone on the VPN can open it. A page opened from another machine reaches the engine through the web UI's own `/engine` proxy, since the engine stays on 127.0.0.1; an address that cannot bind is skipped. Anyone who can open the page gets the engine token, so list private addresses only.
 - Web: agents are born with a random look that sticks. The first time the engine sees a gem alive it rolls its eyes and hat and keeps them for good (a seasonal costume covers the hat while the season lasts; the gem keeps its own color). Gem Studio (sidebar footer) dresses any gem over that look (eyes, hat, color) and sets the season for all (Auto, None, Halloween, Christmas) on a live stage; Random Look rolls a new outfit and Reset goes back to the born look. The engine keeps the looks (`GET`/`PUT /agents/appearance`, stored in `~/.kollab/hub/appearance.json`), so every browser shows the same gems.
 
 ### Changed
