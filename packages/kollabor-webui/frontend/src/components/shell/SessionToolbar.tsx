@@ -1,3 +1,5 @@
+import { GemAvatar } from "@/components/gems/GemAvatar";
+import { titleCase } from "@/components/panels/panel-model";
 import {
   type ComponentProps,
   forwardRef,
@@ -320,7 +322,7 @@ export function SessionToolbar({
               space before the dot. */}
           <SelectValue placeholder="Model">
             {activeProfile ? (
-              <span className="truncate">
+              <span className="min-w-0 truncate">
                 {activeProfile.model || activeProfile.name}
                 {activeProfile.model && activeProfile.name !== activeProfile.model ? (
                   <span className="text-muted-foreground max-xl:hidden"> · {activeProfile.name}</span>
@@ -332,10 +334,12 @@ export function SessionToolbar({
         <SelectContent>
           {profiles.map((profile) => (
             <SelectItem key={profile.name} value={profile.name}>
-              {profile.model || profile.name}
-              {profile.model && profile.name !== profile.model
-                ? ` · ${profile.name}`
-                : ""}
+              <span className="min-w-0 truncate">
+                {profile.model || profile.name}
+                {profile.model && profile.name !== profile.model ? (
+                  <span className="text-muted-foreground"> · {profile.name}</span>
+                ) : null}
+              </span>
             </SelectItem>
           ))}
         </SelectContent>
@@ -416,9 +420,11 @@ export function SessionToolbar({
                           <span className="truncate text-sm font-medium">
                             {name}
                           </span>
-                          <span className="text-muted-foreground text-xs">
-                            {definition.description || "No description"}
-                          </span>
+                          {definition.description ? (
+                            <span className="text-muted-foreground text-xs">
+                              {definition.description}
+                            </span>
+                          ) : null}
                           {/* A long command path must wrap anywhere, or its
                               width pushes the dialog past a phone screen. */}
                           <span className="text-muted-foreground flex items-start gap-1 text-[11px] break-all">
@@ -677,14 +683,10 @@ export function SessionToolbar({
                         key={identity}
                         className="flex items-center gap-3 rounded-md px-2 py-2"
                       >
-                        <span
-                          className="size-2 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgb(16_185_129/0.12)]"
-                          aria-label="online"
-                          title="online"
-                        />
+                        <GemAvatar gem={identity} state="idle" live season="auto" size={28} />
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center justify-between gap-2 text-sm font-medium">
-                            <span className="truncate">{identity || "agent"}</span>
+                            <span className="truncate">{titleCase(identity) || "Agent"}</span>
                             <span className="text-muted-foreground text-xs">Online</span>
                           </span>
                           <span className="text-muted-foreground block truncate text-xs">

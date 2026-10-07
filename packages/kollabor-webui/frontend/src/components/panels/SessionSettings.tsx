@@ -193,22 +193,22 @@ export function SessionSettings({
             <div className="grid gap-1.5">
               <div className="flex items-center gap-2 font-medium">
                 <CheckCircle2 className="size-3.5 text-emerald-500" />
-                engine connected
+                Engine connected
               </div>
               <span className="text-muted-foreground break-words">
-                pid{" "}
+                PID{" "}
                 {String(
                   settings.system?.daemon_pid || session.daemon_pid || "—",
                 )}{" "}
-                · {String(settings.system?.git_branch || "no git branch")}
+                · {String(settings.system?.git_branch || "No git branch")}
               </span>
               <span className="text-muted-foreground break-words">
-                hub{" "}
-                {String(
-                  settings.hub?.my_identity || session.identity || "unassigned",
+                Hub{" "}
+                {titleCase(
+                  String(settings.hub?.my_identity || session.identity || "unassigned"),
                 )}{" "}
                 ·{" "}
-                {String(settings.processing?.is_processing ? "working" : "idle")}
+                {settings.processing?.is_processing ? "Working" : "Idle"}
               </span>
               {settings.agent?.description ? (
                 <span className="text-muted-foreground break-words">

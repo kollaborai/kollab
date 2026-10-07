@@ -254,7 +254,12 @@ export function AppSidebar({
                   <SelectContent>
                     {profiles.map((profile) => (
                       <SelectItem key={profile.name} value={profile.name}>
-                        {profile.model ? `${profile.model} · ${profile.name}` : profile.name}
+                        <span className="min-w-0 truncate">
+                          {profile.model || profile.name}
+                          {profile.model && profile.name !== profile.model ? (
+                            <span className="text-muted-foreground"> · {profile.name}</span>
+                          ) : null}
+                        </span>
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -403,6 +408,7 @@ export function AppSidebar({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               onClick={() => {
                 // Read the id before clearing state; the dialog unmounts its
                 // content on close and `pendingDelete` is null by the time an
