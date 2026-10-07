@@ -1,5 +1,6 @@
 import type { FC } from "react";
 import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
+import { ToolGroup } from "@/components/assistant-ui/tool-group";
 import type { AgentPoolEntry, SlashCommand } from "@/api";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
 
@@ -27,7 +28,7 @@ export const Thread: FC<{
   onOpenPanel?: (request: PanelOpenRequest) => void;
 }> = ({ agents = [], commands = [], onOpenPanel }) => (
   <AssistantThread
-    components={{ Welcome }}
+    components={{ Welcome, ToolGroup }}
     agents={agents}
     commands={commands}
     onOpenPanel={onOpenPanel}

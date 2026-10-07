@@ -90,6 +90,7 @@ function historyToMessages(
     argsText: string;
     result?: unknown;
     isError?: boolean;
+    timing?: { startedAt: number; completedAt: number };
   };
 
   const asRecord = (value: unknown): Record<string, unknown> | null => {
@@ -277,6 +278,15 @@ function historyToMessages(
       if (existingCall) {
         existingCall.result = historyContentToThreadContent(message.content);
         existingCall.isError = toolResultIsError(message);
+        // History keeps only how long the call ran (seconds), not when; the
+        // elapsed hook and the group total read just completedAt - startedAt.
+        const runSeconds = asRecord(message.metadata)?.tool_execution_time;
+        if (typeof runSeconds === "number" && runSeconds > 0) {
+          existingCall.timing = {
+            startedAt: 0,
+            completedAt: Math.round(runSeconds * 1000),
+          };
+        }
         return;
       }
 

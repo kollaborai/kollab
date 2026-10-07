@@ -97,8 +97,9 @@ const statusIconMap: Record<ToolStatus, React.ElementType> = {
   "requires-action": AlertCircleIcon,
 };
 
-const formatToolDuration = (ms: number) => {
-  if (ms < 1000) return "<1s";
+/** A running call under a second reads "<1s" instead of flickering through ms. */
+export const formatToolDuration = (ms: number, running = false) => {
+  if (ms < 1000) return running ? "<1s" : `${Math.round(ms)}ms`;
   const seconds = ms / 1000;
   if (seconds < 10) return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;
   if (seconds < 60) return `${Math.floor(seconds)}s`;
@@ -106,9 +107,10 @@ const formatToolDuration = (ms: number) => {
 };
 
 function ToolFallbackDuration({
+  running,
   className,
   ...props
-}: React.ComponentProps<"span">) {
+}: React.ComponentProps<"span"> & { running: boolean }) {
   const elapsedMs = useToolCallElapsed();
   if (elapsedMs === undefined) return null;
 
@@ -121,7 +123,7 @@ function ToolFallbackDuration({
       )}
       {...props}
     >
-      {formatToolDuration(elapsedMs)}
+      {formatToolDuration(elapsedMs, running)}
     </span>
   );
 }
@@ -185,7 +187,7 @@ function ToolFallbackTrigger({
           </span>
         )}
       </span>
-      <ToolFallbackDuration />
+      <ToolFallbackDuration running={isRunning} />
       <ChevronDownIcon
         data-slot="tool-fallback-trigger-chevron"
         className={cn(
