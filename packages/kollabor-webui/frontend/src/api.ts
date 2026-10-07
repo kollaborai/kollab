@@ -852,13 +852,6 @@ export class EngineApi {
     );
   }
 
-  getHubAgentOutput(agentId: string, lines = 80, signal?: AbortSignal) {
-    return this.json<{ agent_id: string; output?: string | null; error?: string }>(
-      `/hub/agents/${encodeURIComponent(agentId)}/output?lines=${lines}`,
-      { signal },
-    );
-  }
-
   sendHubMessage(target: string, content: string, fromIdentity = "webui") {
     return this.json<{ ok: boolean; target: string }>("/hub/messages", {
       method: "POST",
