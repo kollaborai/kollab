@@ -215,6 +215,38 @@ needs, and `--install` keeps it running as a systemd service (`kollab relay run
 the [public beacon contract](docs/specs/agent-public-beacon.md) covers the relay's
 routes, limits and key handling.
 
+### How the network works
+
+Both machines dial out to the directory on port 443, so nothing needs an open
+port. The directory relays frames by device key and can't open them.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/agent-network/topology-dark.svg">
+  <img alt="Both machines' kollab daemons dial out to kollabor.ai on port 443; the relay forwards frames between them without opening them." src="docs/diagrams/agent-network/topology-light.svg">
+</picture>
+
+Every message rides five layers deep. The directory reads the outer two; only
+your two daemons can open the rest.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/agent-network/layers-dark.svg">
+  <img alt="One connection, five layers: the wss link and relay frame are visible to the directory; the NaCl Box, the mutual TLS 1.3 session and the hub message inside are readable only by your two daemons." src="docs/diagrams/agent-network/layers-light.svg">
+</picture>
+
+<details>
+<summary>The join, step by step: a code, a sealed mailbox, one key press</summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/agent-network/join-dark.svg">
+  <img alt="The join in 27 steps between your Mac, kollabor.ai and a new VPS: the Mac makes a code, the VPS uses it to claim a mailbox offer, both prove keys through sealed envelopes, you accept on the Mac, the VPS receives its credential and profile, then both hold relay links and talk over TLS 1.3 inside Box frames." src="docs/diagrams/agent-network/join-light.svg">
+</picture>
+
+</details>
+
+The [agent network architecture](docs/architecture/agent-network.md) has the
+rest: what travels and what stays, keeping a device online, how `/connect` uses
+your domain's DNS record, and running your own directory.
+
 ## Browser UI and Local Engine
 
 The optional browser surface uses the same provider, tool, permission, MCP, and
@@ -594,6 +626,7 @@ architecture guidance, see [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
 - [Tasks and Checkpoints](docs/features/tasks.md)
 - [Tool Calling](docs/features/tools.md)
 - [Attach Mode](docs/features/attach-mode.md)
+- [Agent Network Architecture](docs/architecture/agent-network.md)
 - [Command Reference](docs/reference/commands.md)
 - [Engine](packages/kollabor-engine/README.md) and [Web UI](packages/kollabor-webui/README.md)
 - [Tool-output Artifacts](docs/specs/tool-output-artifacts.md)

@@ -19,6 +19,7 @@ accepted decisions, historical records, or archive.
 - [terminal-rendering-architecture.md](terminal-rendering-architecture.md) - TUI rendering model and coordinator-facing rules
 - [event-system-architecture.md](event-system-architecture.md) - Event bus, hooks, and execution flow
 - [tool-calling-architecture.md](tool-calling-architecture.md) - XML/native tool-calling protocols and shared backend
+- [agent-network.md](agent-network.md) - Agent network across machines: join, tunnel layers, discovery, staying online, self-hosting
 
 ## Supplemental Reference
 

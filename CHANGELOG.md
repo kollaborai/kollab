@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `kollab service install` keeps the folder's agent running: a systemd unit on Linux that runs as you and starts at boot (sudo writes it), or a LaunchAgent on macOS that starts at login, restarted 5 s after it stops either way. `kollab` in the folder attaches to it and closing that window leaves it running; `kollab --hub stop` says it will come back. `kollab service status` shows the unit, its pid and whether the agent answers; `kollab service uninstall` removes it. `install` refuses while another agent runs in the folder.
 - `kollab relay serve --domain <domain> --install` installs the directory as the systemd unit `--print systemd` shows, after creating its state directory, then enables and starts it; `--uninstall` removes it.
+- The README and `docs/architecture/agent-network.md` show the agent network: who connects to whom, the join step by step, the tunnel's layers, how `/connect` uses a domain's DNS record, staying online and running your own directory. `scripts/build_network_diagrams.py` draws them.
 
 ### Fixed
 - `python main.py` exits with the command's status. It always exited 0, so a failed `kollab relay serve` or `kollab service status` looked like success when run from a checkout.
