@@ -4,6 +4,8 @@ export type Session = {
   profile?: string;
   model?: string;
   effort?: string;
+  /** Whether the session's live model accepts image input. */
+  supports_vision?: boolean;
   agent?: string;
   workspace?: string | null;
   approval_mode?: string;
@@ -71,6 +73,10 @@ export type Profile = {
   provider?: string;
   model?: string;
   description?: string;
+  base_url?: string;
+  temperature?: number;
+  streaming?: boolean;
+  supports_tools?: boolean;
   supports_vision?: boolean;
 };
 
@@ -739,7 +745,12 @@ export class EngineApi {
   }
 
   listProfiles() {
-    return this.json<{ profiles: Profile[]; active?: string }>("/profiles");
+    return this.json<{
+      profiles: Profile[];
+      active?: string;
+      /** Every provider the engine can run, for the profile editor. */
+      providers?: string[];
+    }>("/profiles");
   }
 
   createProfile(body: ProfileWrite) {

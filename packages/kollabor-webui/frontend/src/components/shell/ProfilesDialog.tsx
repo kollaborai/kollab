@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pencil, Plus, Trash2, Zap } from "lucide-react";
 
 import type { Profile } from "@/api";
@@ -23,6 +23,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 
 type Api = {
+  listProfiles: () => Promise<{ providers?: string[] }>;
   createProfile: (body: ProfileWriteBody) => Promise<unknown>;
   updateProfile: (name: string, body: ProfileUpdateBody) => Promise<unknown>;
   deleteProfile: (name: string) => Promise<unknown>;
@@ -90,6 +91,25 @@ export function ProfilesDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [providers, setProviders] = useState<string[]>([]);
+
+  // The engine names every provider it can run, so the picker never lags it.
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    api
+      .listProfiles()
+      .then((result) => live && setProviders(result.providers ?? []))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [api, open]);
+
+  // A stored provider the engine no longer lists stays selectable.
+  const providerOptions = providers.includes(draft.provider)
+    ? providers
+    : [...providers, draft.provider];
 
   const startCreate = () => {
     setEditing(null);
@@ -106,13 +126,10 @@ export function ProfilesDialog({
       provider: p.provider || "anthropic",
       model: p.model || "",
       description: p.description || "",
-      ...(typeof (p as Profile & { temperature?: number }).temperature ===
-      "number"
-        ? { temperature: (p as Profile & { temperature: number }).temperature }
-        : {}),
-      ...(typeof (p as Profile & { base_url?: string }).base_url === "string"
-        ? { base_url: (p as Profile & { base_url: string }).base_url }
-        : {}),
+      base_url: p.base_url ?? "",
+      temperature: p.temperature ?? EMPTY_DRAFT.temperature,
+      streaming: p.streaming ?? EMPTY_DRAFT.streaming,
+      supports_tools: p.supports_tools ?? EMPTY_DRAFT.supports_tools,
     });
     setError(null);
     setTestResult(null);
@@ -169,11 +186,11 @@ export function ProfilesDialog({
           ? `${name}: OK (${r.message ?? "connected"}${
               r.latency_ms ? `, ${Math.round(r.latency_ms)}ms` : ""
             })`
-          : `${name}: FAILED — ${r.message ?? r.error ?? "unknown error"}`,
+          : `${name}: Failed — ${r.message ?? r.error ?? "unknown error"}`,
       );
     } catch (e) {
       setTestResult(
-        `${name}: FAILED — ${e instanceof Error ? e.message : String(e)}`,
+        `${name}: Failed — ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   };
@@ -205,11 +222,18 @@ export function ProfilesDialog({
                 variant="ghost"
                 size="sm"
                 onClick={() => void test(p.name)}
-                title="Test connectivity"
+                title="Test Connection"
+                aria-label={`Test ${p.name}`}
               >
                 <Zap className="size-4" />
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => startEdit(p)}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => startEdit(p)}
+                title="Edit"
+                aria-label={`Edit ${p.name}`}
+              >
                 <Pencil className="size-4" />
               </Button>
               <Button
@@ -218,6 +242,7 @@ export function ProfilesDialog({
                 onClick={() => void remove(p.name)}
                 disabled={busy}
                 title="Delete"
+                aria-label={`Delete ${p.name}`}
               >
                 <Trash2 className="size-4" />
               </Button>
@@ -231,11 +256,11 @@ export function ProfilesDialog({
         <div className="rounded-md border p-3">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold">
-              {editing ? `Edit: ${editing}` : "New profile"}
+              {editing ? `Edit: ${editing}` : "New Profile"}
             </h3>
             {editing && (
               <Button variant="ghost" size="sm" onClick={startCreate}>
-                Cancel edit
+                Cancel Edit
               </Button>
             )}
           </div>
@@ -252,18 +277,20 @@ export function ProfilesDialog({
               />
             </div>
             <div className="grid gap-1.5">
-              <Label>Provider</Label>
+              <Label htmlFor="profile-provider">Provider</Label>
               <Select
                 value={draft.provider}
                 onValueChange={(v) => setDraft({ ...draft, provider: v })}
               >
-                <SelectTrigger>
+                <SelectTrigger id="profile-provider">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="anthropic">anthropic</SelectItem>
-                  <SelectItem value="openai">openai</SelectItem>
-                  <SelectItem value="custom">custom</SelectItem>
+                  {providerOptions.map((provider) => (
+                    <SelectItem key={provider} value={provider}>
+                      {provider}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -279,7 +306,7 @@ export function ProfilesDialog({
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="profile-base-url">Base URL (optional)</Label>
+              <Label htmlFor="profile-base-url">Base URL (Optional)</Label>
               <Input
                 id="profile-base-url"
                 value={draft.base_url || ""}
@@ -291,7 +318,7 @@ export function ProfilesDialog({
             </div>
             <div className="grid gap-1.5 sm:col-span-2">
               <Label htmlFor="profile-api-key">
-                API key (leave blank to keep current / use env)
+                API Key (Leave Blank to Keep Current or Use Environment)
               </Label>
               <Input
                 id="profile-api-key"
@@ -369,7 +396,7 @@ export function ProfilesDialog({
               (!editing && !draft.provider.trim())
             }
           >
-            {busy ? "Saving…" : editing ? "Save changes" : "Create"}
+            {busy ? "Saving…" : editing ? "Save Changes" : "Create"}
           </Button>
           {!editing && (
             <Button variant="ghost" onClick={startCreate} disabled={busy}>
