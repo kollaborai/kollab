@@ -1984,6 +1984,13 @@ class TerminalLLMChat:
             )
         )
 
+        # A second Ctrl+C stops the daemon this window owns
+        # (cli._kill_owned_daemon). Say so, and name the key that keeps it.
+        if os.environ.get("KOLLAB_DAEMON_PID"):
+            self.input_handler._key_press_handler.quit_hint_text = (
+                f"Press Ctrl+C again to stop {identity}, or Ctrl+Z to detach"
+            )
+
         # Start reading semantic events from remote agent.
         # The daemon streams high-level UI events, not raw terminal bytes,
         # so the attached client can render them with its own local TUI state.

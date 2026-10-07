@@ -104,6 +104,8 @@ class KeyPressHandler:
         # second press within the window actually exits.
         self._ctrl_c_first_press_time: float = 0.0
         self._ctrl_c_window_seconds: float = 3.0
+        # Shown after the first Ctrl+C. Attach mode names what the second does.
+        self.quit_hint_text: str = "Press Ctrl+C again to quit"
 
         logger.debug("KeyPressHandler initialized")
 
@@ -706,7 +708,7 @@ class KeyPressHandler:
         # First press (or expired)
         self._ctrl_c_first_press_time = now
         logger.info("Ctrl+C received (first press) - waiting for confirmation")
-        self._set_quit_hint("Press Ctrl+C again to quit")
+        self._set_quit_hint(self.quit_hint_text)
 
         # If a tool/API is running, also cancel it (same as ESC)
         try:

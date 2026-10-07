@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - A paste shorter than `input.paste_min_chars` (default 500, in `/config` under Input Settings) goes into the input as text, line breaks kept and not submitted. Only longer pastes collapse to `[Pasted #N ...]`; before, anything over 10 characters did. Ctrl+V clipboard text follows the same rule instead of always going in flattened to one line. Text with a character the input cannot hold still collapses, so nothing is lost.
 - Sliders with a whole-number step show whole numbers in `/config` (`History Limit: 100`, not `100.0`).
+- The first Ctrl+C in a window that started its agent says what each key does next: "Press Ctrl+C again to stop koordinator, or Ctrl+Z to detach". The hint wraps on narrow terminals.
 
 ### Fixed
 - A second `kollab` in the same workspace starts the next agent again instead of joining the session another terminal still has open. A bare relaunch only reattaches to a daemon with no window (one left by Ctrl+Z or a closed terminal); the agent's status now reports how many windows it has.

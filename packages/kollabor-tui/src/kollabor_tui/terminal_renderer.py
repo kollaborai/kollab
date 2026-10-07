@@ -7,6 +7,7 @@ display, and terminal state management.
 
 import logging
 import math
+import textwrap
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -447,7 +448,9 @@ class TerminalRenderer:
 
         # Transient quit hint (after first Ctrl+C)
         if self._quit_hint:
-            lines.append(self._quit_hint)
+            # Wrap here so each row is a line the active area counts; a row
+            # the terminal wraps itself breaks clearing.
+            lines.extend(textwrap.wrap(self._quit_hint, max(get_global_width() - 1, 1)))
 
         # Status area (command menu, status modal, or status views)
         status_lines = await self._build_status_lines()
