@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
+import { Loader2, Plus } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { useThreadActivity } from "@/components/gems/activity";
+import { GemAvatar } from "@/components/gems/GemAvatar";
+import { KollabLogo } from "@/components/icons/kollab-logo";
+import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { PanelHost } from "@/components/panels/PanelHost";
@@ -253,6 +257,12 @@ export default function App() {
   const selectedBundle =
     pickedBundle ??
     (gemBundle && bundles.some((bundle) => bundle.name === gemBundle) ? gemBundle : "default");
+  // What New Session will use, for the empty state's greeting.
+  const nextGem = agents.find((agent) => agent.name === selectedIdentity);
+  const selectedModelLabel =
+    profiles.find((profile) => profile.name === selectedProfile)?.model ||
+    selectedProfile ||
+    "default";
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
@@ -664,13 +674,31 @@ export default function App() {
           </EngineRuntimeProvider>
         ) : (
           <>
-            <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+            <header className="flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
               <SidebarTrigger className="-ml-1" />
               <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
               <span className="text-muted-foreground text-sm">No session</span>
             </header>
+            {/* The next free gem greets here, as it will once its session starts. */}
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-              <h1 className="text-2xl font-semibold">Start a kollab session</h1>
+              {nextGem ? (
+                <GemAvatar
+                  gem={nextGem.name}
+                  caste={nextGem.caste}
+                  color={nextGem.color}
+                  state={busy ? "working" : "idle"}
+                  live
+                  season="auto"
+                  follow
+                  size={112}
+                  label={titleCase(nextGem.name)}
+                />
+              ) : (
+                <KollabLogo className="text-foreground/80 mb-2 h-10 w-auto" />
+              )}
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {nextGem ? titleCase(nextGem.name) : "Start a Session"}
+              </h1>
               <p
                 className={
                   error
@@ -678,14 +706,18 @@ export default function App() {
                     : "text-muted-foreground max-w-md text-sm"
                 }
               >
-                {error || (busy ? busyMessage : "Create a session to begin.")}
+                {error ||
+                  (busy
+                    ? busyMessage
+                    : `Ready on ${selectedModelLabel}. Start a session to begin.`)}
               </p>
               <Button
                 type="button"
                 onClick={() => void createSession()}
                 disabled={busy}
               >
-                {busy ? busyMessage || "Connecting…" : "Create Session"}
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                {busy ? "Starting…" : "Start Session"}
               </Button>
             </div>
           </>

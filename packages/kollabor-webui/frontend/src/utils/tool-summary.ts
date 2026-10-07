@@ -128,6 +128,14 @@ function summarizeTerminalCommand(command: string): string {
     );
   }
 
+  if (/^ls\b/.test(normalized)) {
+    const target = pathArgument(normalized);
+    return withStepCount(
+      target ? `List Files · ${basename(target)}` : "List Files",
+      count,
+    );
+  }
+
   const executable = normalized.match(/^(?:sudo\s+)?([^\s]+)/)?.[1];
   const labels: Record<string, string> = {
     cd: "Change Directory",
@@ -137,9 +145,10 @@ function summarizeTerminalCommand(command: string): string {
     python: "Run Python",
     python3: "Run Python",
   };
+  // Anything else shows the command itself: "Run ls" hid what actually ran.
   return withStepCount(
     (executable && labels[executable]) ||
-      (executable ? `Run ${executable}` : "Run Command"),
+      (executable ? `Run · ${truncate(normalized)}` : "Run Command"),
     count,
   );
 }

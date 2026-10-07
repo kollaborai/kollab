@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentProps } from "react";
-import { Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Loader2, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
 import type { AgentBundleEntry, AgentPoolEntry, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
@@ -13,6 +13,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatSessionName } from "@/utils/session-display";
 import {
   AlertDialog,
@@ -137,153 +138,158 @@ export function AppSidebar({
 
   return (
     <Sidebar {...props}>
-      <SidebarHeader className="gap-2 border-b">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <div className="flex h-12 items-center px-2">
-              <KollabLogo className="h-6 w-auto shrink-0" />
-              <span className="sr-only">kollab</span>
-            </div>
-          </SidebarMenuItem>
-          <SidebarMenuItem className="flex items-center gap-1">
-            <SidebarMenuButton
-              onClick={create}
-              disabled={busy}
-              title={`New session: ${identityLabel} on ${modelLabel}`}
-              className="bg-sidebar-accent text-sidebar-accent-foreground flex-1 justify-center font-medium"
+      {/* One row: the logo, then New Session and its options as icons. */}
+      <SidebarHeader className="border-b">
+        <div className="flex h-12 items-center gap-0.5 px-2">
+          <KollabLogo className="h-6 w-auto shrink-0" />
+          <span className="sr-only">kollab</span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={create}
+                disabled={busy}
+                aria-label="New Session"
+                data-testid="new-session"
+                className="bg-sidebar-accent text-sidebar-accent-foreground hover:bg-sidebar-accent/80 ml-auto size-8"
+              >
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {busy ? "Starting…" : `New Session: ${identityLabel} on ${modelLabel}`}
+            </TooltipContent>
+          </Tooltip>
+          <Popover open={optionsOpen} onOpenChange={setOptionsOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                disabled={busy}
+                aria-label="Session Options"
+                title="Session Options"
+                data-testid="new-session-options"
+                className="text-muted-foreground hover:text-foreground size-8 shrink-0"
+              >
+                <SlidersHorizontal className="size-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              collisionPadding={12}
+              className="w-80 p-0"
             >
-              <Plus className="size-4" />
-              <span>{busy ? "Starting…" : "New Session"}</span>
-            </SidebarMenuButton>
-            <Popover open={optionsOpen} onOpenChange={setOptionsOpen}>
-              <PopoverTrigger asChild>
+              <div className="flex items-center gap-3 border-b px-4 py-3">
+                <GemAvatar
+                  gem={selectedIdentity}
+                  caste={pickedGem?.caste}
+                  color={pickedGem?.color}
+                  state="idle"
+                  live
+                  season="auto"
+                  follow
+                  size={40}
+                />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">New Session</p>
+                  <p className="text-muted-foreground truncate text-xs">
+                    {identityLabel} · {modelLabel}
+                  </p>
+                </div>
+              </div>
+              <div className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 px-4 py-3">
+                <Label htmlFor="new-session-agent" className="text-muted-foreground text-xs font-normal">
+                  Agent
+                </Label>
+                <Select value={selectedBundle || "default"} onValueChange={onBundleChange}>
+                  <SelectTrigger id="new-session-agent" size="sm" className="w-full">
+                    <SelectValue placeholder="default" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {bundleOptions.map((bundle) => (
+                      <SelectItem key={bundle.name} value={bundle.name}>
+                        {/* No profile suffix: a web session always sends the Model
+                            field's profile, so the bundle's preferred one never
+                            applies ("coder · default" also read as two agents). */}
+                        {bundle.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Label htmlFor="new-session-gem" className="text-muted-foreground text-xs font-normal">
+                  Gem
+                </Label>
+                <Select
+                  value={selectedIdentity}
+                  onValueChange={onIdentityChange}
+                  disabled={!agents.length}
+                >
+                  <SelectTrigger id="new-session-gem" size="sm" className="w-full">
+                    <SelectValue placeholder="Next Free Gem" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {gemOptions.map((agent) => (
+                      <SelectItem key={agent.name} value={agent.name} disabled={agent.active}>
+                        {titleCase(agent.name)}
+                        {agent.active ? " · In Use" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Label htmlFor="new-session-model" className="text-muted-foreground text-xs font-normal">
+                  Model
+                </Label>
+                <Select
+                  value={selectedProfile}
+                  onValueChange={onProfileChange}
+                  disabled={!profiles.length}
+                >
+                  <SelectTrigger id="new-session-model" size="sm" className="w-full">
+                    <SelectValue placeholder="default" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {profiles.map((profile) => (
+                      <SelectItem key={profile.name} value={profile.name}>
+                        {profile.model ? `${profile.model} · ${profile.name}` : profile.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Label htmlFor="new-session-workspace" className="text-muted-foreground text-xs font-normal">
+                  Workspace
+                </Label>
+                <Input
+                  id="new-session-workspace"
+                  placeholder="Engine directory"
+                  value={workspacePath}
+                  onChange={(event) => onWorkspaceChange(event.target.value)}
+                  className="h-8 text-xs"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2 border-t px-3 py-2.5">
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon"
-                  disabled={busy}
-                  aria-label="Session Options"
-                  title="Session Options"
-                  data-testid="new-session-options"
-                  className="text-muted-foreground hover:text-foreground size-8 shrink-0"
+                  size="sm"
+                  onClick={() => {
+                    setOptionsOpen(false);
+                    onManageProfiles();
+                  }}
                 >
-                  <SlidersHorizontal className="size-4" />
+                  Manage Profiles
                 </Button>
-              </PopoverTrigger>
-              <PopoverContent
-                side="bottom"
-                align="start"
-                collisionPadding={12}
-                className="w-80 p-0"
-              >
-                <div className="flex items-center gap-3 border-b px-4 py-3">
-                  <GemAvatar
-                    gem={selectedIdentity}
-                    caste={pickedGem?.caste}
-                    color={pickedGem?.color}
-                    state="idle"
-                    live
-                    season="auto"
-                    follow
-                    size={40}
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">New Session</p>
-                    <p className="text-muted-foreground truncate text-xs">
-                      {identityLabel} · {modelLabel}
-                    </p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 px-4 py-3">
-                  <Label htmlFor="new-session-agent" className="text-muted-foreground text-xs font-normal">
-                    Agent
-                  </Label>
-                  <Select value={selectedBundle || "default"} onValueChange={onBundleChange}>
-                    <SelectTrigger id="new-session-agent" size="sm" className="w-full">
-                      <SelectValue placeholder="default" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {bundleOptions.map((bundle) => (
-                        <SelectItem key={bundle.name} value={bundle.name}>
-                          {/* No profile suffix: a web session always sends the Model
-                              field's profile, so the bundle's preferred one never
-                              applies ("coder · default" also read as two agents). */}
-                          {bundle.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Label htmlFor="new-session-gem" className="text-muted-foreground text-xs font-normal">
-                    Gem
-                  </Label>
-                  <Select
-                    value={selectedIdentity}
-                    onValueChange={onIdentityChange}
-                    disabled={!agents.length}
-                  >
-                    <SelectTrigger id="new-session-gem" size="sm" className="w-full">
-                      <SelectValue placeholder="Next Free Gem" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {gemOptions.map((agent) => (
-                        <SelectItem key={agent.name} value={agent.name} disabled={agent.active}>
-                          {titleCase(agent.name)}
-                          {agent.active ? " · In Use" : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Label htmlFor="new-session-model" className="text-muted-foreground text-xs font-normal">
-                    Model
-                  </Label>
-                  <Select
-                    value={selectedProfile}
-                    onValueChange={onProfileChange}
-                    disabled={!profiles.length}
-                  >
-                    <SelectTrigger id="new-session-model" size="sm" className="w-full">
-                      <SelectValue placeholder="default" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {profiles.map((profile) => (
-                        <SelectItem key={profile.name} value={profile.name}>
-                          {profile.model ? `${profile.model} · ${profile.name}` : profile.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Label htmlFor="new-session-workspace" className="text-muted-foreground text-xs font-normal">
-                    Workspace
-                  </Label>
-                  <Input
-                    id="new-session-workspace"
-                    placeholder="Engine directory"
-                    value={workspacePath}
-                    onChange={(event) => onWorkspaceChange(event.target.value)}
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-2 border-t px-3 py-2.5">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setOptionsOpen(false);
-                      onManageProfiles();
-                    }}
-                  >
-                    Manage Profiles
-                  </Button>
-                  <Button type="button" size="sm" disabled={busy} onClick={create}>
-                    <Plus className="size-4" />
-                    Start Session
-                  </Button>
-                </div>
-              </PopoverContent>
-            </Popover>
-          </SidebarMenuItem>
-        </SidebarMenu>
+                <Button type="button" size="sm" disabled={busy} onClick={create}>
+                  <Plus className="size-4" />
+                  Start Session
+                </Button>
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
       </SidebarHeader>
 
       <SidebarContent>
@@ -311,7 +317,8 @@ export function AppSidebar({
                     }}
                     disabled={session.attachable === false}
                     title={task ? `${titleCase(gem)}: ${task}` : session.session_id}
-                    className="h-auto gap-3 py-2 pl-2.5"
+                    // overflow-visible: the gem canvas overhangs its box for hats and props.
+                    className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                   >
                     <GemAvatar
                       gem={gem}
@@ -338,8 +345,7 @@ export function AppSidebar({
                         ) : (
                           <>
                             {titleCase(session.identity || "") || session.agent || "Unassigned"} ·{" "}
-                            {session.model || session.profile || "default"} ·{" "}
-                            {session.history_length || 0} messages
+                            {session.model || session.profile || "default"}
                           </>
                         )}
                       </span>

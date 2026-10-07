@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertCircle, RefreshCw, Search, Wrench } from "lucide-react";
+import { AlertCircle, RefreshCw, Search, Wrench } from "lucide-react";
 import type { EngineApi, SessionEvent } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -209,33 +209,23 @@ export function TrajectoryView({
       className="flex min-h-0 flex-1 flex-col overflow-hidden"
       data-testid="trajectory-view"
     >
-      <div className="flex shrink-0 flex-col gap-3 border-b bg-muted/[0.06] px-4 py-3.5">
+      {/* The session header's Trajectory tab already names this view: counts only. */}
+      <div className="flex shrink-0 flex-col gap-3 border-b bg-muted/[0.06] px-4 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="bg-primary/10 text-primary flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-primary/10">
-              <Activity className="size-4" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-muted-foreground text-[10px] font-semibold tracking-[0.16em] uppercase">
-                Session trace
-              </p>
-              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                <h2 className="text-sm font-semibold">Trajectory</h2>
-                <p className="text-muted-foreground text-xs">
-                  {visibleRecords.length} of {records.length} records
+            <p className="text-muted-foreground text-xs tabular-nums">
+              {visibleRecords.length} of {records.length} records
+              <span className="mx-1.5">·</span>
+              {toolCount} {toolCount === 1 ? "tool" : "tools"}
+              {errorCount > 0 && (
+                <>
                   <span className="mx-1.5">·</span>
-                  {toolCount} {toolCount === 1 ? "tool" : "tools"}
-                  {errorCount > 0 && (
-                    <>
-                      <span className="mx-1.5">·</span>
-                      <span className="text-destructive">
-                        {errorCount} {errorCount === 1 ? "error" : "errors"}
-                      </span>
-                    </>
-                  )}
-                </p>
-              </div>
-            </div>
+                  <span className="text-destructive">
+                    {errorCount} {errorCount === 1 ? "error" : "errors"}
+                  </span>
+                </>
+              )}
+            </p>
             {refreshing && (
               <Badge variant="secondary" className="gap-1.5 font-normal">
                 <RefreshCw className="size-3 animate-spin" />

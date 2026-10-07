@@ -20,3 +20,12 @@ test("native file tools keep showing their file", () => {
 test("tools without a file argument keep their plain name", () => {
   assert.equal(summarizeToolCall("web_search", JSON.stringify({ query: "ruby" })), "Web Search");
 });
+
+test("shell commands say what ran", () => {
+  const run = (command: string) =>
+    summarizeToolCall("terminal", JSON.stringify({ command }));
+  assert.equal(run("ls -la"), "List Files");
+  assert.equal(run("ls -la src/components"), "List Files · components");
+  assert.equal(run("make build"), "Run · make build");
+  assert.equal(run("git status"), "Git Status");
+});

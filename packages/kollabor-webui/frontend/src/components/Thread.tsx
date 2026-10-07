@@ -1,5 +1,8 @@
 import { createContext, useContext, type FC } from "react";
-import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
+import {
+  ComposerPlaceholderContext,
+  Thread as AssistantThread,
+} from "@/components/assistant-ui/thread";
 import { ToolGroup } from "@/components/assistant-ui/tool-group";
 import type { AgentPoolEntry, SlashCommand } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
@@ -34,8 +37,8 @@ const Welcome: FC = () => {
       <h1 className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-semibold duration-200">
         {gem ? titleCase(gem.name) : "kollab"}
       </h1>
-      <p className="text-muted-foreground fade-in slide-in-from-bottom-1 animate-in fill-mode-both max-w-sm text-sm duration-200">
-        Everything has hooks. Send a message to start this session.
+      <p className="text-muted-foreground fade-in slide-in-from-bottom-1 animate-in fill-mode-both max-w-sm text-sm text-balance duration-200">
+        Everything has hooks. Send a message to begin.
       </p>
     </div>
   );
@@ -57,12 +60,16 @@ export const Thread: FC<{
   <WelcomeContext.Provider
     value={identity ? { name: identity, pool: agents.find((agent) => agent.name === identity) } : null}
   >
-    <AssistantThread
-      components={{ Welcome, ToolGroup }}
-      agents={agents}
-      commands={commands}
-      onOpenPanel={onOpenPanel}
-      attachmentsEnabled={attachmentsEnabled}
-    />
+    <ComposerPlaceholderContext.Provider
+      value={identity ? `Message ${titleCase(identity)}…` : "Send a message..."}
+    >
+      <AssistantThread
+        components={{ Welcome, ToolGroup }}
+        agents={agents}
+        commands={commands}
+        onOpenPanel={onOpenPanel}
+        attachmentsEnabled={attachmentsEnabled}
+      />
+    </ComposerPlaceholderContext.Provider>
   </WelcomeContext.Provider>
 );

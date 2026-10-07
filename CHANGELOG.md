@@ -11,14 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web UI: the Kollabor K logo heads the sidebar and is the browser tab icon.
 
 ### Changed
-- Web UI: the session header is one slim row on desktop (two on phones) with borderless controls: the model, the approval mode (an amber open shield for Trust All), MCP and online counts, and Settings and Clear as icons with tooltips. The sidebar shows bigger gems with smaller row text, and the session count sits beside "Sessions".
+- Web UI: the session header is one slim row on desktop (two on phones) with borderless controls: the model, the approval mode (an amber open shield for Trust All), MCP and online counts, and Settings and Clear as icons with tooltips. The sidebar header is one row (the logo, then New Session and its options as icon buttons), rows show bigger gems with smaller text and drop the message count, and the session count sits beside "Sessions".
+- Web: with no session open, the next free gem greets you with the model it will run and a Start Session button; inside a session the composer reads "Message Lapis…". Shell tool rows say what ran ("List Files", "Run · make build" instead of "Run ls" / "Run make"). The model picker dims the profile beside the model, and Trajectory's header is a single row of counts and controls (the tab above already names it).
 
 ### Fixed
 - The bundled `default` agent's description said it fixes linting errors; it now describes the general assistant it is.
 - Shell commands report exit code 0 when they succeed; every success was reported as exit 1 next to `success: true`.
 - Web: New Session's Agent field shows the agent the session will run (the gem's pool agent until you pick one) and pins the one you pick; it said "default" while the hub swapped the gem to `coder`. The agent list no longer appends each bundle's unused profile ("coder · default").
 - Web: a session reloaded in a background tab shows in about a second instead of up to 20 (the history gate polled with timers the browser throttles).
-- Web: Trajectory keeps a tool's name readable beside long output ("Run ls" showed "R…"); a tool result's multi-line output no longer ends in a stray comma; the sidebar shows gem names in Title Case, and the empty state's button reads "Create Session".
+- Web: Trajectory keeps a tool's name readable beside long output ("Run ls" showed "R…"); a tool result's multi-line output no longer ends in a stray comma; the sidebar shows gem names in Title Case.
+- Web: sidebar rows no longer clip the gems' hats and props.
 - `kollab --web-ui` no longer reuses an engine of another version that is still running on port 7433 (a 0.12 web UI was served by a 0.10 engine left over from an older install). It leaves that engine running for whoever uses it and starts its own on the next free port.
 
 ## [0.12.0] - 2026-10-07

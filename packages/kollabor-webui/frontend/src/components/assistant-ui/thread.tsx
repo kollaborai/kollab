@@ -110,6 +110,9 @@ const EMPTY_COMPONENTS: ThreadComponents = {};
 const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
 
+/** The composer's placeholder; the app names the session's gem ("Message Lapis…"). */
+export const ComposerPlaceholderContext = createContext("Send a message...");
+
 // Startup exposes a loading placeholder thread; treat it as a new chat so
 // the composer mounts centered. Loads after startup keep the docked layout.
 const isNewChatView = (s: AssistantState) =>
@@ -277,6 +280,7 @@ const Composer: FC<{
 }> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const aui = useAui();
   const voice = useVoiceMode();
+  const placeholder = useContext(ComposerPlaceholderContext);
   // The mic only exists where the session's live command list has /voicemode.
   const voiceAvailable = commands.some(
     (command) => command.name === "voicemode" && command.enabled !== false,
@@ -538,7 +542,7 @@ const Composer: FC<{
             <div className="aui-composer-row flex items-end gap-1.5">
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
-                placeholder="Send a message..."
+                placeholder={placeholder}
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none"
                 rows={1}
                 autoFocus

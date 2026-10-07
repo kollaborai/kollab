@@ -314,15 +314,17 @@ export function SessionToolbar({
           aria-label="Model"
         >
           {/* Phones show the model alone; "gpt-6-luna · openai-oauth" cut to
-              "gpt-6-luna ·". The list below still names each profile. */}
+              "gpt-6-luna ·". The list below still names each profile. One
+              wrapping span: SelectValue is a gap-2 flex row, which doubled the
+              space before the dot. */}
           <SelectValue placeholder="Model">
             {activeProfile ? (
-              <>
+              <span className="truncate">
                 {activeProfile.model || activeProfile.name}
                 {activeProfile.model && activeProfile.name !== activeProfile.model ? (
-                  <span className="max-sm:hidden"> · {activeProfile.name}</span>
+                  <span className="text-muted-foreground max-sm:hidden"> · {activeProfile.name}</span>
                 ) : null}
-              </>
+              </span>
             ) : undefined}
           </SelectValue>
         </SelectTrigger>
