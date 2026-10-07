@@ -20,6 +20,7 @@ import type {
 import { isToolOutputBatch, stripAgentHud } from "./api";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
+  historyTurnTiming,
   newTurnClock,
   observeRun,
   turnTimings,
@@ -217,6 +218,26 @@ function historyToMessages(
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
 
+  // The reply time survives a reload: each turn is timed by the history's own
+  // timestamps, from the user's message to the final reply. assistant-ui joins
+  // a turn's adjacent assistant messages and keeps only the first one's
+  // metadata, so the timing goes on the turn's first assistant message.
+  let turnStartedAt: string | null | undefined;
+  let turnTools = 0;
+  let firstReply: number | undefined;
+  let finalReplyAt: string | null | undefined;
+  const closeTurn = () => {
+    const timing = historyTurnTiming(turnStartedAt, finalReplyAt, turnTools);
+    const first = firstReply === undefined ? undefined : messages[firstReply];
+    if (firstReply !== undefined && first && timing) {
+      messages[firstReply] = { ...first, metadata: { ...first.metadata, timing } };
+    }
+    turnStartedAt = undefined;
+    turnTools = 0;
+    firstReply = undefined;
+    finalReplyAt = undefined;
+  };
+
   history.forEach((message, sourceIndex) => {
     const metadata = asRecord(message.metadata);
     if (
@@ -235,6 +256,9 @@ function historyToMessages(
     if (isToolOutputBatch(message)) return;
 
     if (message.role === "user") {
+      // Before the HUD check: a status-only turn still ends the one before.
+      closeTurn();
+      turnStartedAt = message.timestamp;
       const content = withoutAgentHud(
         historyContentToThreadContent(message.content),
       );
@@ -257,8 +281,13 @@ function historyToMessages(
           content: historyContentToThreadContent(message.content),
           status: { type: "complete", reason: "stop" },
         });
+        firstReply ??= messages.length - 1;
+        finalReplyAt = message.timestamp;
         return;
       }
+      // A step with tool calls; the turn's final reply comes after it.
+      turnTools += calls.length;
+      finalReplyAt = undefined;
 
       const content: Array<
         | { type: "text"; text: string }
@@ -285,6 +314,7 @@ function historyToMessages(
         content,
         status: { type: "complete", reason: "stop" },
       });
+      firstReply ??= messages.length - 1;
       return;
     }
 
@@ -326,6 +356,7 @@ function historyToMessages(
       });
     }
   });
+  closeTurn();
 
   // A daemon does not re-emit permission_request after a browser reload. Keep
   // the prompt as a pending tool call so assistant-ui can render it and its
