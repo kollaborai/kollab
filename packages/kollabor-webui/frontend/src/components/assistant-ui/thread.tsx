@@ -461,7 +461,7 @@ const Composer: FC<{
 
   const agentItems = useMemo<readonly ComposerPaletteItem[]>(() => {
     const onlineAgents = agents
-      .filter((agent) => agent.name && agent.available !== false)
+      .filter((agent) => agent.name && agent.active)
       .map((agent) => ({
         id: agent.name,
         label: agent.name,
@@ -480,7 +480,7 @@ const Composer: FC<{
         ]
           .filter(Boolean)
           .join(" "),
-        status: "online",
+        status: agent.state || "online",
         icon: "agent" as const,
       }));
     return [

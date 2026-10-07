@@ -90,7 +90,7 @@ function RuntimeShell({
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   const profile = profiles.find((item) => item.name === session.profile);
-  const model = profile?.model;
+  const model = session.model || profile?.model;
   const sessionLabel = formatSessionName(session.name, session.session_id);
   const [view, setView] = useState<SessionView>("chat");
   const [commands, setCommands] = useState<SlashCommand[]>(

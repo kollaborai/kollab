@@ -107,17 +107,12 @@ export function AppSidebar({
       <SidebarHeader className="gap-2 border-b">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton
-              size="lg"
-              className="cursor-default px-2 hover:bg-transparent active:bg-transparent"
-            >
-              <div className="flex flex-col gap-0.5 leading-none">
-                <span className="text-base font-semibold tracking-tight">kollab</span>
-                <span className="text-muted-foreground text-xs">
-                  {sessions.length} session{sessions.length === 1 ? "" : "s"}
-                </span>
-              </div>
-            </SidebarMenuButton>
+            <div className="flex h-12 flex-col justify-center gap-0.5 px-2 leading-none">
+              <span className="text-base font-semibold tracking-tight">kollab</span>
+              <span className="text-muted-foreground text-xs">
+                {sessions.length} session{sessions.length === 1 ? "" : "s"}
+              </span>
+            </div>
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
@@ -126,7 +121,7 @@ export function AppSidebar({
               className="bg-sidebar-accent text-sidebar-accent-foreground justify-center font-medium"
             >
               <Plus className="size-4" />
-              <span>{busy ? "Starting…" : "New session"}</span>
+              <span>{busy ? "Starting…" : "New Session"}</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -134,7 +129,7 @@ export function AppSidebar({
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>New session</SidebarGroupLabel>
+          <SidebarGroupLabel>New Session</SidebarGroupLabel>
           <SidebarGroupContent className="px-2">
             <div className="flex flex-col gap-2">
               <Select
@@ -218,7 +213,7 @@ export function AppSidebar({
               className="w-full justify-center"
               onClick={onManageProfiles}
             >
-              Manage profiles
+              Manage Profiles
             </Button>
           </SidebarGroupContent>
         </SidebarGroup>
