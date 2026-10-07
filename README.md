@@ -203,9 +203,14 @@ the network observes it, like the local hub. Start with the
 kollab --hub msg ops@home-server "check the tunnel"
 ```
 
+`kollab service install` in the joined folder keeps that machine's agent online
+across crashes and reboots (systemd on Linux, launchd on macOS); `kollab` there
+attaches to it.
+
 Run your own directory on your own domain with one command, `kollab relay serve
 --domain agents.example.com`: it prints the DNS record and the proxy routes it still
-needs (`kollab relay run --config` is the form for several workers). The
+needs, and `--install` keeps it running as a systemd service (`kollab relay run
+--config` is the form for several workers). The
 [agent network contract](docs/specs/agent-network-simple-flow.md) is the design;
 the [public beacon contract](docs/specs/agent-public-beacon.md) covers the relay's
 routes, limits and key handling.
@@ -522,6 +527,7 @@ kollab --doctor                 # first-run readiness check
 kollab --updates                # recent changes
 kollab --sub list               # agent orchestrator sessions
 kollab --attach lapis           # interactively attach to a live identity
+kollab service install          # keep this folder's agent running at boot/login and after a crash
 kollab --hub status             # hub inspection without a TUI
 kollab --web-ui                 # local engine + browser UI
 ```

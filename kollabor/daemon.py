@@ -25,6 +25,13 @@ DAEMON_READY_FD_ENV = "KOLLAB_DAEMON_READY_FD"
 # The attach client runs as `--attach <identity>`; this keeps the command the
 # user launched so /upgrade can relaunch it with a fresh daemon.
 LAUNCH_ARGS_ENV = "KOLLAB_LAUNCH_ARGS"
+# `kollab service install` runs `kollab --detached` with SERVICE_ENV=1, which
+# keeps the daemon in the foreground so systemd or launchd owns it. cli_main
+# pops it (agents the daemon spawns with --detached still detach) and sets
+# SERVICE_PID_ENV to the one process the manager started; its hub status
+# reports `service` from that.
+SERVICE_ENV = "KOLLAB_SERVICE"
+SERVICE_PID_ENV = "KOLLAB_SERVICE_PID"
 
 
 class DaemonExited(RuntimeError):
@@ -118,13 +125,15 @@ def _is_bare_launch(argv: list[str]) -> bool:
     return True
 
 
-def find_workspace_daemon(argv: list[str]) -> tuple[int, str] | None:
-    """The window-less daemon serving this workspace, as (pid, socket_path).
+def find_workspace_daemon(argv: list[str]) -> tuple[int, str, bool] | None:
+    """The window-less daemon serving this workspace, as (pid, socket_path, service).
 
     A bare relaunch attaches to it. Forking another one doubles the agent: the
     new daemon takes a second designation while the first keeps running with no
     window, and whatever is sent to the first is never seen. A daemon that
     already has a window is in use: a second terminal gets its own agent.
+    `service` is true for a daemon systemd or launchd runs (`kollab service`):
+    the window attaches to it but never owns it.
     """
     if not _is_bare_launch(argv):
         return None
@@ -148,22 +157,23 @@ def find_workspace_daemon(argv: list[str]) -> tuple[int, str] | None:
             started = float(data.get("started_at") or 0)
             # A daemon is its own session leader (fork_daemon and --detached
             # both setsid); an interactive window never is. Raises for a dead pid.
-            if os.getsid(pid) != pid:
-                continue
+            leader = os.getsid(pid) == pid
             if not is_project_scoped() and data.get("project") != os.getcwd():
                 continue
             # Unreachable, or a window already streams it (an older daemon
-            # that does not report windows counts as in use).
+            # that does not report windows counts as in use). A service
+            # daemon under launchd is no session leader; its status says so.
             status = asyncio.run(AgentMessenger.request_status(sock, timeout=1.0))
-            if status.get("attached") != 0:
+            service = status.get("service") is True
+            if not (leader or service) or status.get("attached") != 0:
                 continue
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        live.append((not data.get("is_coordinator"), started, pid, sock))
+        live.append((not data.get("is_coordinator"), started, pid, sock, service))
     if not live:
         return None
-    _, _, pid, sock = min(live)
-    return pid, sock
+    _, _, pid, sock, service = min(live)
+    return pid, sock, service
 
 
 def stop_daemon(pid: int, grace_seconds: float = 5.0) -> None:

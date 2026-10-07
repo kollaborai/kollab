@@ -430,15 +430,16 @@ still to do, once:
        POST  /relay/v1/enrollment/*           join codes
        POST  /relay/v1/contact/*              knocks
      paste-ready: kollab relay serve --domain agents.acme.com --print nginx   (or --print caddy)
-  3. keep it running: kollab relay serve --domain agents.acme.com --print systemd
+  3. keep it running: kollab relay serve --domain agents.acme.com --install   (systemd; --print systemd shows the unit)
 
 then devices connect with /connect agents.acme.com
 
 ready: relay up, key file published (revision 2)
 ```
 
-The admin adds the record, pastes the proxy config and installs the unit; the
-command prints them, it never installs anything itself. Every employee then runs:
+The admin adds the record, pastes the proxy config and runs `--install` (or
+installs the printed unit by hand); DNS and the proxy stay theirs to do. Every
+employee then runs:
 
 ```
 /connect agents.acme.com
@@ -810,8 +811,9 @@ prints both. Operator detail is in
 - **What it prints.** The TXT record value and the five routes (key file, health,
   websocket, `enrollment/*`, `contact/*`). `--print nginx|caddy` prints that
   proxy config and `--print systemd` a unit that runs the same command as the
-  same user on the same state directory. Nothing is written for the operator:
-  installing a unit needs root and is theirs to do.
+  same user on the same state directory. `--install` writes that unit (sudo when
+  not root), enables and starts it, after creating the state directory the unit
+  is confined to; `--uninstall` removes it. Without them nothing is written.
 - **Client addresses.** A proxy on the same machine is trusted for `X-Real-IP`, so
   per-address limits see the client and not the proxy. A proxy elsewhere needs
   `--trusted-proxy <ip>`; an office behind one address needs

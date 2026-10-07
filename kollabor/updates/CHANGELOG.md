@@ -13,7 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The first Ctrl+C in a window that started its agent says what each key does next: "Press Ctrl+C again to stop koordinator, or Ctrl+Z to detach". The hint wraps on narrow terminals.
 - After Ctrl+Z on the coordinator, the notice says `reattach: kollab`: a bare `kollab` in the same folder picks it back up. Other agents still show `kollab --attach <name>`.
 
+### Added
+- `kollab service install` keeps the folder's agent running: a systemd unit on Linux that runs as you and starts at boot (sudo writes it), or a LaunchAgent on macOS that starts at login, restarted 5 s after it stops either way. `kollab` in the folder attaches to it and closing that window leaves it running; `kollab --hub stop` says it will come back. `kollab service status` shows the unit, its pid and whether the agent answers; `kollab service uninstall` removes it. `install` refuses while another agent runs in the folder.
+- `kollab relay serve --domain <domain> --install` installs the directory as the systemd unit `--print systemd` shows, after creating its state directory, then enables and starts it; `--uninstall` removes it.
+
 ### Fixed
+- `python main.py` exits with the command's status. It always exited 0, so a failed `kollab relay serve` or `kollab service status` looked like success when run from a checkout.
 - A second `kollab` in the same workspace starts the next agent again instead of joining the session another terminal still has open. A bare relaunch only reattaches to a daemon with no window (one left by Ctrl+Z or a closed terminal); the agent's status now reports how many windows it has.
 - Pasting an image no longer closes `kollab`. The daemon read each client message with a 64 KB cap, so an image dropped the connection and the window exited as if the agent had died.
 - The hub coordinator now saves work it takes back from a dead agent, so the work is reassigned. It used to log the same reassignment every 5 seconds and never save it.

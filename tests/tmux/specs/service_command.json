@@ -1,0 +1,42 @@
+{
+  "name": "service-command",
+  "description": "kollab service renders the systemd unit (Linux) or launchd plist (macOS) that runs `kollab --detached` under the manager, status says plainly that a folder has no service, and relay serve --print systemd names --install. Nothing is installed.",
+  "config": {
+    "command": "python main.py --no-daemon",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    { "action": "section", "title": "Setup: an empty folder with no service" },
+    {
+      "action": "shell",
+      "description": "Print the service definition, then ask for status, in a throwaway folder",
+      "show": true,
+      "command": "REPO=$PWD; D=$(mktemp -d); cd \"$D\" && python \"$REPO/main.py\" service install --print --env KOLLAB_NO_KEYRING=1; echo \"----- PRINT_EXIT=$? -----\"; python \"$REPO/main.py\" service status; echo \"----- STATUS_EXIT=$? -----\"; cd \"$REPO\" && rmdir \"$D\""
+    },
+
+    { "action": "section", "title": "Test 1: the manager runs kollab --detached with the service flag" },
+    { "action": "assert_contains", "pattern": "kollabor_cli_main", "description": "Runs this interpreter's kollab" },
+    { "action": "assert_contains", "pattern": "--detached", "description": "As the headless daemon" },
+    { "action": "assert_contains", "pattern": "KOLLAB_SERVICE", "description": "In the foreground for the manager" },
+    { "action": "assert_contains", "pattern": "KOLLAB_NO_KEYRING", "description": "--env reaches the agent" },
+    { "action": "assert_contains", "pattern": "PRINT_EXIT=0", "description": "--print installs nothing and succeeds" },
+
+    { "action": "section", "title": "Test 2: status is plain about a folder with no service" },
+    { "action": "assert_contains", "pattern": "no kollab service for|needs systemd", "description": "Not installed (or no manager here)" },
+    { "action": "assert_contains", "pattern": "STATUS_EXIT=1", "description": "Non-zero, so scripts can test it" },
+    { "action": "assert_not_contains", "pattern": "Traceback \\(most recent call last\\)", "description": "No raw traceback" },
+
+    { "action": "section", "title": "Test 3: the relay's systemd unit names its one-command install" },
+    {
+      "action": "shell",
+      "description": "Print the relay unit",
+      "show": true,
+      "command": "python main.py relay serve --domain agents.example.com --print systemd"
+    },
+    { "action": "assert_contains", "pattern": "--install", "description": "Header names --install" },
+    { "action": "assert_contains", "pattern": "kollab-relay-agents.example.com", "description": "Unit name" }
+  ]
+}

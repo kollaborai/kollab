@@ -20,7 +20,7 @@ One process runs the relay (one worker on the in-memory backend), signs the disc
 
 1. **DNS.** One TXT record: `_agent.agents.example.com  TXT  "v=aid1;u=https://agents.example.com/.well-known/agent-keys.json"`.
 2. **The TLS proxy.** Terminate TLS for `agents.example.com` and forward these five routes to the port, nothing else: `GET /.well-known/agent-keys.json`, `GET /relay/v1/health`, the WebSocket at `/relay/v1/ws`, `POST /relay/v1/enrollment/*` and `POST /relay/v1/contact/*`. Never forward `/relay/v1/metrics`. `--print nginx` and `--print caddy` print that config for your settings; both set `X-Real-IP` from the connecting client.
-3. **Keeping it running.** `--print systemd` prints a unit. It runs the same command as the same user on the same state directory, so moving from a shell to systemd keeps the published identity. The command never installs anything: pipe the unit to `sudo tee` yourself.
+3. **Keeping it running.** `--install` writes the systemd unit to `/etc/systemd/system/kollab-relay-<domain>.service` (with sudo when you are not root), enables it at boot and starts it; `--uninstall` stops and removes it. The unit runs the same command as the same user on the same state directory, so moving from a shell to systemd keeps the published identity. `--install` creates the state directory and key first, because the unit may write only there, and refuses a directory another `relay serve` is using: stop the one in your shell first. `--print systemd` prints the same unit for a setup you manage yourself.
 
 Then every device runs `/connect agents.example.com` and joins with a code, as on kollabor.ai.
 

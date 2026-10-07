@@ -45,6 +45,7 @@ def mesh(monkeypatch):
         started=1.0,
         listening=True,
         attached=0,
+        service=False,
     ):
         proc = subprocess.Popen(SLEEPER, start_new_session=leader)
         procs.append(proc)
@@ -54,7 +55,7 @@ def mesh(monkeypatch):
             srv.bind(str(path))
             srv.listen(16)
             socks.append(srv)
-            status = {"type": "status", "identity": name}
+            status = {"type": "status", "identity": name, "service": service}
             if attached is not None:  # None: a daemon that predates the field
                 status["attached"] = attached
             threading.Thread(
@@ -96,15 +97,15 @@ def _answer_status(srv, status):
 def test_a_live_workspace_daemon_is_attached(mesh):
     pid, sock = mesh("koordinator", coordinator=True)
 
-    assert daemon.find_workspace_daemon(["--llm", "openai-oauth"]) == (pid, sock)
-    assert daemon.find_workspace_daemon([]) == (pid, sock)
+    assert daemon.find_workspace_daemon(["--llm", "openai-oauth"]) == (pid, sock, False)
+    assert daemon.find_workspace_daemon([]) == (pid, sock, False)
 
 
 def test_the_coordinator_wins_over_a_younger_peer(mesh):
     mesh("lapis", started=9.0)
     pid, sock = mesh("koordinator", coordinator=True, started=5.0)
 
-    assert daemon.find_workspace_daemon([]) == (pid, sock)
+    assert daemon.find_workspace_daemon([]) == (pid, sock, False)
 
 
 def test_a_dead_unreachable_or_interactive_agent_is_not_attached(mesh):
@@ -128,7 +129,14 @@ def test_a_window_less_peer_is_attached_while_the_coordinator_has_a_window(mesh)
     mesh("koordinator", coordinator=True, attached=1)
     pid, sock = mesh("lapis", started=9.0)
 
-    assert daemon.find_workspace_daemon([]) == (pid, sock)
+    assert daemon.find_workspace_daemon([]) == (pid, sock, False)
+
+
+def test_a_service_daemon_is_attached_though_launchd_made_it_no_session_leader(mesh):
+    # launchd starts a job in its own session; the status reply says it is a service.
+    pid, sock = mesh("koordinator", coordinator=True, leader=False, service=True)
+
+    assert daemon.find_workspace_daemon([]) == (pid, sock, True)
 
 
 def test_the_daemon_status_counts_attached_windows():
@@ -174,7 +182,9 @@ def test_a_launch_that_asks_for_something_new_starts_its_own(mesh, argv):
 def test_cli_main_attaches_to_the_live_daemon_and_never_forks(monkeypatch):
     monkeypatch.setattr(cli, "_should_use_daemon", lambda: True)
     monkeypatch.setattr(
-        daemon, "find_workspace_daemon", lambda argv: (4242, "/tmp/x/koordinator.sock")
+        daemon,
+        "find_workspace_daemon",
+        lambda argv: (4242, "/tmp/x/koordinator.sock", False),
     )
     monkeypatch.setattr(
         daemon, "fork_daemon", lambda argv: pytest.fail("forked a second daemon")

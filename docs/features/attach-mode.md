@@ -157,6 +157,32 @@ State persists across attach cycles: conversation history, active profile, loade
 
 A bare `kollab` in the same workspace reattaches too, to a daemon with no window open (the coordinator first). A daemon that already has a window is in use: a second terminal starts its own daemon and gets the next agent (koordinator, then lapis, ...).
 
+## Keep It Running: `kollab service`
+
+A daemon survives a closed terminal or SSH session, but not a reboot, and nothing restarts it after a crash. `kollab service` hands the folder's agent to the system's service manager:
+
+```bash
+cd ~/work            # the folder whose agent should always be up
+kollab service install
+kollab service status
+kollab service uninstall
+```
+
+| | Linux | macOS |
+|---|---|---|
+| Manager | systemd system unit `/etc/systemd/system/kollab-<folder>-<hash>.service`, `User=` you (sudo writes it) | LaunchAgent `~/Library/LaunchAgents/ai.kollabor.kollab-<folder>-<hash>.plist` |
+| Starts | at boot, before anyone logs in | at login |
+| After it stops | restarted 5 s later (`Restart=always`) | restarted 5 s later (`KeepAlive`, `ThrottleInterval` 5) |
+| Logs | `journalctl -u <unit>` (stderr) and the project's `kollab.log` | the project's `logs/service.log` (stderr) and `kollab.log` |
+
+- The manager runs `kollab --detached` in the folder with `KOLLAB_SERVICE=1`, which keeps the daemon in the foreground so the manager owns it. The flag is removed at startup, so agents the service spawns still detach normally.
+- A bare `kollab` in the folder attaches to the service's agent. The window never owns it: Ctrl+C twice closes the window and the agent keeps running. `kollab --hub stop <name>` says the agent will come back; `kollab service uninstall` stops it for good.
+- `install` refuses while another agent is running in the folder (it names the `kollab --hub stop` command), so the service is the folder's only agent and the one that holds its network identity. Running `install` again rewrites the unit and restarts the agent, which is how a service picks up an upgraded kollab.
+- `install --print` shows the unit or plist without installing. `--env KEY=VALUE` adds environment (for example `KOLLAB_NO_KEYRING=1`); never a secret, because unit files are world-readable. API keys belong in kollab's config or keychain, not only in your shell profile, which the manager never reads. The service keeps the `PATH` of the shell that installed it, so its tools and MCP servers resolve the same way.
+- Other init systems: run `kollab --detached` in the folder from your own unit or script.
+
+The directory has the same command for its own unit: `kollab relay serve --domain <domain> --install` (and `--uninstall`), see [Signed discovery and relay service operations](../operations/kollabor-ai-discovery-publication.md).
+
 ## Known Gaps
 
 The original phase-4.6 migration audit remains useful historical context, but the

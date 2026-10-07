@@ -1423,6 +1423,11 @@ async def _handle_cli_hub(hub_args: list) -> None:
         desig = agent.get("identity", "?")
         sock = agent.get("socket_path", "")
         pid = int(agent.get("pid") or 0)
+        # systemd/launchd start a `kollab service` agent again; say so.
+        if sock and (await AgentMessenger.request_status(sock, timeout=1.0)).get(
+            "service"
+        ):
+            desig += " (a kollab service: it restarts; `kollab service uninstall` stops it for good)"
 
         shutdown_acked = False
         if sock:
@@ -2083,20 +2088,32 @@ def cli_main() -> None:
     if "--detached" in sys.argv or "-d" in sys.argv:
         import os
 
-        pid = os.fork()
-        if pid > 0:
-            # Parent: print child PID and exit cleanly
-            sys.stdout.write(f"[detached] pid {pid}\n")
-            sys.stdout.flush()
-            sys.exit(0)
+        from kollabor.daemon import SERVICE_ENV, SERVICE_PID_ENV
 
-        # Child: new session, detach from terminal
-        os.setsid()
-        devnull = os.open(os.devnull, os.O_RDWR)
-        os.dup2(devnull, 0)  # stdin
-        os.dup2(devnull, 1)  # stdout
-        os.dup2(devnull, 2)  # stderr
-        os.close(devnull)
+        if os.environ.pop(SERVICE_ENV, "") == "1":
+            # `kollab service`: systemd or launchd owns this process, so it
+            # stays in the foreground (no fork, no setsid) and keeps stderr
+            # for the manager's log.
+            os.environ[SERVICE_PID_ENV] = str(os.getpid())
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0)  # stdin
+            os.dup2(devnull, 1)  # stdout
+            os.close(devnull)
+        else:
+            pid = os.fork()
+            if pid > 0:
+                # Parent: print child PID and exit cleanly
+                sys.stdout.write(f"[detached] pid {pid}\n")
+                sys.stdout.flush()
+                sys.exit(0)
+
+            # Child: new session, detach from terminal
+            os.setsid()
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0)  # stdin
+            os.dup2(devnull, 1)  # stdout
+            os.dup2(devnull, 2)  # stderr
+            os.close(devnull)
 
     # Daemon mode (default): auto-fork daemon + connect as attach client.
     # The daemon runs headless (like --detached). The parent becomes
@@ -2111,9 +2128,8 @@ def cli_main() -> None:
         try:
             # A bare relaunch attaches to the workspace's live daemon; forking
             # another one doubles the agent.
-            daemon_pid, socket_path = find_workspace_daemon(
-                sys.argv[1:]
-            ) or fork_daemon(sys.argv)
+            found = find_workspace_daemon(sys.argv[1:])
+            daemon_pid, socket_path, service = found or (*fork_daemon(sys.argv), False)
         except RuntimeError as e:
             # Exit status 2 is a rejected argument (an unknown --llm); the
             # in-process run below prints that error itself, so stay quiet.
@@ -2129,8 +2145,11 @@ def cli_main() -> None:
             os.environ[LAUNCH_ARGS_ENV] = json.dumps(sys.argv[1:])
             sys.argv = [sys.argv[0], "--attach", identity]
 
-            # Store daemon PID so cleanup knows to kill it on ctrl+c
-            os.environ["KOLLAB_DAEMON_PID"] = str(daemon_pid)
+            # Store daemon PID so cleanup knows to kill it on ctrl+c. A
+            # service daemon belongs to systemd/launchd: closing this window
+            # leaves it running.
+            if not service:
+                os.environ["KOLLAB_DAEMON_PID"] = str(daemon_pid)
 
             try:
                 asyncio.run(async_main())

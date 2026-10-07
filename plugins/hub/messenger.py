@@ -1488,6 +1488,11 @@ class AgentSocketServer:
                             if self._display_tap
                             else 0
                         ),
+                        # systemd/launchd runs this agent (`kollab service`,
+                        # kollabor.daemon.SERVICE_PID_ENV): a window attaches
+                        # to it but never stops it.
+                        "service": os.environ.get("KOLLAB_SERVICE_PID")
+                        == str(os.getpid()),
                     }
                     if self._identity:
                         status_data["identity"] = self._identity.get(
