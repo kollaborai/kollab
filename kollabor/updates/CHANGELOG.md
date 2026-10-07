@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Web UI: the session header is one slim row on desktop (two on phones) with borderless controls: the model, the approval mode (an amber open shield for Trust All), MCP and online counts, and Settings and Clear as icons with tooltips. The sidebar header is one row (the logo, then New Session and its options as icon buttons), rows show bigger gems with smaller text and drop the message count, and the session count sits beside "Sessions".
-- Web: with no session open, the next free gem greets you with the model it will run and a Start Session button; inside a session the composer reads "Message Lapis…". Shell tool rows say what ran ("List Files", "Run · make build" instead of "Run ls" / "Run make"). The model picker dims the profile beside the model, and Trajectory's header is a single row of counts and controls (the tab above already names it).
+- Web: with no session open, the next free gem greets you with the model it will run and a Start Session button; inside a session the composer reads "Message Lapis…". Shell tool rows say what ran ("List Files", "Run · make build" instead of "Run ls" / "Run make"). The model picker dims the profile beside the model and shows the model alone below 1280px, so the header stays one row on a laptop with the sidebar open. Trajectory's header is a single row of counts and controls (the tab above already names it), and on phones its controls share one row.
 
 ### Fixed
 - The bundled `default` agent's description said it fixes linting errors; it now describes the general assistant it is.
@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: a session reloaded in a background tab shows in about a second instead of up to 20 (the history gate polled with timers the browser throttles).
 - Web: Trajectory keeps a tool's name readable beside long output ("Run ls" showed "R…"); a tool result's multi-line output no longer ends in a stray comma; the sidebar shows gem names in Title Case.
 - Web: sidebar rows no longer clip the gems' hats and props.
+- Web: opening the sidebar on a phone no longer pops the New Session tooltip; the first Escape closed that tooltip instead of the sidebar.
 - Web: a reply's time ("14.0s" under it) stays after a reload. The live clock lives in the tab, so a reloaded turn is timed by the history's own timestamps, from your message to the final reply.
 - `kollab --web-ui` no longer reuses an engine of another version that is still running on port 7433 (a 0.12 web UI was served by a 0.10 engine left over from an older install). It leaves that engine running for whoever uses it and starts its own on the next free port.
 

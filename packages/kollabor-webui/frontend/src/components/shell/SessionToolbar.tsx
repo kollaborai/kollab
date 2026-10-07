@@ -313,8 +313,9 @@ export function SessionToolbar({
           className={cn(GHOST_TRIGGER, "max-w-[7.5rem] sm:max-w-[15rem]")}
           aria-label="Model"
         >
-          {/* Phones show the model alone; "gpt-6-luna · openai-oauth" cut to
-              "gpt-6-luna ·". The list below still names each profile. One
+          {/* Below xl the model shows alone: "gpt-6-luna · openai-oauth" cut to
+              "gpt-6-luna ·" on phones and wrapped the header at tablet width.
+              The list below still names each profile. One
               wrapping span: SelectValue is a gap-2 flex row, which doubled the
               space before the dot. */}
           <SelectValue placeholder="Model">
@@ -322,7 +323,7 @@ export function SessionToolbar({
               <span className="truncate">
                 {activeProfile.model || activeProfile.name}
                 {activeProfile.model && activeProfile.name !== activeProfile.model ? (
-                  <span className="text-muted-foreground max-sm:hidden"> · {activeProfile.name}</span>
+                  <span className="text-muted-foreground max-xl:hidden"> · {activeProfile.name}</span>
                 ) : null}
               </span>
             ) : undefined}

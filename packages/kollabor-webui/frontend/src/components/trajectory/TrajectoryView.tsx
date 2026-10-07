@@ -233,9 +233,10 @@ export function TrajectoryView({
               </Badge>
             )}
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* Phones: a full row where the search flexes (Refresh wrapped alone). */}
+          <div className="flex w-full items-center justify-end gap-2 sm:w-auto sm:flex-wrap">
             <div
-              className="bg-muted flex rounded-md p-0.5"
+              className="bg-muted flex shrink-0 rounded-md p-0.5"
               role="group"
               aria-label="Trajectory layout"
             >
@@ -253,7 +254,7 @@ export function TrajectoryView({
                 </Button>
               ))}
             </div>
-            <div className="relative w-48 sm:w-64">
+            <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
               <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
               <Input
                 value={search}
