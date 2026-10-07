@@ -292,3 +292,36 @@ def test_mixed_native_and_xml_tool_history_shape_is_stable():
     xml_result = history[2]
     assert xml_result.role == "user"
     assert xml_result.content == "Tool result: [file_read] xml saved"
+
+
+def test_native_arguments_holding_xml_attributes_are_split():
+    """GLM 5.3 writes the rest of the documented XML tag into one argument."""
+
+    def call(name, arguments):
+        tool_call = SimpleNamespace(id="call_1", name=name, input=arguments)
+        return normalize_native_tool_call(tool_call, plugin_handler_names={name})
+
+    spawned = call("hub_spawn", {"name": 'coder" task="ROLE: builder. Return "429" when over.'})
+    assert spawned["input"] == {"name": "coder", "task": 'ROLE: builder. Return "429" when over.'}
+    assert spawned["task"] == 'ROLE: builder. Return "429" when over.'
+
+    body = call("hub_spawn", {"name": 'coder">ROLE: builder'})
+    assert body["input"] == {"name": "coder", "task": "ROLE: builder"}
+
+    cron = call("hub_cron_add", {"interval": '5m" to="koordinator', "message": "check in"})
+    assert cron["input"] == {"interval": "5m", "to": "koordinator", "message": "check in"}
+
+
+def test_native_arguments_with_ordinary_quotes_are_left_alone():
+    def call(name, arguments):
+        tool_call = SimpleNamespace(id="call_1", name=name, input=arguments)
+        return normalize_native_tool_call(tool_call, plugin_handler_names={name})["input"]
+
+    message = {"to": "lapis", "message": 'say "hi" then wait=">" for me'}
+    assert call("hub_msg", message) == message
+    undeclared = {"name": 'coder" model="glm-5.3'}  # not a hub_spawn parameter
+    assert call("hub_spawn", undeclared) == undeclared
+    kept = {"name": 'coder" task="other', "task": "the real task"}  # task already given
+    assert call("hub_spawn", kept) == kept
+    command = {"command": 'echo ">" && grep "a" b.txt'}
+    assert normalize_native_tool_call(SimpleNamespace(id="c", name="terminal", input=command))["input"] == command

@@ -55,6 +55,54 @@ def _registry_native_names() -> set[str]:
         return set()
 
 
+# One argument that swallowed the rest of an XML tag: `coder" task="...` or `coder">...`
+_BLED_ATTRIBUTE = re.compile(r'([^"]*)"\s+([A-Za-z_][\w-]*)="(.*)', re.DOTALL)
+_BLED_BODY = re.compile(r'([^"]*)">(.*)', re.DOTALL)
+
+
+def _split_bled_attributes(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Split XML tag syntax a model wrote inside one native argument.
+
+    The system prompt documents these tools as XML tags, and a model calling one
+    natively sometimes writes the rest of the tag into its first argument:
+    ``{"name": "coder\\" task=\\"..."}`` or ``{"name": "coder\\">..."}``. Only a
+    parameter the tool declares and the call left out is split off, and only
+    the tool's XML body parameter takes text after ``">``.
+    """
+    try:
+        from .tool_registry import get_registry
+
+        tool = get_registry().get_by_native_name(tool_name)
+    except Exception:
+        return arguments
+    if tool is None:
+        return arguments
+    declared = {param.name for param in tool.parameters}
+    body = tool.xml_body_param
+    repaired = dict(arguments)
+    for key, value in arguments.items():
+        if not isinstance(value, str):
+            continue
+        pieces: dict[str, str] = {}
+        current, rest = key, value
+        while True:
+            taken = repaired.keys() | pieces.keys()
+            attribute = _BLED_ATTRIBUTE.fullmatch(rest)
+            if attribute and attribute[2] in declared and attribute[2] not in taken:
+                pieces[current], current, rest = attribute[1], attribute[2], attribute[3]
+                continue
+            tail = _BLED_BODY.fullmatch(rest)
+            if tail and body and current != body and body not in taken:
+                pieces[current], current, rest = tail[1], body, tail[2]
+                continue
+            break
+        if pieces:
+            pieces[current] = rest
+            repaired.update(pieces)
+            logger.warning("Split XML attributes out of native %s arguments", tool_name)
+    return repaired
+
+
 def normalize_native_tool_call(
     tool_call: Any,
     *,
@@ -77,7 +125,7 @@ def normalize_native_tool_call(
     tool_name = str(_get_tool_call_field(tool_call, "name", "") or "")
     tool_name = _clean_tool_name(tool_name, known_names)
     raw_type = str(_get_tool_call_field(tool_call, "type", "tool_use") or "tool_use")
-    input_value = _tool_call_input(tool_call)
+    input_value = _split_bled_attributes(tool_name, _tool_call_input(tool_call))
 
     plugin_key = tool_name
     if plugin_key not in plugin_handler_names:
