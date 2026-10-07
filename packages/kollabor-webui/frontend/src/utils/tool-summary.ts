@@ -176,11 +176,12 @@ export function summarizeToolCall(toolName: string, argsText?: string): string {
     return summarizeTerminalCommand(args.command);
   }
 
-  if (
-    (normalizedName === "file_read" || normalizedName === "file_write") &&
-    typeof args.file === "string"
-  ) {
-    return `${humanizeToolName(normalizedName)} · ${basename(args.file)}`;
+  // Native file tools name the target `file`; MCP filesystem tools use `path`.
+  const target = [args.file, args.path, args.file_path].find(
+    (value): value is string => typeof value === "string" && value !== "",
+  );
+  if (target) {
+    return `${humanizeToolName(normalizedName)} · ${basename(target)}`;
   }
 
   return humanizeToolName(normalizedName);
