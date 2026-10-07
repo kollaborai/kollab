@@ -164,7 +164,13 @@ export function humanizeToolName(toolName: string): string {
 /** Keep tool rows scannable while leaving the full request in the detail panel. */
 export function summarizeToolCall(toolName: string, argsText?: string): string {
   const args = parseArgs(argsText);
-  const normalizedName = toolName.trim() || "tool";
+  // Live names are the daemon's display names ("terminal: ls", "web-search: q");
+  // history carries the bare native name. Reduce both to the native name.
+  const normalizedName =
+    (toolName.match(/^([\w-]+):(?:\s|$)/)?.[1] ?? toolName.trim()).replaceAll(
+      "-",
+      "_",
+    ) || "tool";
 
   if (normalizedName === "terminal" && typeof args.command === "string") {
     return summarizeTerminalCommand(args.command);
