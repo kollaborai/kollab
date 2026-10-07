@@ -249,7 +249,15 @@ export default function App() {
     nonce: number;
   } | null>(null);
   const intentNonceRef = useRef(0);
-  const [selectedBundle, setSelectedBundle] = useState("default");
+  // The agent a new session runs, shown in New Session. Until the user picks
+  // one it is the gem's pool bundle: the hub moves an unpinned gem onto it
+  // (plugins/hub/plugin.py, "Reconcile agent bundle to hub role"), so showing
+  // "default" there was false.
+  const [pickedBundle, setPickedBundle] = useState<string | null>(null);
+  const gemBundle = agents.find((agent) => agent.name === selectedIdentity)?.agent_type;
+  const selectedBundle =
+    pickedBundle ??
+    (gemBundle && bundles.some((bundle) => bundle.name === gemBundle) ? gemBundle : "default");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
@@ -461,7 +469,11 @@ export default function App() {
     try {
       const session = await api.createSession({
         profile: selectedProfile || "default",
-        agent: selectedBundle !== "default" ? selectedBundle : undefined,
+        // Pin what New Session shows. "default" is only a placeholder until
+        // such a bundle exists (the first daemon start seeds it).
+        agent: bundles.some((bundle) => bundle.name === selectedBundle)
+          ? selectedBundle
+          : undefined,
         identity: selectedIdentity || undefined,
         approval_mode: "trust_all",
         workspace: workspacePath.trim() || undefined,
@@ -603,7 +615,7 @@ export default function App() {
         busy={busy}
         onProfileChange={setSelectedProfile}
         onIdentityChange={setSelectedIdentity}
-        onBundleChange={setSelectedBundle}
+        onBundleChange={setPickedBundle}
         onSettings={() => openSettings()}
         onManageProfiles={() => setProfilesOpen(true)}
         onSelectSession={(id) => void selectSession(id)}
@@ -678,7 +690,7 @@ export default function App() {
                 onClick={() => void createSession()}
                 disabled={busy}
               >
-                {busy ? busyMessage || "Connecting…" : "Create session"}
+                {busy ? busyMessage || "Connecting…" : "Create Session"}
               </Button>
             </div>
           </>

@@ -406,6 +406,7 @@ const converter = (
 type ThreadReadyRuntime = {
   thread: {
     getState: () => { messages: readonly ThreadMessageLike[] };
+    subscribe: (callback: () => void) => () => void;
   };
 };
 
@@ -421,30 +422,32 @@ function InitialMessagesGate({
   const [ready, setReady] = useState(messages.length === 0);
 
   useEffect(() => {
-    let attempts = 0;
-    let retry: number | undefined;
-    const hydrate = () => {
-      if (
-        runtime.thread.getState().messages.length >= messages.length ||
-        attempts >= 20
-      ) {
-        // Give the provider's assistant-ui adapter one commit to publish the
-        // bound thread state before Thread reads its empty-state selector.
-        retry = window.setTimeout(() => setReady(true), 50);
-        return;
-      }
-      attempts += 1;
-      retry = window.setTimeout(hydrate, 10);
+    if (ready) return;
+    let commit: number | undefined;
+    const finish = () => {
+      if (commit !== undefined) return;
+      // Give the provider's assistant-ui adapter one commit to publish the
+      // bound thread state before Thread reads its empty-state selector.
+      commit = window.setTimeout(() => setReady(true), 50);
+    };
+    const check = () => {
+      if (runtime.thread.getState().messages.length >= messages.length) finish();
     };
 
     // The remote thread runtime is bound by AssistantRuntimeProvider after
     // this component mounts. Wait for that binding before mounting Thread so
     // its initial empty-state selector cannot stick after a full reload.
-    hydrate();
+    // Event-driven, not polled: a hidden tab clamps each chained timer to
+    // ~1 s, so the old 20-step poll kept a reloaded session blank for 20 s.
+    const unsubscribe = runtime.thread.subscribe(check);
+    const fallback = window.setTimeout(finish, 250);
+    check();
     return () => {
-      if (retry !== undefined) window.clearTimeout(retry);
+      unsubscribe();
+      window.clearTimeout(fallback);
+      if (commit !== undefined) window.clearTimeout(commit);
     };
-  }, [messages.length, runtime]);
+  }, [messages.length, runtime, ready]);
 
   return ready ? children : null;
 }

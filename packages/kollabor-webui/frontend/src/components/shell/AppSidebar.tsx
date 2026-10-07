@@ -206,8 +206,10 @@ export function AppSidebar({
                     <SelectContent>
                       {bundleOptions.map((bundle) => (
                         <SelectItem key={bundle.name} value={bundle.name}>
+                          {/* No profile suffix: a web session always sends the Model
+                              field's profile, so the bundle's preferred one never
+                              applies ("coder · default" also read as two agents). */}
                           {bundle.name}
-                          {bundle.profile ? ` · ${bundle.profile}` : ""}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -333,7 +335,7 @@ export function AppSidebar({
                           task
                         ) : (
                           <>
-                            {session.identity || session.agent || "unassigned"} ·{" "}
+                            {titleCase(session.identity || "") || session.agent || "Unassigned"} ·{" "}
                             {session.model || session.profile || "default"} ·{" "}
                             {session.history_length || 0} messages
                           </>

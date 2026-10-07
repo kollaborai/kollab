@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Shell commands report exit code 0 when they succeed; every success was reported as exit 1 next to `success: true`.
+- Web: New Session's Agent field shows the agent the session will run (the gem's pool agent until you pick one) and pins the one you pick; it said "default" while the hub swapped the gem to `coder`. The agent list no longer appends each bundle's unused profile ("coder · default").
+- Web: a session reloaded in a background tab shows in about a second instead of up to 20 (the history gate polled with timers the browser throttles).
+- Web: Trajectory keeps a tool's name readable beside long output ("Run ls" showed "R…"); a tool result's multi-line output no longer ends in a stray comma; the sidebar shows gem names in Title Case, and the empty state's button reads "Create Session".
 - `kollab --web-ui` no longer reuses an engine of another version that is still running on port 7433 (a 0.12 web UI was served by a 0.10 engine left over from an older install). It leaves that engine running for whoever uses it and starts its own on the next free port.
 
 ## [0.12.0] - 2026-10-07

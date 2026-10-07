@@ -1,3 +1,13 @@
+// A block string ends on a line of its own text, where a comma reads as part
+// of it ("notes.txt,"). Entries after a block are separated by the newline.
+function joinEntries(parts: string[]): string {
+  return parts
+    .map((part, index) =>
+      index === parts.length - 1 || part.split("\n")[0].endsWith("|") ? part : `${part},`,
+    )
+    .join("\n");
+}
+
 function formatJsonValue(value: unknown, depth: number): string {
   const indent = " ".repeat(depth * 2);
 
@@ -14,9 +24,9 @@ function formatJsonValue(value: unknown, depth: number): string {
   if (Array.isArray(value)) {
     if (!value.length) return "[]";
     const childIndent = " ".repeat((depth + 1) * 2);
-    return `[\n${value
-  .map((item) => `${childIndent}${formatJsonValue(item, depth + 1)}`)
-  .join(",\n")}\n${indent}]`;
+    return `[\n${joinEntries(
+      value.map((item) => `${childIndent}${formatJsonValue(item, depth + 1)}`),
+    )}\n${indent}]`;
   }
   if (typeof value === "object") {
     return formatObject(value as Record<string, unknown>, depth);
@@ -29,12 +39,12 @@ function formatObject(value: Record<string, unknown>, depth: number): string {
   const entries = Object.entries(value);
   if (!entries.length) return "{}";
   const childIndent = " ".repeat((depth + 1) * 2);
-  return `{\n${entries
-    .map(
+  return `{\n${joinEntries(
+    entries.map(
       ([key, item]) =>
         `${childIndent}${JSON.stringify(key)}: ${formatDisplayValue(item, depth + 1)}`,
-    )
-    .join(",\n")}\n${indent}}`;
+    ),
+  )}\n${indent}}`;
 }
 
 function formatDisplayValue(value: unknown, depth: number): string {
