@@ -66,6 +66,7 @@ human-only-answer rule, the `invite`/`join` file pairing, and the `K1-…`
 | Strangers | Kept and shown as `knock` / `knocks`. A stranger never gets `open`. |
 | Automation | `kollab --hub msg agent@device "text"` from any shell. `hub_cron_add` on top. |
 | Sealed config | Everything but OAuth logins and machine-local settings, continuously, primary wins. |
+| Shared login | A human shares the ChatGPT login with chosen devices (`s` at accept, `/connect share`). The device that made the newest record refreshes it; the rest take its result. Section 9, milestone 5. |
 | Mesh | Relay now. Direct/LAN mesh is milestone 3, proven live before it ships. Same commands. |
 | Conversation rules | Hub rules apply across machines. No question cap, no task envelope, no human-only answers under `open` and `agents`. The Codex task model exists only under `manual`. |
 
@@ -521,6 +522,7 @@ Shown in the palette and in `/connect help`:
 | `/connect knocks` | Review introductions you received | renamed from `contacts` |
 | `/connect allow <device> <agent>`, `deny <device> [agent]` | Under `agents` trust or for accepted strangers; under `open` they say they have no effect | kept; argument was a 64-hex key |
 | `/connect revoke <device>` | Remove a device or peer | kept; argument was a 64-hex key |
+| `/connect share <device>` | Share this computer's ChatGPT login with a device on the network (milestone 5, section 9) | new |
 | `/connect leave [domain]` | Disconnect, forget the network and stop reconnecting; the device can then join another by code | renamed from `disconnect` |
 | `/connect help [all]` | This list; `all` adds the manual-trust and reset commands | kept |
 
@@ -558,8 +560,9 @@ Removed, with the message the router prints for one release:
 | `disconnect` | `use /connect leave` |
 | `grants` | `use /connect status` |
 
-Count: 29 today. 14 kept (7 shown, 7 advanced), 4 renamed, 11 removed, 2 new
-(`name`, `trust`). 20 subcommands after, 13 of them shown. The `kollab --hub`
+Count: 29 today. 14 kept (7 shown, 7 advanced), 4 renamed, 11 removed, 3 new
+(`name`, `trust`, and `share` from milestone 5). 21 subcommands after, 14 of
+them shown. The `kollab --hub`
 CLI gains `status` rows and `msg` targets for remote agents; it gains no
 `--connect` family.
 
@@ -698,8 +701,10 @@ How it stays secure with 40 bits:
   sealed to the receiving device's key, and travels over the network's secure
   conversation path: the directory carries ciphertext and never reads it.
 - Not synced:
-  - OAuth logins. Each device runs `/login`. The `oauth/` directory is never
-    read and no access, refresh or id token leaves the primary.
+  - OAuth logins. They are never part of a bundle. Until milestone 5 each
+    device runs `/login` and no access, refresh or id token leaves a device;
+    from milestone 5 the ChatGPT login travels by its own rule, "The shared
+    login" below.
   - Project `.kollab/`, vaults, conversations, scratchpads.
   - Machine-local settings, which a secondary also refuses from its primary:
     `kollabor.updates`, `kollabor.permissions` (approval mode), `plugins.hub`,
@@ -744,6 +749,190 @@ How it stays secure with 40 bits:
   from that side. `/connect rotate` empties the list of devices the primary
   updates, so they join again. Revoking never revokes a key at the provider.
 - A network joined before this milestone has no recipients: join once more.
+
+### The shared login (milestone 5)
+
+Decided by Marco on 2026-10-06 and hardened by an adversarial review the same
+day; not built yet. Until it ships each device runs `/login`. This subsection
+is the explicit sharing policy that `agent-device-pairing.md` requires before
+a login leaves a device.
+
+Why it needs its own rule. The ChatGPT access token is a bearer token, about
+240 hours, not tied to a machine; OpenAI's own Codex docs copy `auth.json` to a
+second machine. The refresh token is single-use: every refresh returns a new
+pair and kills the old refresh token, and refreshing with a dead one fails with
+`refresh_token_reused`. Agents on one machine share the login by reading one
+file. Devices on a network can do the same if exactly one of them refreshes
+and the rest take its result.
+
+Who gets it:
+
+- A human shares it. `s` on a join request (`home-server wants to join
+  fingerprint abcd…ef01   [a]ccept [s]hare login [r]eject`) accepts the device
+  and shares the login; `/connect share <device>` shares it with a device
+  already on the network; `a` accepts without it. Never by vouch, link or
+  knock, and never with a stranger accepted from one (Story 5). In a company
+  network (Story 6) nobody gets a colleague's login unless that colleague
+  shares it.
+- Identity is the access token's `chatgpt_account_user_id` claim: one person
+  in one ChatGPT account (a Team workspace's members share
+  `chatgpt_account_id`, not this). Never a label or a fallback; a token
+  without the claim is refused.
+- Holders: the devices holding a login for one identity, whether shared or
+  logged in on their own. A device learns who holds what from the answers to
+  the version question below. A record goes only to holders of its identity
+  and to a device being shared with. A device with sharing off, or logged out,
+  answers `none` and is not a holder.
+
+What travels, and where it lives:
+
+- The ChatGPT login in `~/.kollab/oauth/openai.json`: access token, refresh
+  token, account id, expiry. Profile-scoped logins under `~/.kollab/private/`
+  and any other provider's OAuth never travel; a new OAuth provider joins only
+  when this section names it.
+- The file is per machine, so one process per machine shares it: the network
+  connection owner of the first workspace that shares it writes `shared_by:
+  <device key>` into the file. A workspace whose file is shared by another
+  device takes no records, answers `none`, and says once `The ChatGPT login on
+  this computer is shared by another network.` Every writer keeps `shared_by`.
+- A process that reads a login marked shared never refreshes it, on demand or
+  after a 401; it re-reads the file. The sharer re-reads the file every 10
+  seconds and shares a newer login another process wrote (a `/login` in
+  another folder). A login not marked shared keeps today's 5-minute refresh.
+- Every write of the file (refresh, `/login`, `kollab --login`, logout, an
+  arriving record) holds `~/.kollab/oauth/openai.lock` and replaces the file
+  atomically (temp file and `os.replace`). A refresh holds the lock from its
+  re-read to its write and uses a newer login it finds there instead. This
+  part ships before milestone 5: two hub agents on one machine can spend the
+  same refresh token today.
+- How: one login record, signed by the sending device and sealed to the
+  receiving device's key, over the network's secure conversation path (a new
+  method on it); the directory carries ciphertext. Three messages: the version
+  question (saying whether the asker is about to refresh), its answer
+  (identity and version, or `none`), and the record (identity, version,
+  tokens, maker). A record is under 8 KiB. No pane, log, event, tool result,
+  model request, history, attach or daemon reply, or `/config` row shows a
+  token; screens say `chatgpt login` and a device name.
+- When: on a share; after every refresh or `/login`, to every holder the
+  device can reach; and on every reconnect, when holders compare versions and
+  the older side takes the newer record. A failed send retries like the sealed
+  config: 10 seconds, doubling to 5 minutes. A login that lands takes the path
+  of a bundle that changed profiles: the ChatGPT profile registers and the
+  synced loadout is applied again. Every process re-reads the file when its
+  mtime changes.
+
+Which record wins:
+
+- Within one identity the version is the access token's `iat`; a tie goes to
+  the larger SHA-256 of the access token. Time left is read from the token's
+  `exp`, never from the file's `expires_at`, which the refreshing device's
+  clock wrote. Device clocks must agree within 10 minutes.
+- A record is refused when its access token is not a well-formed JWT, lacks
+  the identity claim, has an `iat` more than 10 minutes ahead, an `exp` not
+  after its `iat`, or more than 30 days between them. An older or replayed
+  record is ignored.
+- A device keeps the login a record replaced until the new access token has
+  served one request. If OpenAI rejects the new one, the device goes back and
+  ignores that version.
+- A device takes a record for another identity only from its own primary, and
+  only when its current login came from the network; that record wins
+  whatever its version. So `/login` with another account on a primary moves
+  its secondaries, and no other member can point a device at an account of
+  its own.
+- A device whose own `/login` is for another identity keeps it, shares nothing,
+  and says once: `This computer is logged in to a different ChatGPT account. It
+  keeps its own login and does not share the network's.`
+
+Who refreshes:
+
+- The refresher is the device that made the newest record, by its last
+  refresh or its `/login`; `/login` on any holder makes that device the
+  refresher. The window W is a tenth of the token's lifetime, from its `iat`
+  and `exp` (24 hours today). Nothing refreshes a shared login with more than
+  W left, and nothing refreshes it on demand.
+- With less than W left, the refresher refreshes while its directory or mesh
+  link is up. First it asks every holder it can reach and waits up to 10
+  seconds. An answer with a newer version makes it wait up to 60 seconds for
+  that record instead; after that the answer stops nothing. With no answer at
+  all it refreshes only if every other holder is off the roster; a holder on
+  the roster that does not answer blocks it, and it asks again every 10
+  minutes.
+- Fallback for a refresher that is gone: with less than W/2 left, the
+  refresher off the roster (or answering `none`) since W began, and this
+  device online that whole time, the online holder with the smallest device
+  key takes the same steps and becomes the refresher.
+- A device whose link was down at any time after W began refreshes only after
+  a holder answered. This stops a returning refresher from spending a token
+  the fallback already spent.
+- A device about to refresh that learns, from a question or an answer, that a
+  device with a smaller key is about to refresh holds off for 60 seconds.
+- Refused means HTTP 400 or 401 whose `error` field (read alone, never
+  logged) is `refresh_token_reused`, `invalid_grant` or
+  `refresh_token_expired`: another device already refreshed or the login was
+  ended, so the device asks every holder for a newer record. Anything else is
+  no answer: it retries with the same refresh token after 60 seconds, then
+  every 10 minutes while the access token works.
+- A device whose own access token OpenAI rejects, with no newer record from
+  any holder, shows `ChatGPT login was signed out. Run /login on any device;
+  the others pick it up.` A device whose access token expired with no holder
+  answering shows `ChatGPT login expired and no device on <network> answered.
+  Run /login here, or bring another device online.` Its agents wait for a
+  record or a `/login`.
+
+Off, logout, leave, revoke:
+
+- `plugins.hub.login_sync_enabled` (default `true`; machine-local like the rest
+  of `plugins.hub`) turns sharing off on one machine: it neither sends nor
+  takes the login, and its own `/login` stays its own. Only `/config` changes
+  it.
+- `/login logout` removes the login on this computer and writes
+  `~/.kollab/oauth/openai.off`, so no record refills it; `/login` here removes
+  only that marker. It says: `Logged out on this computer. The other devices
+  keep the ChatGPT login; to end it everywhere, log out of all devices at
+  chatgpt.com.`
+- `/connect leave` by a holder drops its copy unless it is the only holder:
+  `Left <network>. The ChatGPT login stays with the network; run /login here
+  for one of your own.`
+- `/connect revoke <device>` of a holder, and `/connect rotate`, stop sending
+  the login and end with: `<device> still holds the ChatGPT login. Run /login
+  here to move <network> to a new one. If <device> was lost or stolen, first
+  log out of all devices at chatgpt.com.` The new login starts a new token
+  chain that every holder takes; the old holder can only spend its own copy.
+  Revoking never revokes the login at OpenAI.
+
+Screens, changed when this ships:
+
+- The join request line gains `[s]hare login`. After `a`, the accept line
+  (Story 1 and the accept bullet above) is `sealed config queued: settings,
+  agents, skills, mcp, api keys`; after `s` it adds `chatgpt login shared with
+  <device>`.
+- Story 1's line under the joined line: `Settings arrive sealed from <primary
+  name>.`, then `The ChatGPT login arrived from <primary name>.` or `Run /login
+  here, or /connect share <this device> on <primary name>.` (or the
+  different-account line).
+- The Connect screen's `login` row, in the terminal and in web Settings >
+  Connect (`kollabor/panels/connect.py`): `chatgpt (shared)`, `chatgpt, this
+  computer only`, or `none`.
+- `/login status`: `chatgpt: shared, refreshed by <device>` in place of
+  "expired (will auto-refresh on next use)".
+- Story 8's last sentence, Story 9's revocation line, and the comments in
+  `enrollment_client.py` (`_profile_credential_category`) and `relay_agent.py`
+  (synced loadout activation) that say OAuth never travels.
+
+Known limits, so nobody claims more:
+
+- Two holders that cannot reach each other but both reach OpenAI can both
+  refresh. One is then signed out, and every holder is if OpenAI ends the
+  whole login on reuse, which milestone 5 measures. Recovery is one `/login`
+  on any holder.
+- A refresh OpenAI processed but whose answer was lost (lid closed, Wi-Fi
+  gone) spends the token with nobody holding the new pair: the holders are
+  signed out until a `/login`.
+- Every holder has a refresh token. A stolen holder is a working login until
+  "log out of all devices" at chatgpt.com, and any holder can sign every
+  holder out. Share only with devices you would hand your laptop to.
+- W follows the token's own lifetime, so a change at OpenAI moves the window
+  with it; a refusal ends in the signed-out line.
 
 ## 10. The mesh (#99)
 
@@ -842,6 +1031,33 @@ prints both. Operator detail is in
    static server: two devices join a network on that domain and exchange a
    message, a restart of the command keeps the published key and both devices
    come back, and nothing touches kollabor.ai (`tests/live/m4`).
+5. **Shared login.** Section 9, "The shared login". Proven on the Mac and
+   server from installed packages (`tests/live/m5`), with the m3 relay-less
+   device on the server as a third holder and the test-only
+   `KOLLAB_LOGIN_LIFETIME_SECONDS` (a token counts as expiring at its `iat`
+   plus this; W is a tenth of it):
+   - `s` at accept and `/connect share`: the server, with no login of its own,
+     runs a ChatGPT turn within 60 seconds, holding the same login digest at
+     mode 0600; `a` alone shares nothing.
+   - Exactly one refresh request per window across all three logs, and every
+     holder on the new version within 60 seconds.
+   - Mac stopped: the fallback refreshes once, and the returning Mac takes its
+     record without refreshing.
+   - Directory stopped through W/2: no refresh while it is down, exactly one
+     after it returns.
+   - The Mac comes back with an expired login while the others are
+     unreachable: no refresh, and the one line.
+   - Revoke an offline holder, then `/login` on the Mac: no sign-out over the
+     next two windows.
+   - Logout survives the next record, leave drops the copy, a device logged in
+     as another identity keeps its login and shares nothing, and a record
+     whose claim names another identity is refused.
+   - Two processes forced to refresh at once on one machine make one refresh
+     request.
+   - No pane, log, event, tool result, model request, history, or attach or
+     daemon reply on any host shows a token.
+   - Once, on a separate `/login` chain, reuse a spent refresh token and record
+     whether the newer pair still refreshes. The answer goes into Known limits.
 
 "Proven" means the live run, not unit tests. Every milestone updates this
 document before it merges.
@@ -874,6 +1090,8 @@ document before it merges.
 - **knock**: a sealed introduction from outside the network.
 - **link**: the directory's record that two device keys in different rooms each signed a consent to reach the other; how an accepted stranger's messages cross rooms.
 - **primary**: the device whose config the network follows.
+- **shared login**: the ChatGPT login a human shared with chosen devices; the device that made the newest record refreshes it (section 9).
+- **holder**: a device holding the shared login for one identity.
 
 ## 15. Open, ask Marco
 
