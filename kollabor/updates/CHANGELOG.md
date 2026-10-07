@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `kollab --web-ui` no longer reuses an engine of another version that is still running on port 7433 (a 0.12 web UI was served by a 0.10 engine left over from an older install). It leaves that engine running for whoever uses it and starts its own on the next free port.
+
 ## [0.12.0] - 2026-10-07
 
 ### Changed

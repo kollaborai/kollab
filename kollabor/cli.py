@@ -1884,6 +1884,25 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             pass
 
 
+def _pick_engine_port(
+    version: str, engine_version, port: int = 7433, tries: int = 10
+) -> tuple[int, bool]:
+    """Return (port, reuse): the first port with this version's engine, or none.
+
+    ``engine_version(port)`` is None when no engine answers there. An engine of
+    another version is left running, since other clients may use it, and
+    skipped: reusing it silently served a 0.10 engine to a 0.12 web UI.
+    """
+    for candidate in range(port, port + tries):
+        running = engine_version(candidate)
+        if running is None:
+            return candidate, False
+        if running == version:
+            return candidate, True
+        print(f"  (engine on {candidate} is {running}, not {version}; leaving it running)")
+    raise RuntimeError(f"no free engine port in {port}-{port + tries - 1}")
+
+
 async def _handle_cli_web_ui() -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
@@ -1891,28 +1910,44 @@ async def _handle_cli_web_ui() -> None:
     (`kollabor_engine`, `kollabor_webui`); this just wires them together the
     way the two READMEs describe running them by hand.
     """
+    import json
     import subprocess
     import time
     import urllib.error
     import urllib.request
 
-    engine_port = 7433
     webui_port = int(os.environ.get("KOLLAB_WEBUI_PORT", "8080"))
+
+    def engine_version(port: int) -> Optional[str]:
+        base = f"http://127.0.0.1:{port}"
+        try:
+            with urllib.request.urlopen(f"{base}/health", timeout=1) as resp:
+                if resp.status != 200:
+                    return None
+        except (urllib.error.URLError, OSError):
+            return None
+        try:
+            with urllib.request.urlopen(f"{base}/version", timeout=1) as resp:
+                return str(json.loads(resp.read()).get("version") or "unknown")
+        except (urllib.error.URLError, OSError, ValueError):
+            return "unknown"
+
+    try:
+        engine_port, reuse = _pick_engine_port(__version__, engine_version)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     engine_url = f"http://127.0.0.1:{engine_port}"
 
     def engine_healthy() -> bool:
-        try:
-            with urllib.request.urlopen(f"{engine_url}/health", timeout=1) as resp:
-                return resp.status == 200
-        except (urllib.error.URLError, OSError):
-            return False
+        return engine_version(engine_port) is not None
 
     print("\n  starting kollab web ui...")
     print(f"  engine: {engine_url}")
     print(f"  ui:     http://127.0.0.1:{webui_port}\n")
 
     engine_proc = None
-    if engine_healthy():
+    if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
         engine_proc = subprocess.Popen(
