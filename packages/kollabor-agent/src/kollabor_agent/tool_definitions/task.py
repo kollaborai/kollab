@@ -39,7 +39,10 @@ task_checkpoint = ToolDefinition(
 # --- task-complete ---
 task_complete = ToolDefinition(
     name="task-complete",
-    description="Mark a task as done.",
+    description=(
+        "Mark a task on your task ledger done: one you claimed or were assigned, "
+        "by its id from your work queue."
+    ),
     category="task",
     risk_level="low",
     requires_permission=False,
@@ -51,7 +54,7 @@ task_complete = ToolDefinition(
         ToolParameter(
             name="task_id",
             type="string",
-            description="Task identifier",
+            description="The ledger task id (8 characters, as your work queue lists it)",
             required=True,
         ),
         ToolParameter(
@@ -62,11 +65,12 @@ task_complete = ToolDefinition(
         ),
     ],
     examples=[
-        '<task_complete id="phase-b">phase B migration shipped — 28 tools registered</task_complete>',
+        '<task_complete id="3f9a1c2e">phase B migration shipped — 28 tools registered</task_complete>',
     ],
     result_format="Task marked as complete.",
     key_rules=[
         "task tags are for reporting, not for creating new tasks",
+        "work that has no ledger task needs no task_complete: say it is done instead",
         "after task_complete, stop naturally when no more tool calls are needed",
     ],
 )

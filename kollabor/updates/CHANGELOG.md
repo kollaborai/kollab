@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README and `docs/architecture/agent-network.md` show the agent network: who connects to whom, the join step by step, the tunnel's layers, how `/connect` uses a domain's DNS record, staying online and running your own directory. `scripts/build_network_diagrams.py` draws them.
 
 ### Fixed
+- Agents no longer call `task_complete` with a task id they made up. Its description and example now ask for the ledger id from the work queue (the example used a slug, `phase-b`), and calling it for an unknown task says so: "no open task <id> on your ledger".
 - A native tool call whose first argument holds the rest of the documented XML tag (GLM 5.3 sends `{"name": "coder\" task=\"..."}`) no longer fails with "task required". kollab splits out the parameters the tool declares, so `hub_spawn`, `hub_cron_add` and the other tag tools run on the first try.
 - `kollab --hub stop` run from another shell no longer reports an agent that stopped as "pid survived SIGKILL". The agent had exited, but its window had not reaped it yet, and the check counted that as still running.
 - A joined computer no longer lists an MCP server the other computer switched off as "Skipped MCP servers not installed here". It is still skipped when its command is missing, but nothing was missed.

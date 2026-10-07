@@ -3670,7 +3670,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="task_complete",
                 success=False,
-                error=f"task {task_id} not found or not in claimable state",
+                error=f"no open task {task_id} on your ledger; task_complete takes an id from your work queue",
             )
 
         return ToolExecutionResult(
