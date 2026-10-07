@@ -574,6 +574,10 @@ class ToolExecutor:
                     metadata={"permission_denied": True},
                 )
 
+            # Time the tool itself: the pre hook can sit on a permission
+            # prompt until the user answers, which is not the tool's run time.
+            start_time = time.time()
+
             # Execute based on tool type
             execution_phase_started = False
 

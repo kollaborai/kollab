@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kollabor_agent.shell_executor import ShellResult
 from kollabor_agent.tool_executor import ToolExecutor
+from kollabor_events.models import EventType
 
 
 # Mock result classes for testing
@@ -130,6 +131,27 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         mock_terminal.assert_awaited_once_with(
             {"type": "terminal", "id": "git_0", "command": "git status --short"}
         )
+
+    async def test_permission_wait_is_not_tool_run_time(self):
+        """The pre hook can sit on a permission prompt; that wait is not timed."""
+        tool_data = {"type": "terminal", "id": "terminal_0", "command": "ls"}
+
+        async def hooks(event_type, *args, **kwargs):
+            if event_type == EventType.TOOL_CALL_PRE:
+                await asyncio.sleep(0.3)  # the user reading the prompt
+
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=hooks)
+        with patch.object(
+            self.executor,
+            "_execute_terminal_command",
+            new=AsyncMock(
+                return_value=MockToolResult("terminal", "terminal_0", True, "ok")
+            ),
+        ):
+            result = await self.executor._execute_tool_inner(tool_data)
+
+        self.assertTrue(result.success)
+        self.assertLess(result.execution_time, 0.2)
 
     async def test_execute_terminal_command_failure(self):
         """Test failed terminal command execution."""
