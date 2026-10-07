@@ -28,13 +28,15 @@ export const useVoiceMode = () => useContext(VoiceModeContext);
 /**
  * The composer mic is a /voicemode toggle. The command goes out as a normal
  * chat turn, the same path a typed slash command takes, and the daemon runs it
- * (LocalStateService._run_web_slash_command). Success is read from the saved
- * reply's `command_success` in history. That flag means the plugin accepted the
- * request: start_voice() answers "Voice Starting" and finishes setup in the
- * background, and no engine route exposes VoicePlugin.status(), so the web
- * cannot see later transitions (a service that fails after starting). Toggling
- * again is self-correcting: "on" while already on answers success, as does "off"
- * while already off.
+ * (LocalStateService._run_web_slash_command).
+ *
+ * The mic's state is the daemon's own: `voice_requested` from
+ * VoicePlugin.status(), carried in the session state's system snapshot. It is
+ * read on mount (so a reload, or voice mode started from the terminal, shows
+ * the real state) and again once each toggle's run ends. The reply's
+ * `command_success` in history is the fallback for a daemon that predates the
+ * field. ponytail: no polling, so a voice service that fails later shows at
+ * the next mount or toggle; poll the state route if that matters.
  */
 export function VoiceModeProvider({
   api,
@@ -50,6 +52,27 @@ export function VoiceModeProvider({
   const [on, setOn] = useState(false);
   const [pending, setPending] = useState<"on" | "off" | null>(null);
   const sawRun = useRef(false);
+
+  /** The daemon's voice_requested, or undefined when it cannot say. */
+  const readRequested = useCallback(async () => {
+    try {
+      const requested = (await api.getSessionState(sessionId)).system
+        ?.voice_requested;
+      return typeof requested === "boolean" ? requested : undefined;
+    } catch {
+      return undefined;
+    }
+  }, [api, sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void readRequested().then((requested) => {
+      if (!cancelled && requested !== undefined) setOn(requested);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [readRequested]);
 
   const toggle = useCallback(() => {
     if (pending || isRunning) return;
@@ -86,14 +109,16 @@ export function VoiceModeProvider({
       } catch {
         // Unreadable history counts as unconfirmed: the mic stays where it was.
       }
+      const requested = await readRequested();
       if (cancelled) return;
-      if (ok) setOn(pending === "on");
+      if (requested !== undefined) setOn(requested);
+      else if (ok) setOn(pending === "on");
       setPending(null);
     })();
     return () => {
       cancelled = true;
     };
-  }, [api, isRunning, pending, sessionId]);
+  }, [api, isRunning, pending, readRequested, sessionId]);
 
   // A command whose run never started must not leave the mic stuck.
   useEffect(() => {

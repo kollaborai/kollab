@@ -926,6 +926,16 @@ class LocalStateService(StateService):
                 except Exception as e:
                     logger.debug(f"plugin_registry count error: {e}")
 
+        voice_requested = voice_running = False
+        if self._event_bus is not None:
+            try:
+                voice_plugin = self._event_bus.get_service("voice_plugin")
+                voice = voice_plugin.status() if voice_plugin is not None else {}
+                voice_requested = bool(voice.get("requested"))
+                voice_running = bool(voice.get("running"))
+            except Exception as e:
+                logger.debug(f"voice status error: {e}")
+
         return SystemInfoSnapshot(
             cwd=cwd,
             git_branch=git_branch,
@@ -939,6 +949,8 @@ class LocalStateService(StateService):
             enabled_commands=enabled_commands,
             command_categories=command_categories,
             plugin_count=plugin_count,
+            voice_requested=voice_requested,
+            voice_running=voice_running,
         )
 
     # === Command catalog ===
