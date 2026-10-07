@@ -77,3 +77,24 @@ def test_normal_timeout_does_not_warn(caplog):
     with caplog.at_level("WARNING"):
         _profile(timeout=120).get_timeout()
     assert not [r for r in caplog.records if "SECONDS" in r.message]
+
+
+def test_update_profile_applies_every_field_the_engine_route_forwards():
+    """PUT /profiles/{name} forwards these; a missing kwarg was a 500 on every Save."""
+    mgr = ProfileManager.__new__(ProfileManager)  # skip config I/O
+    mgr._profiles = {"test": _profile()}
+    mgr._active_profile_name = "other"
+
+    assert mgr.update_profile(
+        "test",
+        streaming=False,
+        supports_tools=False,
+        timeout=30,
+        top_p=0.5,
+        extra_headers={"x-probe": "1"},
+    )
+
+    updated = mgr._profiles["test"]
+    assert (updated.streaming, updated.supports_tools) == (False, False)
+    assert (updated.timeout, updated.top_p) == (30, 0.5)
+    assert updated.extra_headers == {"x-probe": "1"}

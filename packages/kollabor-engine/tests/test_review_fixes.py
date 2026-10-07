@@ -79,6 +79,10 @@ async def test_profile_routes_redact_api_key(profile_app):
     assert list_response.status_code == 200
     listed = list_response.json()["profiles"][0]
     assert "api_key" not in listed
+    # the profile editor offers whatever the engine can run, not a fixed trio
+    assert {"azure_openai", "gemini", "openai_responses", "openrouter"} <= set(
+        list_response.json()["providers"]
+    )
 
     assert get_response.status_code == 200
     profile = get_response.json()

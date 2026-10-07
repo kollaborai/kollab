@@ -1862,6 +1862,10 @@ class ProfileManager:
         description: Optional[str] = None,
         effort: Optional[str] = None,
         save_to_config: bool = False,
+        timeout: Optional[int] = None,
+        top_p: Optional[float] = None,
+        streaming: Optional[bool] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> bool:
         """
         Update an existing profile.
@@ -1879,6 +1883,10 @@ class ProfileManager:
             description: Profile description
             effort: Reasoning effort level ("" clears it)
             save_to_config: Whether to persist changes to config file
+            timeout: Request timeout in seconds (0 = provider default)
+            top_p: Nucleus sampling
+            streaming: Enable streaming responses
+            extra_headers: Additional HTTP headers
 
         Returns:
             True if updated successfully, False otherwise
@@ -1916,6 +1924,14 @@ class ProfileManager:
             profile.description = description
         if effort is not None:
             profile.effort = effort
+        if timeout is not None:
+            profile.timeout = timeout
+        if top_p is not None:
+            profile.top_p = top_p
+        if streaming is not None:
+            profile.streaming = streaming
+        if extra_headers is not None:
+            profile.extra_headers = extra_headers
 
         # Handle rename
         if new_name and new_name != original_name:
