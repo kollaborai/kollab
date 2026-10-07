@@ -267,6 +267,8 @@ export default function App() {
     selectedProfile ||
     "default";
   const [activeId, setActiveId] = useState<string | null>(null);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
   const [error, setError] = useState<string | null>(null);
@@ -395,10 +397,20 @@ export default function App() {
     const poll = async () => {
       while (!controller.signal.aborted) {
         try {
+          const watched = activeIdRef.current;
           const next = await loadSessions();
           if (!controller.signal.aborted) {
             setSessions(next);
-            setInitialState((state) => state ? { ...state, sessions: next } : state);
+            // Deleted elsewhere (another tab, the CLI, a dead daemon): close it
+            // instead of retrying its streams every second. Only when the open
+            // session did not change mid-request, so a new one is never closed.
+            if (watched && watched === activeIdRef.current && !next.some((item) => item.session_id === watched)) {
+              abortRecovery();
+              setActiveId(null);
+              setInitialState(null);
+            } else {
+              setInitialState((state) => state ? { ...state, sessions: next } : state);
+            }
           }
           // Live hub state for the sidebar gems; skip the update when nothing
           // moved so the chat does not re-render every poll.
@@ -417,7 +429,7 @@ export default function App() {
       controller.abort();
       if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
     };
-  }, [loadSessions]);
+  }, [abortRecovery, loadSessions]);
 
   useEffect(() => {
     let mounted = true;
