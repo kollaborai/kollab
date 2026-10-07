@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect  # type: ignore[import-not-found]
 
+from ..auth import validate_token
 from ..hub_bridge import HubBridge
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,8 @@ async def _broadcast(event: Dict[str, Any]) -> None:
     payload = json.dumps(event, default=str)
     dead: List[WebSocket] = []
 
-    for ws in _connections:
+    # Copy: a client connecting mid-broadcast must not resize the set we iterate.
+    for ws in list(_connections):
         try:
             await ws.send_text(payload)
         except Exception:
@@ -48,16 +50,60 @@ async def _broadcast(event: Dict[str, Any]) -> None:
 
 
 def _snapshot_agents(agents: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Build agent_id -> {identity, state} snapshot for diffing."""
+    """Build agent_id -> {identity, state, current_task} snapshot for diffing."""
     return {
         a.get("agent_id", ""): {
             "agent_id": a.get("agent_id", ""),
             "identity": a.get("identity", ""),
             "state": a.get("state", ""),
+            "current_task": a.get("current_task") or "",
             "capabilities": a.get("capabilities", []),
         }
         for a in agents
     }
+
+
+def _diff_snapshots(
+    old: Dict[str, Dict[str, Any]],
+    current: Dict[str, Dict[str, Any]],
+    now: float,
+) -> List[Dict[str, Any]]:
+    """Return the events that turn ``old`` into ``current``.
+
+    Order: joins, leaves, then state/task changes. ``agent_state_changed``
+    fires when either the state or the current task moved; ``new_state`` and
+    ``state`` carry the same value (``state`` is the field clients read).
+    """
+    events: List[Dict[str, Any]] = []
+
+    for aid, info in current.items():
+        if aid not in old:
+            events.append({"type": "agent_joined", "agent": info, "ts": now})
+
+    for aid, info in old.items():
+        if aid not in current:
+            events.append({"type": "agent_left", "agent": info, "ts": now})
+
+    for aid, info in current.items():
+        prev = old.get(aid)
+        if prev and (
+            prev.get("state") != info.get("state")
+            or prev.get("current_task") != info.get("current_task")
+        ):
+            events.append(
+                {
+                    "type": "agent_state_changed",
+                    "agent_id": aid,
+                    "identity": info.get("identity"),
+                    "state": info.get("state"),
+                    "old_state": prev.get("state"),
+                    "new_state": info.get("state"),
+                    "current_task": info.get("current_task"),
+                    "ts": now,
+                }
+            )
+
+    return events
 
 
 async def _watcher_loop() -> None:
@@ -70,43 +116,9 @@ async def _watcher_loop() -> None:
 
             agents = _bridge.get_agents(use_cache=False)
             current = _snapshot_agents(agents)
-            now = time.time()
 
-            # Detect joins
-            for aid, info in current.items():
-                if aid not in _last_snapshot:
-                    await _broadcast(
-                        {
-                            "type": "agent_joined",
-                            "agent": info,
-                            "ts": now,
-                        }
-                    )
-
-            # Detect leaves
-            for aid, info in _last_snapshot.items():
-                if aid not in current:
-                    await _broadcast(
-                        {
-                            "type": "agent_left",
-                            "agent": info,
-                            "ts": now,
-                        }
-                    )
-
-            # Detect state changes
-            for aid, info in current.items():
-                old = _last_snapshot.get(aid)
-                if old and old.get("state") != info.get("state"):
-                    await _broadcast(
-                        {
-                            "type": "agent_state_changed",
-                            "agent_id": aid,
-                            "old_state": old.get("state"),
-                            "new_state": info.get("state"),
-                            "ts": now,
-                        }
-                    )
+            for event in _diff_snapshots(_last_snapshot, current, time.time()):
+                await _broadcast(event)
 
             _last_snapshot = current
 
@@ -117,25 +129,50 @@ async def _watcher_loop() -> None:
             await asyncio.sleep(POLL_INTERVAL)
 
 
+def _token_ok(ws: WebSocket) -> bool:
+    """Check ``?token=``: browsers cannot set headers on a WebSocket.
+
+    server.py's HTTP auth middleware never runs for websocket scope, so this is
+    the only gate. ``validate_token`` carries the same pytest-only bypass.
+    """
+    try:
+        return validate_token(ws.query_params.get("token", ""))
+    except TypeError:  # secrets.compare_digest rejects non-ASCII str
+        return False
+
+
 @router.websocket("/ws/hub/feed")
 async def hub_feed_ws(ws: WebSocket) -> None:
     """WebSocket endpoint for real-time hub event stream.
 
+    Requires ``?token=<engine token>``; anything else is closed with 1008.
     Sends initial snapshot on connect, then streams:
       agent_joined, agent_left, agent_state_changed
+    agent_state_changed fires on a state or current_task change and carries
+    identity, state (new), old_state, new_state and current_task.
     """
+    global _watcher_task, _last_snapshot
+
     await ws.accept()
+    if not _token_ok(ws):
+        # Accepted first so the browser sees code 1008; a refused handshake
+        # surfaces as a bare 1006. Nothing is sent or registered before this.
+        await ws.close(code=1008)
+        return
     _connections.add(ws)
     logger.info(f"WebSocket client connected (total: {len(_connections)})")
 
-    # Start watcher if not running
-    global _watcher_task
-    if _watcher_task is None or _watcher_task.done():
-        _watcher_task = asyncio.ensure_future(_watcher_loop())
-
     try:
-        # Send initial snapshot
         agents = _bridge.get_agents(use_cache=False)
+
+        # Start watcher if not running. Its baseline is what this client is
+        # about to be told; an empty or stale one would replay every live
+        # agent as a join on the first poll.
+        if _watcher_task is None or _watcher_task.done():
+            _last_snapshot = _snapshot_agents(agents)
+            _watcher_task = asyncio.ensure_future(_watcher_loop())
+
+        # Send initial snapshot
         await ws.send_text(
             json.dumps(
                 {

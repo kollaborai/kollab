@@ -48,19 +48,16 @@ async def list_agent_pool(
                 "role_aliases": list(getattr(identity, "role_aliases", []) or []),
                 "personality": str(getattr(identity, "personality", "") or ""),
                 "caste": str(getattr(identity, "caste", "") or ""),
+                "color": list(getattr(identity, "color_rgb", None) or (128, 128, 128)),
                 "available": current is None,
                 "active": current is not None,
                 "state": current.get("state") if current else "available",
                 "current_task": current.get("current_task", "") if current else "",
+                # The live hub agent, for /hub/agents/{agent_id}/output.
+                "agent_id": current.get("agent_id", "") if current else "",
             }
         )
 
-    return {
-        "agents": agents,
-        "available": [agent["name"] for agent in agents if agent["available"]],
-        "active": [agent["name"] for agent in agents if agent["active"]],
-        "count": len(agents),
-    }
     return {
         "agents": agents,
         "available": [agent["name"] for agent in agents if agent["available"]],
@@ -102,6 +99,3 @@ async def list_agent_bundles() -> Dict[str, Any]:
 
     bundles.sort(key=lambda bundle: bundle["name"])
     return {"bundles": bundles, "count": len(bundles)}
-
-
-
