@@ -11,6 +11,7 @@ import {
 } from "@/components/assistant-ui/composer-palette";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { MessageTimingBadge } from "@/components/assistant-ui/message-timing";
 import {
   Reasoning,
   ReasoningContent,
@@ -27,6 +28,7 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useVoiceMode, type VoiceMode } from "@/voice-mode";
 import type { AgentPoolEntry, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
@@ -147,7 +149,7 @@ const ThreadRoot: FC<{
         ["--thread-max-width" as string]: "44rem",
         ["--composer-bg" as string]:
           "color-mix(in oklab, var(--color-muted) 30%, var(--color-background))",
-        ["--composer-radius" as string]: "1.5rem",
+        ["--composer-radius" as string]: "1.75rem",
         ["--composer-padding" as string]: "8px",
       }}
     >
@@ -156,14 +158,14 @@ const ThreadRoot: FC<{
         data-slot="aui_thread-viewport"
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
-        <div
-          className={cn(
-            "mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4",
-            isEmpty && "justify-center",
-          )}
-        >
+        <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
+          {/* Auto margins on the welcome and the footer center them together
+              while the thread is empty, and unlike justify-center they never
+              push the top out of reach when a tall hero overflows. */}
           <AuiIf condition={isNewChatView}>
-            <Welcome />
+            <div className="mt-auto">
+              <Welcome />
+            </div>
           </AuiIf>
 
           <div
@@ -178,8 +180,9 @@ const ThreadRoot: FC<{
           <ThreadPrimitive.ViewportFooter
             className={cn(
               "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
-              !isEmpty &&
-                "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
+              isEmpty
+                ? "mb-auto"
+                : "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
             <ThreadScrollToBottom />
@@ -214,7 +217,7 @@ const ThreadScrollToBottom: FC = () => {
   return (
     <ThreadPrimitive.ScrollToBottom asChild>
       <TooltipIconButton
-        tooltip="Scroll to bottom"
+        tooltip="Scroll to Bottom"
         variant="outline"
         className="aui-thread-scroll-to-bottom dark:border-border dark:bg-background dark:hover:bg-accent absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible"
       >
@@ -266,6 +269,14 @@ const Composer: FC<{
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
 }> = ({ agents, commands, onOpenPanel }) => {
   const aui = useAui();
+  const voice = useVoiceMode();
+  // The mic only exists where the session's live command list has /voicemode.
+  const voiceAvailable = commands.some(
+    (command) => command.name === "voicemode" && command.enabled !== false,
+  );
+  const slotMode = useAuiState((s) =>
+    composerSlotMode(s, voiceAvailable ? voice : null),
+  );
 
   // A bare /config, /llm, /model, /setup or /connect (also /connect code and
   // /connect knocks) opens its Settings tab and posts no text. Any other line is
@@ -489,7 +500,8 @@ const Composer: FC<{
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root
-        className="aui-composer-root relative flex w-full flex-col"
+        className="aui-composer-root group/composer relative flex w-full flex-col"
+        data-mode={slotMode}
         onSubmit={openPanelFromComposer}
       >
         <ComposerPalette
@@ -513,16 +525,22 @@ const Composer: FC<{
             className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
             <ComposerAttachments />
-            <ComposerPrimitive.Input
-              placeholder="Send a message..."
-              className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
-              rows={1}
-              autoFocus
-              enterKeyHint="send"
-              aria-label="Message input"
-              onKeyDown={handleComposerKeyDown}
-            />
-            <ComposerAction onBeforeSend={openPanelFromComposer} />
+            <div className="aui-composer-row flex items-end gap-1.5">
+              <ComposerAddAttachment />
+              <ComposerPrimitive.Input
+                placeholder="Send a message..."
+                className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none"
+                rows={1}
+                autoFocus
+                enterKeyHint="send"
+                aria-label="Message input"
+                onKeyDown={handleComposerKeyDown}
+              />
+              <ComposerSlot
+                voice={voiceAvailable ? voice : null}
+                onBeforeSend={openPanelFromComposer}
+              />
+            </div>
           </div>
         </ComposerPrimitive.AttachmentDropzone>
       </ComposerPrimitive.Root>
@@ -547,74 +565,95 @@ function prettyCommandName(name: string): string {
     .join(" ");
 }
 
-const ComposerAction: FC<{
+type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
+
+// One trailing button slot that morphs: stop while a run is going, send once
+// there is something to send, otherwise the /voicemode toggle (a mic, or the
+// pulsing listening button while voice is on) where the session offers it.
+const composerSlotMode = (
+  s: AssistantState,
+  voice: VoiceMode | null,
+): ComposerSlotMode => {
+  // A /voicemode command is itself a chat run; hold the mic still through it
+  // rather than flashing stop.
+  if (voice?.pending) return voice.on ? "listening" : "mic";
+  if (s.thread.isRunning) return "stop";
+  if (!s.composer.isEmpty || !voice) return "send";
+  return voice.on ? "listening" : "mic";
+};
+
+// The slot's buttons stack in one box. Each is hidden (scaled down, faded,
+// visibility off so it leaves the tab order) until the composer root's
+// data-mode names it; visibility flips at the end of the fade-out.
+const SLOT_BUTTON =
+  "absolute inset-0 size-9 rounded-full p-1 scale-50 opacity-0 invisible transition-all duration-200 ease-out motion-reduce:transition-none";
+const SLOT_SHOWS_MIC =
+  "group-data-[mode=mic]/composer:scale-100 group-data-[mode=mic]/composer:opacity-100 group-data-[mode=mic]/composer:visible";
+const SLOT_SHOWS_SEND =
+  "group-data-[mode=send]/composer:scale-100 group-data-[mode=send]/composer:opacity-100 group-data-[mode=send]/composer:visible";
+const SLOT_SHOWS_LISTENING =
+  "group-data-[mode=listening]/composer:scale-100 group-data-[mode=listening]/composer:opacity-100 group-data-[mode=listening]/composer:visible";
+const SLOT_SHOWS_STOP =
+  "group-data-[mode=stop]/composer:scale-100 group-data-[mode=stop]/composer:opacity-100 group-data-[mode=stop]/composer:visible";
+
+const ComposerSlot: FC<{
+  voice: VoiceMode | null;
   onBeforeSend: (event: { preventDefault: () => void }) => void;
-}> = ({ onBeforeSend }) => {
+}> = ({ voice, onBeforeSend }) => {
   return (
-    <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      <ComposerAddAttachment />
-      <div className="flex items-center gap-1.5">
-        <AuiIf condition={(s) => s.thread.capabilities.dictation}>
-          <AuiIf condition={(s) => s.composer.dictation == null}>
-            <ComposerPrimitive.Dictate asChild>
-              <TooltipIconButton
-                tooltip="Voice input"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-dictate size-7 rounded-full"
-                aria-label="Start voice input"
-              >
-                <MicIcon className="aui-composer-dictate-icon size-4" />
-              </TooltipIconButton>
-            </ComposerPrimitive.Dictate>
-          </AuiIf>
-          <AuiIf condition={(s) => s.composer.dictation != null}>
-            <ComposerPrimitive.StopDictation asChild>
-              <TooltipIconButton
-                tooltip="Stop dictation"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
-                aria-label="Stop voice input"
-              >
-                <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
-              </TooltipIconButton>
-            </ComposerPrimitive.StopDictation>
-          </AuiIf>
-        </AuiIf>
-        <AuiIf condition={(s) => !s.thread.isRunning}>
-          <ComposerPrimitive.Send asChild onClick={onBeforeSend}>
-            <TooltipIconButton
-              tooltip="Send message"
-              side="bottom"
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-send size-7 rounded-full"
-              aria-label="Send message"
-            >
-              <ArrowUpIcon className="aui-composer-send-icon size-4.5" />
-            </TooltipIconButton>
-          </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-7 rounded-full"
-              aria-label="Stop generating"
-            >
-              <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
-      </div>
+    <div className="aui-composer-slot relative size-9 shrink-0">
+      {voice && (
+        <>
+          <TooltipIconButton
+            tooltip="Start Voice"
+            side="top"
+            type="button"
+            variant="default"
+            disabled={voice.pending}
+            onClick={voice.toggle}
+            className={cn(SLOT_BUTTON, SLOT_SHOWS_MIC)}
+            aria-label="Start voice mode"
+          >
+            <MicIcon className="size-5" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="Stop Listening"
+            side="top"
+            type="button"
+            variant="destructive"
+            disabled={voice.pending}
+            onClick={voice.toggle}
+            className={cn(SLOT_BUTTON, SLOT_SHOWS_LISTENING)}
+            aria-label="Stop listening"
+          >
+            <MicIcon className="size-5 animate-pulse" />
+          </TooltipIconButton>
+        </>
+      )}
+      <ComposerPrimitive.Send asChild onClick={onBeforeSend}>
+        <TooltipIconButton
+          tooltip="Send Message"
+          side="top"
+          type="button"
+          variant="default"
+          className={cn(SLOT_BUTTON, SLOT_SHOWS_SEND)}
+          aria-label="Send message"
+        >
+          <ArrowUpIcon className="size-5" />
+        </TooltipIconButton>
+      </ComposerPrimitive.Send>
+      <ComposerPrimitive.Cancel asChild>
+        <TooltipIconButton
+          tooltip="Stop Generating"
+          side="top"
+          type="button"
+          variant="default"
+          className={cn(SLOT_BUTTON, SLOT_SHOWS_STOP)}
+          aria-label="Stop generating"
+        >
+          <SquareIcon className="size-3.5 fill-current" />
+        </TooltipIconButton>
+      </ComposerPrimitive.Cancel>
     </div>
   );
 };
@@ -744,11 +783,16 @@ const AssistantActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload asChild>
-        <TooltipIconButton tooltip="Refresh">
-          <RefreshCwIcon />
-        </TooltipIconButton>
-      </ActionBarPrimitive.Reload>
+      {/* Reload and Edit throw "Runtime does not support ..." when the runtime
+          has no handler, so they render only when the runtime reports it. */}
+      <AuiIf condition={(s) => s.thread.capabilities.reload}>
+        <ActionBarPrimitive.Reload asChild>
+          <TooltipIconButton tooltip="Reload">
+            <RefreshCwIcon />
+          </TooltipIconButton>
+        </ActionBarPrimitive.Reload>
+      </AuiIf>
+      <MessageTimingBadge />
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton
@@ -807,13 +851,25 @@ const UserActionBar: FC = () => {
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
-      className="aui-user-action-bar-root flex flex-col items-end"
+      className="aui-user-action-bar-root text-muted-foreground flex items-center gap-1"
     >
-      <ActionBarPrimitive.Edit asChild>
-        <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
-          <PencilIcon />
+      <ActionBarPrimitive.Copy asChild>
+        <TooltipIconButton tooltip="Copy" className="aui-user-action-copy">
+          <AuiIf condition={(s) => s.message.isCopied}>
+            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+          </AuiIf>
+          <AuiIf condition={(s) => !s.message.isCopied}>
+            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+          </AuiIf>
         </TooltipIconButton>
-      </ActionBarPrimitive.Edit>
+      </ActionBarPrimitive.Copy>
+      <AuiIf condition={(s) => s.thread.capabilities.edit}>
+        <ActionBarPrimitive.Edit asChild>
+          <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
+            <PencilIcon />
+          </TooltipIconButton>
+        </ActionBarPrimitive.Edit>
+      </AuiIf>
     </ActionBarPrimitive.Root>
   );
 };

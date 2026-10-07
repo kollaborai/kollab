@@ -9,7 +9,7 @@ import {
 } from "react";
 import {
   XIcon,
-  PlusIcon,
+  PaperclipIcon,
   FileText,
   Loader2Icon,
   AlertCircleIcon,
@@ -322,13 +322,13 @@ export const ComposerAddAttachment: FC = () => {
     <ComposerPrimitive.AddAttachment asChild>
       <TooltipIconButton
         tooltip="Add Attachment"
-        side="bottom"
+        side="top"
         variant="ghost"
         size="icon"
-        className="aui-composer-add-attachment hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 rounded-full p-1 text-xs font-semibold active:scale-[0.96] motion-reduce:transition-none"
+        className="aui-composer-add-attachment hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-9 shrink-0 rounded-full p-1 text-xs font-semibold active:scale-[0.96] motion-reduce:transition-none"
         aria-label="Add Attachment"
       >
-        <PlusIcon className="aui-attachment-add-icon size-4.5 stroke-[1.5px]" />
+        <PaperclipIcon className="aui-attachment-add-icon size-5 stroke-[1.5px]" />
       </TooltipIconButton>
     </ComposerPrimitive.AddAttachment>
   );
