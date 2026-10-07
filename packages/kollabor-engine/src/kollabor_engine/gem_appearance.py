@@ -1,29 +1,32 @@
-"""How the user dressed their gems in the web UI's Gem Studio.
+"""How the web UI dresses its gems: the look each agent is born with, and the
+user's picks from the Gem Studio.
 
 One JSON document at ``~/.kollab/hub/appearance.json``, so every browser
 pointed at this engine shows the same gems::
 
     {"season": "auto",
-     "seed": 0,
-     "defaults": {"face": "pill", "hat": "auto"},
+     "born": {"lapis": {"face": "kawaii", "hat": "beret"}},
      "gems": {"lapis": {"face": "disney", "hat": "crown", "color": [30, 90, 180]}}}
 
-A gem with no eyes picked (its own or the defaults') draws a pair from the
-web UI's mix by its name and ``seed``; Shuffle Eyes saves a new seed.
+``born`` is the random eyes and hat a gem gets the first time the engine sees
+it alive (``record_births``, from ``GET /agents``). It sticks: nothing rolls it
+again, and the studio's save keeps it from disk whatever the request says.
+``gems`` holds the user's picks, drawn over the born look.
 
-The web UI owns the style vocabulary (eye styles, hats and seasons in
-``gem-face.ts``), so the engine checks shape only: short slug ids, colors as
-three 0-255 ints, a bounded number of gems. The renderer skips ids it does not
-know, and malformed fields are dropped rather than stored.
+The web UI owns the style vocabulary (``gem-face.ts``), so the engine checks
+shape only: short slug ids, colors as three 0-255 ints, a bounded number of
+gems. The renderer skips ids it does not know, and malformed fields are
+dropped rather than stored.
 """
 
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from kollabor_config.config_utils import get_config_directory
 
@@ -31,8 +34,12 @@ logger = logging.getLogger(__name__)
 
 APPEARANCE_FILE = "appearance.json"
 MAX_GEMS = 256
-MAX_SEED = 2**31
 _SLUG = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+# What a gem can be born with: gem-face.ts's EYE_STYLES and HAT_STYLES without
+# the Halloween and Christmas groups (a test keeps the two in step).
+BIRTH_FACES = ("pill", "dot", "disney", "kawaii", "diamond", "heart", "triclops", "shades", "visor", "googly", "pixel")
+BIRTH_HATS = ("none", "party", "top", "beanie", "crown", "wizard", "cap", "headphones", "hardhat", "beret")
 
 
 def appearance_path() -> Path:
@@ -52,12 +59,6 @@ def _color(value: Any) -> Optional[List[int]]:
     return list(value)
 
 
-def _seed(value: Any) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < MAX_SEED:
-        return value
-    return 0
-
-
 def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -72,27 +73,30 @@ def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
     return look
 
 
+def _looks(value: Any, allow_color: bool) -> Dict[str, Dict[str, Any]]:
+    looks: Dict[str, Dict[str, Any]] = {}
+    if isinstance(value, dict):
+        for name, raw in list(value.items())[:MAX_GEMS]:
+            look = _look(raw, allow_color) if _slug(name) else {}
+            if look:
+                looks[name] = look
+    return looks
+
+
 def normalize(doc: Any) -> Dict[str, Any]:
     """Keep the well-formed fields of ``doc``; drop everything else."""
     if not isinstance(doc, dict):
         doc = {}
-    gems: Dict[str, Any] = {}
-    raw_gems = doc.get("gems")
-    if isinstance(raw_gems, dict):
-        for name, value in list(raw_gems.items())[:MAX_GEMS]:
-            look = _look(value, allow_color=True) if _slug(name) else {}
-            if look:
-                gems[name] = look
     return {
         "season": _slug(doc.get("season")) or "auto",
-        "seed": _seed(doc.get("seed")),
-        # A default color would repaint every gem one color: per gem only.
-        "defaults": _look(doc.get("defaults"), allow_color=False),
-        "gems": gems,
+        # Born looks keep a gem's own color: the gem names are colors.
+        "born": _looks(doc.get("born"), allow_color=False),
+        "gems": _looks(doc.get("gems"), allow_color=True),
     }
 
 
-def load_appearance() -> Dict[str, Any]:
+def _read() -> Optional[Dict[str, Any]]:
+    """The stored document, or None when the file exists but cannot be read."""
     path = appearance_path()
     try:
         return normalize(json.loads(path.read_text(encoding="utf-8")))
@@ -100,12 +104,10 @@ def load_appearance() -> Dict[str, Any]:
         return normalize({})
     except (OSError, ValueError) as exc:
         logger.warning("Ignoring unreadable gem appearance %s: %s", path, exc)
-        return normalize({})
+        return None
 
 
-def save_appearance(doc: Any) -> Dict[str, Any]:
-    """Write the normalized document atomically and return what was stored."""
-    clean = normalize(doc)
+def _write(clean: Dict[str, Any]) -> None:
     path = appearance_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".appearance-", suffix=".json")
@@ -117,4 +119,42 @@ def save_appearance(doc: Any) -> Dict[str, Any]:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def load_appearance() -> Dict[str, Any]:
+    return _read() or normalize({})
+
+
+def save_appearance(doc: Any) -> Dict[str, Any]:
+    """Write the studio's document atomically and return what was stored.
+
+    Born looks come from disk, never from the request, so a studio opened
+    before a gem was born cannot drop the look it was born with.
+    """
+    clean = normalize(doc)
+    clean["born"] = load_appearance()["born"]
+    _write(clean)
     return clean
+
+
+def record_births(names: Iterable[str]) -> None:
+    """Give each gem in ``names`` without a born look a random one, for good.
+
+    Called with the gems seen alive. A file that exists but cannot be read is
+    left alone for the user to recover.
+    """
+    # ponytail: no file lock. The engine does this read-modify-write without
+    # yielding, but two engines on one machine writing at once can lose a birth.
+    doc = _read()
+    if doc is None:
+        return
+    born = doc["born"]
+    newborn = [name for name in dict.fromkeys(names) if _slug(name) and name not in born]
+    newborn = newborn[: max(0, MAX_GEMS - len(born))]
+    for name in newborn:
+        born[name] = {"face": random.choice(BIRTH_FACES), "hat": random.choice(BIRTH_HATS)}
+    if newborn:
+        try:
+            _write(doc)
+        except OSError as exc:
+            logger.warning("Could not record gem births %s: %s", newborn, exc)

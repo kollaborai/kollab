@@ -36,12 +36,11 @@ if Node/npm is unavailable.
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
-- **Gem Studio** (sidebar footer): pick each gem's eyes, hat and color, the
-  defaults for every gem and the season, previewed live. Gems nobody dressed
-  draw their own eyes from a mix (Shuffle Eyes redraws it; Random Look dresses
-  one gem at random). The engine saves the
-  looks, so every browser and every gem in the app (session rows, chat, Who Is
-  Online) follows.
+- **Gem Studio** (sidebar footer): every agent is born with a random look (eyes
+  and hat) that sticks; dress any gem over it (eyes, hat, color) and set the
+  season for all, previewed live. Random Look rolls a new outfit, Reset goes
+  back to the born look. The engine keeps the looks, so every browser and every
+  gem in the app (session rows, chat, Who Is Online) follows.
 
 ## Usage
 

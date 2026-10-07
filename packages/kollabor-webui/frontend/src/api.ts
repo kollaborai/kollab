@@ -29,10 +29,9 @@ export type GemLook = { face?: string; hat?: string; color?: number[] };
 export type GemAppearance = {
   /** "auto" follows the calendar (Halloween in October, Christmas in December). */
   season?: string;
-  /** Which eyes the gems without a pick draw from the mix; Shuffle Eyes changes it. */
-  seed?: number;
-  /** Every gem's look unless it has its own pick. */
-  defaults?: Omit<GemLook, "color">;
+  /** The random eyes and hat each gem got the first time it came alive; the engine rolls them. */
+  born?: Record<string, Omit<GemLook, "color">>;
+  /** What the user dressed each gem in, over its born look. */
   gems?: Record<string, GemLook>;
 };
 

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Dices, Loader2, RotateCcw, Sparkles } from "lucide-react";
+import { Dices, Loader2, RotateCcw } from "lucide-react";
 import type { AgentPoolEntry, GemAppearance, GemLook } from "@/api";
 import { titleCase } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
@@ -15,15 +15,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { GemAvatar } from "./GemAvatar";
-import {
-  GEM_LOOK_VOCABULARY,
-  GemAppearancePreview,
-  MIXED_FACES,
-  MIXED_HATS,
-  useGemAppearance,
-} from "./gem-appearance";
+import { EVERYDAY_FACES, EVERYDAY_HATS, GemAppearancePreview, useGemAppearance } from "./gem-appearance";
 import { EYE_STYLES, HAT_STYLES, SEASONS, type Activity, type EyeStyle } from "./gem-face";
-import { defaultFace, withLook } from "./gem-look";
+import { withLook } from "./gem-look";
 
 type Rgb = [number, number, number];
 
@@ -62,9 +56,10 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 }
 
 /**
- * Dress the gems: each one's eyes, hat and color, the all-gems defaults and
- * the season, on a live stage. Edits a draft; Save writes it to the engine
- * (GET/PUT /agents/appearance) and every gem in the app follows.
+ * Dress the gems over the random look each was born with: eyes, hat and color
+ * per gem, and the season for all, on a live stage. Edits a draft; Save writes
+ * it to the engine (GET/PUT /agents/appearance) and every gem in the app
+ * follows. Born looks are the engine's: Reset goes back to one.
  */
 export function GemStudio({
   open,
@@ -88,32 +83,19 @@ export function GemStudio({
 function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onDone: () => void }) {
   const studio = useGemAppearance();
   const [draft, setDraft] = useState<GemAppearance>(() => studio?.appearance ?? {});
-  /** null edits the all-gems defaults. */
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState("");
   const [activity, setActivity] = useState<Activity>("idle");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const current = selected ? agents.find((agent) => agent.name === selected) : undefined;
-  const target: GemLook = (selected ? draft.gems?.[selected] : draft.defaults) ?? {};
-  // The defaults show on gems without their own pick, so All Gems previews those.
-  const plain = agents.filter((agent) => !draft.gems?.[agent.name]);
-  const showcase = (plain.length ? plain : agents).slice(0, 3);
-  const sample = current ?? showcase[0];
-  // The first eye tile: the gem's eyes without its own pick, or, for All Gems,
-  // the sample's draw from the mix.
-  const firstFace = sample
-    ? ((defaultFace(selected ? draft : { ...draft, defaults: {} }, sample.name, GEM_LOOK_VOCABULARY) ??
-        "pill") as EyeStyle)
-    : "pill";
-  const set = (patch: Partial<GemLook>) => setDraft((prev) => withLook(prev, selected, patch));
+  const current = agents.find((agent) => agent.name === selected) ?? agents[0];
+  const target: GemLook = (current && draft.gems?.[current.name]) || {};
+  const born = current ? draft.born?.[current.name] : undefined;
+  const bornHat = HAT_STYLES.find((hat) => hat.id === born?.hat)?.label;
+  const set = (patch: Partial<GemLook>) => {
+    if (current) setDraft((prev) => withLook(prev, current.name, patch));
+  };
   const pick = (pool: readonly string[]) => pool[Math.floor(Math.random() * pool.length)];
-  // A gem gets random eyes and hat of its own; All Gems draws a new mix for
-  // every gem without picked eyes.
-  const shuffle = () =>
-    selected
-      ? set({ face: pick(MIXED_FACES), hat: pick(MIXED_HATS) })
-      : setDraft((prev) => withLook({ ...prev, seed: Math.floor(Math.random() * 2 ** 31) }, null, { face: undefined }));
   const season = draft.season ?? "auto";
   const phone = useIsMobile();
 
@@ -136,7 +118,7 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
       <DialogHeader className="border-b px-5 py-4 text-left">
         <DialogTitle>Gem Studio</DialogTitle>
         <DialogDescription>
-          Dress your agents. Saved to Kollab, so every browser shows the same gems.
+          Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems.
         </DialogDescription>
       </DialogHeader>
 
@@ -146,32 +128,15 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
             aria-label="Gems"
             className="flex shrink-0 gap-1 overflow-x-auto border-b p-2 lg:min-h-0 lg:flex-col lg:overflow-x-visible lg:overflow-y-auto lg:border-r lg:border-b-0"
           >
-            <button
-              type="button"
-              aria-pressed={selected === null}
-              onClick={() => setSelected(null)}
-              className={cn(
-                "flex shrink-0 items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors lg:w-full",
-                selected === null ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
-              )}
-            >
-              <span className="bg-muted flex size-7 shrink-0 items-center justify-center rounded-full">
-                <Sparkles className="size-3.5" />
-              </span>
-              <span className="flex min-w-0 flex-col leading-tight">
-                <span className="font-medium">All Gems</span>
-                <span className="text-muted-foreground text-[11px]">Defaults</span>
-              </span>
-            </button>
             {agents.map((agent) => (
               <button
                 key={agent.name}
                 type="button"
-                aria-pressed={selected === agent.name}
+                aria-pressed={current?.name === agent.name}
                 onClick={() => setSelected(agent.name)}
                 className={cn(
                   "flex shrink-0 items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors lg:w-full",
-                  selected === agent.name ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+                  current?.name === agent.name ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
                 )}
               >
                 <GemAvatar gem={agent.name} caste={agent.caste} color={agent.color} state="idle" live season="auto" size={28} />
@@ -186,27 +151,25 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
           </nav>
 
           <section className="flex min-h-[19rem] min-w-0 shrink-0 flex-col items-center justify-center gap-4 border-b px-4 py-10 sm:px-6 lg:border-b-0">
-            <div className="flex items-end justify-center gap-4 sm:gap-8">
-              {(current ? [current] : showcase).map((agent) => (
-                <GemAvatar
-                  key={agent.name}
-                  gem={agent.name}
-                  caste={agent.caste}
-                  color={agent.color}
-                  state="idle"
-                  live
-                  activity={activity}
-                  season="auto"
-                  follow
-                  size={current ? (phone ? 120 : 150) : phone ? 64 : 96}
-                  label={titleCase(agent.name)}
-                />
-              ))}
-            </div>
+            {current ? (
+              <GemAvatar
+                key={current.name}
+                gem={current.name}
+                caste={current.caste}
+                color={current.color}
+                state="idle"
+                live
+                activity={activity}
+                season="auto"
+                follow
+                size={phone ? 120 : 150}
+                label={titleCase(current.name)}
+              />
+            ) : null}
             <div className="text-center">
-              <p className="text-lg font-semibold">{current ? titleCase(current.name) : "All Gems"}</p>
+              <p className="text-lg font-semibold">{current ? titleCase(current.name) : "No Gems"}</p>
               <p className="text-muted-foreground text-xs">
-                {current ? titleCase(current.caste || "") : "Every gem without its own pick"}
+                {[titleCase(current?.caste || ""), current && !born ? "Not Born Yet" : ""].filter(Boolean).join(" · ")}
               </p>
             </div>
             <div className="flex flex-wrap justify-center gap-1.5" role="group" aria-label="Preview activity">
@@ -216,9 +179,15 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
                 </Chip>
               ))}
             </div>
-            <Button type="button" variant="outline" size="sm" onClick={shuffle}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => set({ face: pick(EVERYDAY_FACES), hat: pick(EVERYDAY_HATS) })}
+              disabled={!current}
+            >
               <Dices className="size-4" />
-              {current ? "Random Look" : "Shuffle Eyes"}
+              Random Look
             </Button>
           </section>
 
@@ -231,27 +200,24 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
               </TabsList>
 
               <TabsContent value="eyes" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-                {selected ? null : (
-                  <p className="text-muted-foreground mb-2 text-[11px]">Mixed gives each gem its own eyes.</p>
-                )}
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 lg:grid-cols-3">
-                  {sample ? (
+                  {current ? (
                     <EyeTile
                       active={!target.face}
                       onClick={() => set({ face: undefined })}
-                      label={selected ? "Default" : "Mixed"}
-                      agent={sample}
-                      face={firstFace}
+                      label={born ? "Born" : "Default"}
+                      agent={current}
+                      face={(born?.face ?? "pill") as EyeStyle}
                     />
                   ) : null}
-                  {sample
+                  {current
                     ? EYE_STYLES.map((style) => (
                         <EyeTile
                           key={style.id}
                           active={target.face === style.id}
                           onClick={() => set({ face: style.id })}
                           label={style.label}
-                          agent={sample}
+                          agent={current}
                           face={style.id}
                         />
                       ))
@@ -262,20 +228,17 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
               <TabsContent value="hat" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
                 <div className="flex flex-col gap-3">
                   <div className="flex flex-wrap gap-1.5">
-                    {selected ? (
-                      <Chip active={!target.hat} onClick={() => set({ hat: undefined })}>
-                        Default
-                      </Chip>
-                    ) : null}
-                    <Chip
-                      active={selected ? target.hat === "auto" : (target.hat ?? "auto") === "auto"}
-                      onClick={() => set({ hat: "auto" })}
-                    >
+                    <Chip active={!target.hat} onClick={() => set({ hat: undefined })}>
+                      {born ? "Born" : "Default"}
+                    </Chip>
+                    <Chip active={target.hat === "auto"} onClick={() => set({ hat: "auto" })}>
                       Auto
                     </Chip>
                   </div>
                   <p className="text-muted-foreground text-[11px]">
-                    Auto dresses each gem for its caste, and in season.
+                    {bornHat
+                      ? `Born hat: ${bornHat}. Seasonal costumes cover it; Auto picks a hat for its caste.`
+                      : "Until it is born it wears Auto: a hat for its caste, or a seasonal costume."}
                   </p>
                   {HAT_GROUPS.map((group) => (
                     <div key={group} className="flex flex-col gap-1.5">
@@ -327,11 +290,7 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
                       The ringed swatch is {titleCase(current.name)}'s pool color.
                     </p>
                   </div>
-                ) : (
-                  <p className="text-muted-foreground text-sm">
-                    Colors are per gem. Pick a gem on the left.
-                  </p>
-                )}
+                ) : null}
               </TabsContent>
             </Tabs>
 

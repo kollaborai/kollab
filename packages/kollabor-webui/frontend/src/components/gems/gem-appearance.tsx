@@ -12,15 +12,14 @@ import { EYE_STYLES, HAT_STYLES, SEASONS } from "./gem-face";
 import { resolveGemLook, type GemLookVocabulary, type ResolvedGemLook } from "./gem-look";
 
 const everyday = (style: { group: string }) => style.group !== "Halloween" && style.group !== "Christmas";
-/** The out-of-season eyes and hats that Mixed and Random Look draw from. */
-export const MIXED_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
-export const MIXED_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
+/** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same). */
+export const EVERYDAY_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
+export const EVERYDAY_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
 
 export const GEM_LOOK_VOCABULARY: GemLookVocabulary = {
   faces: new Set(EYE_STYLES.map((style) => style.id)),
   hats: new Set(["auto", ...HAT_STYLES.map((style) => style.id)]),
   seasons: new Set(["auto", ...SEASONS.map((season) => season.id)]),
-  mixedFaces: MIXED_FACES,
 };
 
 type GemAppearanceValue = {
@@ -30,8 +29,20 @@ type GemAppearanceValue = {
 
 const GemAppearanceContext = createContext<GemAppearanceValue | null>(null);
 
-/** Loads the Gem Studio's saved looks once; every GemAvatar below reads them. */
-export function GemAppearanceProvider({ api, children }: { api: EngineApi; children: ReactNode }) {
+/**
+ * Loads every gem's look; every GemAvatar below reads it. A new `refreshKey`
+ * (the gems alive) loads it again: the engine rolls a gem's born look the
+ * first time it lists the gem alive.
+ */
+export function GemAppearanceProvider({
+  api,
+  refreshKey,
+  children,
+}: {
+  api: EngineApi;
+  refreshKey?: string;
+  children: ReactNode;
+}) {
   const [appearance, setAppearance] = useState<GemAppearance | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +56,7 @@ export function GemAppearanceProvider({ api, children }: { api: EngineApi; child
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, refreshKey]);
   const save = useCallback(
     async (next: GemAppearance) => {
       const saved = await api.saveGemAppearance(next);

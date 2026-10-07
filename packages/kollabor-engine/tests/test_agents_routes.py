@@ -1,5 +1,6 @@
 """Tests for the agent pool colors and the hub feed's live state events."""
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -96,6 +97,16 @@ class TestAgentPoolColor:
         assert by_name["ruby"]["state"] == "available"
         assert body["active"] == ["lapis"]
         assert body["available"] == ["ruby"]
+
+    async def test_a_live_gem_is_born_once(self, client, pool, monkeypatch, appearance_store):
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([presence("a1", "lapis", "idle")]))
+
+        await client.get("/agents")
+        born = json.loads(appearance_store.read_text())["born"]
+        await client.get("/agents")
+
+        assert set(born) == {"lapis"}
+        assert json.loads(appearance_store.read_text())["born"] == born
 
     async def test_missing_color_falls_back_to_neutral_gray(self, client, monkeypatch):
         monkeypatch.setattr(

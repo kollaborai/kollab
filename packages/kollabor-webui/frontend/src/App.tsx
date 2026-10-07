@@ -606,8 +606,10 @@ export default function App() {
     );
   }, []);
 
+  const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
+
   return (
-    <GemAppearanceProvider api={api}>
+    <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <SidebarProvider>
         <AppSidebar
           sessions={sessions}

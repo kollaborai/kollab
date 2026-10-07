@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { cn } from "@/lib/utils";
 import { useGemLook } from "./gem-appearance";
 import { GEM_PAD, gemEngine, type GemProps } from "./gem-engine";
-import type { EyeStyle, HatStyle, Season } from "./gem-face";
+import { seasonFor, type EyeStyle, type HatStyle, type Season } from "./gem-face";
 import { gemSpec } from "./gem-specs";
 
 export type GemAvatarProps = Omit<GemProps, "size"> & {
@@ -26,11 +26,14 @@ export function GemAvatar({ size = 32, className, label, ...own }: GemAvatarProp
   // face or hat wins (studio tiles, the dev lab), an "auto" season follows the
   // user's pick, and a picked color replaces the pool's.
   const look = useGemLook(own.gem);
+  const season = own.season === "auto" ? ((look.season as Season | "auto" | undefined) ?? "auto") : own.season;
+  // A seasonal costume covers the hat a gem was born with, not one the user picked.
+  const inSeason = (season === "auto" ? seasonFor() : (season ?? "none")) !== "none";
   const gem: Omit<GemProps, "size"> = {
     ...own,
     face: own.face ?? (look.face as EyeStyle | undefined),
-    hat: own.hat ?? (look.hat as HatStyle | "auto" | undefined),
-    season: own.season === "auto" ? ((look.season as Season | "auto" | undefined) ?? "auto") : own.season,
+    hat: own.hat ?? ((look.hat ?? (inSeason ? undefined : look.bornHat)) as HatStyle | "auto" | undefined),
+    season,
     color: look.color ?? own.color,
   };
   const canvasRef = useRef<HTMLCanvasElement>(null);
