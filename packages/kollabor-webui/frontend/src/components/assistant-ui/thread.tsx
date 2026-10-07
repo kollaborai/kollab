@@ -101,6 +101,8 @@ export type ThreadProps = {
   commands?: readonly SlashCommand[] | undefined;
   /** Open a Settings tab; called for a bare panel command typed in the composer. */
   onOpenPanel?: ((request: PanelOpenRequest) => void) | undefined;
+  /** Offer image attachments; false hides the paperclip and refuses drops and pastes. */
+  attachmentsEnabled?: boolean | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -119,6 +121,7 @@ export const Thread: FC<ThreadProps> = ({
   agents = [],
   commands = [],
   onOpenPanel,
+  attachmentsEnabled = true,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -129,6 +132,7 @@ export const Thread: FC<ThreadProps> = ({
         agents={agents}
         commands={commands}
         onOpenPanel={onOpenPanel}
+        attachmentsEnabled={attachmentsEnabled}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -139,7 +143,8 @@ const ThreadRoot: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
-}> = ({ isEmpty, agents, commands, onOpenPanel }) => {
+  attachmentsEnabled: boolean;
+}> = ({ isEmpty, agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
 
   return (
@@ -191,6 +196,7 @@ const ThreadRoot: FC<{
               agents={agents}
               commands={commands}
               onOpenPanel={onOpenPanel}
+              attachmentsEnabled={attachmentsEnabled}
             />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
@@ -267,7 +273,8 @@ const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
-}> = ({ agents, commands, onOpenPanel }) => {
+  attachmentsEnabled: boolean;
+}> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const aui = useAui();
   const voice = useVoiceMode();
   // The mic only exists where the session's live command list has /voicemode.
@@ -519,14 +526,17 @@ const Composer: FC<{
           emptyMessage="No online agents"
           emptyHint="Try @broadcast to reach every online agent."
         />
-        <ComposerPrimitive.AttachmentDropzone asChild>
+        <ComposerPrimitive.AttachmentDropzone
+          asChild
+          disabled={!attachmentsEnabled}
+        >
           <div
             data-slot="aui_composer-shell"
             className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
             <ComposerAttachments />
             <div className="aui-composer-row flex items-end gap-1.5">
-              <ComposerAddAttachment />
+              {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
                 placeholder="Send a message..."
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none"
@@ -534,6 +544,7 @@ const Composer: FC<{
                 autoFocus
                 enterKeyHint="send"
                 aria-label="Message input"
+                addAttachmentOnPaste={attachmentsEnabled}
                 onKeyDown={handleComposerKeyDown}
               />
               <ComposerSlot

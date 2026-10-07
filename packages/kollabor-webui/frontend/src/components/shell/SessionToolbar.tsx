@@ -63,6 +63,7 @@ export function SessionToolbar({
   onStatus,
   onSessionUpdated,
   onOpenSettings,
+  onHistoryCleared,
 }: {
   api: EngineApi;
   session: Session;
@@ -70,6 +71,8 @@ export function SessionToolbar({
   onStatus: (message: string) => void;
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: () => void;
+  /** Called once the engine has cleared the history; resets the open thread. */
+  onHistoryCleared: () => Promise<void>;
 }) {
   const [mode, setMode] = useState(() =>
     normalizeApprovalMode(session.approval_mode),
@@ -82,6 +85,7 @@ export function SessionToolbar({
   const [agentsLoading, setAgentsLoading] = useState(true);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [pendingMcpDelete, setPendingMcpDelete] = useState<string | null>(null);
   const [mcpDraft, setMcpDraft] = useState<{
     original: string | null;
     name: string;
@@ -212,12 +216,15 @@ export function SessionToolbar({
   };
 
   const deleteServer = async (serverName: string) => {
+    setMcpBusy(serverName);
     try {
       await api.deleteMcpServer(serverName);
       await loadMcp();
       onStatus(`${serverName}: deleted`);
     } catch (error) {
       fail(error);
+    } finally {
+      setMcpBusy(null);
     }
   };
 
@@ -234,7 +241,7 @@ export function SessionToolbar({
   const clearHistory = async () => {
     try {
       await api.clearHistory(session.session_id);
-      onStatus("History cleared; reload the session to refresh messages.");
+      await onHistoryCleared();
     } catch (error) {
       fail(error);
     }
@@ -304,7 +311,7 @@ export function SessionToolbar({
         </DialogTrigger>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>MCP servers</DialogTitle>
+            <DialogTitle>MCP Servers</DialogTitle>
             <DialogDescription>
               {connectedCount} connected · {allServerNames.length} configured.
               Tool access is scoped to this session.
@@ -318,6 +325,9 @@ export function SessionToolbar({
                     status: "disconnected",
                   };
                   const definition = mcpDefinitions[name] || {};
+                  // The engine only edits and removes servers in the global MCP
+                  // config; a server an agent brought along is not listed there.
+                  const editable = configuredServerNames.includes(name);
                   const connected = info.status === "connected";
                   const tools = Array.isArray(info.tools) ? info.tools : [];
                   return (
@@ -339,7 +349,7 @@ export function SessionToolbar({
                           </span>
                         </div>
                         <Badge variant={connected ? "default" : "outline"}>
-                          {connected ? "connected" : "offline"}
+                          {connected ? "Connected" : "Offline"}
                         </Badge>
                       </div>
                       <div className="flex items-center justify-between gap-2">
@@ -348,25 +358,29 @@ export function SessionToolbar({
                           {info.error ? ` · ${info.error}` : ""}
                         </span>
                         <div className="flex items-center gap-1">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            aria-label={`Edit ${name}`}
-                            onClick={() => startEditServer(name, definition)}
-                          >
-                            <Pencil className="size-4" />
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            aria-label={`Delete ${name}`}
-                            disabled={mcpBusy === name}
-                            onClick={() => void deleteServer(name)}
-                          >
-                            <Trash2 className="size-4" />
-                          </Button>
+                          {editable ? (
+                            <>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                aria-label={`Edit ${name}`}
+                                onClick={() => startEditServer(name, definition)}
+                              >
+                                <Pencil className="size-4" />
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                aria-label={`Delete ${name}`}
+                                disabled={mcpBusy === name}
+                                onClick={() => setPendingMcpDelete(name)}
+                              >
+                                <Trash2 className="size-4" />
+                              </Button>
+                            </>
+                          ) : null}
                           <Button
                             type="button"
                             size="sm"
@@ -413,7 +427,7 @@ export function SessionToolbar({
             <div className="flex flex-col gap-2 rounded-lg border p-3">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold">
-                  {mcpDraft.original ? `Edit ${mcpDraft.original}` : "Add server"}
+                  {mcpDraft.original ? `Edit ${mcpDraft.original}` : "Add Server"}
                 </span>
                 <Button
                   type="button"
@@ -466,7 +480,7 @@ export function SessionToolbar({
                     setMcpDraft({ ...mcpDraft, enabled: e.target.checked })
                   }
                 />
-                enabled
+                Enabled
               </label>
               <Button
                 type="button"
@@ -474,7 +488,7 @@ export function SessionToolbar({
                 disabled={!mcpDraft.command.trim() || (!mcpDraft.original && !mcpDraft.name.trim())}
                 onClick={() => void saveServer()}
               >
-                Save server
+                Save Server
               </Button>
             </div>
           ) : null}
@@ -504,11 +518,41 @@ export function SessionToolbar({
               }
             >
               <Plus className="size-4" />
-              Add server
+              Add Server
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog
+        open={pendingMcpDelete !== null}
+        onOpenChange={(open) => !open && setPendingMcpDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete This MCP Server?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingMcpDelete} will be removed from your MCP configuration.
+              Sessions already connected to it keep the connection until they
+              disconnect. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                // Read the name before clearing state; the dialog unmounts its
+                // content on close.
+                const name = pendingMcpDelete;
+                setPendingMcpDelete(null);
+                if (name) void deleteServer(name);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Online agents */}
       <Dialog
@@ -529,7 +573,7 @@ export function SessionToolbar({
         </DialogTrigger>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Who is online</DialogTitle>
+            <DialogTitle>Who Is Online</DialogTitle>
             <DialogDescription>
               Type <code className="rounded bg-muted px-1 py-0.5">@identity message</code> to message one agent, or <code className="rounded bg-muted px-1 py-0.5">@broadcast message</code> to reach everyone.
             </DialogDescription>
@@ -561,7 +605,7 @@ export function SessionToolbar({
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center justify-between gap-2 text-sm font-medium">
                             <span className="truncate">{identity || "agent"}</span>
-                            <span className="text-muted-foreground text-xs">online</span>
+                            <span className="text-muted-foreground text-xs">Online</span>
                           </span>
                           <span className="text-muted-foreground block truncate text-xs">
                             {agent.agent_name || agent.profile_name || "agent"}
@@ -587,7 +631,7 @@ export function SessionToolbar({
               disabled={agentsLoading}
             >
               <RefreshCw className="size-4" />
-              Refresh agents
+              Refresh Agents
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -614,7 +658,7 @@ export function SessionToolbar({
         </AlertDialogTrigger>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Clear conversation history?</AlertDialogTitle>
+            <AlertDialogTitle>Clear Conversation History?</AlertDialogTitle>
             <AlertDialogDescription>
               Removes every message from {sessionLabel}. The session keeps
               running. This cannot be undone.

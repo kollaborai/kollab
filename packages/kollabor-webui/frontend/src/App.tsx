@@ -73,6 +73,7 @@ function RuntimeShell({
   agents,
   onSessionUpdated,
   onOpenSettings,
+  onHistoryCleared,
   onActivity,
   refreshSignal,
 }: {
@@ -81,6 +82,8 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
+  /** Reloads this session's conversation after the engine cleared it. */
+  onHistoryCleared: () => Promise<void>;
   /** Reports what this session's gem should act out in the sidebar. */
   onActivity: (activity: Activity | null) => void;
   refreshSignal: number;
@@ -182,6 +185,7 @@ function RuntimeShell({
           onStatus={setStatus}
           onSessionUpdated={onSessionUpdated}
           onOpenSettings={() => onOpenSettings()}
+          onHistoryCleared={onHistoryCleared}
         />
       </header>
       <div className="flex min-h-0 flex-1 flex-col">
@@ -190,6 +194,9 @@ function RuntimeShell({
             agents={agents}
             commands={commands}
             onOpenPanel={onOpenSettings}
+            attachmentsEnabled={
+              session.supports_vision ?? profile?.supports_vision ?? true
+            }
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -224,6 +231,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  // Bumped to remount the runtime: it reads its initial state only on mount.
+  const [runtimeEpoch, setRuntimeEpoch] = useState(0);
   const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
@@ -520,6 +529,19 @@ export default function App() {
     }
   };
 
+  // The engine already emptied the conversation; reload it and remount the
+  // runtime so the open thread resets in place.
+  const resetThread = async (sessionId: string) => {
+    const operation = ++operationRef.current;
+    const result = await loadSessions();
+    const nextState = await loadState(sessionId, result);
+    if (operation !== operationRef.current) return;
+    setInitialState(nextState);
+    setRuntimeEpoch((epoch) => epoch + 1);
+    refreshSignalRef.current += 1;
+    setRefreshSignal(refreshSignalRef.current);
+  };
+
   const openSettings = useCallback((request?: PanelOpenRequest) => {
     setSettingsTab(request?.tab ?? "session");
     setSettingsIntent(
@@ -589,7 +611,7 @@ export default function App() {
       <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
         {activeSession && initialState ? (
           <EngineRuntimeProvider
-            key={activeId}
+            key={`${activeId}:${runtimeEpoch}`}
             api={api}
             sessionId={activeSession.session_id}
             initialState={initialState}
@@ -601,6 +623,7 @@ export default function App() {
               refreshSignal={refreshSignal}
               onSessionUpdated={handleSessionUpdated}
               onOpenSettings={openSettings}
+              onHistoryCleared={() => resetThread(activeSession.session_id)}
               onActivity={setActiveActivity}
             />
           </EngineRuntimeProvider>

@@ -26,11 +26,14 @@ export const Thread: FC<{
   agents?: readonly AgentPoolEntry[];
   commands?: readonly SlashCommand[];
   onOpenPanel?: (request: PanelOpenRequest) => void;
-}> = ({ agents = [], commands = [], onOpenPanel }) => (
+  /** False when the session's model cannot read images. */
+  attachmentsEnabled?: boolean;
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true }) => (
   <AssistantThread
     components={{ Welcome, ToolGroup }}
     agents={agents}
     commands={commands}
     onOpenPanel={onOpenPanel}
+    attachmentsEnabled={attachmentsEnabled}
   />
 );
