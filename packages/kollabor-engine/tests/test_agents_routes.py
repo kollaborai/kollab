@@ -43,6 +43,9 @@ async def client():
         yield ac
 
 
+# Marked so it also runs from the repo root, whose pytest config is strict
+# (the engine package's own config sets asyncio_mode = "auto").
+@pytest.mark.asyncio
 class TestAgentPoolColor:
     @pytest.fixture
     def pool(self, monkeypatch):
