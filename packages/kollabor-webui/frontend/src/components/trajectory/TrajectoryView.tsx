@@ -229,7 +229,7 @@ export function TrajectoryView({
             {refreshing && (
               <Badge variant="secondary" className="gap-1.5 font-normal">
                 <RefreshCw className="size-3 animate-spin" />
-                refreshing
+                Refreshing
               </Badge>
             )}
           </div>
@@ -271,7 +271,7 @@ export function TrajectoryView({
                 aria-label="Collapse tool rows"
                 size="sm"
               />
-              <span className="hidden sm:inline">Collapse tools</span>
+              <span className="hidden sm:inline">Collapse Tools</span>
             </label>
             <Button
               type="button"
@@ -330,7 +330,7 @@ export function TrajectoryView({
       >
         <SheetContent side="bottom" className="max-h-[75vh] rounded-t-2xl p-0">
           <SheetHeader className="sr-only">
-            <SheetTitle>Trajectory record details</SheetTitle>
+            <SheetTitle>Record Details</SheetTitle>
           </SheetHeader>
           <TrajectoryInspector record={selectedRecord} className="min-h-0 border-0" />
         </SheetContent>

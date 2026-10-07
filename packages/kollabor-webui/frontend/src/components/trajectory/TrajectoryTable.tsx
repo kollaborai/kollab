@@ -91,7 +91,7 @@ export function LoadEarlierBanner({
         onClick={onLoad}
         disabled={loading}
       >
-        {loading ? "Loading…" : "Load earlier"}
+        {loading ? "Loading…" : "Load Earlier"}
       </button>
     </div>
   );

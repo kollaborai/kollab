@@ -75,7 +75,7 @@ export function TrajectoryInspector({
             <p className="text-muted-foreground text-[10px] font-semibold tracking-[0.14em] uppercase">
               Inspector
             </p>
-            <p className="text-sm font-semibold">Record details</p>
+            <p className="text-sm font-semibold">Record Details</p>
           </div>
         </div>
         <div className="flex flex-1 flex-col items-center justify-center p-6 text-center">
@@ -83,7 +83,7 @@ export function TrajectoryInspector({
             <div className="bg-primary/10 text-primary mx-auto flex size-11 items-center justify-center rounded-2xl">
               <PanelRight className="size-5" />
             </div>
-            <p className="mt-4 text-sm font-semibold">Inspect a record</p>
+            <p className="mt-4 text-sm font-semibold">Inspect a Record</p>
             <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
               Choose a row to inspect its full input, output, or thinking content.
             </p>
@@ -152,7 +152,7 @@ export function TrajectoryInspector({
         <div
           className="bg-muted/70 flex rounded-lg p-1"
           role="tablist"
-          aria-label="Record details"
+          aria-label="Record Details"
         >
           {DETAIL_TABS.map((item) => {
             const Icon = detailIcon(item.id);
