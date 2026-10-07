@@ -3,9 +3,11 @@
 Combines Tech/Code and Mythical/Epic themes for unique, memorable names.
 """
 
+import hashlib
 import random
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
 # Tech/Code themed words
 TECH_PREFIXES = [
@@ -100,6 +102,29 @@ MYTHIC_SUFFIXES = [
     "call",
     "wake",
 ]
+
+
+def session_display_name(session_id: str) -> str:
+    """Return a readable label without replacing the session's API identity.
+
+    Kollab-generated session IDs already contain a friendly slug. UUID-shaped
+    IDs do not, so map them to a stable two-word label for user-facing lists.
+    """
+    value = str(session_id or "")
+    candidate = value.removeprefix("sess_")
+    prefix, separator, suffix = candidate.partition("-")
+    if separator and len(prefix) == 10 and prefix.isdigit():
+        return suffix or "session"
+
+    try:
+        canonical_id = UUID(candidate).hex
+    except ValueError:
+        return value or "session"
+
+    digest = hashlib.sha256(canonical_id.encode("ascii")).digest()
+    prefix_index = int.from_bytes(digest[:4], "big") % len(TECH_PREFIXES)
+    suffix_index = int.from_bytes(digest[4:8], "big") % len(TECH_SUFFIXES)
+    return f"{TECH_PREFIXES[prefix_index]}-{TECH_SUFFIXES[suffix_index]}"
 
 
 def generate_session_name(

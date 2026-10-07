@@ -1,11 +1,11 @@
 """Tests for discovery of detached sessions through hub presence."""
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from kollabor_engine.hub_bridge import HubBridge
 from kollabor_engine.routes import sessions as sessions_route
+
+from kollabor_ai.session_naming import session_display_name
 
 
 def test_discover_sessions_filters_non_attachable_and_missing_socket(tmp_path, monkeypatch):
@@ -29,6 +29,30 @@ def test_discover_sessions_filters_non_attachable_and_missing_socket(tmp_path, m
     assert found[0]["attachable"] is False
     assert found[0]["actions_supported"] == []
     assert found[0]["source"] == "hub_presence"
+
+
+def test_discover_sessions_uses_friendly_name_for_opaque_identity(tmp_path, monkeypatch):
+    socket = tmp_path / "agent.sock"
+    socket.touch()
+    identity = "1c753a7d2def481084e3a64bcb09a7d2"
+    bridge = HubBridge()
+    monkeypatch.setattr(
+        bridge,
+        "get_agents",
+        lambda use_cache=False: [
+            {
+                "identity": identity,
+                "launch_strategy": "subprocess",
+                "socket_path": str(socket),
+            }
+        ],
+    )
+
+    found = bridge.discover_sessions(use_cache=False)
+
+    assert found[0]["session_id"] == identity
+    assert found[0]["name"] == session_display_name(identity)
+    assert found[0]["name"] != identity
 
 
 @pytest.mark.asyncio

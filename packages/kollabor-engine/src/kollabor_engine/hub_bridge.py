@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.session_naming import session_display_name
 from kollabor_config.config_utils import (
     get_config_directory_candidates,
     get_project_data_dir_candidates,
@@ -158,7 +159,7 @@ class HubBridge:
                 continue
             sessions.append({
                 "session_id": identity,
-                "name": identity,
+                "name": session_display_name(identity),
                 "identity": identity,
                 "agent": agent.get("agent_name") or agent.get("name") or "default",
                 "workspace": agent.get("project") or "",

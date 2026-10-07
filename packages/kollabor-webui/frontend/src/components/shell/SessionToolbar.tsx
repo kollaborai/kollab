@@ -78,8 +78,8 @@ export function SessionToolbar({
   const [mcpDefinitions, setMcpDefinitions] = useState<
     Record<string, McpServerConfig>
   >({});
-  const [agents, setAgents] = useState<HubAgent[]>([]);
-  const [agentsLoading, setAgentsLoading] = useState(false);
+  const [agents, setAgents] = useState<HubAgent[] | null>(null);
+  const [agentsLoading, setAgentsLoading] = useState(true);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [mcpDraft, setMcpDraft] = useState<{
@@ -112,10 +112,26 @@ export function SessionToolbar({
     }
   }, [api, fail, session.session_id]);
 
+  const loadAgents = useCallback(async () => {
+    setAgentsLoading(true);
+    try {
+      const result = await api.listHubAgents(true);
+      setAgents(result.agents || []);
+    } catch (error) {
+      fail(error);
+    } finally {
+      setAgentsLoading(false);
+    }
+  }, [api, fail]);
+
   useEffect(() => {
     setMode(normalizeApprovalMode(session.approval_mode));
     void loadMcp();
   }, [loadMcp, session.approval_mode]);
+
+  useEffect(() => {
+    void loadAgents();
+  }, [loadAgents]);
 
   const changeMode = async (next: string) => {
     // Optimistic so the Select reflects the click immediately; reconciled with
@@ -202,18 +218,6 @@ export function SessionToolbar({
       onStatus(`${serverName}: deleted`);
     } catch (error) {
       fail(error);
-    }
-  };
-
-  const loadAgents = async () => {
-    setAgentsLoading(true);
-    try {
-      const result = await api.listHubAgents(true);
-      setAgents(result.agents || []);
-    } catch (error) {
-      fail(error);
-    } finally {
-      setAgentsLoading(false);
     }
   };
 
@@ -518,7 +522,9 @@ export function SessionToolbar({
           <Button variant="outline" size="sm">
             <Users className="size-4" />
             Online
-            <Badge variant="secondary">{agents.length}</Badge>
+            <Badge variant="secondary">
+              {agents === null ? "…" : agents.length}
+            </Badge>
           </Button>
         </DialogTrigger>
         <DialogContent className="sm:max-w-md">
@@ -531,6 +537,10 @@ export function SessionToolbar({
           <div className="flex flex-col gap-3">
             {agentsLoading ? (
               <p className="text-muted-foreground text-sm">Looking for online agents…</p>
+            ) : agents === null ? (
+              <p className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
+                Online agent status is unavailable. Refresh to try again.
+              </p>
             ) : agents.length ? (
               <ScrollArea className="max-h-56 rounded-md border p-2">
                 <div className="flex flex-col gap-1">

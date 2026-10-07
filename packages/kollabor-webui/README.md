@@ -94,6 +94,10 @@ navigation back to `index.html`.
 - `GET /hub/agents`
 - `POST /hub/messages`
 
+Session rows keep `session_id` as the API key and expose a separate `name` for
+display. Kollab-generated timestamped names display as their slug; opaque UUIDs
+receive a stable two-word label.
+
 ## Authentication
 
 The browser gets the current engine bearer token from `/api/config`, which

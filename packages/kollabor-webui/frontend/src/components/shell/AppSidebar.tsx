@@ -97,6 +97,16 @@ export function AppSidebar({
   // Deleting a session stops its daemon and is irreversible, so it goes behind
   // an AlertDialog rather than the bare "x" the previous shell shipped.
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const bundleOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options = bundles.filter((bundle) => {
+      if (seen.has(bundle.name)) return false;
+      seen.add(bundle.name);
+      return true;
+    });
+    if (!seen.has("default")) options.unshift({ name: "default" });
+    return options;
+  }, [bundles]);
   const poolByName = useMemo(
     () => new Map(agents.map((agent) => [agent.name, agent])),
     [agents],
@@ -141,8 +151,7 @@ export function AppSidebar({
                   <SelectValue placeholder="default" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="default">default</SelectItem>
-                  {bundles.map((bundle) => (
+                  {bundleOptions.map((bundle) => (
                     <SelectItem key={bundle.name} value={bundle.name}>
                       {bundle.name}
                       {bundle.profile ? ` · ${bundle.profile}` : ""}

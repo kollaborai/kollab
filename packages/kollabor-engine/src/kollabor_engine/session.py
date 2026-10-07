@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.session_naming import session_display_name
 from kollabor_events.permissions_models import ApprovalMode
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
@@ -371,7 +372,7 @@ class EngineSession:
         )
         return {
             "session_id": self.session_id,
-            "name": self.session_id,
+            "name": session_display_name(self.session_id),
             "profile": getattr(self.profile, "name", str(self.profile or "")),
             "model": getattr(self.profile, "model", ""),
             "agent": agent_name,
