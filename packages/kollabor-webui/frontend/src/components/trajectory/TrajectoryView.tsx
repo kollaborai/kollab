@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { TrajectoryInspector } from "./TrajectoryInspector";
 import { projectTrajectory, type TrajectoryRecord } from "./trajectory-records";
 import { TrajectoryTable } from "./TrajectoryTable";
+import { TrajectoryWaterfall } from "./TrajectoryWaterfall";
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
@@ -52,6 +53,7 @@ export function TrajectoryView({
   const [records, setRecords] = useState<TrajectoryRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [collapseTurns, setCollapseTurns] = useState(false);
+  const [layout, setLayout] = useState<"table" | "waterfall">("table");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -242,6 +244,25 @@ export function TrajectoryView({
             )}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
+            <div
+              className="bg-muted flex rounded-md p-0.5"
+              role="group"
+              aria-label="Trajectory layout"
+            >
+              {(["table", "waterfall"] as const).map((option) => (
+                <Button
+                  key={option}
+                  type="button"
+                  variant={layout === option ? "secondary" : "ghost"}
+                  size="xs"
+                  aria-pressed={layout === option}
+                  data-testid={`trajectory-${option}-tab`}
+                  onClick={() => setLayout(option)}
+                >
+                  {option === "table" ? "Table" : "Waterfall"}
+                </Button>
+              ))}
+            </div>
             <div className="relative w-48 sm:w-64">
               <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
               <Input
@@ -284,15 +305,27 @@ export function TrajectoryView({
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 md:p-4">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card/40 shadow-sm lg:flex-row">
-          <TrajectoryTable
-            records={visibleRecords}
-            selectedId={selectedId}
-            loading={loading}
-            canLoadEarlier={canLoadEarlier}
-            loadingEarlier={loadingEarlier}
-            onLoadEarlier={() => void loadEarlier()}
-            onSelect={setSelectedId}
-          />
+          {layout === "table" ? (
+            <TrajectoryTable
+              records={visibleRecords}
+              selectedId={selectedId}
+              loading={loading}
+              canLoadEarlier={canLoadEarlier}
+              loadingEarlier={loadingEarlier}
+              onLoadEarlier={() => void loadEarlier()}
+              onSelect={setSelectedId}
+            />
+          ) : (
+            <TrajectoryWaterfall
+              records={visibleRecords}
+              selectedId={selectedId}
+              loading={loading}
+              canLoadEarlier={canLoadEarlier}
+              loadingEarlier={loadingEarlier}
+              onLoadEarlier={() => void loadEarlier()}
+              onSelect={setSelectedId}
+            />
+          )}
           <div className="hidden min-h-0 min-w-0 w-[min(30rem,42%)] lg:flex">
             <TrajectoryInspector record={selectedRecord} className="w-full" />
           </div>

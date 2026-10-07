@@ -410,16 +410,20 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
           "success",
         ]) === false ||
         readBoolean(metadata, ["is_error", "isError", "tool_output_is_error"]);
+      // The daemon writes the call's assistant message after the tools ran,
+      // so the timestamp delta is ~0; the measured run time is the truth.
+      const ranFor = asNumber(metadata.tool_execution_time);
       const existing = id ? nativeCalls.get(id) : undefined;
       if (existing) {
         existing.output = output;
         existing.isError = isError;
         existing.summary = toolResultSummary(existing.title, output);
+        if (ranFor !== undefined) existing.durationSeconds = ranFor;
         return;
       }
 
       const name = asString(metadata.tool_name) ?? "TOOL RESULT";
-      add({
+      const record = add({
         id: `${identity}:tool-result:${id || "unknown"}`,
         kind: "tool",
         turn,
@@ -432,6 +436,7 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
         callId: id,
         isError,
       });
+      if (ranFor !== undefined) record.durationSeconds = ranFor;
       return;
     }
 

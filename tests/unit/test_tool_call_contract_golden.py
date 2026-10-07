@@ -184,6 +184,7 @@ class FakeNativeToolsHandler:
                 tool_type="state_update",
                 success=True,
                 output="state saved",
+                execution_time=0.2504,
             )
         ]
 
@@ -283,7 +284,10 @@ def test_mixed_native_and_xml_tool_history_shape_is_stable():
     native_result = history[1]
     assert native_result.role == "tool"
     assert native_result.content == "state saved"
-    assert native_result.metadata == {"tool_call_id": "call_native"}
+    assert native_result.metadata == {
+        "tool_call_id": "call_native",
+        "tool_execution_time": 0.25,
+    }
 
     xml_result = history[2]
     assert xml_result.role == "user"
