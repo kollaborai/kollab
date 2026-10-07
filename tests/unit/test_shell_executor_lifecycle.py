@@ -30,3 +30,13 @@ async def test_outer_task_cancellation_propagates_after_process_cleanup():
     assert executor._current_process is None
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("command", "code"), [("true", 0), ("false", 1), ("exit 3", 3)])
+async def test_exit_code_is_the_process_return_code(command, code):
+    """A successful command reports exit 0, not 1."""
+    result = await ShellExecutor().run(command, timeout=10)
+
+    assert result.exit_code == code
+    assert result.success is (code == 0)
