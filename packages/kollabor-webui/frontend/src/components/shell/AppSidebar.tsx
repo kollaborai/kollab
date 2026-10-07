@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentProps } from "react";
-import { Loader2, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
 import type { AgentBundleEntry, AgentPoolEntry, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
@@ -45,6 +45,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar";
 
 /**
@@ -71,6 +72,7 @@ export function AppSidebar({
   onBundleChange,
   onWorkspaceChange,
   onSettings,
+  onStudio,
   onManageProfiles,
   // Named `onSelectSession`, not `onSelect`: ComponentProps<typeof Sidebar>
   // already carries the DOM `onSelect` handler, and the collision widens the
@@ -97,11 +99,14 @@ export function AppSidebar({
   onBundleChange: (bundle: string) => void;
   onWorkspaceChange: (path: string) => void;
   onSettings: () => void;
+  /** Opens the Gem Studio; works without a session. */
+  onStudio: () => void;
   onManageProfiles: () => void;
   onSelectSession: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
 }) {
+  const { setOpenMobile } = useSidebar();
   // Deleting a session stops its daemon and is irreversible, so it goes behind
   // an AlertDialog rather than the bare "x" the previous shell shipped.
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
@@ -379,6 +384,18 @@ export function AppSidebar({
 
       <SidebarFooter className="border-t p-2">
         <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                // On a phone the sidebar is a sheet: close it under the studio.
+                setOpenMobile(false);
+                onStudio();
+              }}
+            >
+              <Palette className="size-4" />
+              <span>Gem Studio</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton onClick={onSettings} disabled={!activeId}>
               <Settings2 className="size-4" />

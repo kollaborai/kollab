@@ -36,6 +36,10 @@ if Node/npm is unavailable.
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
+- **Gem Studio** (sidebar footer): pick each gem's eyes, hat and color, the
+  defaults for every gem and the season, previewed live. The engine saves the
+  looks, so every browser and every gem in the app (session rows, chat, Who Is
+  Online) follows.
 
 ## Usage
 
@@ -110,6 +114,7 @@ upgrade. `src/dev/gem-lab.html` previews every gem, activity, hat and season.
 - `GET/POST/PUT/DELETE /mcp/servers...`
 - `GET/POST /sessions/{session_id}/mcp...`
 - `GET /agents` (gem pool: colors, live state, hub agent ids)
+- `GET/PUT /agents/appearance` (Gem Studio looks)
 - `GET /hub/agents`
 - `POST /hub/messages`
 

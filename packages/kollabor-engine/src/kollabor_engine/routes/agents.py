@@ -2,8 +2,9 @@
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Query  # type: ignore[import-not-found]
+from fastapi import APIRouter, Body, HTTPException, Query  # type: ignore[import-not-found]
 
+from ..gem_appearance import load_appearance, save_appearance
 from ..hub_bridge import HubBridge
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -64,6 +65,21 @@ async def list_agent_pool(
         "active": [agent["name"] for agent in agents if agent["active"]],
         "count": len(agents),
     }
+
+
+@router.get("/appearance")
+async def get_gem_appearance() -> Dict[str, Any]:
+    """The Gem Studio's saved looks: season, all-gem defaults, per-gem picks."""
+    return load_appearance()
+
+
+@router.put("/appearance")
+async def put_gem_appearance(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Replace the saved looks and return what was stored (bad fields dropped)."""
+    try:
+        return save_appearance(body)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save gem appearance: {exc}") from exc
 
 
 @router.get("/bundles")

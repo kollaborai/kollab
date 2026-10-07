@@ -22,6 +22,18 @@ export type Session = {
   actions_supported?: string[];
 };
 
+/** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */
+export type GemLook = { face?: string; hat?: string; color?: number[] };
+
+/** The Gem Studio's saved looks (engine: ~/.kollab/hub/appearance.json). */
+export type GemAppearance = {
+  /** "auto" follows the calendar (Halloween in October, Christmas in December). */
+  season?: string;
+  /** Every gem's look unless it has its own pick. */
+  defaults?: Omit<GemLook, "color">;
+  gems?: Record<string, GemLook>;
+};
+
 export type HistoryMessage = {
   role: "system" | "user" | "assistant" | string;
   content?: unknown;
@@ -799,6 +811,17 @@ export class EngineApi {
       available?: string[];
       active?: string[];
     }>(`/agents${refresh ? "?refresh=true" : ""}`);
+  }
+
+  getGemAppearance() {
+    return this.json<GemAppearance>("/agents/appearance");
+  }
+
+  saveGemAppearance(appearance: GemAppearance) {
+    return this.json<GemAppearance>("/agents/appearance", {
+      method: "PUT",
+      body: JSON.stringify(appearance),
+    });
   }
 
   /**

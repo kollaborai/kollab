@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Web UI: the Kollabor K logo heads the sidebar and is the browser tab icon.
+- Web: Gem Studio (sidebar footer) dresses the agents: each gem's eyes, hat and color, the all-gems defaults and the season (Auto, None, Halloween, Christmas), on a live stage you can set to thinking, typing or dancing. The engine keeps the looks (`GET`/`PUT /agents/appearance`, stored in `~/.kollab/hub/appearance.json`), so every browser shows the same gems.
 
 ### Changed
 - Web UI: the session header is one slim row on desktop (two on phones) with borderless controls: the model, the approval mode (an amber open shield for Trust All), MCP and online counts, and Settings and Clear as icons with tooltips. The sidebar header is one row (the logo, then New Session and its options as icon buttons), rows show bigger gems with smaller text and drop the message count, and the session count sits beside "Sessions".
