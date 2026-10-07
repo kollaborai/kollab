@@ -315,6 +315,22 @@ def _assistant_state_content(
     return parts if parts else ""
 
 
+def _assistant_continued_tool_parts(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Copies of the tool calls on the assistant message a continuation extends."""
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        return [
+            copy.deepcopy(part)
+            for part in (content if isinstance(content, list) else [])
+            if isinstance(part, dict) and part.get("type") == "tool-call"
+        ]
+    return []
+
+
 def _assistant_update_message_state(
     messages: List[Dict[str, Any]],
     session_id: str,
@@ -340,20 +356,23 @@ def _assistant_update_message_state(
                 if isinstance(content, list)
                 else ([{"type": "text", "text": content}] if content else [])
             )
-            existing_tool_ids = {
-                part.get("toolCallId")
+            # A tool call this run knows by id (adopted from this message, e.g.
+            # a gated tool whose prompt the user just answered) replaces the
+            # stored part so its result lands in place; the rest append.
+            fresh = {part.get("toolCallId"): part for part in tool_parts}
+            existing_parts = [
+                (
+                    fresh.pop(part.get("toolCallId"), part)
+                    if isinstance(part, dict) and part.get("type") == "tool-call"
+                    else part
+                )
                 for part in existing_parts
-                if isinstance(part, dict) and part.get("type") == "tool-call"
-            }
+            ]
             if reasoning:
                 existing_parts.append({"type": "reasoning", "text": reasoning})
             if text:
                 existing_parts.append({"type": "text", "text": text})
-            existing_parts.extend(
-                part
-                for part in tool_parts
-                if part.get("toolCallId") not in existing_tool_ids
-            )
+            existing_parts.extend(fresh.values())
             message["content"] = existing_parts
             if status is None:
                 message.pop("status", None)
@@ -738,6 +757,15 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 controller.add_error("assistant request has no commands")
                 return
 
+            if not submitted_contents:
+                # Answering a permission prompt continues the last assistant
+                # message. Its tool calls started in the previous run, so adopt
+                # them to finish those rows (result, duration) in place.
+                for part in _assistant_continued_tool_parts(state_messages):
+                    if part.get("toolCallId"):
+                        assistant_tool_parts[part["toolCallId"]] = part
+                        assistant_parts.append(part)
+
             while True:
                 event = await _assistant_next_event(session, queue, controller)
                 if event is None:
@@ -841,8 +869,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             }
                     if tool_controller is not None:
                         _assistant_set_tool_result(tool_controller, result)
-                    else:
+                    elif tool_part is None:
                         controller.add_tool_result(tool_id, result)
+                    # else: adopted from the prior run; this run's wire stream
+                    # never opened that call, so the state publish carries it.
                     publish_progress()
                 elif event_type == "permission_granted":
                     source_tool_id = str(event.get("tool_id") or "")
@@ -870,6 +900,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                                 "scope": event.get("scope", "once"),
                             },
                         )
+                    publish_progress()
                 elif event_type == "permission_denied":
                     source_tool_id = str(event.get("tool_id") or "")
                     permission_part = assistant_tool_parts.get(
@@ -890,6 +921,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             permission_controller,
                             {"decision": "deny"},
                         )
+                    publish_progress()
                 elif event_type == "error":
                     controller.add_error(str(event.get("message") or "engine error"))
                 elif event_type == "turn_complete":

@@ -593,15 +593,19 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
 }) => {
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
-  const isRequiresAction = status?.type === "requires-action";
+  // A gated tool row has no approval data of its own: the engine asks through a
+  // separate `request_permission` card (PermissionTool.tsx), and a second
+  // Allow/Deny bar here would send an answer the engine rejects.
+  const needsApproval =
+    status?.type === "requires-action" &&
+    (approval != null || interrupt != null);
   const failed = isError === true && result !== undefined;
 
-  const [open, setOpen] = useState(isRequiresAction);
-  const [prevRequiresAction, setPrevRequiresAction] =
-    useState(isRequiresAction);
-  if (isRequiresAction !== prevRequiresAction) {
-    setPrevRequiresAction(isRequiresAction);
-    if (isRequiresAction) setOpen(true);
+  const [open, setOpen] = useState(needsApproval);
+  const [prevNeedsApproval, setPrevNeedsApproval] = useState(needsApproval);
+  if (needsApproval !== prevNeedsApproval) {
+    setPrevNeedsApproval(needsApproval);
+    if (needsApproval) setOpen(true);
   }
 
   return (
@@ -619,7 +623,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
           argsText={argsText}
           className={cn(isCancelled && "opacity-60")}
         />
-        {isRequiresAction && (
+        {needsApproval && (
           <ToolFallbackApproval
             addResult={addResult}
             resume={resume}

@@ -698,3 +698,79 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
     # The final publish keeps one assistant message with an explicit status.
     assert [m["role"] for m in sets[-2][1]] == ["user", "assistant"]
     assert sets[-2][1][1]["status"] == {"type": "complete", "reason": "stop"}
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
+    """A tool gated by a prompt gets its result and duration in the answering run."""
+    session = _FakeSession(
+        [
+            {"type": "permission_granted", "tool_id": "call-1", "scope": "once"},
+            {
+                "type": "tool_result",
+                "tool_id": "call-1",
+                "success": True,
+                "output": "a",
+                "execution_time": 2.0,
+            },
+            {"type": "token", "text": "done"},
+            {"type": "turn_complete"},
+        ]
+    )
+    state = {
+        "messages": [
+            {"id": "u", "role": "user", "content": "go"},
+            {
+                "id": "a",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "call-1",
+                        "toolName": "terminal",
+                        "args": {"command": "ls"},
+                        "argsText": '{"command": "ls"}',
+                        "timing": {"startedAt": 1000},
+                    },
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "permission_call-1",
+                        "toolName": "request_permission",
+                        "args": {"tool_id": "call-1"},
+                        "argsText": '{"tool_id": "call-1"}',
+                    },
+                ],
+                "status": {"type": "requires-action", "reason": "tool-calls"},
+            },
+        ]
+    }
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [
+            {
+                "type": "add-tool-result",
+                "toolCallId": "permission_call-1",
+                "result": {"decision": "approve", "scope": "once"},
+            }
+        ],
+        state,
+    )
+
+    # permission_granted: the prompt card is answered and the message runs again.
+    path, message = sets[0]
+    assert path == ["messages", "1"] and "status" not in message
+    assert message["content"][1]["result"] == {"decision": "approve", "scope": "once"}
+    # tool_result: the same row finishes with its output and a measured duration.
+    path, message = sets[1]
+    row = message["content"][0]
+    assert path == ["messages", "1"] and row["toolCallId"] == "call-1"
+    assert row["result"]["output"] == "a" and row["isError"] is False
+    assert row["timing"] == {"startedAt": 1000, "completedAt": 3000}
+    # Turn end: one assistant message, each tool call once, the row still finished.
+    final = sets[-2][1]
+    assert [m["role"] for m in final] == ["user", "assistant"]
+    tools = [p for p in final[1]["content"] if p["type"] == "tool-call"]
+    assert [p["toolCallId"] for p in tools] == ["call-1", "permission_call-1"]
+    assert tools[0]["timing"] == {"startedAt": 1000, "completedAt": 3000}
+    assert final[1]["status"] == {"type": "complete", "reason": "stop"}
