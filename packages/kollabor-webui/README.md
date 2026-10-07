@@ -37,7 +37,9 @@ if Node/npm is unavailable.
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
 - **Gem Studio** (sidebar footer): pick each gem's eyes, hat and color, the
-  defaults for every gem and the season, previewed live. The engine saves the
+  defaults for every gem and the season, previewed live. Gems nobody dressed
+  draw their own eyes from a mix (Shuffle Eyes redraws it; Random Look dresses
+  one gem at random). The engine saves the
   looks, so every browser and every gem in the app (session rows, chat, Who Is
   Online) follows.
 

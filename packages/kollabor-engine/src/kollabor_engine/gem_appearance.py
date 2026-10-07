@@ -4,8 +4,12 @@ One JSON document at ``~/.kollab/hub/appearance.json``, so every browser
 pointed at this engine shows the same gems::
 
     {"season": "auto",
+     "seed": 0,
      "defaults": {"face": "pill", "hat": "auto"},
      "gems": {"lapis": {"face": "disney", "hat": "crown", "color": [30, 90, 180]}}}
+
+A gem with no eyes picked (its own or the defaults') draws a pair from the
+web UI's mix by its name and ``seed``; Shuffle Eyes saves a new seed.
 
 The web UI owns the style vocabulary (eye styles, hats and seasons in
 ``gem-face.ts``), so the engine checks shape only: short slug ids, colors as
@@ -27,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 APPEARANCE_FILE = "appearance.json"
 MAX_GEMS = 256
+MAX_SEED = 2**31
 _SLUG = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
@@ -45,6 +50,12 @@ def _color(value: Any) -> Optional[List[int]]:
     if not all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 255 for c in value):
         return None
     return list(value)
+
+
+def _seed(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < MAX_SEED:
+        return value
+    return 0
 
 
 def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
@@ -74,6 +85,7 @@ def normalize(doc: Any) -> Dict[str, Any]:
                 gems[name] = look
     return {
         "season": _slug(doc.get("season")) or "auto",
+        "seed": _seed(doc.get("seed")),
         # A default color would repaint every gem one color: per gem only.
         "defaults": _look(doc.get("defaults"), allow_color=False),
         "gems": gems,

@@ -11,10 +11,16 @@ import type { EngineApi, GemAppearance } from "@/api";
 import { EYE_STYLES, HAT_STYLES, SEASONS } from "./gem-face";
 import { resolveGemLook, type GemLookVocabulary, type ResolvedGemLook } from "./gem-look";
 
+const everyday = (style: { group: string }) => style.group !== "Halloween" && style.group !== "Christmas";
+/** The out-of-season eyes and hats that Mixed and Random Look draw from. */
+export const MIXED_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
+export const MIXED_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
+
 export const GEM_LOOK_VOCABULARY: GemLookVocabulary = {
   faces: new Set(EYE_STYLES.map((style) => style.id)),
   hats: new Set(["auto", ...HAT_STYLES.map((style) => style.id)]),
   seasons: new Set(["auto", ...SEASONS.map((season) => season.id)]),
+  mixedFaces: MIXED_FACES,
 };
 
 type GemAppearanceValue = {

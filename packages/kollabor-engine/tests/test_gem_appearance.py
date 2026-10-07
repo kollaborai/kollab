@@ -8,7 +8,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
-EMPTY = {"season": "auto", "defaults": {}, "gems": {}}
+EMPTY = {"season": "auto", "seed": 0, "defaults": {}, "gems": {}}
 
 
 @pytest.fixture
@@ -30,6 +30,7 @@ class TestNormalize:
     def test_keeps_well_formed_looks(self):
         doc = {
             "season": "halloween",
+            "seed": 12345,
             "defaults": {"face": "disney", "hat": "auto"},
             "gems": {"lapis": {"face": "kawaii", "hat": "crown", "color": [30, 90, 180]}},
         }
@@ -38,6 +39,7 @@ class TestNormalize:
     def test_drops_malformed_fields(self):
         doc = {
             "season": "Not A Slug",
+            "seed": True,
             "defaults": {"face": "pill", "color": [1, 2, 3]},
             "gems": {
                 "lapis": {"face": 7, "hat": "crown", "color": [256, 0, 0]},
@@ -48,6 +50,7 @@ class TestNormalize:
         }
         assert gem_appearance.normalize(doc) == {
             "season": "auto",
+            "seed": 0,
             "defaults": {"face": "pill"},
             "gems": {"lapis": {"hat": "crown"}},
         }
@@ -64,6 +67,7 @@ class TestAppearanceRoutes:
     async def test_put_saves_and_get_reads_back(self, client, store):
         doc = {
             "season": "none",
+            "seed": 42,
             "defaults": {"face": "disney"},
             "gems": {"lapis": {"hat": "crown", "color": [10, 20, 30]}},
         }

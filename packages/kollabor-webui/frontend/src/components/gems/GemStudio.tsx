@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Loader2, RotateCcw, Sparkles } from "lucide-react";
+import { Dices, Loader2, RotateCcw, Sparkles } from "lucide-react";
 import type { AgentPoolEntry, GemAppearance, GemLook } from "@/api";
 import { titleCase } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
@@ -15,9 +15,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { GemAvatar } from "./GemAvatar";
-import { GemAppearancePreview, useGemAppearance } from "./gem-appearance";
+import {
+  GEM_LOOK_VOCABULARY,
+  GemAppearancePreview,
+  MIXED_FACES,
+  MIXED_HATS,
+  useGemAppearance,
+} from "./gem-appearance";
 import { EYE_STYLES, HAT_STYLES, SEASONS, type Activity, type EyeStyle } from "./gem-face";
-import { withLook } from "./gem-look";
+import { defaultFace, withLook } from "./gem-look";
 
 type Rgb = [number, number, number];
 
@@ -94,8 +100,20 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
   const plain = agents.filter((agent) => !draft.gems?.[agent.name]);
   const showcase = (plain.length ? plain : agents).slice(0, 3);
   const sample = current ?? showcase[0];
-  const defaultFace = (draft.defaults?.face as EyeStyle | undefined) ?? "pill";
+  // The first eye tile: the gem's eyes without its own pick, or, for All Gems,
+  // the sample's draw from the mix.
+  const firstFace = sample
+    ? ((defaultFace(selected ? draft : { ...draft, defaults: {} }, sample.name, GEM_LOOK_VOCABULARY) ??
+        "pill") as EyeStyle)
+    : "pill";
   const set = (patch: Partial<GemLook>) => setDraft((prev) => withLook(prev, selected, patch));
+  const pick = (pool: readonly string[]) => pool[Math.floor(Math.random() * pool.length)];
+  // A gem gets random eyes and hat of its own; All Gems draws a new mix for
+  // every gem without picked eyes.
+  const shuffle = () =>
+    selected
+      ? set({ face: pick(MIXED_FACES), hat: pick(MIXED_HATS) })
+      : setDraft((prev) => withLook({ ...prev, seed: Math.floor(Math.random() * 2 ** 31) }, null, { face: undefined }));
   const season = draft.season ?? "auto";
   const phone = useIsMobile();
 
@@ -198,6 +216,10 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
                 </Chip>
               ))}
             </div>
+            <Button type="button" variant="outline" size="sm" onClick={shuffle}>
+              <Dices className="size-4" />
+              {current ? "Random Look" : "Shuffle Eyes"}
+            </Button>
           </section>
 
           <aside className="flex shrink-0 flex-col lg:min-h-0 lg:border-l">
@@ -209,21 +231,24 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
               </TabsList>
 
               <TabsContent value="eyes" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                {selected ? null : (
+                  <p className="text-muted-foreground mb-2 text-[11px]">Mixed gives each gem its own eyes.</p>
+                )}
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 lg:grid-cols-3">
-                  {selected && sample ? (
+                  {sample ? (
                     <EyeTile
                       active={!target.face}
                       onClick={() => set({ face: undefined })}
-                      label="Default"
+                      label={selected ? "Default" : "Mixed"}
                       agent={sample}
-                      face={defaultFace}
+                      face={firstFace}
                     />
                   ) : null}
                   {sample
                     ? EYE_STYLES.map((style) => (
                         <EyeTile
                           key={style.id}
-                          active={selected ? target.face === style.id : defaultFace === style.id}
+                          active={target.face === style.id}
                           onClick={() => set({ face: style.id })}
                           label={style.label}
                           agent={sample}
