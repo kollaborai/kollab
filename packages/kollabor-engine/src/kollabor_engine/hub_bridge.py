@@ -11,6 +11,7 @@ import asyncio
 import glob as _glob
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,27 @@ logger = logging.getLogger(__name__)
 
 STALE_THRESHOLD_SECONDS = 60
 CACHE_TTL_SECONDS = 5
+
+
+def _pid_alive(pid: Any) -> bool:
+    """False only for a pid that is known and gone.
+
+    A daemon that crashes or is killed leaves its presence file (and a fresh
+    heartbeat) behind for up to STALE_THRESHOLD_SECONDS.
+    """
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return True
+    if pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _current_project_presence_dir() -> Optional[Path]:
@@ -105,6 +127,8 @@ class HubBridge:
                         continue
                     heartbeat = data.get("last_heartbeat", 0)
                     if now - heartbeat > STALE_THRESHOLD_SECONDS:
+                        continue
+                    if not _pid_alive(data.get("pid")):
                         continue
                     seen.add(agent_id)
                     data["alive"] = True

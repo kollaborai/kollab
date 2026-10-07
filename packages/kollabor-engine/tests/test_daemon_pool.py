@@ -114,3 +114,26 @@ async def test_spawn_exports_session_env(user_token, solo, monkeypatch):
     assert env["MENTIKO_SESSION_ID"] == "sess_env"
     assert env.get("MENTIKO_SESSION_TOKEN") == user_token
     assert (env.get("KOLLAB_HUB_SOLO") == "1") is solo
+
+
+@pytest.mark.asyncio
+async def test_spawn_retries_a_socket_that_is_not_listening_yet():
+    # A dead daemon of the same gem can leave its socket file behind, and the
+    # new daemon publishes presence before it binds: the first connect is refused.
+    pool = daemon_pool.DaemonPool()
+    handle = SimpleNamespace(
+        connect=AsyncMock(side_effect=[ConnectionRefusedError(), None]),
+        identity="web-retry",
+        close=AsyncMock(),
+    )
+
+    with (
+        patch.object(daemon_pool.subprocess, "Popen", return_value=SimpleNamespace()),
+        patch.object(daemon_pool, "DaemonHandle", return_value=handle),
+        patch.object(pool, "_await_socket", AsyncMock(return_value="/tmp/k.sock")),
+    ):
+        result = await pool.spawn("sess_retry", workspace="/tmp")
+
+    assert result is handle
+    assert handle.connect.await_count == 2
+    handle.close.assert_not_awaited()
