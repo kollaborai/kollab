@@ -35,8 +35,8 @@ router = APIRouter(prefix="/sessions", tags=["messages"])
 EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 
 # Streamed text and reasoning reach the browser through message-state publishes
-# (it renders only state.messages); at most one per interval, the tail rides the
-# next tool, permission or final publish.
+# (it renders only state.messages); at most one per interval. Text held back by
+# the interval goes out with the next publish, or once the stream goes quiet.
 STREAM_PUBLISH_INTERVAL = 0.15
 
 
@@ -239,18 +239,26 @@ async def _cancel_assistant_turn(session, controller) -> None:
         )
 
 
-async def _assistant_next_event(session, queue, controller):
-    """Wait for either a daemon event or assistant-stream cancellation."""
+async def _assistant_next_event(session, queue, controller, timeout=None):
+    """Wait for either a daemon event or assistant-stream cancellation.
+
+    Returns None once the stream is cancelled, and ``{}`` when ``timeout``
+    seconds pass with neither (a cancelled ``queue.get()`` loses no event).
+    """
     event_task = asyncio.create_task(queue.get())
     cancel_task = asyncio.create_task(controller.cancelled_event.wait())
     try:
         done, _ = await asyncio.wait(
-            {event_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            {event_task, cancel_task},
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
         )
         if cancel_task in done:
             event_task.cancel()
             await _cancel_assistant_turn(session, controller)
             return None
+        if event_task not in done:
+            return {}
         cancel_task.cancel()
         return event_task.result()
     finally:
@@ -661,6 +669,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         # What the client holds; progress publishes only send what differs.
         sent_messages = state_messages
         last_publish = float("-inf")
+        # Streamed text the throttle has not published yet.
+        stream_held = False
 
         def publish_progress() -> None:
             """Publish the in-flight turn so its parts reach the browser.
@@ -670,8 +680,9 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             each time (the final publishes below still mutate it in place);
             ops carry per-message sets, not the whole history.
             """
-            nonlocal sent_messages, last_publish
+            nonlocal sent_messages, last_publish, stream_held
             last_publish = time.monotonic()
+            stream_held = False
             if not persist_message_state:
                 return
             progress = _assistant_update_message_state(
@@ -692,9 +703,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         def add_streamed_text(part_type: str, text: str) -> None:
             """Grow the trailing text/reasoning part, or start one, and publish.
 
-            Throttled, with no trailing timer: tool, permission and final
-            publishes resend the whole message, which flushes any tail.
+            Throttled: text inside the interval is held until the next publish,
+            or until the event wait below times out on a quiet stream.
             """
+            nonlocal stream_held
             if not text:
                 return
             if assistant_parts and assistant_parts[-1]["type"] == part_type:
@@ -703,6 +715,14 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 assistant_parts.append({"type": part_type, "text": text})
             if time.monotonic() - last_publish >= STREAM_PUBLISH_INTERVAL:
                 publish_progress()
+            else:
+                stream_held = True
+
+        def held_text_due() -> Optional[float]:
+            """Seconds until held text should publish; None when none is held."""
+            if not stream_held:
+                return None
+            return max(0.0, last_publish + STREAM_PUBLISH_INTERVAL - time.monotonic())
 
         try:
             for command in body.commands:
@@ -770,9 +790,16 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         assistant_parts.append(part)
 
             while True:
-                event = await _assistant_next_event(session, queue, controller)
+                event = await _assistant_next_event(
+                    session, queue, controller, timeout=held_text_due()
+                )
                 if event is None:
                     return
+                if not event:
+                    # The daemon went quiet after streaming (e.g. before
+                    # turn_complete): publish the text the throttle held.
+                    publish_progress()
+                    continue
                 event_type = str(event.get("type") or "")
 
                 if event_type == "token":

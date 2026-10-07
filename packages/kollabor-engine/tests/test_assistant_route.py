@@ -843,6 +843,35 @@ async def test_assistant_transport_throttles_streamed_text_publishes(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_assistant_transport_flushes_held_text_when_the_stream_goes_quiet(
+    monkeypatch,
+):
+    """Text the throttle held publishes once the daemon goes quiet, not only at
+    turn_complete (the last words of a reply used to lag by seconds)."""
+    monkeypatch.setattr(messages, "STREAM_PUBLISH_INTERVAL", 0.05)
+    session = _FakeSession(_tokens("a", "b", "c"))
+    asyncio.get_running_loop().call_later(
+        0.3, session._events.put_nowait, {"type": "turn_complete"}
+    )
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [{"type": "add-message", "content": "count"}],
+        {"messages": []},
+    )
+
+    assert [path for path, _ in sets] == [
+        ["messages", "0"],
+        ["messages", "1"],
+        ["messages", "1"],
+        ["messages"],
+        ["usage"],
+    ]
+    assert sets[1][1]["content"] == [{"type": "text", "text": "a"}]
+    assert sets[2][1]["content"] == [{"type": "text", "text": "abc"}]
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_orders_text_and_tools_chronologically(monkeypatch):
     """A text -> tool -> text turn keeps each text on its own side of the row."""
     session = _FakeSession(
