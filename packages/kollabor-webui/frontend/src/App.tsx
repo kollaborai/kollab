@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Monitor } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
+import { useThreadActivity } from "@/components/gems/activity";
+import type { Activity } from "@/components/gems/gem-face";
+import { AgentLivePanel } from "@/components/shell/AgentLivePanel";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { PanelHost } from "@/components/panels/PanelHost";
 import type {
@@ -71,6 +75,7 @@ function RuntimeShell({
   agents,
   onSessionUpdated,
   onOpenSettings,
+  onActivity,
   refreshSignal,
 }: {
   session: Session;
@@ -78,6 +83,8 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
+  /** Reports what this session's gem should act out in the sidebar. */
+  onActivity: (activity: Activity | null) => void;
   refreshSignal: number;
 }) {
   const runtimeState = useEngineRuntimeState();
@@ -92,6 +99,14 @@ function RuntimeShell({
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
+  const activity = useThreadActivity(Boolean(transportError));
+  // The hub agent behind this session, when one is live: its screen feeds the
+  // Computer panel.
+  const hubAgent = agents.find((agent) => agent.name === session.identity && agent.agent_id);
+  const [liveOpen, setLiveOpen] = useState(false);
+
+  useEffect(() => onActivity(activity), [activity, onActivity]);
+  useEffect(() => () => onActivity(null), [onActivity]);
 
   useEffect(() => {
     let mounted = true;
@@ -165,6 +180,19 @@ function RuntimeShell({
           >
             {status || transportError || null}
           </span>
+          {hubAgent ? (
+            <Button
+              type="button"
+              variant={liveOpen ? "secondary" : "ghost"}
+              size="xs"
+              aria-pressed={liveOpen}
+              data-testid="computer-toggle"
+              onClick={() => setLiveOpen((open) => !open)}
+            >
+              <Monitor />
+              Computer
+            </Button>
+          ) : null}
         </div>
         <SessionToolbar
           api={api}
@@ -186,6 +214,15 @@ function RuntimeShell({
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
         )}
       </div>
+      <AgentLivePanel
+        api={api}
+        agentId={hubAgent?.agent_id || null}
+        identity={session.identity}
+        state={hubAgent?.state}
+        currentTask={hubAgent?.current_task}
+        open={liveOpen && Boolean(hubAgent)}
+        onOpenChange={setLiveOpen}
+      />
     </>
   );
 }
@@ -215,6 +252,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
@@ -338,6 +376,12 @@ export default function App() {
           if (!controller.signal.aborted) {
             setSessions(next);
             setInitialState((state) => state ? { ...state, sessions: next } : state);
+          }
+          // Live hub state for the sidebar gems; skip the update when nothing
+          // moved so the chat does not re-render every poll.
+          const pool = (await api.listAgentPool(true)).agents || [];
+          if (!controller.signal.aborted) {
+            setAgents((current) => (JSON.stringify(current) === JSON.stringify(pool) ? current : pool));
           }
         } catch {
           // Keep the last known sidebar while the daemon is unavailable.
@@ -535,6 +579,7 @@ export default function App() {
         onWorkspaceChange={setWorkspacePath}
         selectedBundle={selectedBundle}
         activeId={activeId}
+        activeActivity={activeActivity}
         busy={busy}
         onProfileChange={setSelectedProfile}
         onIdentityChange={setSelectedIdentity}
@@ -584,6 +629,7 @@ export default function App() {
               refreshSignal={refreshSignal}
               onSessionUpdated={handleSessionUpdated}
               onOpenSettings={openSettings}
+              onActivity={setActiveActivity}
             />
           </EngineRuntimeProvider>
         ) : (

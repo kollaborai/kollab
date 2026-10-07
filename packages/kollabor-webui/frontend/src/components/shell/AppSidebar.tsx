@@ -1,6 +1,9 @@
-import { useState, type ComponentProps } from "react";
+import { useMemo, useState, type ComponentProps } from "react";
 import { Plus, Settings2, Trash2 } from "lucide-react";
 import type { AgentBundleEntry, AgentPoolEntry, Profile, Session } from "@/api";
+import { GemAvatar } from "@/components/gems/GemAvatar";
+import type { Activity } from "@/components/gems/gem-face";
+import { titleCase } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatSessionName } from "@/utils/session-display";
@@ -53,6 +56,7 @@ export function AppSidebar({
   selectedBundle,
   workspacePath,
   activeId,
+  activeActivity,
   busy,
   onProfileChange,
   onIdentityChange,
@@ -77,6 +81,8 @@ export function AppSidebar({
   selectedBundle: string;
   workspacePath: string;
   activeId: string | null;
+  /** The open session's live action, read from its thread. */
+  activeActivity?: Activity | null;
   busy: boolean;
   onProfileChange: (profile: string) => void;
   onIdentityChange: (identity: string) => void;
@@ -91,6 +97,10 @@ export function AppSidebar({
   // Deleting a session stops its daemon and is irreversible, so it goes behind
   // an AlertDialog rather than the bare "x" the previous shell shipped.
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const poolByName = useMemo(
+    () => new Map(agents.map((agent) => [agent.name, agent])),
+    [agents],
+  );
 
   return (
     <Sidebar {...props}>
@@ -217,7 +227,15 @@ export function AppSidebar({
           <SidebarGroupLabel>Sessions</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {sessions.map((session) => (
+              {sessions.map((session) => {
+                const gem = session.identity || session.agent || "";
+                // Hub presence when the identity is live; otherwise the engine's
+                // own word on whether a daemon backs the session.
+                const pool = poolByName.get(session.identity || "");
+                const hubLive = Boolean(pool?.active);
+                const live = hubLive || session.active !== false;
+                const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
+                return (
                 <SidebarMenuItem key={session.session_id}>
                   <SidebarMenuButton
                     isActive={session.session_id === activeId}
@@ -225,24 +243,40 @@ export function AppSidebar({
                       if (session.attachable !== false) onSelectSession(session.session_id);
                     }}
                     disabled={session.attachable === false}
-                    className="h-auto flex-col items-start gap-0.5 py-2"
+                    title={task ? `${titleCase(gem)}: ${task}` : session.session_id}
+                    className="h-auto gap-3 py-2 pl-2.5"
                   >
-                    <span className="truncate font-medium">
-                      {formatSessionName(session.name, session.session_id)}
-                    </span>
-                    <span className="text-muted-foreground truncate text-xs">
-                      {session.attachable === false ? (
-                        <span className="text-amber-600 dark:text-amber-400">
-                          discovered · attach unavailable
-                        </span>
-                      ) : (
-                        <>
-                          {session.identity || session.agent || "unassigned"} ·{" "}
-                          {session.model || session.profile || "default"} ·{" "}
-                          {session.history_length || 0} messages
-                        </>
-                      )}
-                    </span>
+                    <GemAvatar
+                      gem={gem}
+                      caste={pool?.caste}
+                      color={pool?.color}
+                      state={hubLive ? pool?.state : live ? "idle" : "offline"}
+                      live={live}
+                      activity={session.session_id === activeId ? activeActivity : null}
+                      season="auto"
+                      follow
+                      size={32}
+                    />
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="truncate font-medium">
+                        {formatSessionName(session.name, session.session_id)}
+                      </span>
+                      <span className="text-muted-foreground truncate text-xs">
+                        {session.attachable === false ? (
+                          <span className="text-amber-600 dark:text-amber-400">
+                            discovered · attach unavailable
+                          </span>
+                        ) : task ? (
+                          task
+                        ) : (
+                          <>
+                            {session.identity || session.agent || "unassigned"} ·{" "}
+                            {session.model || session.profile || "default"} ·{" "}
+                            {session.history_length || 0} messages
+                          </>
+                        )}
+                      </span>
+                    </div>
                   </SidebarMenuButton>
                   <SidebarMenuAction
                     onClick={() => setPendingDelete(session)}
@@ -253,7 +287,8 @@ export function AppSidebar({
                     <Trash2 />
                   </SidebarMenuAction>
                 </SidebarMenuItem>
-              ))}
+                );
+              })}
               {!sessions.length ? (
                 <p className="text-muted-foreground px-2 py-1 text-xs">
                   No sessions yet.

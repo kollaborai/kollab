@@ -105,6 +105,10 @@ export type AgentPoolEntry = {
   active?: boolean;
   state?: string;
   current_task?: string;
+  /** Pool gem color [r, g, b], shared with the TUI. */
+  color?: number[];
+  /** Live hub agent id; empty when nothing runs this identity. */
+  agent_id?: string;
 };
 
 export type AgentBundleEntry = {
@@ -840,9 +844,10 @@ export class EngineApi {
     );
   }
 
-  getHubAgentOutput(agentId: string, lines = 80) {
+  getHubAgentOutput(agentId: string, lines = 80, signal?: AbortSignal) {
     return this.json<{ agent_id: string; output?: string | null; error?: string }>(
       `/hub/agents/${encodeURIComponent(agentId)}/output?lines=${lines}`,
+      { signal },
     );
   }
 
