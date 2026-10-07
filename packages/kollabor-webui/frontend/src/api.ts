@@ -439,6 +439,7 @@ export class ApiError extends Error {
 export class EngineApi {
   private baseUrl: string;
   private token: string | null;
+  private config: Promise<EngineConfig | null> | null = null;
 
   constructor(baseUrl = "http://127.0.0.1:7433") {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -492,6 +493,9 @@ export class EngineApi {
   }
 
   async request(path: string, init: RequestInit = {}, retry = true): Promise<Response> {
+    // Requests fired on mount (the session poll) would otherwise go to the
+    // default URL without a token before the config arrives.
+    await this.loadConfig();
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers: this.headers(init.headers),
@@ -518,17 +522,21 @@ export class EngineApi {
     return (await (await this.request(path, init)).json()) as T;
   }
 
-  async loadConfig() {
-    try {
-      const response = await fetch("/api/config", { cache: "no-store" });
-      if (!response.ok) return null;
-      const config = (await response.json()) as EngineConfig;
-      if (config.engine_url) this.setBaseUrl(config.engine_url);
-      if (config.token) this.setToken(config.token);
-      return config;
-    } catch {
-      return null;
-    }
+  /** Loads the engine URL and token once; every caller shares the result. */
+  loadConfig() {
+    this.config ??= (async () => {
+      try {
+        const response = await fetch("/api/config", { cache: "no-store" });
+        if (!response.ok) return null;
+        const config = (await response.json()) as EngineConfig;
+        if (config.engine_url) this.setBaseUrl(config.engine_url);
+        if (config.token) this.setToken(config.token);
+        return config;
+      } catch {
+        return null;
+      }
+    })();
+    return this.config;
   }
 
   listSessions() {
