@@ -410,9 +410,7 @@ def _now_ms() -> int:
 def _tool_completed_ms(started: int, event: Dict[str, Any]) -> int:
     """End of a tool call: the daemon's measured run time, else receipt time.
 
-    ``execution_time`` (seconds) starts before the permission hook, so a gated
-    tool's duration includes the wait for the user; a missing or zero value must
-    not render as "0ms".
+    A missing or zero ``execution_time`` (seconds) must not render as "0ms".
     """
     elapsed = event.get("execution_time")
     if isinstance(elapsed, (int, float)) and elapsed > 0:
