@@ -7,8 +7,10 @@ clients need no modification.
 """
 
 import asyncio
+import copy
 import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -320,9 +322,14 @@ def _assistant_update_message_state(
     text: str,
     reasoning: str,
     tool_parts: List[Dict[str, Any]],
-    status: Dict[str, str],
+    status: Optional[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
-    """Persist the completed or interrupted turn in assistant-ui state."""
+    """Persist the completed or interrupted turn in assistant-ui state.
+
+    ``status=None`` leaves the message status out so the client derives it
+    (running while the request is open); mid-turn publishes use that so a
+    cancelled or crashed run cannot leave a message spinning forever.
+    """
     if not submitted_contents:
         for message in reversed(messages):
             if message.get("role") != "assistant":
@@ -348,7 +355,10 @@ def _assistant_update_message_state(
                 if part.get("toolCallId") not in existing_tool_ids
             )
             message["content"] = existing_parts
-            message["status"] = status
+            if status is None:
+                message.pop("status", None)
+            else:
+                message["status"] = status
             return messages
 
     for index, submitted_content in enumerate(submitted_contents):
@@ -363,14 +373,14 @@ def _assistant_update_message_state(
             }
         )
 
-    messages.append(
-        {
-            "id": f"assistant-{session_id}-{len(messages)}",
-            "role": "assistant",
-            "content": _assistant_state_content(text, reasoning, tool_parts),
-            "status": status,
-        }
-    )
+    assistant_message: Dict[str, Any] = {
+        "id": f"assistant-{session_id}-{len(messages)}",
+        "role": "assistant",
+        "content": _assistant_state_content(text, reasoning, tool_parts),
+    }
+    if status is not None:
+        assistant_message["status"] = status
+    messages.append(assistant_message)
     return messages
 
 
@@ -381,6 +391,23 @@ def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> 
         controller.state = {"messages": messages}
     else:
         state["messages"] = messages
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _tool_completed_ms(started: int, event: Dict[str, Any]) -> int:
+    """End of a tool call: the daemon's measured run time, else receipt time.
+
+    ``execution_time`` (seconds) starts before the permission hook, so a gated
+    tool's duration includes the wait for the user; a missing or zero value must
+    not render as "0ms".
+    """
+    elapsed = event.get("execution_time")
+    if isinstance(elapsed, (int, float)) and elapsed > 0:
+        return started + int(elapsed * 1000)
+    return max(started, _now_ms())
 
 
 def _assistant_protocol_chunk(
@@ -624,6 +651,36 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         assistant_parts: List[Dict[str, Any]] = []
         saw_action = False
+        # What the client holds; progress publishes only send what differs.
+        sent_messages = state_messages
+
+        def publish_progress() -> None:
+            """Publish the in-flight turn so running tool parts reach the browser.
+
+            The web client renders only ``state.messages``, so without this a
+            turn shows nothing until it ends. Rebuilt from the untouched base
+            each time (the final publishes below still mutate it in place);
+            ops carry per-message sets, not the whole history.
+            """
+            nonlocal sent_messages
+            if not persist_message_state:
+                return
+            progress = _assistant_update_message_state(
+                [dict(message) for message in state_messages],
+                session_id,
+                submitted_contents,
+                assistant_text,
+                assistant_reasoning,
+                copy.deepcopy(assistant_parts),
+                None,
+            )
+            published = controller.state["messages"]
+            for index, message in enumerate(progress):
+                if index >= len(sent_messages):
+                    published.append(message)
+                elif message != sent_messages[index]:
+                    published[index] = message
+            sent_messages = progress
 
         try:
             for command in body.commands:
@@ -710,10 +767,12 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         "toolName": str(event.get("tool_name") or "tool"),
                         "args": tool_input,
                         "argsText": json.dumps(tool_input, ensure_ascii=False),
+                        "timing": {"startedAt": _now_ms()},
                     }
                     assistant_tool_parts[tool_id] = tool_part
                     assistant_parts.append(tool_part)
                     tool_controller.append_args_text(tool_part["argsText"])
+                    publish_progress()
                 elif event_type == "permission_request":
                     source_tool_id = str(event.get("tool_id") or "")
                     if not source_tool_id:
@@ -774,10 +833,17 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                                 "isError": not result["success"],
                             }
                         )
+                        started = (tool_part.get("timing") or {}).get("startedAt")
+                        if started is not None:
+                            tool_part["timing"] = {
+                                "startedAt": started,
+                                "completedAt": _tool_completed_ms(started, event),
+                            }
                     if tool_controller is not None:
                         _assistant_set_tool_result(tool_controller, result)
                     else:
                         controller.add_tool_result(tool_id, result)
+                    publish_progress()
                 elif event_type == "permission_granted":
                     source_tool_id = str(event.get("tool_id") or "")
                     permission_part = assistant_tool_parts.get(

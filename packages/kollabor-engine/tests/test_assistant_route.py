@@ -556,3 +556,145 @@ async def test_assistant_transport_maps_daemon_events_to_stream(monkeypatch):
         "toolCalls": 1,
         "stopReason": "tool_use",
     }
+
+
+async def _state_ops(monkeypatch, session, commands, state):
+    """Run the route through the real StateProxy; return its update-state ops."""
+    import assistant_stream
+
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    real_create_run = assistant_stream.create_run
+
+    async def create_run(callback, *, state=None):
+        async for chunk in real_create_run(callback, state=state):
+            yield chunk
+
+    monkeypatch.setattr(assistant_stream, "create_run", create_run)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=commands, state=state),
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+    payload = "".join(
+        chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks
+    )
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in payload.splitlines()
+        if line.startswith("data: {")
+    ]
+    return [
+        (op["path"], op["value"])
+        for frame in frames
+        if frame["type"] == "update-state"
+        for op in frame["operations"]
+        if op["type"] == "set"
+    ]
+
+
+def test_tool_completed_ms_prefers_measured_run_time():
+    assert messages._tool_completed_ms(1000, {"execution_time": 1.25}) == 2250
+    # A missing or zero run time must not render as "0ms"; never before the start.
+    for event in ({}, {"execution_time": 0}, {"execution_time": None}):
+        assert messages._tool_completed_ms(10**15, event) == 10**15
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_publishes_running_tool_with_timing(monkeypatch):
+    """A running tool part reaches the client mid-turn, then finishes timed."""
+    session = _FakeSession(
+        [
+            {
+                "type": "tool_start",
+                "tool_id": "call-1",
+                "tool_name": "terminal: ls",
+                "input": {"command": "ls"},
+            },
+            {
+                "type": "tool_result",
+                "tool_id": "call-1",
+                "success": True,
+                "output": "a",
+                "execution_time": 1.25,
+            },
+            {"type": "turn_complete"},
+        ]
+    )
+    prior = [{"id": "prior", "role": "user", "content": "previous"}]
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [{"type": "add-message", "content": "run ls"}],
+        {"messages": prior},
+    )
+
+    assert [path for path, _ in sets] == [
+        ["messages", "1"],
+        ["messages", "2"],
+        ["messages", "2"],
+        ["messages"],
+        ["usage"],
+    ]
+    # tool_start: the user message and an in-flight assistant message, no result
+    # and no explicit status (the client shows it running while the run is open).
+    assert sets[0][1]["role"] == "user"
+    running = sets[1][1]
+    part = running["content"][0]
+    assert "status" not in running and "result" not in part
+    assert isinstance(part["timing"]["startedAt"], int)
+    assert "completedAt" not in part["timing"]
+    # tool_result: same message index, now with its result and measured run time.
+    done = sets[2][1]["content"][0]
+    assert done["result"]["output"] == "a" and "status" not in sets[2][1]
+    assert done["timing"]["completedAt"] - done["timing"]["startedAt"] == 1250
+    # Turn end: the authoritative list, nothing duplicated, timing kept.
+    final = sets[3][1]
+    assert [m["role"] for m in final] == ["user", "user", "assistant"]
+    assert final[2]["status"] == {"type": "complete", "reason": "stop"}
+    assert final[2]["content"][0]["timing"] == done["timing"]
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_progress_extends_continued_assistant_message(
+    monkeypatch,
+):
+    """A run that answers a permission prompt updates that message in place."""
+    session = _FakeSession(
+        [
+            {
+                "type": "tool_start",
+                "tool_id": "call-2",
+                "tool_name": "terminal: pwd",
+                "input": {"command": "pwd"},
+            },
+            {"type": "turn_complete"},
+        ]
+    )
+    earlier = {"type": "tool-call", "toolCallId": "call-1", "toolName": "terminal"}
+    state = {
+        "messages": [
+            {"id": "u", "role": "user", "content": "go"},
+            {
+                "id": "a",
+                "role": "assistant",
+                "content": [earlier],
+                "status": {"type": "requires-action", "reason": "tool-calls"},
+            },
+        ]
+    }
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [{"type": "add-tool-result", "toolCallId": "permission_call-1", "result": True}],
+        state,
+    )
+
+    path, message = sets[0]
+    assert path == ["messages", "1"]
+    assert [part["toolCallId"] for part in message["content"]] == ["call-1", "call-2"]
+    assert "status" not in message
+    # The final publish keeps one assistant message with an explicit status.
+    assert [m["role"] for m in sets[-2][1]] == ["user", "assistant"]
+    assert sets[-2][1][1]["status"] == {"type": "complete", "reason": "stop"}
