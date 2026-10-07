@@ -343,12 +343,17 @@ export function SessionToolbar({
                           <span className="text-muted-foreground text-xs">
                             {definition.description || "No description"}
                           </span>
-                          <span className="text-muted-foreground flex items-center gap-1 text-[11px]">
-                            <Terminal className="size-3" />
+                          {/* A long command path must wrap anywhere, or its
+                              width pushes the dialog past a phone screen. */}
+                          <span className="text-muted-foreground flex items-start gap-1 text-[11px] break-all">
+                            <Terminal className="mt-0.5 size-3 shrink-0" />
                             {definition.command || "configured by agent"}
                           </span>
                         </div>
-                        <Badge variant={connected ? "default" : "outline"}>
+                        <Badge
+                          className="shrink-0"
+                          variant={connected ? "default" : "outline"}
+                        >
                           {connected ? "Connected" : "Offline"}
                         </Badge>
                       </div>

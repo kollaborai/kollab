@@ -227,7 +227,7 @@ export function ProfilesDialog({
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium">{p.name}</div>
                 <div className="text-muted-foreground truncate text-xs">
-                  {p.provider} · {p.model}
+                  {[p.provider, p.model].filter(Boolean).join(" · ")}
                 </div>
               </div>
               <Button
