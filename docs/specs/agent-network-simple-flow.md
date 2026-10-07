@@ -721,7 +721,8 @@ How it stays secure with 40 bits:
   `shutil.which` cannot find, or a path that is missing or not executable) is
   skipped: it is never written and a local server of the same name stays. The
   secondary shows one line, `Skipped MCP servers not installed here: a, b`, once
-  per distinct set. URL servers have no command and always sync.
+  per distinct set; a server the primary switched off (`"enabled": false`) is
+  skipped without being named. URL servers have no command and always sync.
 - That skip is availability, not a sandbox: a synced server's command, args and
   env run on the secondary as this user, the moment the bundle lands. Joining a
   network means trusting its primary to run what it sends; `/connect revoke` is
