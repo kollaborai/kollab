@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/kollab-demo.gif" alt="Kollab terminal demo showing koordinator coordinating with lapis and sapphire through the local agent hub" width="760">
+  <img src="docs/media/kollab-hero.gif" alt="Kollab running: koordinator spins up three agents that build and test checkout rate limiting together; a second pane SSHes into a server, joins the network with a one-time code, receives the laptop's settings, pulls the pushed code and runs the tests" width="100%">
 </p>
 
 Kollab is a terminal-native AI workspace for developers who want more than a
