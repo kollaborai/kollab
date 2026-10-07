@@ -204,3 +204,50 @@ async def test_pasted_slash_command_is_dispatched_after_paste_expansion():
     assert not any(
         event_type == EventType.USER_INPUT for event_type, _, _ in event_bus.events
     )
+
+
+@pytest.mark.asyncio
+async def test_key_press_hooks_run_once_and_can_prevent_default():
+    """Each key reaches KEY_PRESS hooks once; prevent_default skips its handling.
+
+    The hook's return value lives under main["hook_results"], which the old
+    check never read, so Ctrl+Z detach ran twice and printed its notice twice.
+    """
+    from kollabor_events.bus import EventBus
+    from kollabor_events.models import Hook, HookPriority
+
+    seen = []
+
+    async def hook(data, event=None):
+        seen.append(data["key"])
+        if data["key"] == "x":
+            return {"prevent_default": True}
+
+    bus = EventBus()
+    await bus.register_hook(
+        Hook(
+            name="keys",
+            plugin_name="test",
+            event_type=EventType.KEY_PRESS,
+            callback=hook,
+            priority=HookPriority.SYSTEM.value,
+        )
+    )
+    buffer = BufferManager()
+    handler = KeyPressHandler(
+        buffer_manager=buffer,
+        key_parser=KeyParser(),
+        event_bus=bus,
+        error_handler=_ErrorHandler(),
+        display_controller=AsyncMock(),
+        paste_processor=PasteProcessor(buffer),
+        renderer=_Renderer(),
+    )
+
+    await handler.process_character("a")
+    await handler.process_character("x")
+    await asyncio.sleep(0.05)  # let any background emit land
+    await handler.cleanup()
+
+    assert seen == ["a", "x"]
+    assert buffer.content == "a"

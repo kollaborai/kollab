@@ -11,11 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A paste shorter than `input.paste_min_chars` (default 500, in `/config` under Input Settings) goes into the input as text, line breaks kept and not submitted. Only longer pastes collapse to `[Pasted #N ...]`; before, anything over 10 characters did. Ctrl+V clipboard text follows the same rule instead of always going in flattened to one line. Text with a character the input cannot hold still collapses, so nothing is lost.
 - Sliders with a whole-number step show whole numbers in `/config` (`History Limit: 100`, not `100.0`).
 - The first Ctrl+C in a window that started its agent says what each key does next: "Press Ctrl+C again to stop koordinator, or Ctrl+Z to detach". The hint wraps on narrow terminals.
+- After Ctrl+Z on the coordinator, the notice says `reattach: kollab`: a bare `kollab` in the same folder picks it back up. Other agents still show `kollab --attach <name>`.
 
 ### Fixed
 - A second `kollab` in the same workspace starts the next agent again instead of joining the session another terminal still has open. A bare relaunch only reattaches to a daemon with no window (one left by Ctrl+Z or a closed terminal); the agent's status now reports how many windows it has.
 - Pasting an image no longer closes `kollab`. The daemon read each client message with a 64 KB cap, so an image dropped the connection and the window exited as if the agent had died.
 - The hub coordinator now saves work it takes back from a dead agent, so the work is reassigned. It used to log the same reassignment every 5 seconds and never save it.
+- `KeyPress` hooks, plugin or config, run once per key instead of twice, and a hook that returns `prevent_default` now stops the key's normal handling. Ctrl+Z printed its detach notice twice because of it.
 
 ## [0.11.3] - 2026-10-05
 

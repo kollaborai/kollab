@@ -1949,14 +1949,17 @@ class TerminalLLMChat:
             except Exception:
                 pass
 
+            # A bare relaunch reattaches to the coordinator first
+            # (daemon.find_workspace_daemon); any other agent needs its name.
+            reattach = (
+                "kollab"
+                if hub_info.get("is_coordinator")
+                else f"kollab --attach {identity}"
+            )
             self.renderer.message_coordinator.display_message_sequence(
                 [
                     ("system", f"detached from {identity}", {"display_type": "info"}),
-                    (
-                        "system",
-                        f"reattach: kollab --attach {identity}",
-                        {"display_type": "info"},
-                    ),
+                    ("system", f"reattach: {reattach}", {"display_type": "info"}),
                 ]
             )
 
