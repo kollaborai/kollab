@@ -34,6 +34,11 @@ router = APIRouter(prefix="/sessions", tags=["messages"])
 # This only bounds silence: any event from the daemon resets it.
 EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 
+# Streamed text and reasoning reach the browser through message-state publishes
+# (it renders only state.messages); at most one per interval, the tail rides the
+# next tool, permission or final publish.
+STREAM_PUBLISH_INTERVAL = 0.15
+
 
 class MessageRequest(BaseModel):
     content: Any
@@ -300,21 +305,6 @@ def _assistant_copy_messages(state: Any) -> List[Dict[str, Any]]:
     return messages
 
 
-def _assistant_state_content(
-    text: str,
-    reasoning: str,
-    tool_parts: List[Dict[str, Any]],
-) -> Any:
-    """Build a ThreadMessageLike-compatible content value."""
-    parts: List[Dict[str, Any]] = []
-    if reasoning:
-        parts.append({"type": "reasoning", "text": reasoning})
-    if text:
-        parts.append({"type": "text", "text": text})
-    parts.extend(tool_parts)
-    return parts if parts else ""
-
-
 def _assistant_continued_tool_parts(
     messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -335,13 +325,13 @@ def _assistant_update_message_state(
     messages: List[Dict[str, Any]],
     session_id: str,
     submitted_contents: List[MessageContent],
-    text: str,
-    reasoning: str,
-    tool_parts: List[Dict[str, Any]],
+    parts: List[Dict[str, Any]],
     status: Optional[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
     """Persist the completed or interrupted turn in assistant-ui state.
 
+    ``parts`` are the turn's text, reasoning and tool-call parts in arrival
+    order, so the message reads chronologically like its reloaded history.
     ``status=None`` leaves the message status out so the client derives it
     (running while the request is open); mid-turn publishes use that so a
     cancelled or crashed run cannot leave a message spinning forever.
@@ -358,21 +348,22 @@ def _assistant_update_message_state(
             )
             # A tool call this run knows by id (adopted from this message, e.g.
             # a gated tool whose prompt the user just answered) replaces the
-            # stored part so its result lands in place; the rest append.
-            fresh = {part.get("toolCallId"): part for part in tool_parts}
-            existing_parts = [
-                (
-                    fresh.pop(part.get("toolCallId"), part)
-                    if isinstance(part, dict) and part.get("type") == "tool-call"
-                    else part
+            # stored part so its result lands in place; the rest append in order.
+            stored_tools = {
+                part.get("toolCallId"): index
+                for index, part in enumerate(existing_parts)
+                if isinstance(part, dict) and part.get("type") == "tool-call"
+            }
+            for part in parts:
+                index = (
+                    stored_tools.get(part.get("toolCallId"))
+                    if part.get("type") == "tool-call"
+                    else None
                 )
-                for part in existing_parts
-            ]
-            if reasoning:
-                existing_parts.append({"type": "reasoning", "text": reasoning})
-            if text:
-                existing_parts.append({"type": "text", "text": text})
-            existing_parts.extend(fresh.values())
+                if index is None:
+                    existing_parts.append(part)
+                else:
+                    existing_parts[index] = part
             message["content"] = existing_parts
             if status is None:
                 message.pop("status", None)
@@ -395,7 +386,7 @@ def _assistant_update_message_state(
     assistant_message: Dict[str, Any] = {
         "id": f"assistant-{session_id}-{len(messages)}",
         "role": "assistant",
-        "content": _assistant_state_content(text, reasoning, tool_parts),
+        "content": list(parts) if parts else "",
     }
     if status is not None:
         assistant_message["status"] = status
@@ -665,31 +656,30 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             body.state.get("messages"), list
         )
         submitted_contents: List[MessageContent] = []
-        assistant_text = ""
-        assistant_reasoning = ""
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
+        # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
         saw_action = False
         # What the client holds; progress publishes only send what differs.
         sent_messages = state_messages
+        last_publish = float("-inf")
 
         def publish_progress() -> None:
-            """Publish the in-flight turn so running tool parts reach the browser.
+            """Publish the in-flight turn so its parts reach the browser.
 
             The web client renders only ``state.messages``, so without this a
             turn shows nothing until it ends. Rebuilt from the untouched base
             each time (the final publishes below still mutate it in place);
             ops carry per-message sets, not the whole history.
             """
-            nonlocal sent_messages
+            nonlocal sent_messages, last_publish
+            last_publish = time.monotonic()
             if not persist_message_state:
                 return
             progress = _assistant_update_message_state(
                 [dict(message) for message in state_messages],
                 session_id,
                 submitted_contents,
-                assistant_text,
-                assistant_reasoning,
                 copy.deepcopy(assistant_parts),
                 None,
             )
@@ -700,6 +690,21 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 elif message != sent_messages[index]:
                     published[index] = message
             sent_messages = progress
+
+        def add_streamed_text(part_type: str, text: str) -> None:
+            """Grow the trailing text/reasoning part, or start one, and publish.
+
+            Throttled, with no trailing timer: tool, permission and final
+            publishes resend the whole message, which flushes any tail.
+            """
+            if not text:
+                return
+            if assistant_parts and assistant_parts[-1]["type"] == part_type:
+                assistant_parts[-1]["text"] += text
+            else:
+                assistant_parts.append({"type": part_type, "text": text})
+            if time.monotonic() - last_publish >= STREAM_PUBLISH_INTERVAL:
+                publish_progress()
 
         try:
             for command in body.commands:
@@ -774,12 +779,12 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
 
                 if event_type == "token":
                     token = str(event.get("text") or "")
-                    assistant_text += token
                     controller.append_text(token)
+                    add_streamed_text("text", token)
                 elif event_type == "thinking":
                     thinking = str(event.get("text") or "")
-                    assistant_reasoning += thinking
                     controller.append_reasoning(thinking)
+                    add_streamed_text("reasoning", thinking)
                 elif event_type == "tool_start":
                     tool_id = str(event.get("tool_id") or "")
                     if not tool_id:
@@ -833,8 +838,6 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         state_messages,
                         session_id,
                         submitted_contents,
-                        assistant_text,
-                        assistant_reasoning,
                         assistant_parts,
                         {"type": "requires-action", "reason": "tool-calls"},
                     )
@@ -936,8 +939,6 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         state_messages,
                         session_id,
                         submitted_contents,
-                        assistant_text,
-                        assistant_reasoning,
                         assistant_parts,
                         {"type": "complete", "reason": "stop"},
                     )

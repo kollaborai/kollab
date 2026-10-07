@@ -370,6 +370,7 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
     assert [frame["type"] for frame in frames] == [
         "part-start",
         "text-delta",
+        "update-state",
         "part-finish",
         "part-start",
         "text-delta",
@@ -379,13 +380,18 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
     ]
     assert frames[1]["path"] == [0]
     assert frames[1]["textDelta"] == "thinking"
-    assert frames[4]["path"] == [1]
-    assert frames[4]["textDelta"] == "hello"
-    assert frames[5]["operations"] == [
+    # The first streamed event publishes at once; "hello" lands inside the
+    # throttle window and rides the final publish.
+    mid_turn = [(op["path"], op["value"]) for op in frames[2]["operations"]]
+    assert [path for path, _ in mid_turn] == [["messages", "1"], ["messages", "2"]]
+    assert mid_turn[1][1]["content"] == [{"type": "reasoning", "text": "thinking"}]
+    assert frames[5]["path"] == [1]
+    assert frames[5]["textDelta"] == "hello"
+    assert frames[6]["operations"] == [
         {"type": "set", "path": ["messages"], "value": state["messages"]},
         {"type": "set", "path": ["usage"], "value": state["usage"]},
     ]
-    assert frames[7]["finishReason"] == "stop"
+    assert frames[8]["finishReason"] == "stop"
     assert state["sessionId"] == initial_state["sessionId"]
     assert state["messages"] == [
         *prior_messages,
@@ -687,7 +693,13 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
     sets = await _state_ops(
         monkeypatch,
         session,
-        [{"type": "add-tool-result", "toolCallId": "permission_call-1", "result": True}],
+        [
+            {
+                "type": "add-tool-result",
+                "toolCallId": "permission_call-1",
+                "result": True,
+            }
+        ],
         state,
     )
 
@@ -773,4 +785,180 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     tools = [p for p in final[1]["content"] if p["type"] == "tool-call"]
     assert [p["toolCallId"] for p in tools] == ["call-1", "permission_call-1"]
     assert tools[0]["timing"] == {"startedAt": 1000, "completedAt": 3000}
+    # The continued run's text lands after the finished rows, not above them.
+    assert final[1]["content"][-1] == {"type": "text", "text": "done"}
     assert final[1]["status"] == {"type": "complete", "reason": "stop"}
+
+
+def _tokens(*texts: str) -> list[dict[str, Any]]:
+    return [{"type": "token", "text": text} for text in texts]
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_publishes_streamed_text_as_it_grows(monkeypatch):
+    """With no throttle every token publishes the whole text so far."""
+    monkeypatch.setattr(messages, "STREAM_PUBLISH_INTERVAL", 0)
+    session = _FakeSession([*_tokens("a", "b", "c"), {"type": "turn_complete"}])
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [{"type": "add-message", "content": "count"}],
+        {"messages": []},
+    )
+
+    assert [path for path, _ in sets] == [
+        ["messages", "0"],
+        ["messages", "1"],
+        ["messages", "1"],
+        ["messages", "1"],
+        ["messages"],
+        ["usage"],
+    ]
+    growing = [value["content"] for _, value in sets[1:4]]
+    assert growing == [[{"type": "text", "text": text}] for text in ("a", "ab", "abc")]
+    # Mid-turn publishes leave the status to the client; only the end sets it.
+    assert all("status" not in value for _, value in sets[1:4])
+    assert sets[4][1][1]["status"] == {"type": "complete", "reason": "stop"}
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_throttles_streamed_text_publishes(monkeypatch):
+    """Rapid tokens publish once mid-turn; the final publish carries the tail."""
+    session = _FakeSession([*_tokens("a", "b", "c"), {"type": "turn_complete"}])
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [{"type": "add-message", "content": "count"}],
+        {"messages": []},
+    )
+
+    assert [path for path, _ in sets] == [
+        ["messages", "0"],
+        ["messages", "1"],
+        ["messages"],
+        ["usage"],
+    ]
+    assert sets[1][1]["content"] == [{"type": "text", "text": "a"}]
+    assert sets[2][1][1]["content"] == [{"type": "text", "text": "abc"}]
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_orders_text_and_tools_chronologically(monkeypatch):
+    """A text -> tool -> text turn keeps each text on its own side of the row."""
+    session = _FakeSession(
+        [
+            *_tokens("Checking. ", "now"),
+            {
+                "type": "tool_start",
+                "tool_id": "call-1",
+                "tool_name": "terminal: ls",
+                "input": {"command": "ls"},
+            },
+            {
+                "type": "tool_result",
+                "tool_id": "call-1",
+                "success": True,
+                "output": "a",
+            },
+            *_tokens("All ", "done"),
+            {"type": "turn_complete"},
+        ]
+    )
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [{"type": "add-message", "content": "run ls"}],
+        {"messages": []},
+    )
+
+    def shape(content):
+        return [part.get("text") or part["toolCallId"] for part in content]
+
+    # tool_start flushes the throttled tail ahead of the row it starts.
+    assert shape(sets[2][1]["content"]) == ["Checking. now", "call-1"]
+    final = sets[-2][1][-1]
+    assert [part["type"] for part in final["content"]] == [
+        "text",
+        "tool-call",
+        "text",
+    ]
+    assert shape(final["content"]) == ["Checking. now", "call-1", "All done"]
+    assert final["content"][1]["result"]["output"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
+    """Answering a prompt finishes its row in place; later text and tools follow it."""
+    session = _FakeSession(
+        [
+            {"type": "permission_granted", "tool_id": "call-1", "scope": "once"},
+            {
+                "type": "tool_result",
+                "tool_id": "call-1",
+                "success": True,
+                "output": "a",
+            },
+            *_tokens("x"),
+            {
+                "type": "tool_start",
+                "tool_id": "call-2",
+                "tool_name": "terminal: pwd",
+                "input": {"command": "pwd"},
+            },
+            {
+                "type": "tool_result",
+                "tool_id": "call-2",
+                "success": True,
+                "output": "/",
+            },
+            *_tokens("y"),
+            {"type": "turn_complete"},
+        ]
+    )
+    state = {
+        "messages": [
+            {"id": "u", "role": "user", "content": "go"},
+            {
+                "id": "a",
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "call-1",
+                        "toolName": "terminal",
+                    },
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "permission_call-1",
+                        "toolName": "request_permission",
+                    },
+                ],
+                "status": {"type": "requires-action", "reason": "tool-calls"},
+            },
+        ]
+    }
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [
+            {
+                "type": "add-tool-result",
+                "toolCallId": "permission_call-1",
+                "result": True,
+            }
+        ],
+        state,
+    )
+
+    final = sets[-2][1]
+    assert [m["role"] for m in final] == ["user", "assistant"]
+    assert [part.get("text") or part["toolCallId"] for part in final[1]["content"]] == [
+        "before",
+        "call-1",
+        "permission_call-1",
+        "x",
+        "call-2",
+        "y",
+    ]
+    assert final[1]["content"][1]["result"]["output"] == "a"
