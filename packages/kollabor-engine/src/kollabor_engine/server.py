@@ -74,6 +74,26 @@ def create_app() -> FastAPI:
 
         return await call_next(request)
 
+    def error_response(request: Request, exc: Exception) -> JSONResponse:
+        tb = "".join(traceback.format_exception(exc))
+        logger.error(
+            f"Unhandled exception on {request.method} {request.url.path}:\n{tb}"
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(exc), "type": type(exc).__name__},
+        )
+
+    # Between auth and CORS: a crash becomes a JSON 500 that still carries CORS
+    # headers. The exception handler below runs outside CORS, so on its own the
+    # browser reported "Failed to fetch" instead of the error.
+    @app.middleware("http")
+    async def error_middleware(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            return error_response(request, exc)
+
     # Registered last so it wraps auth_middleware: a short-circuited 401 still
     # gets CORS headers, otherwise the browser reports an opaque CORS failure
     # instead of the real "unauthorized".
@@ -87,14 +107,7 @@ def create_app() -> FastAPI:
     # Global exception handler - ensures all 500s return JSON (not plain text)
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
-        tb = traceback.format_exc()
-        logger.error(
-            f"Unhandled exception on {request.method} {request.url.path}:\n{tb}"
-        )
-        return JSONResponse(
-            status_code=500,
-            content={"detail": str(exc), "type": type(exc).__name__},
-        )
+        return error_response(request, exc)
 
     # Mount routes
     from .routes.mcp import router as mcp_router
