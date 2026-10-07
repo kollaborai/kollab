@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pasting an image no longer closes `kollab`. The daemon read each client message with a 64 KB cap, so an image dropped the connection and the window exited as if the agent had died.
 - The hub coordinator now saves work it takes back from a dead agent, so the work is reassigned. It used to log the same reassignment every 5 seconds and never save it.
 - `KeyPress` hooks, plugin or config, run once per key instead of twice, and a hook that returns `prevent_default` now stops the key's normal handling. Ctrl+Z printed its detach notice twice because of it.
+- An agent answers a message from another machine, a greeting included. A new `agent@device` message got the hub rule "if it is only an acknowledgement, do not respond", so a "hello" woke the agent, it replied with nothing, and the sender saw silence. The agent is now told the sender is waiting and to reply once.
 
 ## [0.11.3] - 2026-10-05
 

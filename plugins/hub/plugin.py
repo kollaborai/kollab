@@ -7530,13 +7530,26 @@ class HubPlugin(BasePlugin):
                     f"to your current task or you can add value to the discussion.)"
                 )
             elif message.to == my_name:
+                if network_request:
+                    # Someone on another machine watches for the answer, so
+                    # silence reads as "never arrived": a greeting gets a reply
+                    # too. A pure acknowledgement never wakes (_decide_hub_wake).
+                    guidance = (
+                        f"{message.from_identity} wrote to you from another "
+                        "machine and is waiting for your answer. Reply once, "
+                        "even to a greeting: your plain-text reply is sent "
+                        "back to them."
+                    )
+                else:
+                    guidance = (
+                        "Handle this once if actionable. If it is only an "
+                        "acknowledgement, do not respond."
+                    )
                 formatted += (
                     "\n\n[hub wake instruction]\n"
                     f"classification: {wake_decision.mode} "
                     f"({wake_decision.reason}). "
-                    "Handle this once if actionable. If it is only an "
-                    "acknowledgement, do not respond. When no work remains, "
-                    "let the turn end naturally."
+                    f"{guidance} When no work remains, let the turn end naturally."
                 )
 
             try:
