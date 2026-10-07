@@ -129,6 +129,7 @@ class ProfileSnapshot(Snapshot):
     temperature: float = 0.7
     description: str = ""
     is_active: bool = False
+    effort: str = ""  # reasoning effort the next request will send, "" = model default
 
 
 @dataclass

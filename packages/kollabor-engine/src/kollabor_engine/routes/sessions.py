@@ -406,7 +406,10 @@ async def list_session_commands(session_id: str):
 
 
 def apply_profile_mirror(
-    session: Any, name: str, model: Optional[str] = None
+    session: Any,
+    name: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> None:
     """Keep the engine list response in sync with the daemon's active profile.
 
@@ -423,6 +426,8 @@ def apply_profile_mirror(
             session.profile = selected
             if model:
                 selected.model = model
+            if effort is not None:
+                selected.effort = effort
     except Exception as exc:
         logger.debug(
             "Session %s profile mirror update failed: %s",
@@ -453,7 +458,14 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
         logger.error("Session %s profile switch failed: %s", session_id, exc)
         raise HTTPException(status_code=502, detail=f"daemon unreachable: {exc}")
 
-    apply_profile_mirror(session, body.name, body.model)
+    # The daemon's snapshot is the truth: an override applied earlier stays on
+    # its in-memory profile, so mirror what it reports, not just this request.
+    apply_profile_mirror(
+        session,
+        body.name,
+        getattr(snapshot, "model", None) or body.model,
+        getattr(snapshot, "effort", None),
+    )
 
     result = getattr(snapshot, "to_dict", None)
     return {
