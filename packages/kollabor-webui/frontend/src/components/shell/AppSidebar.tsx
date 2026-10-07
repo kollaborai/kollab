@@ -136,8 +136,10 @@ export function AppSidebar({
     profiles.find((profile) => profile.name === selectedProfile)?.model ||
     selectedProfile ||
     "default";
+  // On a phone the sidebar is a sheet over the chat: close it when the chat changes.
   const create = () => {
     setOptionsOpen(false);
+    setOpenMobile(false);
     onCreate();
   };
 
@@ -323,7 +325,9 @@ export function AppSidebar({
                   <SidebarMenuButton
                     isActive={session.session_id === activeId}
                     onClick={() => {
-                      if (session.attachable !== false) onSelectSession(session.session_id);
+                      if (session.attachable === false) return;
+                      setOpenMobile(false);
+                      onSelectSession(session.session_id);
                     }}
                     disabled={session.attachable === false}
                     title={task ? `${titleCase(gem)}: ${task}` : session.session_id}
@@ -397,7 +401,13 @@ export function AppSidebar({
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
-            <SidebarMenuButton onClick={onSettings} disabled={!activeId}>
+            <SidebarMenuButton
+              onClick={() => {
+                setOpenMobile(false);
+                onSettings();
+              }}
+              disabled={!activeId}
+            >
               <Settings2 className="size-4" />
               <span>Settings</span>
             </SidebarMenuButton>

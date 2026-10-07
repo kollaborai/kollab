@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: a session reloaded in a background tab shows in about a second instead of up to 20 (the history gate polled with timers the browser throttles).
 - Web: Trajectory keeps a tool's name readable beside long output ("Run ls" showed "R…"); a tool result's multi-line output no longer ends in a stray comma; the sidebar shows gem names in Title Case.
 - Web: sidebar rows no longer clip the gems' hats and props.
+- Web: on a phone, opening a session, starting one or opening Settings from the sidebar closes the sidebar; it stayed over the chat.
 - Web: a session deleted elsewhere (another tab, the CLI, a daemon that died) closes within a few seconds; its event streams retried every second for as long as the tab stayed open.
 - Web: opening the sidebar on a phone no longer pops the New Session tooltip; the first Escape closed that tooltip instead of the sidebar.
 - Web: a reply's time ("14.0s" under it) stays after a reload. The live clock lives in the tab, so a reloaded turn is timed by the history's own timestamps, from your message to the final reply.
