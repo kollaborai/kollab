@@ -301,7 +301,8 @@ class HubBridge:
         """Fetch recent output from an agent via get_output socket action."""
         resp = await self.query_socket(agent_id, "get_output", {"lines": lines})
         if resp and resp.get("type") == "output":
-            return str(resp.get("content", ""))
+            # The socket replies {"type": "output", "lines": [...]} (messenger.py).
+            return "\n".join(str(line) for line in resp.get("lines") or [])
         return None
 
     async def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
