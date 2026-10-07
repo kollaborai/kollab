@@ -627,6 +627,7 @@ export function SessionToolbar({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               onClick={() => {
                 // Read the name before clearing state; the dialog unmounts its
                 // content on close.
@@ -741,8 +742,8 @@ export function SessionToolbar({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void clearHistory()}>
-              Clear history
+            <AlertDialogAction variant="destructive" onClick={() => void clearHistory()}>
+              Clear History
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

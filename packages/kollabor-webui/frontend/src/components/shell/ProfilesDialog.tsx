@@ -423,7 +423,7 @@ export function ProfilesDialog({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete this profile?</AlertDialogTitle>
+            <AlertDialogTitle>Delete This Profile?</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingDelete} will be removed from ~/.kollab/config.json.
               Sessions already running on it keep going.
@@ -432,6 +432,7 @@ export function ProfilesDialog({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               onClick={() => {
                 const name = pendingDelete;
                 setPendingDelete(null);

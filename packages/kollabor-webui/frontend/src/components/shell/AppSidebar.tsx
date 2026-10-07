@@ -395,7 +395,7 @@ export function AppSidebar({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete this session?</AlertDialogTitle>
+            <AlertDialogTitle>Delete This Session?</AlertDialogTitle>
             <AlertDialogDescription>
               {formatSessionName(
                 pendingDelete?.name,
