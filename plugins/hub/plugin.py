@@ -6394,20 +6394,13 @@ class HubPlugin(BasePlugin):
         assert self._presence is not None
         agents = await self._presence.discover_agents_async(include_self=True)
         # discover_agents_async already cleans dead presence files
-        # Check if any assigned work needs reassignment
+        # Work held by a dead agent goes back to pending (and is saved).
         if self._work_queue:
-            for slot in self._work_queue.get_all():
-                if slot.status == "assigned" and slot.assigned_to:
-                    # Check if assigned agent still exists
-                    alive = any(a.identity == slot.assigned_to for a in agents)
-                    if not alive:
-                        dead_agent = slot.assigned_to
-                        slot.status = "pending"
-                        slot.assigned_to = None
-                        logger.info(
-                            f"Reassigning work {slot.id}: "
-                            f"agent {dead_agent} is dead"
-                        )
+            live = {a.identity for a in agents}
+            for slot_id, dead_agent in self._work_queue.requeue_orphans(live):
+                logger.info(
+                    f"Reassigning work {slot_id}: agent {dead_agent} is dead"
+                )
 
     async def _try_assign_work(self) -> None:
         """Try to assign pending work to idle agents using capability matching."""

@@ -255,6 +255,27 @@ class WorkQueue:
                 break
         self._save(slots)
 
+    def requeue_orphans(self, live: set) -> List[tuple]:
+        """Return work held by agents not in ``live`` to pending.
+
+        Returns ``(slot_id, dead_agent)`` pairs. Saves once, and only when
+        something changed.
+        """
+        slots = self._load()
+        requeued = []
+        for slot in slots:
+            if (
+                slot.status == "assigned"
+                and slot.assigned_to
+                and slot.assigned_to not in live
+            ):
+                requeued.append((slot.id, slot.assigned_to))
+                slot.status = "pending"
+                slot.assigned_to = None
+        if requeued:
+            self._save(slots)
+        return requeued
+
     def get_pending(self) -> List[WorkSlot]:
         """Get all pending work slots."""
         return [s for s in self._load() if s.status == "pending"]

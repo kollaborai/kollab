@@ -3116,7 +3116,10 @@ class TerminalLLMChat:
                 logger.debug(f"Background task cancelled: {name}")
                 return
 
-            if error is not None:
+            if isinstance(error, KeyboardInterrupt):
+                # The double Ctrl+C quit raises this on purpose.
+                logger.info(f"Background task stopped by Ctrl+C: {name}")
+            elif error is not None:
                 logger.error(
                     "Background task failed: %s - %s: %s",
                     name,
@@ -3561,6 +3564,10 @@ class TerminalLLMChat:
 
     async def shutdown(self) -> None:
         """Shutdown the application gracefully."""
+        # The attach client shuts down in the background, then cleanup() calls
+        # this again. Run once; a shutdown cancelled midway still reruns.
+        if getattr(self, "_shutdown_complete", False):
+            return
         logger.info("Application shutting down")
         self.running = False
 
@@ -3598,8 +3605,13 @@ class TerminalLLMChat:
             await self.version_check_service.shutdown()
             logger.debug("Version check service shutdown complete")
 
-        # Shutdown all plugins dynamically
+        # Shutdown all plugins dynamically. Like _initialize_plugins, skip the
+        # second key the factory stores each instance under.
+        shut_down = set()
         for plugin_name, plugin_instance in self.plugin_instances.items():
+            if id(plugin_instance) in shut_down:
+                continue
+            shut_down.add(id(plugin_instance))
             if hasattr(plugin_instance, "shutdown"):
                 try:
                     await plugin_instance.shutdown()
@@ -3619,4 +3631,5 @@ class TerminalLLMChat:
             if not self.pipe_mode:
                 print("\033[?25h")  # Show cursor
 
+        self._shutdown_complete = True
         logger.info("Application shutdown complete")
