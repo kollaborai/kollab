@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Web UI: the Kollabor K logo heads the sidebar and is the browser tab icon.
+
+### Changed
+- Web UI: the session header is one slim row on desktop (two on phones) with borderless controls: the model, the approval mode (an amber open shield for Trust All), MCP and online counts, and Settings and Clear as icons with tooltips. The sidebar shows bigger gems with smaller row text, and the session count sits beside "Sessions".
+
 ### Fixed
+- The bundled `default` agent's description said it fixes linting errors; it now describes the general assistant it is.
 - Shell commands report exit code 0 when they succeed; every success was reported as exit 1 next to `success: true`.
 - Web: New Session's Agent field shows the agent the session will run (the gem's pool agent until you pick one) and pins the one you pick; it said "default" while the hub swapped the gem to `coder`. The agent list no longer appends each bundle's unused profile ("coder · default").
 - Web: a session reloaded in a background tab shows in about a second instead of up to 20 (the history gate polled with timers the browser throttles).

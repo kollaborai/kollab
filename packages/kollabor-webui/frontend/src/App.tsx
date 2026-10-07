@@ -151,57 +151,52 @@ function RuntimeShell({
 
   return (
     <>
-      <header className="bg-background sticky top-0 z-10 flex shrink-0 flex-col gap-2 border-b px-3 py-2">
-        <div className="flex items-center gap-2">
-          <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-1 h-4" />
-          <div className="flex min-w-0 flex-col">
-            <span className="truncate font-mono text-sm font-medium">
-              {sessionLabel}
-            </span>
-            <span
-              className="text-muted-foreground truncate text-xs"
-              title={model || session.profile || "default"}
-            >
-              {model || "model unavailable"} · {session.profile || "default"}
-            </span>
-          </div>
-          <div
-            className="bg-muted flex rounded-md p-0.5"
-            role="group"
-            aria-label="Session view"
+      {/* One slim row; the controls wrap under the title on narrow screens. The
+          model picker shows model and profile, so the title carries no subtitle. */}
+      <header className="bg-background sticky top-0 z-10 flex min-h-12 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b px-3 py-1.5">
+        <SidebarTrigger className="-ml-1" />
+        <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+        <span
+          className="min-w-0 truncate text-sm font-semibold tracking-tight"
+          title={`${model || "model unavailable"} · ${session.profile || "default"}`}
+        >
+          {sessionLabel}
+        </span>
+        <div
+          className="bg-muted flex shrink-0 rounded-md p-0.5"
+          role="group"
+          aria-label="Session view"
+        >
+          <Button
+            type="button"
+            variant={view === "chat" ? "secondary" : "ghost"}
+            size="xs"
+            aria-pressed={view === "chat"}
+            data-testid="chat-tab"
+            onClick={() => setView("chat")}
           >
-            <Button
-              type="button"
-              variant={view === "chat" ? "secondary" : "ghost"}
-              size="xs"
-              aria-pressed={view === "chat"}
-              data-testid="chat-tab"
-              onClick={() => setView("chat")}
-            >
-              Chat
-            </Button>
-            <Button
-              type="button"
-              variant={view === "trajectory" ? "secondary" : "ghost"}
-              size="xs"
-              aria-pressed={view === "trajectory"}
-              data-testid="trajectory-tab"
-              onClick={() => setView("trajectory")}
-            >
-              Trajectory
-            </Button>
-          </div>
-          <span
-            className={
-              transportError
-                ? "text-destructive ml-auto truncate text-xs"
-                : "text-muted-foreground ml-auto truncate text-xs"
-            }
+            Chat
+          </Button>
+          <Button
+            type="button"
+            variant={view === "trajectory" ? "secondary" : "ghost"}
+            size="xs"
+            aria-pressed={view === "trajectory"}
+            data-testid="trajectory-tab"
+            onClick={() => setView("trajectory")}
           >
-            {status || transportError || null}
-          </span>
+            Trajectory
+          </Button>
         </div>
+        <span
+          className={
+            transportError
+              ? "text-destructive min-w-0 flex-1 truncate text-right text-xs"
+              : "text-muted-foreground min-w-0 flex-1 truncate text-right text-xs"
+          }
+        >
+          {status || transportError || null}
+        </span>
         <SessionToolbar
           api={api}
           session={session}
@@ -671,7 +666,7 @@ export default function App() {
           <>
             <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
               <SidebarTrigger className="-ml-1" />
-              <Separator orientation="vertical" className="mr-1 h-4" />
+              <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
               <span className="text-muted-foreground text-sm">No session</span>
             </header>
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">

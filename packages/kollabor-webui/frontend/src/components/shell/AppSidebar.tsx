@@ -4,6 +4,7 @@ import type { AgentBundleEntry, AgentPoolEntry, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
+import { KollabLogo } from "@/components/icons/kollab-logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -139,11 +140,9 @@ export function AppSidebar({
       <SidebarHeader className="gap-2 border-b">
         <SidebarMenu>
           <SidebarMenuItem>
-            <div className="flex h-12 flex-col justify-center gap-0.5 px-2 leading-none">
-              <span className="text-base font-semibold tracking-tight">kollab</span>
-              <span className="text-muted-foreground text-xs">
-                {sessions.length} session{sessions.length === 1 ? "" : "s"}
-              </span>
+            <div className="flex h-12 items-center px-2">
+              <KollabLogo className="h-6 w-auto shrink-0" />
+              <span className="sr-only">kollab</span>
             </div>
           </SidebarMenuItem>
           <SidebarMenuItem className="flex items-center gap-1">
@@ -289,7 +288,10 @@ export function AppSidebar({
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Sessions</SidebarGroupLabel>
+          <SidebarGroupLabel>
+            Sessions
+            <span className="ml-auto tabular-nums">{sessions.length}</span>
+          </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {sessions.map((session) => {
@@ -320,13 +322,13 @@ export function AppSidebar({
                       activity={session.session_id === activeId ? activeActivity : null}
                       season="auto"
                       follow
-                      size={44}
+                      size={56}
                     />
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="truncate font-medium">
+                      <span className="truncate text-[13px] leading-tight font-medium">
                         {formatSessionName(session.name, session.session_id)}
                       </span>
-                      <span className="text-muted-foreground truncate text-xs">
+                      <span className="text-muted-foreground truncate text-[11px] leading-tight">
                         {session.attachable === false ? (
                           <span className="text-amber-600 dark:text-amber-400">
                             discovered · attach unavailable
