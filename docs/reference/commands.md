@@ -23,6 +23,17 @@ start a detached agent:
   no & needed. the agent runs headless with stdout/stderr to /dev/null.
   the hub plugin joins the mesh, gets an identity, starts a vault.
 
+keep this folder's agent running (systemd at boot, launchd at login):
+  kollab service install                     install and start it; again: restart it
+  kollab service install --print             show the unit or plist, install nothing
+  kollab service install --env KEY=VALUE     extra non-secret environment
+  kollab service status                      unit, pid, and whether the agent answers
+  kollab service uninstall                   stop it and remove it
+
+  the manager runs `kollab --detached` in the foreground and restarts it 5 s
+  after it stops. a bare `kollab` in the folder attaches to it; closing that
+  window leaves it running. see docs/features/attach-mode.md.
+
 attach to a running agent:
   kollab --attach ruby                  full TUI proxy
   kollab --attach lapis --context bug-fix  attach to context

@@ -36,4 +36,5 @@ if sys.platform == "win32":
 from kollabor_cli_main import cli_main
 
 if __name__ == "__main__":
-    cli_main()
+    # The exit status of `kollab service status` and `kollab relay ...` is their return value.
+    raise SystemExit(cli_main())

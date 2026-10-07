@@ -656,7 +656,7 @@ class Applied:
     config_changed: bool = False
     profiles_changed: bool = False
     mcp_changed: bool = False
-    skipped_mcp: tuple[str, ...] = ()  # servers whose command is not installed here
+    skipped_mcp: tuple[str, ...] = ()  # enabled servers whose command is not installed here
 
 
 def safe_parts(rel: Any) -> tuple[str, ...] | None:
@@ -893,7 +893,8 @@ class Receiver:
                     skipped.add(name)
                 else:
                     merged[name] = copy.deepcopy(server)
-        applied.skipped_mcp = tuple(sorted(skipped))
+        # a server the primary switched off is skipped all the same, but nothing missed
+        applied.skipped_mcp = tuple(sorted(n for n in skipped if servers[n].get("enabled", True)))
         if merged != existing:
             settings["servers"] = merged
             _write_json(mcp_path, settings)

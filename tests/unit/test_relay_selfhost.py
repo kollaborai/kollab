@@ -194,6 +194,39 @@ def test_print_writes_the_config_and_creates_no_state(kind, tmp_path, capsys):
     assert not state.exists()
 
 
+def test_install_needs_systemd_and_touches_nothing_without_it(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("kollabor.service.has_systemd", lambda: False)
+    state = tmp_path / "state"
+    assert selfhost.main(["--domain", DOMAIN, "--state-dir", str(state), "--install"]) == 1
+    assert "--install needs systemd" in capsys.readouterr().err
+    assert not state.exists()
+
+
+def test_install_makes_the_state_dir_then_installs_the_printed_unit(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("kollabor.service.has_systemd", lambda: True)
+    installed = []
+    monkeypatch.setattr("kollabor.service.install_systemd", lambda name, unit: installed.append((name, unit)))
+    state = tmp_path / "state"
+    assert selfhost.main(["--domain", DOMAIN, "--state-dir", str(state), "--install"]) == 0
+    # The unit may write only the state directory, so its key exists before systemd starts it.
+    assert (state / "service.key").exists()
+    settings = settings_from(build_parser().parse_args(["--domain", DOMAIN, "--state-dir", str(state)]))
+    assert installed == [(f"kollab-relay-{DOMAIN}", selfhost.systemd_unit(settings))]
+    assert f"installed kollab-relay-{DOMAIN}" in capsys.readouterr().out
+
+
+def test_uninstall_removes_the_unit(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("kollabor.service.has_systemd", lambda: True)
+    monkeypatch.setattr("kollabor.service.uninstall_systemd", lambda name: name == f"kollab-relay-{DOMAIN}")
+    assert selfhost.main(["--domain", DOMAIN, "--state-dir", str(tmp_path / "state"), "--uninstall"]) == 0
+    assert f"removed kollab-relay-{DOMAIN}" in capsys.readouterr().out
+
+
+def test_install_and_print_are_one_or_the_other(tmp_path):
+    with pytest.raises(SystemExit):
+        selfhost.main(["--domain", DOMAIN, "--print", "systemd", "--install"])
+
+
 # --- keys and state ------------------------------------------------------------------------------
 
 

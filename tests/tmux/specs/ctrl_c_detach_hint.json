@@ -1,0 +1,34 @@
+{
+  "name": "ctrl-c-detach-hint",
+  "description": "In a window that owns its agent, the first Ctrl+C says a second press stops the agent and Ctrl+Z detaches; Ctrl+Z then leaves the agent running. Uses a scratch workspace so a developer's agents are never touched.",
+  "config": {
+    "command": "sh -c 'mkdir -p /tmp/kollab-ctrlc-hint && cd /tmp/kollab-ctrlc-hint && exec \"$0\"' \"$PWD/.venv/bin/kollab\"",
+    "show_captures": false,
+    "app_init_sleep": 3,
+    "term_width": 120,
+    "term_height": 35
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "attached to", "timeout": 30 },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "control", "key": "c" },
+    {
+      "action": "wait_for",
+      "pattern": "Press Ctrl\\+C again to stop \\S+, or Ctrl\\+Z to detach",
+      "timeout": 3
+    },
+    { "action": "sleep", "seconds": 3.5 },
+    { "action": "control", "key": "z" },
+    { "action": "wait_for", "pattern": "detached from", "timeout": 5 },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" sh -c 'cd /tmp/kollab-ctrlc-hint && kollab --hub status 2>&1 | grep -q \"agent(s) online\"'"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" sh -c 'cd /tmp/kollab-ctrlc-hint && kollab --hub stop all'",
+      "allow_failure": true
+    }
+  ]
+}

@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kollabor_agent.shell_executor import ShellResult
 from kollabor_agent.tool_executor import ToolExecutor
+from kollabor_events.models import EventType
 
 
 # Mock result classes for testing
@@ -131,6 +132,27 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             {"type": "terminal", "id": "git_0", "command": "git status --short"}
         )
 
+    async def test_permission_wait_is_not_tool_run_time(self):
+        """The pre hook can sit on a permission prompt; that wait is not timed."""
+        tool_data = {"type": "terminal", "id": "terminal_0", "command": "ls"}
+
+        async def hooks(event_type, *args, **kwargs):
+            if event_type == EventType.TOOL_CALL_PRE:
+                await asyncio.sleep(0.3)  # the user reading the prompt
+
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=hooks)
+        with patch.object(
+            self.executor,
+            "_execute_terminal_command",
+            new=AsyncMock(
+                return_value=MockToolResult("terminal", "terminal_0", True, "ok")
+            ),
+        ):
+            result = await self.executor._execute_tool_inner(tool_data)
+
+        self.assertTrue(result.success)
+        self.assertLess(result.execution_time, 0.2)
+
     async def test_execute_terminal_command_failure(self):
         """Test failed terminal command execution."""
         tool_data = {
@@ -229,6 +251,21 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.error, "Tool not found")
+
+    async def test_execute_mcp_tool_is_error_result_is_a_failure(self):
+        """MCP flags a tool-level failure with isError inside a normal result."""
+        tool_data = {"type": "mcp_tool", "id": "mcp_tool_0", "name": "read_file"}
+        self.mcp_integration.call_mcp_tool = AsyncMock(
+            return_value={
+                "content": [{"type": "text", "text": "403 Path not in workspace"}],
+                "isError": True,
+            }
+        )
+
+        result = await self.executor._execute_mcp_tool(tool_data)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "403 Path not in workspace")
 
     async def test_execute_all_tools_mixed(self):
         """Test executing mixed terminal and MCP tools."""

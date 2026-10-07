@@ -1,7 +1,7 @@
 ---
 title: WebUI Trajectory Tab
 created: 2026-08-21
-modified: 2026-08-21
+modified: 2026-10-07
 status: draft
 author: maintainers
 ---
@@ -150,6 +150,17 @@ logger JSONL, **not** in history metadata.
 | xml/plugin tool results | partially -- batched user messages need parsing |
 | per-record duration | deltas only -- message timestamps |
 | tokens / ttft / decode | **no** -- usage never reaches history |
+
+**update 2026-10-07 -- waterfall.** the tab has a Table / Waterfall toggle;
+the waterfall (`TrajectoryWaterfall.tsx`, spans from `trajectory-spans.ts`)
+uses `@assistant-ui/react-o11y` 0.0.31 span primitives. durations now come
+from: model calls `usage.thinking_duration`; native tool results
+`metadata.tool_execution_time` (seconds, written by queue_processor); anything
+else the timestamp delta. the daemon writes a request's assistant message
+*after* its tools ran (sequentially), so a request lays out backwards from that
+timestamp: tools back to back ending there, the model call ending where the
+first tool starts. the prompt that opens a turn is a point; each turn is drawn
+on its own time scale. check: `node --test tests/trajectory-spans.test.ts`.
 
 
 ## goals

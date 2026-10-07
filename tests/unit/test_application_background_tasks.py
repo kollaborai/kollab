@@ -80,3 +80,27 @@ async def test_cleanup_is_idempotent_for_repeated_calls():
     await app.cleanup()
 
     app.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_runs_once_and_stops_each_plugin_once():
+    app = object.__new__(TerminalLLMChat)
+    for attr in (
+        "event_bus",
+        "script_widget_manager",
+        "input_handler",
+        "llm_service",
+        "conversation_logger",
+        "mcp_integration",
+    ):
+        setattr(app, attr, AsyncMock())
+    plugin = AsyncMock()
+    # The factory stores each instance under its class name and clean name.
+    app.plugin_instances = {"HubPlugin": plugin, "hub": plugin}
+
+    await app.shutdown()
+    # cleanup() calls shutdown() again after the attach client's own call.
+    await app.shutdown()
+
+    plugin.shutdown.assert_awaited_once()
+    app.conversation_logger.shutdown.assert_awaited_once()

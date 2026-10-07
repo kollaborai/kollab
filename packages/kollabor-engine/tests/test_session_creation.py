@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from kollabor_engine.routes import sessions
+from kollabor_engine.session import EngineSession
 from starlette.requests import Request
 
 
@@ -39,6 +40,21 @@ def _body(session_id: str | None = None) -> sessions.CreateSessionRequest:
 
 def test_session_request_defaults_to_trust_all():
     assert sessions.CreateSessionRequest().approval_mode == "trust_all"
+
+
+def test_engine_session_keeps_opaque_id_but_serializes_friendly_name():
+    session_id = "1c753a7d2def481084e3a64bcb09a7d2"
+    session = EngineSession(
+        session_id=session_id,
+        profile=SimpleNamespace(name="default", model="test-model"),
+    )
+
+    first = session.to_dict()
+    second = session.to_dict()
+
+    assert first["session_id"] == session_id
+    assert first["name"] != session_id
+    assert first["name"] == second["name"]
 
 
 class _FakeSession:

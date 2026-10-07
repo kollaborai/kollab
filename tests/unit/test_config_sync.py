@@ -1052,6 +1052,7 @@ def test_mcp_servers_whose_command_is_not_installed_here_are_skipped(homes, keys
                     "here": {"command": sys.executable},
                     "gone": {"command": "no-such-mcp-server-xyz"},
                     "far": {"command": str(tmp_path / "no-such-server")},
+                    "off": {"command": "no-such-mcp-server-xyz", "enabled": False},
                     "remote": {"type": "sse", "url": "https://mcp.example.test/sse"},
                 }
             },

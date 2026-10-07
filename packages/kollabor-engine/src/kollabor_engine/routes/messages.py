@@ -7,8 +7,10 @@ clients need no modification.
 """
 
 import asyncio
+import copy
 import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +33,11 @@ router = APIRouter(prefix="/sessions", tags=["messages"])
 # A turn can legitimately run for a long time (big builds, long tool chains).
 # This only bounds silence: any event from the daemon resets it.
 EVENT_IDLE_TIMEOUT_SECONDS = 600.0
+
+# Streamed text and reasoning reach the browser through message-state publishes
+# (it renders only state.messages); at most one per interval. Text held back by
+# the interval goes out with the next publish, or once the stream goes quiet.
+STREAM_PUBLISH_INTERVAL = 0.15
 
 
 class MessageRequest(BaseModel):
@@ -232,18 +239,26 @@ async def _cancel_assistant_turn(session, controller) -> None:
         )
 
 
-async def _assistant_next_event(session, queue, controller):
-    """Wait for either a daemon event or assistant-stream cancellation."""
+async def _assistant_next_event(session, queue, controller, timeout=None):
+    """Wait for either a daemon event or assistant-stream cancellation.
+
+    Returns None once the stream is cancelled, and ``{}`` when ``timeout``
+    seconds pass with neither (a cancelled ``queue.get()`` loses no event).
+    """
     event_task = asyncio.create_task(queue.get())
     cancel_task = asyncio.create_task(controller.cancelled_event.wait())
     try:
         done, _ = await asyncio.wait(
-            {event_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            {event_task, cancel_task},
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
         )
         if cancel_task in done:
             event_task.cancel()
             await _cancel_assistant_turn(session, controller)
             return None
+        if event_task not in done:
+            return {}
         cancel_task.cancel()
         return event_task.result()
     finally:
@@ -298,31 +313,37 @@ def _assistant_copy_messages(state: Any) -> List[Dict[str, Any]]:
     return messages
 
 
-def _assistant_state_content(
-    text: str,
-    reasoning: str,
-    tool_parts: List[Dict[str, Any]],
-) -> Any:
-    """Build a ThreadMessageLike-compatible content value."""
-    parts: List[Dict[str, Any]] = []
-    if reasoning:
-        parts.append({"type": "reasoning", "text": reasoning})
-    if text:
-        parts.append({"type": "text", "text": text})
-    parts.extend(tool_parts)
-    return parts if parts else ""
+def _assistant_continued_tool_parts(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Copies of the tool calls on the assistant message a continuation extends."""
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        return [
+            copy.deepcopy(part)
+            for part in (content if isinstance(content, list) else [])
+            if isinstance(part, dict) and part.get("type") == "tool-call"
+        ]
+    return []
 
 
 def _assistant_update_message_state(
     messages: List[Dict[str, Any]],
     session_id: str,
     submitted_contents: List[MessageContent],
-    text: str,
-    reasoning: str,
-    tool_parts: List[Dict[str, Any]],
-    status: Dict[str, str],
+    parts: List[Dict[str, Any]],
+    status: Optional[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
-    """Persist the completed or interrupted turn in assistant-ui state."""
+    """Persist the completed or interrupted turn in assistant-ui state.
+
+    ``parts`` are the turn's text, reasoning and tool-call parts in arrival
+    order, so the message reads chronologically like its reloaded history.
+    ``status=None`` leaves the message status out so the client derives it
+    (running while the request is open); mid-turn publishes use that so a
+    cancelled or crashed run cannot leave a message spinning forever.
+    """
     if not submitted_contents:
         for message in reversed(messages):
             if message.get("role") != "assistant":
@@ -333,22 +354,29 @@ def _assistant_update_message_state(
                 if isinstance(content, list)
                 else ([{"type": "text", "text": content}] if content else [])
             )
-            existing_tool_ids = {
-                part.get("toolCallId")
-                for part in existing_parts
+            # A tool call this run knows by id (adopted from this message, e.g.
+            # a gated tool whose prompt the user just answered) replaces the
+            # stored part so its result lands in place; the rest append in order.
+            stored_tools = {
+                part.get("toolCallId"): index
+                for index, part in enumerate(existing_parts)
                 if isinstance(part, dict) and part.get("type") == "tool-call"
             }
-            if reasoning:
-                existing_parts.append({"type": "reasoning", "text": reasoning})
-            if text:
-                existing_parts.append({"type": "text", "text": text})
-            existing_parts.extend(
-                part
-                for part in tool_parts
-                if part.get("toolCallId") not in existing_tool_ids
-            )
+            for part in parts:
+                index = (
+                    stored_tools.get(part.get("toolCallId"))
+                    if part.get("type") == "tool-call"
+                    else None
+                )
+                if index is None:
+                    existing_parts.append(part)
+                else:
+                    existing_parts[index] = part
             message["content"] = existing_parts
-            message["status"] = status
+            if status is None:
+                message.pop("status", None)
+            else:
+                message["status"] = status
             return messages
 
     for index, submitted_content in enumerate(submitted_contents):
@@ -363,14 +391,14 @@ def _assistant_update_message_state(
             }
         )
 
-    messages.append(
-        {
-            "id": f"assistant-{session_id}-{len(messages)}",
-            "role": "assistant",
-            "content": _assistant_state_content(text, reasoning, tool_parts),
-            "status": status,
-        }
-    )
+    assistant_message: Dict[str, Any] = {
+        "id": f"assistant-{session_id}-{len(messages)}",
+        "role": "assistant",
+        "content": list(parts) if parts else "",
+    }
+    if status is not None:
+        assistant_message["status"] = status
+    messages.append(assistant_message)
     return messages
 
 
@@ -381,6 +409,21 @@ def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> 
         controller.state = {"messages": messages}
     else:
         state["messages"] = messages
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _tool_completed_ms(started: int, event: Dict[str, Any]) -> int:
+    """End of a tool call: the daemon's measured run time, else receipt time.
+
+    A missing or zero ``execution_time`` (seconds) must not render as "0ms".
+    """
+    elapsed = event.get("execution_time")
+    if isinstance(elapsed, (int, float)) and elapsed > 0:
+        return started + int(elapsed * 1000)
+    return max(started, _now_ms())
 
 
 def _assistant_protocol_chunk(
@@ -619,11 +662,67 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             body.state.get("messages"), list
         )
         submitted_contents: List[MessageContent] = []
-        assistant_text = ""
-        assistant_reasoning = ""
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
+        # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
         saw_action = False
+        # What the client holds; progress publishes only send what differs.
+        sent_messages = state_messages
+        last_publish = float("-inf")
+        # Streamed text the throttle has not published yet.
+        stream_held = False
+
+        def publish_progress() -> None:
+            """Publish the in-flight turn so its parts reach the browser.
+
+            The web client renders only ``state.messages``, so without this a
+            turn shows nothing until it ends. Rebuilt from the untouched base
+            each time (the final publishes below still mutate it in place);
+            ops carry per-message sets, not the whole history.
+            """
+            nonlocal sent_messages, last_publish, stream_held
+            last_publish = time.monotonic()
+            stream_held = False
+            if not persist_message_state:
+                return
+            progress = _assistant_update_message_state(
+                [dict(message) for message in state_messages],
+                session_id,
+                submitted_contents,
+                copy.deepcopy(assistant_parts),
+                None,
+            )
+            published = controller.state["messages"]
+            for index, message in enumerate(progress):
+                if index >= len(sent_messages):
+                    published.append(message)
+                elif message != sent_messages[index]:
+                    published[index] = message
+            sent_messages = progress
+
+        def add_streamed_text(part_type: str, text: str) -> None:
+            """Grow the trailing text/reasoning part, or start one, and publish.
+
+            Throttled: text inside the interval is held until the next publish,
+            or until the event wait below times out on a quiet stream.
+            """
+            nonlocal stream_held
+            if not text:
+                return
+            if assistant_parts and assistant_parts[-1]["type"] == part_type:
+                assistant_parts[-1]["text"] += text
+            else:
+                assistant_parts.append({"type": part_type, "text": text})
+            if time.monotonic() - last_publish >= STREAM_PUBLISH_INTERVAL:
+                publish_progress()
+            else:
+                stream_held = True
+
+        def held_text_due() -> Optional[float]:
+            """Seconds until held text should publish; None when none is held."""
+            if not stream_held:
+                return None
+            return max(0.0, last_publish + STREAM_PUBLISH_INTERVAL - time.monotonic())
 
         try:
             for command in body.commands:
@@ -681,20 +780,36 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 controller.add_error("assistant request has no commands")
                 return
 
+            if not submitted_contents:
+                # Answering a permission prompt continues the last assistant
+                # message. Its tool calls started in the previous run, so adopt
+                # them to finish those rows (result, duration) in place.
+                for part in _assistant_continued_tool_parts(state_messages):
+                    if part.get("toolCallId"):
+                        assistant_tool_parts[part["toolCallId"]] = part
+                        assistant_parts.append(part)
+
             while True:
-                event = await _assistant_next_event(session, queue, controller)
+                event = await _assistant_next_event(
+                    session, queue, controller, timeout=held_text_due()
+                )
                 if event is None:
                     return
+                if not event:
+                    # The daemon went quiet after streaming (e.g. before
+                    # turn_complete): publish the text the throttle held.
+                    publish_progress()
+                    continue
                 event_type = str(event.get("type") or "")
 
                 if event_type == "token":
                     token = str(event.get("text") or "")
-                    assistant_text += token
                     controller.append_text(token)
+                    add_streamed_text("text", token)
                 elif event_type == "thinking":
                     thinking = str(event.get("text") or "")
-                    assistant_reasoning += thinking
                     controller.append_reasoning(thinking)
+                    add_streamed_text("reasoning", thinking)
                 elif event_type == "tool_start":
                     tool_id = str(event.get("tool_id") or "")
                     if not tool_id:
@@ -710,10 +825,12 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         "toolName": str(event.get("tool_name") or "tool"),
                         "args": tool_input,
                         "argsText": json.dumps(tool_input, ensure_ascii=False),
+                        "timing": {"startedAt": _now_ms()},
                     }
                     assistant_tool_parts[tool_id] = tool_part
                     assistant_parts.append(tool_part)
                     tool_controller.append_args_text(tool_part["argsText"])
+                    publish_progress()
                 elif event_type == "permission_request":
                     source_tool_id = str(event.get("tool_id") or "")
                     if not source_tool_id:
@@ -746,8 +863,6 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         state_messages,
                         session_id,
                         submitted_contents,
-                        assistant_text,
-                        assistant_reasoning,
                         assistant_parts,
                         {"type": "requires-action", "reason": "tool-calls"},
                     )
@@ -774,10 +889,19 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                                 "isError": not result["success"],
                             }
                         )
+                        started = (tool_part.get("timing") or {}).get("startedAt")
+                        if started is not None:
+                            tool_part["timing"] = {
+                                "startedAt": started,
+                                "completedAt": _tool_completed_ms(started, event),
+                            }
                     if tool_controller is not None:
                         _assistant_set_tool_result(tool_controller, result)
-                    else:
+                    elif tool_part is None:
                         controller.add_tool_result(tool_id, result)
+                    # else: adopted from the prior run; this run's wire stream
+                    # never opened that call, so the state publish carries it.
+                    publish_progress()
                 elif event_type == "permission_granted":
                     source_tool_id = str(event.get("tool_id") or "")
                     permission_part = assistant_tool_parts.get(
@@ -804,6 +928,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                                 "scope": event.get("scope", "once"),
                             },
                         )
+                    publish_progress()
                 elif event_type == "permission_denied":
                     source_tool_id = str(event.get("tool_id") or "")
                     permission_part = assistant_tool_parts.get(
@@ -824,6 +949,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             permission_controller,
                             {"decision": "deny"},
                         )
+                    publish_progress()
                 elif event_type == "error":
                     controller.add_error(str(event.get("message") or "engine error"))
                 elif event_type == "turn_complete":
@@ -838,8 +964,6 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         state_messages,
                         session_id,
                         submitted_contents,
-                        assistant_text,
-                        assistant_reasoning,
                         assistant_parts,
                         {"type": "complete", "reason": "stop"},
                     )

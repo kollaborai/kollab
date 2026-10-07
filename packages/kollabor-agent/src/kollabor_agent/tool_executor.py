@@ -574,6 +574,10 @@ class ToolExecutor:
                     metadata={"permission_denied": True},
                 )
 
+            # Time the tool itself: the pre hook can sit on a permission
+            # prompt until the user answers, which is not the tool's run time.
+            start_time = time.time()
+
             # Execute based on tool type
             execution_phase_started = False
 
@@ -1160,6 +1164,15 @@ class ToolExecutor:
             else:
                 # Format MCP output for display
                 output = self._format_mcp_output(mcp_result)
+
+                # MCP reports a tool-level failure inside a normal result.
+                if mcp_result.get("isError") is True:
+                    return ToolExecutionResult(
+                        tool_id=tool_id,
+                        tool_type="mcp_tool",
+                        success=False,
+                        error=output or "MCP tool reported an error",
+                    )
 
                 return ToolExecutionResult(
                     tool_id=tool_id, tool_type="mcp_tool", success=True, output=output

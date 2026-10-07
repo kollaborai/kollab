@@ -130,7 +130,7 @@ The base config is divided into sections:
   "input": {
     "ctrl_c_exit": true,
     "history_limit": 100,
-    "paste_detection_enabled": true
+    "paste_min_chars": 500
   },
   "logging": {
     "level": "INFO",

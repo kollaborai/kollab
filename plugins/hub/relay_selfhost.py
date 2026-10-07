@@ -140,7 +140,7 @@ def setup_text(settings: Settings, *, created: bool) -> str:
             f"  2. TLS proxy: terminate TLS for {settings.domain} and forward only these routes to {settings.upstream}",
             *routes,
             f"     paste-ready: {command} --print nginx   (or --print caddy)",
-            f"  3. keep it running: {command} --print systemd",
+            f"  3. keep it running: {command} --install   (systemd; --print systemd shows the unit)",
             "",
             f"then devices connect with /connect {settings.domain}",
         ]
@@ -201,7 +201,8 @@ _CADDY = """\
 
 _SYSTEMD = """\
 # Kollab directory for @DOMAIN@ as a systemd service, run by @USER@ with the state directory this command uses now.
-# Install:  @COMMAND@ --print systemd | sudo tee /etc/systemd/system/@UNIT@.service
+# Install:  @COMMAND@ --install   (writes this file, enables and starts it; --uninstall removes it)
+# or:       @COMMAND@ --print systemd | sudo tee /etc/systemd/system/@UNIT@.service
 #           sudo systemctl daemon-reload && sudo systemctl enable --now @UNIT@
 [Unit]
 Description=Kollab directory for @DOMAIN@
@@ -241,6 +242,10 @@ def caddy_config(settings: Settings) -> str:
     return _render(_CADDY, DOMAIN=settings.domain, UPSTREAM=settings.upstream)
 
 
+def unit_name(settings: Settings) -> str:
+    return "kollab-relay-" + settings.domain.replace(":", "-")
+
+
 def systemd_unit(settings: Settings) -> str:
     """A unit that runs as this user on the same state directory, so the identity survives the move to systemd."""
     try:
@@ -252,7 +257,7 @@ def systemd_unit(settings: Settings) -> str:
     return _render(
         _SYSTEMD,
         DOMAIN=settings.domain,
-        UNIT="kollab-relay-" + settings.domain.replace(":", "-"),
+        UNIT=unit_name(settings),
         USER=user,
         COMMAND=command,
         EXEC=shlex.join(argv),
@@ -418,7 +423,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="raise it for an office behind one address",
     )
     parser.add_argument("--max-connections-per-room", type=int, default=MAX_CONNECTIONS_PER_ROOM)
-    parser.add_argument("--print", choices=sorted(PRINTABLE), help="print that config for these settings and exit")
+    once = parser.add_mutually_exclusive_group()
+    once.add_argument("--print", choices=sorted(PRINTABLE), help="print that config for these settings and exit")
+    once.add_argument(
+        "--install",
+        action="store_true",
+        help="install the --print systemd unit and start it: the directory runs at boot and after a crash",
+    )
+    once.add_argument("--uninstall", action="store_true", help="stop and remove that systemd unit")
     return parser
 
 
@@ -463,6 +475,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.print:
         sys.stdout.write(PRINTABLE[args.print](settings))
         return 0
+    if args.install or args.uninstall:
+        return _install(settings, remove=args.uninstall)
     try:
         lock, created = prepare(settings)
         try:
@@ -472,6 +486,32 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, KeyError, TypeError, OSError) as exc:
         print(f"kollab relay serve: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _install(settings: Settings, *, remove: bool) -> int:
+    """`--install` / `--uninstall`: the systemd unit `--print systemd` shows (kollabor.service)."""
+    from kollabor.service import has_systemd, install_systemd, uninstall_systemd
+
+    name = unit_name(settings)
+    if not has_systemd():
+        flag = "--uninstall" if remove else "--install"
+        print(f"kollab relay serve: {flag} needs systemd; see --print systemd", file=sys.stderr)
+        return 1
+    if remove:
+        print(f"removed {name}" if uninstall_systemd(name) else f"{name} is not installed")
+        return 0
+    try:
+        # The unit may write only the state directory, so it must exist with its key first;
+        # this also refuses a state directory another relay serve is using.
+        os.close(prepare(settings)[0])
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        print(f"kollab relay serve: {exc}", file=sys.stderr)
+        return 1
+    install_systemd(name, systemd_unit(settings))
+    print(f"installed {name}: starts at boot, restarts 5 s after a failure")
+    print(f"  check:  systemctl status {name}   then curl {settings.origin}/relay/v1/health")
+    print(f"  logs:   journalctl -u {name}")
     return 0
 
 

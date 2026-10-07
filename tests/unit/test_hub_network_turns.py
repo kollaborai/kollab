@@ -433,6 +433,44 @@ async def test_an_acknowledgement_starts_no_turn_and_its_asker_is_released_at_on
 
 
 @pytest.mark.asyncio
+async def test_a_greeting_from_another_machine_is_answered_not_skipped():
+    """Live 2026-10-06: "hello" from another machine woke the model, which read
+    "if it is only an acknowledgement, do not respond" and replied with nothing,
+    so the person who said hello saw silence."""
+    sent: list = []
+    plugin, llm = _responder(sent)
+
+    await plugin._on_message_received(_request(T1, W1, "hello"))
+
+    assert [
+        c
+        for c in plugin.event_bus.emit_with_hooks.await_args_list
+        if c.args[0] is EventType.TRIGGER_LLM_CONTINUE
+    ]
+    prompt = llm.conversation_history[-1].content
+    assert f"{ASKER} wrote to you from another machine" in prompt
+    assert "even to a greeting" in prompt
+    assert "do not respond" not in prompt
+
+    # A message on an open thread is not a new request: the usual guidance
+    # stays, so two agents do not trade acknowledgements.
+    await plugin._on_message_received(
+        HubMessage(
+            id=W2,
+            action="message",
+            from_agent="relay:peer",
+            from_identity=ASKER,
+            to="infra",
+            content="the tunnel is back up",
+            thread_id=T2,
+            reply_to=W3,
+            metadata={"network": {"from_device": "laptop-kollab", "trust": "open"}},
+        )
+    )
+    assert "do not respond" in llm.conversation_history[-1].content
+
+
+@pytest.mark.asyncio
 async def test_a_request_with_no_model_to_run_releases_its_asker_too():
     sent: list = []
     plugin, llm = _responder(sent)

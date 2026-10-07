@@ -10,7 +10,12 @@ from fastapi import APIRouter, HTTPException  # type: ignore
 from pydantic import BaseModel, Field
 
 from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
-from kollabor_ai.providers import AuthenticationError, ProviderError, RateLimitError
+from kollabor_ai.providers import (
+    AuthenticationError,
+    ProviderError,
+    ProviderType,
+    RateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles", tags=["profiles"])
@@ -20,7 +25,7 @@ router = APIRouter(prefix="/profiles", tags=["profiles"])
 class CreateProfileRequest(BaseModel):
     name: str = Field(min_length=1, description="Profile name")
     provider: str = Field(
-        min_length=1, description="Provider type (anthropic, openai, custom)"
+        min_length=1, description="Provider type (one of GET /profiles providers)"
     )
     model: str = Field(min_length=1, description="Model name")
     api_key: str = Field(default="", description="API key (optional, can use env vars)")
@@ -101,6 +106,7 @@ async def list_profiles():
         "profiles": [_redacted_profile_dict(p) for p in profiles],
         "active": pm.active_profile_name,
         "count": len(profiles),
+        "providers": [provider.value for provider in ProviderType],
     }
 
 

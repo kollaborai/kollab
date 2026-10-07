@@ -10,15 +10,22 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   EngineApi,
   HistoryMessage,
   PermissionPrompt,
   Session,
 } from "./api";
-import { isToolOutputBatch } from "./api";
+import { isToolOutputBatch, stripAgentHud } from "./api";
 import { PermissionToolUI } from "./components/PermissionTool";
+import {
+  newTurnClock,
+  observeRun,
+  turnTimings,
+  type TurnClock,
+} from "./turn-timing";
+import { VoiceModeProvider } from "./voice-mode";
 
 export type EngineState = {
   sessionId: string;
@@ -71,6 +78,17 @@ function historyContentToThreadContent(content: unknown): ThreadMessageLike["con
   return parts.length ? parts : "";
 }
 
+function withoutAgentHud(
+  content: ThreadMessageLike["content"],
+): ThreadMessageLike["content"] {
+  if (typeof content === "string") return stripAgentHud(content);
+  return content
+    .map((part) =>
+      part.type === "text" ? { ...part, text: stripAgentHud(part.text) } : part,
+    )
+    .filter((part) => part.type !== "text" || part.text);
+}
+
 function historyToMessages(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[],
@@ -83,6 +101,7 @@ function historyToMessages(
     argsText: string;
     result?: unknown;
     isError?: boolean;
+    timing?: { startedAt: number; completedAt: number };
   };
 
   const asRecord = (value: unknown): Record<string, unknown> | null => {
@@ -216,10 +235,15 @@ function historyToMessages(
     if (isToolOutputBatch(message)) return;
 
     if (message.role === "user") {
+      const content = withoutAgentHud(
+        historyContentToThreadContent(message.content),
+      );
+      // A turn that was only agent status stays in the Trajectory tab.
+      if (!content.length) return;
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
-        content: historyContentToThreadContent(message.content),
+        content,
       });
       return;
     }
@@ -270,6 +294,15 @@ function historyToMessages(
       if (existingCall) {
         existingCall.result = historyContentToThreadContent(message.content);
         existingCall.isError = toolResultIsError(message);
+        // History keeps only how long the call ran (seconds), not when; the
+        // elapsed hook and the group total read just completedAt - startedAt.
+        const runSeconds = asRecord(message.metadata)?.tool_execution_time;
+        if (typeof runSeconds === "number" && runSeconds > 0) {
+          existingCall.timing = {
+            startedAt: 0,
+            completedAt: Math.round(runSeconds * 1000),
+          };
+        }
         return;
       }
 
@@ -328,6 +361,17 @@ const converter = (
   state: EngineState,
   metadata: AssistantTransportConnectionMetadata,
 ) => {
+  // Stream timing rides on the assistant message's metadata, where
+  // `useMessageTiming` reads it (see turn-timing.ts).
+  const stored = state.messages.map((message) => {
+    const timing =
+      message.role === "assistant" && message.id
+        ? turnTimings.get(message.id)
+        : undefined;
+    return timing
+      ? { ...message, metadata: { ...message.metadata, timing } }
+      : message;
+  });
   const optimistic = metadata.pendingCommands.flatMap((command) => {
     if (command.type !== "add-message") return [];
     const parts: Array<TextMessagePart | ImageMessagePart> = command.message.parts.map(
@@ -351,7 +395,7 @@ const converter = (
     // than the transport's structural JSON type.
     state: JSON.parse(JSON.stringify(state)),
     messages: messageConverter.toThreadMessages(
-      [...state.messages, ...optimistic],
+      [...stored, ...optimistic],
       metadata.isSending,
       { error: state.error },
     ),
@@ -416,6 +460,9 @@ export function EngineRuntimeProvider({
   initialState: EngineState;
   children: ReactNode;
 }) {
+  const turnRef = useRef<TurnClock>(newTurnClock());
+  const runStartRef = useRef(0);
+
   const runtime = useAssistantTransportRuntime({
     initialState,
     api: api.assistantUrl(sessionId),
@@ -433,12 +480,32 @@ export function EngineRuntimeProvider({
       if (token) headers.set("Authorization", `Bearer ${token}`);
       return headers;
     },
-    prepareSendCommandsRequest: (body) => ({
-      ...body,
-      sessionId,
-    }),
+    prepareSendCommandsRequest: (body) => {
+      // A new message starts a new turn; a tool answer continues the last one.
+      if (body.commands.some((command) => command.type === "add-message")) {
+        turnRef.current = newTurnClock();
+      }
+      runStartRef.current = performance.now();
+      return { ...body, sessionId };
+    },
     onResponse: (response) => {
-      if (response.status === 401) void api.refreshToken();
+      if (response.status === 401) {
+        void api.refreshToken();
+        return;
+      }
+      if (!response.ok) return;
+      // The transport drops text deltas (the thread renders turn-end state),
+      // so read the wire frames off a clone for real stream timing. Timing is
+      // a nicety: nothing here may fail the run.
+      try {
+        observeRun(
+          response.clone(),
+          turnRef.current,
+          runStartRef.current,
+        ).catch(() => undefined);
+      } catch {
+        // A body that cannot be cloned just has no timing.
+      }
     },
     onError: async (error, { updateState }) => {
       updateState((state) => ({ ...state, error: error.message }));
@@ -458,7 +525,9 @@ export function EngineRuntimeProvider({
         messages={initialState.messages}
       >
         <PermissionToolUI />
-        {children}
+        <VoiceModeProvider api={api} sessionId={sessionId}>
+          {children}
+        </VoiceModeProvider>
       </InitialMessagesGate>
     </AssistantRuntimeProvider>
   );

@@ -82,6 +82,24 @@ class BufferManager:
 
         return True
 
+    def insert_text(self, text: str) -> bool:
+        """Insert text at the cursor, all or nothing.
+
+        Returns:
+            False, with the buffer unchanged, if any character is rejected or
+            the text would pass the buffer limit.
+        """
+        if not all(self._is_valid_char(char) for char in text):
+            return False
+        if len(self._buffer) + len(text) > self._buffer_limit:
+            logger.warning(f"Buffer limit reached: {self._buffer_limit}")
+            return False
+        self._buffer = (
+            self._buffer[: self._cursor_pos] + text + self._buffer[self._cursor_pos :]
+        )
+        self._cursor_pos += len(text)
+        return True
+
     def delete_char(self) -> bool:
         """Delete character before cursor (backspace behavior).
 

@@ -10,13 +10,14 @@ import {
 } from "react";
 import { ChevronDownIcon, LoaderIcon } from "lucide-react";
 import { cva, type VariantProps } from "class-variance-authority";
-import { useScrollLock } from "@assistant-ui/react";
+import { useAuiState, useScrollLock } from "@assistant-ui/react";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { formatToolDuration } from "@/components/assistant-ui/tool-fallback";
 
 const ANIMATION_DURATION = 200;
 
@@ -92,16 +93,37 @@ function ToolGroupRoot({
   );
 }
 
+/** Sum of the group's call durations, or undefined unless every call has one. */
+function useToolGroupTotalMs(indices?: readonly number[]): number | undefined {
+  return useAuiState((s) => {
+    if (!indices?.length) return undefined;
+    let total = 0;
+    for (const index of indices) {
+      const part = s.message.parts[index];
+      const timing = part?.type === "tool-call" ? part.timing : undefined;
+      if (timing?.completedAt === undefined) return undefined;
+      total += Math.max(0, timing.completedAt - timing.startedAt);
+    }
+    return total;
+  });
+}
+
 function ToolGroupTrigger({
   count,
+  indices,
   active = false,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   count: number;
+  /** Message part indices of the group; enables the total duration. */
+  indices?: readonly number[];
   active?: boolean;
 }) {
-  const label = `${count} tool ${count === 1 ? "call" : "calls"}`;
+  const totalMs = useToolGroupTotalMs(indices);
+  const label = `${count} tool ${count === 1 ? "call" : "calls"}${
+    totalMs === undefined ? "" : ` · ${formatToolDuration(totalMs)}`
+  }`;
 
   return (
     <CollapsibleTrigger
@@ -196,33 +218,28 @@ function ToolGroupContent({
   );
 }
 
-type ToolGroupComponent = FC<
-  PropsWithChildren<{ startIndex: number; endIndex: number }>
-> & {
+type ToolGroupProps = PropsWithChildren<{
+  group: { indices: readonly number[]; status: { type: string } };
+}>;
+
+type ToolGroupComponent = FC<ToolGroupProps> & {
   Root: typeof ToolGroupRoot;
   Trigger: typeof ToolGroupTrigger;
   Content: typeof ToolGroupContent;
 };
 
-const ToolGroupImpl: FC<
-  PropsWithChildren<{ startIndex: number; endIndex: number }>
-> = ({ children, startIndex, endIndex }) => {
-  const toolCount = endIndex - startIndex + 1;
+const ToolGroupImpl: FC<ToolGroupProps> = ({ children, group }) => (
+  <ToolGroupRoot variant="ghost" defaultOpen>
+    <ToolGroupTrigger
+      count={group.indices.length}
+      indices={group.indices}
+      active={group.status.type === "running"}
+    />
+    <ToolGroupContent>{children}</ToolGroupContent>
+  </ToolGroupRoot>
+);
 
-  return (
-    <ToolGroupRoot defaultOpen>
-      <ToolGroupTrigger count={toolCount} />
-      <ToolGroupContent>{children}</ToolGroupContent>
-    </ToolGroupRoot>
-  );
-};
-
-/**
- * @deprecated This wrapper targets the legacy `components.ToolGroup` prop
- * on `<MessagePrimitive.Parts>`. Use `<MessagePrimitive.GroupedParts>` with
- * a `groupBy` returning `"group-tool"` and compose `ToolGroupRoot` /
- * `ToolGroupTrigger` / `ToolGroupContent` directly. See `thread.tsx`.
- */
+/** The `ToolGroup` slot of `ThreadComponents` (see `Thread.tsx`). */
 const ToolGroup = memo(ToolGroupImpl) as unknown as ToolGroupComponent;
 
 ToolGroup.displayName = "ToolGroup";

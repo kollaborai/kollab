@@ -472,8 +472,19 @@ class DaemonPool:
 
             handle = DaemonHandle(session_id, identity_name, process)
             try:
-                socket_path = await self._await_socket(handle)
-                await handle.connect(socket_path)
+                deadline = time.monotonic() + SPAWN_TIMEOUT_SECONDS
+                while True:
+                    socket_path = await self._await_socket(handle)
+                    try:
+                        await handle.connect(socket_path)
+                        break
+                    except (ConnectionRefusedError, FileNotFoundError):
+                        # The socket file can predate the listener: a dead
+                        # daemon of the same gem leaves it behind, and the
+                        # new one publishes presence before it binds.
+                        if time.monotonic() >= deadline:
+                            raise
+                        await asyncio.sleep(0.25)
             except Exception:
                 await handle.close()
                 raise

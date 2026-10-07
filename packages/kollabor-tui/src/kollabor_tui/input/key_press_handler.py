@@ -104,6 +104,8 @@ class KeyPressHandler:
         # second press within the window actually exits.
         self._ctrl_c_first_press_time: float = 0.0
         self._ctrl_c_window_seconds: float = 3.0
+        # Shown after the first Ctrl+C. Attach mode names what the second does.
+        self.quit_hint_text: str = "Press Ctrl+C again to quit"
 
         logger.debug("KeyPressHandler initialized")
 
@@ -335,7 +337,8 @@ class KeyPressHandler:
             key_result = await self.event_bus.emit_with_hooks(
                 EventType.KEY_PRESS,
                 {
-                    "key": key_press.name,
+                    "key": key_press.name or key_press.char or "",
+                    "char": key_press.char or "",
                     "char_code": key_press.code,
                     "key_type": key_press.type.value,
                     "modifiers": key_press.modifiers,
@@ -370,19 +373,16 @@ class KeyPressHandler:
             )
 
     def _check_prevent_default(self, key_result: Dict[str, Any]) -> bool:
-        """Check if plugins want to prevent default key handling.
+        """Whether a KEY_PRESS hook returned ``{"prevent_default": True}``.
 
-        Args:
-            key_result: Result from key press event.
-
-        Returns:
-            True if default handling should be prevented.
+        Each hook's return value is under ``main["hook_results"][i]["result"]``.
         """
-        if "main" in key_result:
-            for hook_result in key_result["main"].values():
-                if isinstance(hook_result, dict) and hook_result.get("prevent_default"):
-                    return True
-        return False
+        main = key_result.get("main") or {}
+        return any(
+            isinstance(entry.get("result"), dict)
+            and bool(entry["result"].get("prevent_default"))
+            for entry in main.get("hook_results", [])
+        )
 
     async def _handle_key_press(self, key_press: KeyPress) -> None:
         """Handle a parsed key press.
@@ -405,24 +405,6 @@ class KeyPressHandler:
                 if self._ctrl_c_first_press_time > 0:
                     self._ctrl_c_first_press_time = 0.0
                     self._set_quit_hint("")
-
-            # Emit KEY_PRESS event (fire-and-forget for config hooks)
-            try:
-                self._create_background_task(
-                    self.event_bus.emit_with_hooks(
-                        EventType.KEY_PRESS,
-                        {
-                            "key": key_press.name or key_press.char or "",
-                            "char": key_press.char or "",
-                            "code": key_press.code,
-                            "type": str(key_press.type),
-                            "modifiers": getattr(key_press, "modifiers", None),
-                        },
-                        "key_press_handler",
-                    )
-                )
-            except Exception:
-                logger.exception("Failed to schedule KEY_PRESS event")
 
             # Check for permission prompt FIRST (highest priority)
             if self.layout_manager and hasattr(
@@ -706,7 +688,7 @@ class KeyPressHandler:
         # First press (or expired)
         self._ctrl_c_first_press_time = now
         logger.info("Ctrl+C received (first press) - waiting for confirmation")
-        self._set_quit_hint("Press Ctrl+C again to quit")
+        self._set_quit_hint(self.quit_hint_text)
 
         # If a tool/API is running, also cancel it (same as ESC)
         try:

@@ -45,7 +45,10 @@ class SliderWidget(BaseWidget):
         self.max_value = config.get("max_value") or config.get("max", 1.0)
         self.step = config.get("step", 0.1)
         self.bar_width = config.get("bar_width", 20)
-        self.decimal_places = config.get("decimal_places", 1)
+        # A whole-number step shows whole numbers: 500, not 500.0
+        self.decimal_places = config.get(
+            "decimal_places", 0 if float(self.step).is_integer() else 1
+        )
 
     def render(self) -> List[str]:
         """Render slider with visual progress bar.

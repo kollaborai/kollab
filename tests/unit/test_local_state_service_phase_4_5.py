@@ -902,3 +902,40 @@ class TestSnapshotRoundTrips(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSystemInfoVoice(unittest.IsolatedAsyncioTestCase):
+    """The web mic reads voice mode from the daemon's system snapshot."""
+
+    async def test_system_info_reports_voice_mode(self) -> None:
+        voice = SimpleNamespace(status=lambda: {"requested": True, "running": False})
+
+        class EventBus:
+            def get_service(self, name: str):
+                return voice if name == "voice_plugin" else None
+
+        svc = LocalStateService(
+            llm_service=None, profile_manager=MagicMock(), event_bus=EventBus()
+        )
+
+        snap = await svc.get_system_info()
+
+        self.assertTrue(snap.voice_requested)
+        self.assertFalse(snap.voice_running)
+        # The engine reads it through the RPC wire format.
+        wire = type(snap).from_dict(snap.to_dict())
+        self.assertTrue(wire.voice_requested)
+
+    async def test_system_info_without_voice_plugin_reports_off(self) -> None:
+        class EventBus:
+            def get_service(self, name: str):
+                return None
+
+        svc = LocalStateService(
+            llm_service=None, profile_manager=MagicMock(), event_bus=EventBus()
+        )
+
+        snap = await svc.get_system_info()
+
+        self.assertFalse(snap.voice_requested)
+        self.assertFalse(snap.voice_running)

@@ -64,7 +64,7 @@ from .models import (
 )
 from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
-from .presence import PresenceManager, get_messages_dir
+from .presence import PresenceManager, get_messages_dir, pid_alive
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
@@ -3670,7 +3670,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="task_complete",
                 success=False,
-                error=f"task {task_id} not found or not in claimable state",
+                error=f"no open task {task_id} on your ledger; task_complete takes an id from your work queue",
             )
 
         return ToolExecutionResult(
@@ -6394,20 +6394,13 @@ class HubPlugin(BasePlugin):
         assert self._presence is not None
         agents = await self._presence.discover_agents_async(include_self=True)
         # discover_agents_async already cleans dead presence files
-        # Check if any assigned work needs reassignment
+        # Work held by a dead agent goes back to pending (and is saved).
         if self._work_queue:
-            for slot in self._work_queue.get_all():
-                if slot.status == "assigned" and slot.assigned_to:
-                    # Check if assigned agent still exists
-                    alive = any(a.identity == slot.assigned_to for a in agents)
-                    if not alive:
-                        dead_agent = slot.assigned_to
-                        slot.status = "pending"
-                        slot.assigned_to = None
-                        logger.info(
-                            f"Reassigning work {slot.id}: "
-                            f"agent {dead_agent} is dead"
-                        )
+            live = {a.identity for a in agents}
+            for slot_id, dead_agent in self._work_queue.requeue_orphans(live):
+                logger.info(
+                    f"Reassigning work {slot_id}: agent {dead_agent} is dead"
+                )
 
     async def _try_assign_work(self) -> None:
         """Try to assign pending work to idle agents using capability matching."""
@@ -7537,13 +7530,26 @@ class HubPlugin(BasePlugin):
                     f"to your current task or you can add value to the discussion.)"
                 )
             elif message.to == my_name:
+                if network_request:
+                    # Someone on another machine watches for the answer, so
+                    # silence reads as "never arrived": a greeting gets a reply
+                    # too. A pure acknowledgement never wakes (_decide_hub_wake).
+                    guidance = (
+                        f"{message.from_identity} wrote to you from another "
+                        "machine and is waiting for your answer. Reply once, "
+                        "even to a greeting: your plain-text reply is sent "
+                        "back to them."
+                    )
+                else:
+                    guidance = (
+                        "Handle this once if actionable. If it is only an "
+                        "acknowledgement, do not respond."
+                    )
                 formatted += (
                     "\n\n[hub wake instruction]\n"
                     f"classification: {wake_decision.mode} "
                     f"({wake_decision.reason}). "
-                    "Handle this once if actionable. If it is only an "
-                    "acknowledgement, do not respond. When no work remains, "
-                    "let the turn end naturally."
+                    f"{guidance} When no work remains, let the turn end naturally."
                 )
 
             try:
@@ -11361,28 +11367,8 @@ class HubPlugin(BasePlugin):
 
     @staticmethod
     def _agent_pid_alive(pid: int) -> bool:
-        """Return True when pid exists and can be signaled.
-
-        The default launch forks the agent daemon from the attached window, so
-        that window is the daemon's parent: an exited daemon stays a zombie
-        until reaped, and os.kill(pid, 0) succeeds on zombies. Reap our own
-        exited child first so `/hub stop` typed in that window sees the exit.
-        """
-        if not pid:
-            return False
-        # ponytail: a zombie whose parent is another live process still reads
-        # alive until that parent reaps or exits; add a /proc or ps state check
-        # if that ever shows up.
-        try:
-            if os.waitpid(pid, os.WNOHANG)[0]:
-                return False
-        except ChildProcessError:
-            pass  # not our child
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
+        """Return True while pid runs; a zombie does not (``presence.pid_alive``)."""
+        return pid_alive(pid)
 
     def _force_kill_agent(self, agent) -> bool:
         """Send SIGTERM to an agent process as last resort.

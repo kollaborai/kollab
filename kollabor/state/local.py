@@ -579,6 +579,15 @@ class LocalStateService(StateService):
         except Exception:
             temperature = float(getattr(profile, "temperature", 0.7) or 0.7)
 
+        # effort (env-aware and validated, so it is what the next request sends)
+        try:
+            if hasattr(profile, "get_effort"):
+                effort = profile.get_effort()
+            else:
+                effort = getattr(profile, "effort", "")
+        except Exception:
+            effort = getattr(profile, "effort", "")
+
         return ProfileSnapshot(
             name=getattr(profile, "name", "") or "",
             model=(model or "") if model is not None else "",
@@ -589,6 +598,7 @@ class LocalStateService(StateService):
             temperature=temperature,
             description=getattr(profile, "description", "") or "",
             is_active=is_active,
+            effort=effort or "",
         )
 
     # === Permissions ===
@@ -916,6 +926,16 @@ class LocalStateService(StateService):
                 except Exception as e:
                     logger.debug(f"plugin_registry count error: {e}")
 
+        voice_requested = voice_running = False
+        if self._event_bus is not None:
+            try:
+                voice_plugin = self._event_bus.get_service("voice_plugin")
+                voice = voice_plugin.status() if voice_plugin is not None else {}
+                voice_requested = bool(voice.get("requested"))
+                voice_running = bool(voice.get("running"))
+            except Exception as e:
+                logger.debug(f"voice status error: {e}")
+
         return SystemInfoSnapshot(
             cwd=cwd,
             git_branch=git_branch,
@@ -929,6 +949,8 @@ class LocalStateService(StateService):
             enabled_commands=enabled_commands,
             command_categories=command_categories,
             plugin_count=plugin_count,
+            voice_requested=voice_requested,
+            voice_running=voice_running,
         )
 
     # === Command catalog ===

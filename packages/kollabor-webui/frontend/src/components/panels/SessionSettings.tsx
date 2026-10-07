@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatSessionName } from "@/utils/session-display";
+import { titleCase } from "./panel-model";
 
 /**
  * The Session tab: profile / model / effort overrides for this daemon only.
@@ -114,8 +115,10 @@ export function SessionSettings({
           <span className="text-muted-foreground">Session</span>
           <span className="font-mono break-all">{sessionLabel}</span>
           <span className="text-muted-foreground">Agent</span>
+          <span className="break-words">{session.agent || "default"}</span>
+          <span className="text-muted-foreground">Gem</span>
           <span className="break-words">
-            {session.identity || session.agent || "unassigned"}
+            {session.identity ? titleCase(session.identity) : "Unassigned"}
           </span>
           <span className="text-muted-foreground">Workspace</span>
           <span className="break-all">{workspace}</span>

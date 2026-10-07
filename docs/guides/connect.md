@@ -8,7 +8,7 @@ The design contract for this feature is [the agent network spec](../specs/agent-
 
 - Kollab 0.11.0 or newer on every machine. `kollab --upgrade` updates an existing install. Codes from 0.11.0 do not work with 0.10.x, so upgrade every machine first.
 - A terminal on each machine for the first setup. On a server, that means one SSH session: start `kollab`, then type a code.
-- Kollab running on a machine whenever its agents should be reachable. On a server, keep it open in `tmux`, or run `kollab --detached`.
+- Kollab running on a machine whenever its agents should be reachable. `kollab service install` in the joined folder keeps it running across crashes and reboots (systemd on Linux, launchd on macOS); `kollab --detached` keeps it running until the next reboot.
 
 ## Join a machine to your network
 
@@ -87,7 +87,7 @@ A company or a group that wants its own directory instead of kollabor.ai runs on
 kollab relay serve --domain agents.example.com
 ```
 
-It creates its signing key, starts the relay and serves the signed key file on one local port, then prints the two things it cannot do for you: one DNS TXT record, and a TLS proxy for five routes. `--print nginx` and `--print caddy` print that proxy config, and `--print systemd` prints a service unit; nothing is installed for you. Once the proxy is up, every device runs `/connect agents.example.com` and joins with a code exactly as on kollabor.ai, and nothing touches kollabor.ai. A restart keeps the same key, so joined devices reconnect on their own. Back up the state directory it names (`~/.kollab/relay/agents.example.com`). The operator guide has the options, the limits of one process and how to move an existing manual setup: [Signed discovery and relay service operations](../operations/kollabor-ai-discovery-publication.md).
+It creates its signing key, starts the relay and serves the signed key file on one local port, then prints the two things it cannot do for you: one DNS TXT record, and a TLS proxy for five routes. `--print nginx` and `--print caddy` print that proxy config; `--install` installs and starts it as a systemd service (`--print systemd` shows the unit instead). Once the proxy is up, every device runs `/connect agents.example.com` and joins with a code exactly as on kollabor.ai, and nothing touches kollabor.ai. A restart keeps the same key, so joined devices reconnect on their own. Back up the state directory it names (`~/.kollab/relay/agents.example.com`). The operator guide has the options, the limits of one process and how to move an existing manual setup: [Signed discovery and relay service operations](../operations/kollabor-ai-discovery-publication.md).
 
 ## If something goes wrong
 

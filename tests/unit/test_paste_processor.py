@@ -199,6 +199,54 @@ class TestPasteProcessorAsync(unittest.IsolatedAsyncioTestCase):
         # Should have called display callback
         self.mock_display_callback.assert_called_once_with(force_render=True)
 
+    async def test_paste_text_short_goes_in_as_text_with_its_newlines(self):
+        """Under input.paste_min_chars a paste is typed text, not a placeholder."""
+        buffer = BufferManager(buffer_limit=1000)
+        processor = PasteProcessor(buffer, display_callback=self.mock_display_callback)
+
+        await processor.paste_text("line one\r\nline two\rend", 1.0)
+
+        self.assertEqual(buffer.content, "line one\nline two\nend")
+        self.assertEqual(processor.paste_bucket, {})
+        self.mock_display_callback.assert_awaited_once_with(force_render=True)
+
+    async def test_paste_text_collapses_long_or_untypeable_text(self):
+        """Long text, or text the input refuses, is stored behind a placeholder."""
+        buffer = BufferManager(buffer_limit=1000)
+        config = Mock()
+        config.get.side_effect = lambda key, default: (
+            5 if key == "input.paste_min_chars" else default
+        )
+        processor = PasteProcessor(buffer, config=config)
+
+        await processor.paste_text("abcdef", 1.0)  # at the threshold
+        await processor.paste_text("caf\u00e9", 2.0)  # the input refuses the accent
+
+        self.assertEqual(
+            buffer.content,
+            "[Pasted #1 1 lines, 6 chars][Pasted #2 1 lines, 4 chars]",
+        )
+        self.assertEqual(
+            processor.expand_paste_placeholders(buffer.content), "abcdefcaf\u00e9"
+        )
+
+    async def test_ctrl_v_text_follows_the_same_threshold(self):
+        """Ctrl+V clipboard text is typed when short and collapsed when long."""
+        buffer = BufferManager(buffer_limit=10000)
+        processor = PasteProcessor(buffer)
+
+        with patch(
+            "kollabor_tui.input.paste_processor.read_image_from_clipboard",
+            return_value=None,
+        ), patch(
+            "kollabor_tui.input.paste_processor.read_text_from_clipboard",
+            side_effect=["a\nb", "x" * 500],
+        ):
+            self.assertTrue(await processor.handle_clipboard_paste())
+            self.assertTrue(await processor.handle_clipboard_paste())
+
+        self.assertEqual(buffer.content, "a\nb[Pasted #1 1 lines, 500 chars]")
+
     async def test_update_paste_placeholder(self):
         """Test updating paste placeholder (logs only for now)."""
         self.paste_processor._current_paste_id = "PASTE_1"

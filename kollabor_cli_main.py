@@ -143,7 +143,7 @@ _prepend_dev_workspace_paths()
 
 
 def cli_main():
-    """Run the interactive app or its headless, account-free relay service."""
+    """Run the interactive app, its headless account-free relay, or `kollab service`."""
     if sys.argv[1:2] == ["relay"]:
         if sys.argv[2:3] == ["run"]:
             from plugins.hub.relay_runtime import main
@@ -161,6 +161,13 @@ def cli_main():
             from plugins.hub.relay_selfhost import main
 
         return main(sys.argv[3:])
+    if sys.argv[1:2] == ["service"]:
+        from kollabor.service import ACTIONS
+        from kollabor.service import main as service_main
+
+        # Only its actions: `kollab service is down?` is still a question for the agent.
+        if len(sys.argv) == 2 or sys.argv[2] in {*ACTIONS, "-h", "--help"}:
+            return service_main(sys.argv[2:])
     # Server-only startup must not initialize a TUI, provider or workspace agent.
     from kollabor.cli import cli_main as app_cli_main
 

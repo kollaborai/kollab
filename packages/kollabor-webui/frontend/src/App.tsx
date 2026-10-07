@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuiState } from "@assistant-ui/react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
+import { useThreadActivity } from "@/components/gems/activity";
+import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { PanelHost } from "@/components/panels/PanelHost";
 import type {
@@ -51,6 +54,7 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 
 const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
+const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
 /** True when the restored state still carries an unanswered permission prompt. */
 function hasPendingPermission(state: EngineState): boolean {
@@ -71,27 +75,59 @@ function RuntimeShell({
   agents,
   onSessionUpdated,
   onOpenSettings,
+  onHistoryCleared,
+  onActivity,
   refreshSignal,
+  view,
+  onViewChange: setView,
 }: {
   session: Session;
   profiles: Profile[];
   agents: AgentPoolEntry[];
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
+  /** Reloads this session's conversation after the engine cleared it. */
+  onHistoryCleared: () => Promise<void>;
+  /** Reports what this session's gem should act out in the sidebar. */
+  onActivity: (activity: Activity | null) => void;
   refreshSignal: number;
+  /** Held by App so a runtime remount (Clear history) keeps the open view. */
+  view: SessionView;
+  onViewChange: (view: SessionView) => void;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   const profile = profiles.find((item) => item.name === session.profile);
-  const model = profile?.model;
+  const model = session.model || profile?.model;
   const sessionLabel = formatSessionName(session.name, session.session_id);
-  const [view, setView] = useState<SessionView>("chat");
+  // A typed /restart (/new, /clear) empties the daemon's conversation; once that
+  // run ends, reset the thread the way the toolbar's Clear does. Only a run
+  // seen in this mount counts, so the reloaded thread cannot loop.
+  const running = useAuiState((s) => s.thread.isRunning);
+  const lastPrompt = useAuiState((s) => {
+    const part = s.thread.messages
+      .filter((message) => message.role === "user")
+      .at(-1)
+      ?.parts.find((item) => item.type === "text");
+    return part?.type === "text" ? part.text.trim() : "";
+  });
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && !running && RESTART_COMMAND.test(lastPrompt)) {
+      void onHistoryCleared();
+    }
+    wasRunning.current = running;
+  }, [running, lastPrompt, onHistoryCleared]);
   const [commands, setCommands] = useState<SlashCommand[]>(
     DEFAULT_SLASH_COMMANDS,
   );
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
+  const activity = useThreadActivity(Boolean(transportError));
+
+  useEffect(() => onActivity(activity), [activity, onActivity]);
+  useEffect(() => () => onActivity(null), [onActivity]);
 
   useEffect(() => {
     let mounted = true;
@@ -173,6 +209,7 @@ function RuntimeShell({
           onStatus={setStatus}
           onSessionUpdated={onSessionUpdated}
           onOpenSettings={() => onOpenSettings()}
+          onHistoryCleared={onHistoryCleared}
         />
       </header>
       <div className="flex min-h-0 flex-1 flex-col">
@@ -181,6 +218,10 @@ function RuntimeShell({
             agents={agents}
             commands={commands}
             onOpenPanel={onOpenSettings}
+            attachmentsEnabled={
+              session.supports_vision ?? profile?.supports_vision ?? true
+            }
+            identity={session.identity}
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -215,6 +256,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  // Bumped to remount the runtime: it reads its initial state only on mount.
+  const [runtimeEpoch, setRuntimeEpoch] = useState(0);
+  const [sessionView, setSessionView] = useState<SessionView>("chat");
+  const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
@@ -338,6 +383,12 @@ export default function App() {
           if (!controller.signal.aborted) {
             setSessions(next);
             setInitialState((state) => state ? { ...state, sessions: next } : state);
+          }
+          // Live hub state for the sidebar gems; skip the update when nothing
+          // moved so the chat does not re-render every poll.
+          const pool = (await api.listAgentPool(true)).agents || [];
+          if (!controller.signal.aborted) {
+            setAgents((current) => (JSON.stringify(current) === JSON.stringify(pool) ? current : pool));
           }
         } catch {
           // Keep the last known sidebar while the daemon is unavailable.
@@ -504,6 +555,19 @@ export default function App() {
     }
   };
 
+  // The engine already emptied the conversation; reload it and remount the
+  // runtime so the open thread resets in place.
+  const resetThread = async (sessionId: string) => {
+    const operation = ++operationRef.current;
+    const result = await loadSessions();
+    const nextState = await loadState(sessionId, result);
+    if (operation !== operationRef.current) return;
+    setInitialState(nextState);
+    setRuntimeEpoch((epoch) => epoch + 1);
+    refreshSignalRef.current += 1;
+    setRefreshSignal(refreshSignalRef.current);
+  };
+
   const openSettings = useCallback((request?: PanelOpenRequest) => {
     setSettingsTab(request?.tab ?? "session");
     setSettingsIntent(
@@ -535,6 +599,7 @@ export default function App() {
         onWorkspaceChange={setWorkspacePath}
         selectedBundle={selectedBundle}
         activeId={activeId}
+        activeActivity={activeActivity}
         busy={busy}
         onProfileChange={setSelectedProfile}
         onIdentityChange={setSelectedIdentity}
@@ -572,7 +637,7 @@ export default function App() {
       <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
         {activeSession && initialState ? (
           <EngineRuntimeProvider
-            key={activeId}
+            key={`${activeId}:${runtimeEpoch}`}
             api={api}
             sessionId={activeSession.session_id}
             initialState={initialState}
@@ -584,6 +649,10 @@ export default function App() {
               refreshSignal={refreshSignal}
               onSessionUpdated={handleSessionUpdated}
               onOpenSettings={openSettings}
+              onHistoryCleared={() => resetThread(activeSession.session_id)}
+              onActivity={setActiveActivity}
+              view={sessionView}
+              onViewChange={setSessionView}
             />
           </EngineRuntimeProvider>
         ) : (

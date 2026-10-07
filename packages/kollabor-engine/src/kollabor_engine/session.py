@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.model_registry import supports_vision
+from kollabor_ai.session_naming import session_display_name
 from kollabor_events.permissions_models import ApprovalMode
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
@@ -369,11 +371,17 @@ class EngineSession:
         agent_name = (
             self.agent or (self.daemon.agent_name if self.daemon else "") or "default"
         )
+        model = getattr(self.profile, "model", "")
         return {
             "session_id": self.session_id,
-            "name": self.session_id,
+            "name": session_display_name(self.session_id),
             "profile": getattr(self.profile, "name", str(self.profile or "")),
-            "model": getattr(self.profile, "model", ""),
+            "model": model,
+            # What the daemon will send next (mirrored by apply_profile_mirror).
+            "effort": getattr(self.profile, "effort", "") or "",
+            "supports_vision": supports_vision(
+                model, getattr(self.profile, "provider", "")
+            ),
             "agent": agent_name,
             "workspace": self.workspace,
             "approval_mode": _APPROVAL_MODE_MAP.get(

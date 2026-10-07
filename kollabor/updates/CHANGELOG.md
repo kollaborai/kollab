@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-07
+
+### Changed
+- A paste shorter than `input.paste_min_chars` (default 500, in `/config` under Input Settings) goes into the input as text, line breaks kept and not submitted. Only longer pastes collapse to `[Pasted #N ...]`; before, anything over 10 characters did. Ctrl+V clipboard text follows the same rule instead of always going in flattened to one line. Text with a character the input cannot hold still collapses, so nothing is lost.
+- Sliders with a whole-number step show whole numbers in `/config` (`History Limit: 100`, not `100.0`).
+- The first Ctrl+C in a window that started its agent says what each key does next: "Press Ctrl+C again to stop koordinator, or Ctrl+Z to detach". The hint wraps on narrow terminals.
+- After Ctrl+Z on the coordinator, the notice says `reattach: kollab`: a bare `kollab` in the same folder picks it back up. Other agents still show `kollab --attach <name>`.
+- Tool durations no longer count the time spent waiting on a permission prompt, in the terminal and the web UI.
+- The web UI's Computer panel is gone; `GET /hub/agents/{id}/output` now returns the agent's output lines.
+
+### Added
+- `kollab service install` keeps the folder's agent running: a systemd unit on Linux that runs as you and starts at boot (sudo writes it), or a LaunchAgent on macOS that starts at login, restarted 5 s after it stops either way. `kollab` in the folder attaches to it and closing that window leaves it running; `kollab --hub stop` says it will come back. `kollab service status` shows the unit, its pid and whether the agent answers; `kollab service uninstall` removes it. `install` refuses while another agent runs in the folder.
+- `kollab relay serve --domain <domain> --install` installs the directory as the systemd unit `--print systemd` shows, after creating its state directory, then enables and starts it; `--uninstall` removes it.
+- The README and `docs/architecture/agent-network.md` show the agent network: who connects to whom, the join step by step, the tunnel's layers, how `/connect` uses a domain's DNS record, staying online and running your own directory. `scripts/build_network_diagrams.py` draws them.
+- `kollab --web-ui` has a new look. The sidebar shows each session's gem as a live 3D avatar that acts out what its agent is doing (thinking, typing, searching, messaging, an error), and an empty chat greets you as that gem. New Session starts a session in one click; the options button next to it picks the agent, gem, model and workspace.
+- The web chat composer is a pill with attachments, a `/voicemode` mic and a send/stop button. The mic reads the daemon's voice state, so it is right after a reload or when voice mode was started in the terminal. Attachments are hidden for models that cannot read images.
+- Replies in the web chat stream in as the model writes them, and a turn that goes text, tool, text keeps that order. Tool calls show while they run, then their real duration; a group of calls shows its total, and a failed call is red with its error line.
+- The web Trajectory tab has a Waterfall view next to the Table: one block per turn, each tool call under the model request that made it, timed with the daemon's measured run times.
+- The README opens with a recording of kollab running.
+
+### Fixed
+- Agents no longer call `task_complete` with a task id they made up. Its description and example now ask for the ledger id from the work queue (the example used a slug, `phase-b`), and calling it for an unknown task says so: "no open task <id> on your ledger".
+- A native tool call whose first argument holds the rest of the documented XML tag (GLM 5.3 sends `{"name": "coder\" task=\"..."}`) no longer fails with "task required". kollab splits out the parameters the tool declares, so `hub_spawn`, `hub_cron_add` and the other tag tools run on the first try.
+- `kollab --hub stop` run from another shell no longer reports an agent that stopped as "pid survived SIGKILL". The agent had exited, but its window had not reaped it yet, and the check counted that as still running.
+- A joined computer no longer lists an MCP server the other computer switched off as "Skipped MCP servers not installed here". It is still skipped when its command is missing, but nothing was missed.
+- `python main.py` exits with the command's status. It always exited 0, so a failed `kollab relay serve` or `kollab service status` looked like success when run from a checkout.
+- A second `kollab` in the same workspace starts the next agent again instead of joining the session another terminal still has open. A bare relaunch only reattaches to a daemon with no window (one left by Ctrl+Z or a closed terminal); the agent's status now reports how many windows it has.
+- Pasting an image no longer closes `kollab`. The daemon read each client message with a 64 KB cap, so an image dropped the connection and the window exited as if the agent had died.
+- The hub coordinator now saves work it takes back from a dead agent, so the work is reassigned. It used to log the same reassignment every 5 seconds and never save it.
+- `KeyPress` hooks, plugin or config, run once per key instead of twice, and a hook that returns `prevent_default` now stops the key's normal handling. Ctrl+Z printed its detach notice twice because of it.
+- An agent answers a message from another machine, a greeting included. A new `agent@device` message got the hub rule "if it is only an acknowledgement, do not respond", so a "hello" woke the agent, it replied with nothing, and the sender saw silence. The agent is now told the sender is waiting and to reply once.
+- Agents on one machine no longer spend the same ChatGPT refresh token twice: every write of the login file holds a lock and replaces the file atomically, and a refresh reuses a login another process just wrote.
+- Approving a permission prompt in the web UI finishes the tool's row (result and duration) in the same turn, and the row no longer shows a second Allow/Deny bar that the engine rejected.
+- The web UI's Clear history, and a typed `/clear`, `/new` or `/restart`, reset the open thread instead of leaving old turns on screen, and the Trajectory tab stays open.
+- Spaces typed in the web composer are kept, and the web UI no longer starts with a 401 before it has loaded its engine token.
+- After a reload, web chat messages no longer show the agent status (vault, hub) the daemon adds to a turn, and the Trajectory names such a turn by what you typed.
+- Saving an edited profile from the web UI works again (a 500 that showed as "Failed to fetch"). The editor keeps a profile's streaming, tools, temperature and base URL, lists every provider the engine runs, and asks before deleting.
+- Web Session Settings shows the live effort after Apply, and lists the agent and the gem separately.
+- Web MCP rows offer Edit and Delete only for servers in the global MCP config, Delete asks first, and the dialog fits a phone screen. An MCP result flagged `isError` counts as a failure instead of a green check, and MCP file tools name the file they touch.
+- Creating a web session right after deleting one or restarting the engine no longer fails with "daemon failed to start: Connection refused", and an agent whose process has exited drops out of the Online count at once instead of after a minute.
+- Engine errors reach the browser as JSON with CORS headers, so the web UI shows the real error instead of "Failed to fetch".
+- Web session names read as words, the header shows the session's live model, the `@` menu lists only online agents, and links in replies open in a new tab.
+
 ## [0.11.3] - 2026-10-05
 
 ### Changed

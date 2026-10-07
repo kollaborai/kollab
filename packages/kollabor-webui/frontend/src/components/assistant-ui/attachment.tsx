@@ -9,7 +9,7 @@ import {
 } from "react";
 import {
   XIcon,
-  PlusIcon,
+  PaperclipIcon,
   FileText,
   Loader2Icon,
   AlertCircleIcon,
@@ -279,18 +279,21 @@ const ComposerImageTokenSynchronizer: FC = () => {
         .join("\u0000"),
     ),
   );
-  const text = useAuiState((s) => s.composer.text);
   const managedTokens = useRef<string[]>([]);
 
+  // Only an attachment change rewrites the text. Running on every keystroke
+  // trimmed the space being typed (it is always trailing) and wrote stale
+  // text back over fast typing.
   useEffect(() => {
     const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
     const nextTokens = imageIds.map((_, index) => `[image${index + 1}]`);
+    const text = aui.composer.getState().text;
     let textWithoutManagedTokens = text;
     for (const token of managedTokens.current) {
       textWithoutManagedTokens = textWithoutManagedTokens.split(token).join("");
     }
     textWithoutManagedTokens = textWithoutManagedTokens
-      .replace(/^\s+|\s+$/g, "")
+      .replace(/^\s+/, "")
       .replace(/\n{3,}/g, "\n\n");
 
     const nextText = [
@@ -299,7 +302,7 @@ const ComposerImageTokenSynchronizer: FC = () => {
     ].join("\n");
     managedTokens.current = nextTokens;
     if (nextText !== text) aui.composer.setText(nextText);
-  }, [aui, imageAttachmentKey, text]);
+  }, [aui, imageAttachmentKey]);
 
   return null;
 };
@@ -322,13 +325,13 @@ export const ComposerAddAttachment: FC = () => {
     <ComposerPrimitive.AddAttachment asChild>
       <TooltipIconButton
         tooltip="Add Attachment"
-        side="bottom"
+        side="top"
         variant="ghost"
         size="icon"
-        className="aui-composer-add-attachment hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 rounded-full p-1 text-xs font-semibold active:scale-[0.96] motion-reduce:transition-none"
+        className="aui-composer-add-attachment hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-9 shrink-0 rounded-full p-1 text-xs font-semibold active:scale-[0.96] motion-reduce:transition-none"
         aria-label="Add Attachment"
       >
-        <PlusIcon className="aui-attachment-add-icon size-4.5 stroke-[1.5px]" />
+        <PaperclipIcon className="aui-attachment-add-icon size-5 stroke-[1.5px]" />
       </TooltipIconButton>
     </ComposerPrimitive.AddAttachment>
   );

@@ -129,6 +129,7 @@ class ProfileSnapshot(Snapshot):
     temperature: float = 0.7
     description: str = ""
     is_active: bool = False
+    effort: str = ""  # reasoning effort the next request will send, "" = model default
 
 
 @dataclass
@@ -442,6 +443,10 @@ class SystemInfoSnapshot(Snapshot):
     enabled_commands: int = 0
     command_categories: int = 0
     plugin_count: int = 0
+    # Voice mode (VoicePlugin.status()): requested = turned on, running =
+    # listening now. Both False when the voice plugin is not loaded.
+    voice_requested: bool = False
+    voice_running: bool = False
 
 
 # === Phase 4.5: agent / skill / system_prompt snapshots ===

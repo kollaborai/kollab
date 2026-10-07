@@ -291,7 +291,10 @@ kollab --hub help                # full command list
 kollab --agent koordinator --detached   # start detached
 kollab --hub stop koordinator                    # stop (socket + SIGTERM fallback)
 kollab --hub status                              # verify
+kollab service install                           # this folder's agent under systemd/launchd (kollabor/service.py)
 ```
+
+`kollab service` runs `kollab --detached` with `KOLLAB_SERVICE=1`: cli_main skips the fork so the manager owns the process, pops the flag (agents it spawns still detach) and sets `KOLLAB_SERVICE_PID`. Its hub status then reports `service: true`, `find_workspace_daemon` attaches to it although launchd does not make it a session leader, and the attaching window never owns it (no `KOLLAB_DAEMON_PID`).
 
 **Hub message flow (4 flows, see docs/specs/hub-message-flow.md):**
 1. Human types -> `_broadcast_user_input` -> broadcast to all peers

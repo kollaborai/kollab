@@ -42,7 +42,9 @@ def make_session():
         )
         state.setdefault(
             "get_active_profile",
-            AsyncMock(return_value=SimpleNamespace(name="opus", model="opus-5")),
+            AsyncMock(
+                return_value=SimpleNamespace(name="opus", model="opus-5", effort="high")
+            ),
         )
         session = SimpleNamespace(
             session_id=sid, alive=alive, profile=None, state=SimpleNamespace(**state)
@@ -141,7 +143,7 @@ class TestAction:
     ):
         session = make_session()
         await client.post("/sessions/sess_panels/panels/model/actions/select", json={})
-        mirror.assert_called_once_with(session, "opus", "opus-5")
+        mirror.assert_called_once_with(session, "opus", "opus-5", "high")
 
     @pytest.mark.asyncio
     async def test_mirror_failure_does_not_fail_the_action(
@@ -285,6 +287,30 @@ class TestApplyProfileMirror:
 
         apply_profile_mirror(session, "opus")  # no model: keep the profile's own
         assert profile.model == "opus-5"
+
+    def test_carries_the_live_effort_and_keeps_it_when_none_is_reported(
+        self, monkeypatch
+    ):
+        from kollabor_engine.routes.sessions import (  # type: ignore[import-not-found]
+            apply_profile_mirror,
+        )
+
+        import kollabor_ai
+
+        profile = SimpleNamespace(name="opus", model="opus-5", effort="")
+        monkeypatch.setattr(
+            kollabor_ai,
+            "ProfileManager",
+            lambda: SimpleNamespace(get_profile=lambda name: profile),
+        )
+        session = SimpleNamespace(session_id="s", profile=None)
+        apply_profile_mirror(session, "opus", "opus-5", "high")
+        assert profile.effort == "high"
+
+        apply_profile_mirror(session, "opus", "opus-5")  # unreported: leave it
+        assert profile.effort == "high"
+        apply_profile_mirror(session, "opus", "opus-5", "")  # reported empty: cleared
+        assert profile.effort == ""
 
     def test_never_raises(self, monkeypatch):
         from kollabor_engine.routes.sessions import (  # type: ignore[import-not-found]

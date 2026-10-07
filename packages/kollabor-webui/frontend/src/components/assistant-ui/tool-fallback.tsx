@@ -97,8 +97,9 @@ const statusIconMap: Record<ToolStatus, React.ElementType> = {
   "requires-action": AlertCircleIcon,
 };
 
-const formatToolDuration = (ms: number) => {
-  if (ms < 1000) return "<1s";
+/** A running call under a second reads "<1s" instead of flickering through ms. */
+export const formatToolDuration = (ms: number, running = false) => {
+  if (ms < 1000) return running ? "<1s" : `${Math.round(ms)}ms`;
   const seconds = ms / 1000;
   if (seconds < 10) return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;
   if (seconds < 60) return `${Math.floor(seconds)}s`;
@@ -106,9 +107,10 @@ const formatToolDuration = (ms: number) => {
 };
 
 function ToolFallbackDuration({
+  running,
   className,
   ...props
-}: React.ComponentProps<"span">) {
+}: React.ComponentProps<"span"> & { running: boolean }) {
   const elapsedMs = useToolCallElapsed();
   if (elapsedMs === undefined) return null;
 
@@ -121,28 +123,52 @@ function ToolFallbackDuration({
       )}
       {...props}
     >
-      {formatToolDuration(elapsedMs)}
+      {formatToolDuration(elapsedMs, running)}
     </span>
   );
 }
+
+/** A reloaded failure is the tool message's text, which opens with "Error: ". */
+const stripErrorPrefix = (text: string) => text.replace(/^(\s*error:\s*)+/i, "");
+
+/**
+ * First line of a failed call's error. A live result is `{error, output, ...}`;
+ * a reloaded one is the tool message's text.
+ */
+export const toolErrorLine = (result: unknown): string => {
+  const record =
+    result && typeof result === "object"
+      ? (result as Record<string, unknown>)
+      : undefined;
+  const raw =
+    typeof result === "string" ? result : record?.error || record?.output;
+  const text = typeof raw === "string" ? stripErrorPrefix(raw).trim() : "";
+  return text.split(/\r?\n/, 1)[0] || "Tool call failed";
+};
 
 function ToolFallbackTrigger({
   toolName,
   argsText,
   status,
+  isError,
+  errorLine,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   toolName: string;
   argsText?: string;
   status?: ToolCallMessagePartStatus;
+  /** The call finished with an error result: red icon plus `errorLine`. */
+  isError?: boolean;
+  errorLine?: string;
 }) {
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
+  const isFailed = isError === true && statusType === "complete";
 
-  const Icon = statusIconMap[statusType];
+  const Icon = isFailed ? XCircleIcon : statusIconMap[statusType];
   const label = isCancelled ? "Cancelled: " : "";
   const summary = summarizeToolCall(toolName, argsText);
 
@@ -160,6 +186,7 @@ function ToolFallbackTrigger({
         className={cn(
           "aui-tool-fallback-trigger-icon size-4 shrink-0",
           isCancelled && "text-muted-foreground",
+          isFailed && "text-destructive",
           isRunning && "animate-spin [animation-duration:0.6s]",
         )}
       />
@@ -174,6 +201,14 @@ function ToolFallbackTrigger({
           {label}
           <span className="font-medium text-foreground/90">{summary}</span>
         </span>
+        {isFailed && (
+          <span
+            data-slot="tool-fallback-trigger-error"
+            className="text-destructive block truncate text-xs"
+          >
+            {errorLine}
+          </span>
+        )}
         {isRunning && (
           <span
             aria-hidden
@@ -185,7 +220,7 @@ function ToolFallbackTrigger({
           </span>
         )}
       </span>
-      <ToolFallbackDuration />
+      <ToolFallbackDuration running={isRunning} />
       <ChevronDownIcon
         data-slot="tool-fallback-trigger-chevron"
         className={cn(
@@ -259,10 +294,12 @@ function ToolFallbackArgs({
 
 function ToolFallbackResult({
   result,
+  isError,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
   result?: unknown;
+  isError?: boolean;
 }) {
   if (result === undefined) return null;
 
@@ -272,11 +309,20 @@ function ToolFallbackResult({
       className={cn("aui-tool-fallback-result", className)}
       {...props}
     >
-      <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
-        Result:
+      <p
+        className={cn(
+          "aui-tool-fallback-result-header text-xs font-medium",
+          isError ? "text-destructive" : "text-muted-foreground",
+        )}
+      >
+        {isError ? "Error:" : "Result:"}
       </p>
       <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {formatContent(result)}
+        {formatContent(
+          isError && typeof result === "string"
+            ? stripErrorPrefix(result)
+            : result,
+        )}
       </pre>
     </div>
   );
@@ -537,6 +583,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   toolName,
   argsText,
   result,
+  isError,
   status,
   addResult,
   resume,
@@ -546,14 +593,19 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
 }) => {
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
-  const isRequiresAction = status?.type === "requires-action";
+  // A gated tool row has no approval data of its own: the engine asks through a
+  // separate `request_permission` card (PermissionTool.tsx), and a second
+  // Allow/Deny bar here would send an answer the engine rejects.
+  const needsApproval =
+    status?.type === "requires-action" &&
+    (approval != null || interrupt != null);
+  const failed = isError === true && result !== undefined;
 
-  const [open, setOpen] = useState(isRequiresAction);
-  const [prevRequiresAction, setPrevRequiresAction] =
-    useState(isRequiresAction);
-  if (isRequiresAction !== prevRequiresAction) {
-    setPrevRequiresAction(isRequiresAction);
-    if (isRequiresAction) setOpen(true);
+  const [open, setOpen] = useState(needsApproval);
+  const [prevNeedsApproval, setPrevNeedsApproval] = useState(needsApproval);
+  if (needsApproval !== prevNeedsApproval) {
+    setPrevNeedsApproval(needsApproval);
+    if (needsApproval) setOpen(true);
   }
 
   return (
@@ -562,6 +614,8 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
         toolName={toolName}
         argsText={argsText}
         status={status}
+        isError={failed}
+        errorLine={failed ? toolErrorLine(result) : undefined}
       />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
@@ -569,7 +623,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
           argsText={argsText}
           className={cn(isCancelled && "opacity-60")}
         />
-        {isRequiresAction && (
+        {needsApproval && (
           <ToolFallbackApproval
             addResult={addResult}
             resume={resume}
@@ -578,7 +632,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
             respondToApproval={respondToApproval}
           />
         )}
-        {!isCancelled && <ToolFallbackResult result={result} />}
+        {!isCancelled && <ToolFallbackResult result={result} isError={failed} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );

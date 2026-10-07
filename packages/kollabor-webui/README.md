@@ -24,6 +24,19 @@ installs useful without copying generated files into git.  Python-only builds
 continue to serve the legacy `static/index.html` and `static/app.js` fallback
 if Node/npm is unavailable.
 
+## Interface
+
+- **Sidebar**: New Session starts a session with the current picks in one
+  click; the options button next to it opens Agent, Gem, Model and Workspace.
+  Each session row shows its gem as a live 3D avatar that acts out what the
+  agent is doing (thinking, typing, searching, messaging, error).
+- **Chat**: pill composer with attachments, a `/voicemode` mic, and a
+  send/stop button; tool calls show while they run and keep their duration.
+- **Trajectory**: every turn, request and tool call as a Table, or as a
+  Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
+  under their model request, each turn on its own time scale).
+- **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
+
 ## Usage
 
 Quickest path — `kollab --web-ui` spawns the engine and this package together
@@ -77,6 +90,11 @@ engine while developing.  The production build uses relative asset paths, so
 FastAPI can serve hashed assets from any mount path and route client-side
 navigation back to `index.html`.
 
+The app is not wrapped in `<StrictMode>`: its dev-only double render breaks
+`@assistant-ui/store` 0.3.2 and the composer drops typed text under `npm run
+dev` (production is unaffected). Restore it with the assistant-ui 0.15.25
+upgrade. `src/dev/gem-lab.html` previews every gem, activity, hat and season.
+
 ## Engine endpoints used
 
 - `POST /sessions`
@@ -91,14 +109,20 @@ navigation back to `index.html`.
 - `GET/POST/PUT/DELETE /profiles...`
 - `GET/POST/PUT/DELETE /mcp/servers...`
 - `GET/POST /sessions/{session_id}/mcp...`
+- `GET /agents` (gem pool: colors, live state, hub agent ids)
 - `GET /hub/agents`
 - `POST /hub/messages`
+
+Session rows keep `session_id` as the API key and expose a separate `name` for
+display. Kollab-generated timestamped names display as their slug; opaque UUIDs
+receive a stable two-word label.
 
 ## Authentication
 
 The browser gets the current engine bearer token from `/api/config`, which
-reads `~/.kollab/engine.token`.  Frontend requests retry once after a 401 by
-refreshing that config, covering engine restarts that rotate the token.
+reads `~/.kollab/engine.token`.  Every request waits for that first config
+load, and retries once after a 401 by refreshing it, covering engine restarts
+that rotate the token.
 
 ## Validation
 
@@ -108,6 +132,7 @@ python -m pytest tests/unit/test_webui_auth_wiring.py -q
 cd packages/kollabor-webui/frontend
 npm run typecheck
 npm run build
+node --test tests/*.test.ts
 ```
 
 ## License

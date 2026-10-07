@@ -71,6 +71,31 @@ function RecordSummary({ record }: { record: TrajectoryRecord }) {
   );
 }
 
+export function LoadEarlierBanner({
+  loading,
+  onLoad,
+}: {
+  loading: boolean;
+  onLoad: () => void;
+}) {
+  return (
+    <div className="border-primary/15 bg-primary/[0.04] flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
+      <span className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs">
+        <History className="text-primary size-3.5 shrink-0" />
+        <span>Older records are available.</span>
+      </span>
+      <button
+        type="button"
+        className="text-primary shrink-0 rounded-md px-2 py-1 text-xs font-medium underline-offset-4 hover:bg-primary/10 hover:underline disabled:opacity-50"
+        onClick={onLoad}
+        disabled={loading}
+      >
+        {loading ? "Loading…" : "Load earlier"}
+      </button>
+    </div>
+  );
+}
+
 export function TrajectoryTable({
   records,
   selectedId,
@@ -115,20 +140,7 @@ export function TrajectoryTable({
       data-testid="trajectory-ledger"
     >
       {canLoadEarlier && (
-        <div className="border-primary/15 bg-primary/[0.04] flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
-          <span className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs">
-            <History className="text-primary size-3.5 shrink-0" />
-            <span>Older records are available.</span>
-          </span>
-          <button
-            type="button"
-            className="text-primary shrink-0 rounded-md px-2 py-1 text-xs font-medium underline-offset-4 hover:bg-primary/10 hover:underline disabled:opacity-50"
-            onClick={onLoadEarlier}
-            disabled={loadingEarlier}
-          >
-            {loadingEarlier ? "Loading…" : "Load earlier"}
-          </button>
-        </div>
+        <LoadEarlierBanner loading={loadingEarlier} onLoad={onLoadEarlier} />
       )}
       <div className="bg-muted/55 text-muted-foreground grid shrink-0 grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] border-b px-3 py-2.5 text-[10px] font-semibold tracking-[0.14em] uppercase backdrop-blur md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]">
         <span>#</span>

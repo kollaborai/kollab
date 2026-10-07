@@ -971,6 +971,8 @@ async def test_hub_state_client_eof_fails_pending_rpc_immediately(
     writer = _HubClientTestWriter()
     socket_path = tmp_path / "peer.sock"
     socket_path.touch()
+    # A touched file stands in for the socket; skip the ownership check.
+    monkeypatch.setattr("plugins.hub.messenger.require_own_socket", lambda _p: None)
 
     async def open_connection(_socket_path: str) -> tuple[Any, Any]:
         return reader, writer
@@ -1009,6 +1011,8 @@ async def test_hub_state_client_read_error_fails_pending_rpc_immediately(
     writer = _HubClientTestWriter()
     socket_path = tmp_path / "peer.sock"
     socket_path.touch()
+    # A touched file stands in for the socket; skip the ownership check.
+    monkeypatch.setattr("plugins.hub.messenger.require_own_socket", lambda _p: None)
 
     async def open_connection(_socket_path: str) -> tuple[Any, Any]:
         return reader, writer
@@ -1055,6 +1059,8 @@ async def test_hub_state_client_reconnects_after_eof_and_ignores_stale_reply(
     )
     socket_path = tmp_path / "peer.sock"
     socket_path.touch()
+    # A touched file stands in for the socket; skip the ownership check.
+    monkeypatch.setattr("plugins.hub.messenger.require_own_socket", lambda _p: None)
 
     async def open_connection(_socket_path: str) -> tuple[Any, Any]:
         return next(connections)
@@ -1099,3 +1105,55 @@ async def test_hub_state_client_reconnects_after_eof_and_ignores_stale_reply(
 
     assert first_writer.closed
     assert second_writer.closed
+
+
+@pytest.mark.asyncio
+async def test_attached_rpc_survives_image_sized_frames(
+    running_server: tuple[AgentSocketServer, RpcServer, str],
+) -> None:
+    """A pasted image rides one NDJSON line far past asyncio's 64 KB default.
+
+    The daemon used to read it with the default limit, raise, and hang up on
+    the attached client, which then exited as if the daemon had died.
+    """
+    from kollabor_rpc import open_unix_connection_with_large_buffer
+    from plugins.hub.messenger import LOCAL_MAX_LINE_BYTES
+
+    _, _, socket_path = running_server
+    # Same transport as the real attach client.
+    reader, writer = await open_unix_connection_with_large_buffer(socket_path)
+
+    async def ping(request_id: str, echo: str) -> dict[str, Any]:
+        req = {
+            "action": "rpc_request",
+            "request_id": request_id,
+            "method": "ping",
+            "params": {"echo": echo},
+        }
+        writer.write((json.dumps(req) + "\n").encode("utf-8"))
+        await writer.drain()
+        for _ in range(20):
+            frame = await _readline(reader)
+            if frame.get("request_id") == request_id:
+                return frame
+        raise AssertionError(f"rpc_reply for {request_id} not received")
+
+    try:
+        writer.write(b'{"action": "attach", "mode": "interactive"}\n')
+        await writer.drain()
+        assert (await _readline(reader))["type"] == "attach_ack"
+
+        image = "data:image/png;base64," + "A" * (2 * 1024 * 1024)
+        reply = await ping("image", image)
+        assert reply["result"]["echo"] == image
+
+        # A frame over the limit is dropped; the session stays up.
+        writer.write(b"x" * (LOCAL_MAX_LINE_BYTES + 1024) + b"\n")
+        await writer.drain()
+        assert (await ping("after", "ok"))["result"]["echo"] == "ok"
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass

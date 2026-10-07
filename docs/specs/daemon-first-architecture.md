@@ -136,11 +136,26 @@ works the same whether you started with `kollab` or `kollab --attach`:
 unchanged from current behavior. resolves presence file,
 connects to socket, starts TUI client.
 
+a bare `kollab` (no --agent/--as/--project, no first message)
+reattaches to a window-less daemon of the workspace, coordinator
+first (kollabor/daemon.py:find_workspace_daemon). a daemon that
+already has a window (get_status `attached` > 0) is in use, so a
+second terminal forks its own daemon and gets the next agent.
+
 ### daemon lifecycle
 
-  started by: kollab (auto-fork) or kollab --detached
+  started by: kollab (auto-fork), kollab --detached, or a service manager:
+    `kollab service install` (kollabor/service.py) has systemd or launchd
+    run `kollab --detached` with KOLLAB_SERVICE=1, which skips the fork so
+    the manager owns the process. cli_main pops the flag and sets
+    KOLLAB_SERVICE_PID; get_status then reports `service: true`, and
+    find_workspace_daemon attaches to it even though launchd does not
+    make it a session leader. the window attaching never owns it (no
+    KOLLAB_DAEMON_PID), so ctrl+c closes only the window.
   stopped by: /quit in an attached client, or kollab --hub stop <name>
-  survives: terminal close, ssh disconnect, ctrl+z detach
+    (a service is restarted 5 s later; kollab service uninstall removes it)
+  survives: terminal close, ssh disconnect, ctrl+z detach; a service also
+    survives crashes and reboots (systemd: at boot; launchd: at login)
   cleaned up: presence file removed, socket unlinked on shutdown
   crash recovery: presence file PID check + stale socket detection
     (already implemented in presence.py and messenger.py)

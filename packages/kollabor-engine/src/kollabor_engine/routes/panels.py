@@ -92,7 +92,9 @@ async def _refresh_profile_mirror(session: EngineSession) -> None:
     try:
         snap = await session.state.get_active_profile()
         if snap.name:
-            apply_profile_mirror(session, snap.name, snap.model or None)
+            apply_profile_mirror(
+                session, snap.name, snap.model or None, getattr(snap, "effort", None)
+            )
     except Exception as exc:
         logger.debug(
             "Session %s profile mirror refresh failed: %s",

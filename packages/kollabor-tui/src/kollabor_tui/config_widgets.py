@@ -539,6 +539,16 @@ class ConfigWidgetDefinitions:
                             "step": 10,
                             "help": "Maximum number of history entries",
                         },
+                        {
+                            "type": "slider",
+                            "label": "Paste Placeholder Threshold",
+                            "config_path": "input.paste_min_chars",
+                            "min_value": 50,
+                            "max_value": 5000,
+                            "step": 50,
+                            "help": "Pastes with at least this many characters show as "
+                            "[Pasted #N]; shorter ones go in as text",
+                        },
                     ],
                 },
                 {

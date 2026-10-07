@@ -4,6 +4,8 @@ export type Session = {
   profile?: string;
   model?: string;
   effort?: string;
+  /** Whether the session's live model accepts image input. */
+  supports_vision?: boolean;
   agent?: string;
   workspace?: string | null;
   approval_mode?: string;
@@ -56,6 +58,15 @@ export function isToolOutputBatch(
   return value === true || value === "true";
 }
 
+/**
+ * The daemon prepends pending agent status (vault, hub) to a user turn as an
+ * `<agent_hud>` block (kollabor/llm/agent_hud.py). That is model context, not
+ * what the user typed; this returns the text after it.
+ */
+export function stripAgentHud(text: string): string {
+  return text.replace(/^\s*<agent_hud>[\s\S]*?<\/agent_hud>\s*/, "");
+}
+
 export type PermissionPrompt = {
   type?: "permission_request";
   tool_id: string;
@@ -71,6 +82,10 @@ export type Profile = {
   provider?: string;
   model?: string;
   description?: string;
+  base_url?: string;
+  temperature?: number;
+  streaming?: boolean;
+  supports_tools?: boolean;
   supports_vision?: boolean;
 };
 
@@ -105,6 +120,10 @@ export type AgentPoolEntry = {
   active?: boolean;
   state?: string;
   current_task?: string;
+  /** Pool gem color [r, g, b], shared with the TUI. */
+  color?: number[];
+  /** Live hub agent id; empty when nothing runs this identity. */
+  agent_id?: string;
 };
 
 export type AgentBundleEntry = {
@@ -435,6 +454,7 @@ export class ApiError extends Error {
 export class EngineApi {
   private baseUrl: string;
   private token: string | null;
+  private config: Promise<EngineConfig | null> | null = null;
 
   constructor(baseUrl = "http://127.0.0.1:7433") {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -488,6 +508,9 @@ export class EngineApi {
   }
 
   async request(path: string, init: RequestInit = {}, retry = true): Promise<Response> {
+    // Requests fired on mount (the session poll) would otherwise go to the
+    // default URL without a token before the config arrives.
+    await this.loadConfig();
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers: this.headers(init.headers),
@@ -514,17 +537,21 @@ export class EngineApi {
     return (await (await this.request(path, init)).json()) as T;
   }
 
-  async loadConfig() {
-    try {
-      const response = await fetch("/api/config", { cache: "no-store" });
-      if (!response.ok) return null;
-      const config = (await response.json()) as EngineConfig;
-      if (config.engine_url) this.setBaseUrl(config.engine_url);
-      if (config.token) this.setToken(config.token);
-      return config;
-    } catch {
-      return null;
-    }
+  /** Loads the engine URL and token once; every caller shares the result. */
+  loadConfig() {
+    this.config ??= (async () => {
+      try {
+        const response = await fetch("/api/config", { cache: "no-store" });
+        if (!response.ok) return null;
+        const config = (await response.json()) as EngineConfig;
+        if (config.engine_url) this.setBaseUrl(config.engine_url);
+        if (config.token) this.setToken(config.token);
+        return config;
+      } catch {
+        return null;
+      }
+    })();
+    return this.config;
   }
 
   listSessions() {
@@ -727,7 +754,12 @@ export class EngineApi {
   }
 
   listProfiles() {
-    return this.json<{ profiles: Profile[]; active?: string }>("/profiles");
+    return this.json<{
+      profiles: Profile[];
+      active?: string;
+      /** Every provider the engine can run, for the profile editor. */
+      providers?: string[];
+    }>("/profiles");
   }
 
   createProfile(body: ProfileWrite) {
@@ -837,12 +869,6 @@ export class EngineApi {
   getHubAgentStatus(agentId: string) {
     return this.json<{ agent_id: string; status?: Record<string, unknown>; error?: string }>(
       `/hub/agents/${encodeURIComponent(agentId)}/status`,
-    );
-  }
-
-  getHubAgentOutput(agentId: string, lines = 80) {
-    return this.json<{ agent_id: string; output?: string | null; error?: string }>(
-      `/hub/agents/${encodeURIComponent(agentId)}/output?lines=${lines}`,
     );
   }
 

@@ -1,5 +1,5 @@
 import type { HistoryMessage } from "@/api";
-import { historyContentToText, isToolOutputBatch } from "@/api";
+import { historyContentToText, isToolOutputBatch, stripAgentHud } from "@/api";
 import { formatContent } from "@/utils/format-content";
 import { humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
 
@@ -63,11 +63,11 @@ function firstLine(value: string): string {
   return line || "No text";
 }
 
+// A turn carrying agent status is summarized by what the user typed after it.
 function userSummary(value: string): string {
-  if (/^<agent_hud(?:\s|>)/i.test(value.trim())) {
-    return "Agent status update";
-  }
-  return firstLine(value);
+  const typed = stripAgentHud(value);
+  if (typed !== value && !typed.trim()) return "Agent status update";
+  return firstLine(typed);
 }
 
 function compactionSummary(metadata: JsonObject): string {
@@ -410,16 +410,20 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
           "success",
         ]) === false ||
         readBoolean(metadata, ["is_error", "isError", "tool_output_is_error"]);
+      // The daemon writes the call's assistant message after the tools ran,
+      // so the timestamp delta is ~0; the measured run time is the truth.
+      const ranFor = asNumber(metadata.tool_execution_time);
       const existing = id ? nativeCalls.get(id) : undefined;
       if (existing) {
         existing.output = output;
         existing.isError = isError;
         existing.summary = toolResultSummary(existing.title, output);
+        if (ranFor !== undefined) existing.durationSeconds = ranFor;
         return;
       }
 
       const name = asString(metadata.tool_name) ?? "TOOL RESULT";
-      add({
+      const record = add({
         id: `${identity}:tool-result:${id || "unknown"}`,
         kind: "tool",
         turn,
@@ -432,6 +436,7 @@ export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[]
         callId: id,
         isError,
       });
+      if (ranFor !== undefined) record.durationSeconds = ranFor;
       return;
     }
 
