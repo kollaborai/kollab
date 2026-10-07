@@ -43,6 +43,12 @@ REMOTE_IDLE_TIMEOUT: float = 30.0
 # Hard limit on concurrently accepted off-box connections per agent. Excess
 # connections are closed before a handler task or handshake state is created.
 REMOTE_MAX_CONNECTIONS: int = 64
+# Read limit for one NDJSON line on the local unix socket. Attached clients
+# send pasted images inline as base64: the paste caps allow 20 MB of raw image
+# bytes per message, ~27 MB on the wire. asyncio's 64 KB default dropped the
+# attach connection on the first pasted image. The TCP endpoint keeps the
+# default; off-box peers have their own frame caps.
+LOCAL_MAX_LINE_BYTES = 32 * 1024 * 1024
 REMOTE_AUTH_VERSION = 2
 REMOTE_HANDSHAKE_MAX_LINE_BYTES = 8192
 REMOTE_PEER_FORWARD_MAX_FRAME_BYTES = 64 * 1024
@@ -433,7 +439,9 @@ class AgentSocketServer:
         try:
             self._server = await asyncio.wait_for(
                 asyncio.start_unix_server(
-                    self._accept_connection, path=str(self.socket_path)
+                    self._accept_connection,
+                    path=str(self.socket_path),
+                    limit=LOCAL_MAX_LINE_BYTES,
                 ),
                 timeout=10.0,
             )
@@ -1713,7 +1721,13 @@ class AgentSocketServer:
         async def _recv_input():
             try:
                 while True:
-                    data = await reader.readline()
+                    try:
+                        data = await reader.readline()
+                    except ValueError:
+                        # Line over the read limit. asyncio already discarded
+                        # it; drop the frame, not the attached session.
+                        logger.warning("Dropped oversized frame from %s", client_id)
+                        continue
                     if not data:
                         break
                     try:
