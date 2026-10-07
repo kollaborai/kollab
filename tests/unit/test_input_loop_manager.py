@@ -27,6 +27,7 @@ class TestInputLoopManager(unittest.TestCase):
         self.mock_paste_processor.create_paste_placeholder = AsyncMock()
         self.mock_paste_processor.update_paste_placeholder = AsyncMock()
         self.mock_paste_processor.append_to_current_paste = MagicMock()
+        self.mock_paste_processor.paste_text = AsyncMock()
 
         self.mock_config = MagicMock()
         self.mock_config.get.side_effect = lambda key, default: default
@@ -139,6 +140,7 @@ class TestInputLoopManagerAsync(unittest.TestCase):
         self.mock_paste_processor.create_paste_placeholder = AsyncMock()
         self.mock_paste_processor.update_paste_placeholder = AsyncMock()
         self.mock_paste_processor.append_to_current_paste = MagicMock()
+        self.mock_paste_processor.paste_text = AsyncMock()
 
         self.mock_config = MagicMock()
         self.mock_config.get.side_effect = lambda key, default: default
@@ -203,16 +205,17 @@ class TestInputLoopManagerAsync(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_handle_paste_chunk_new_paste(self):
-        """Test _handle_paste_chunk creates new paste."""
+        """Test _handle_paste_chunk hands a new paste to the paste processor."""
 
         async def run_test():
             self.mock_paste_processor.should_merge_paste.return_value = False
 
             await self.manager._handle_paste_chunk("large paste content here")
 
-            self.mock_paste_processor.start_new_paste.assert_called_once()
-            self.mock_paste_processor.create_paste_placeholder.assert_called_once_with(
-                "PASTE_1"
+            self.mock_paste_processor.paste_text.assert_awaited_once()
+            self.assertEqual(
+                self.mock_paste_processor.paste_text.await_args.args[0],
+                "large paste content here",
             )
 
         asyncio.run(run_test())

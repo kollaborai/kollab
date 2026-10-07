@@ -30,6 +30,10 @@ class BufferManager:
     def insert_char(self, char: str):
         self.content += char
 
+    def insert_text(self, text: str):
+        self.content += text
+        return True
+
     async def handle_paste(self, paste_content: str):
         normalized = " ".join(
             paste_content.replace("\r\n", " ")
@@ -111,7 +115,14 @@ def _make_menu_with_paste(typed_prefix, pasted_text, selected_command):
     from kollabor_tui.input.input_loop_manager import InputLoopManager
 
     buffer_manager = BufferManager("")
-    paste_processor = PasteProcessor(buffer_manager)
+    # Threshold 1: these pastes become [Pasted #N] placeholders, the path
+    # these tests cover.
+    paste_processor = PasteProcessor(
+        buffer_manager,
+        config=SimpleNamespace(
+            get=lambda key, default: 1 if key == "input.paste_min_chars" else default
+        ),
+    )
     executor = CommandExecutor()
     handler = CommandModeHandler(
         buffer_manager=buffer_manager,
@@ -546,15 +557,15 @@ def test_keypress_pipeline_routes_lf_connect_status_to_registered_handler():
     async def submit_pasted_command():
         await key_handler.process_character("/")
         await input_loop._handle_paste_chunk("connect status")
-        placeholder_buffer = buffer.content
+        pasted_buffer = buffer.content
         # KeyParser maps LF (0x0a) to Ctrl+J, unlike CR (0x0d), which it maps
         # to Enter. Both are valid terminal submit sequences for this menu.
         await key_handler.process_character("\n")
-        return placeholder_buffer
+        return pasted_buffer
 
-    placeholder_buffer = asyncio.run(submit_pasted_command())
+    pasted_buffer = asyncio.run(submit_pasted_command())
 
-    assert placeholder_buffer == "/[Pasted #1 1 lines, 14 chars]"
+    assert pasted_buffer == "/connect status"  # short paste: typed text
     assert state.connect_values == ["status"]
     assert buffer.history == ["/connect status"]
     assert paste_processor.paste_bucket == {}

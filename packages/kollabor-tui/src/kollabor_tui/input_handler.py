@@ -123,7 +123,7 @@ class InputHandler:
             renderer, self.buffer_manager, self.error_handler
         )
         self._paste_processor = PasteProcessor(
-            self.buffer_manager, self._display_controller.update_display
+            self.buffer_manager, self._display_controller.update_display, config
         )
 
         # Phase 2: Core processing

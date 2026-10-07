@@ -457,7 +457,7 @@ class ConfigLoader:
                 "max_errors": 100,
                 "paste_detection_enabled": True,
                 "paste_threshold_ms": 50,
-                "paste_min_chars": 3,
+                "paste_min_chars": 500,
                 "paste_max_chars": 10000,
                 "bracketed_paste_enabled": True,
             },

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- A paste shorter than `input.paste_min_chars` (default 500, in `/config` under Input Settings) goes into the input as text, line breaks kept and not submitted. Only longer pastes collapse to `[Pasted #N ...]`; before, anything over 10 characters did. Ctrl+V clipboard text follows the same rule instead of always going in flattened to one line. Text with a character the input cannot hold still collapses, so nothing is lost.
+- Sliders with a whole-number step show whole numbers in `/config` (`History Limit: 100`, not `100.0`).
+
 ### Fixed
 - A second `kollab` in the same workspace starts the next agent again instead of joining the session another terminal still has open. A bare relaunch only reattaches to a daemon with no window (one left by Ctrl+Z or a closed terminal); the agent's status now reports how many windows it has.
 - Pasting an image no longer closes `kollab`. The daemon read each client message with a 64 KB cap, so an image dropped the connection and the window exited as if the agent had died.

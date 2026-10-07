@@ -344,10 +344,8 @@ class InputLoopManager:
             # Update the placeholder to show new size
             await self.paste_processor.update_paste_placeholder()
         else:
-            # New paste - store immediately
-            paste_id = self.paste_processor.start_new_paste(chunk, current_time)
-            # Create placeholder immediately
-            await self.paste_processor.create_paste_placeholder(paste_id)
+            # New paste: typed text when short, a placeholder when long
+            await self.paste_processor.paste_text(chunk, current_time)
 
         # Emit PASTE_DETECTED event without blocking input processing. Keep the
         # task owned by this manager so failures are observed and shutdown can

@@ -13,6 +13,7 @@ import asyncio
 import base64
 import logging
 import re
+import time
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from kollabor_tui.clipboard import (
@@ -44,15 +45,19 @@ class PasteProcessor:
         self,
         buffer_manager: Any,
         display_callback: Optional[Callable[..., Awaitable[None]]] = None,
+        config: Any = None,
     ) -> None:
         """Initialize the paste processor.
 
         Args:
             buffer_manager: Buffer manager instance for character insertion.
             display_callback: Optional async callback for display updates.
+            config: Configuration manager; ``input.paste_min_chars`` is read
+                on every paste so a /config change applies at once.
         """
         self.buffer_manager = buffer_manager
         self._display_callback = display_callback
+        self._config = config
 
         # PRIMARY paste system state (chunk-based, always active)
         self._paste_bucket: Dict[str, str] = {}  # {paste_id: actual_content}
@@ -144,7 +149,8 @@ class PasteProcessor:
 
         text = await asyncio.to_thread(read_text_from_clipboard)
         if text:
-            return await self.buffer_manager.handle_paste(text)
+            await self.paste_text(text, time.time())
+            return True
         return False
 
     async def add_image_attachment(
@@ -374,6 +380,25 @@ class PasteProcessor:
         # Update display once at the end
         if self._display_callback:
             await self._display_callback(force_render=True)
+
+    async def paste_text(self, text: str, current_time: float) -> None:
+        """Insert a new paste: as typed text, or as a placeholder when long.
+
+        Text under ``input.paste_min_chars`` goes in as typed, newlines kept.
+        Longer text, or text the input cannot hold (a character it refuses,
+        or the buffer limit), is stored and shown as [Pasted #N ...].
+        """
+        min_chars = (
+            self._config.get("input.paste_min_chars", 500) if self._config else 500
+        )
+        if len(text) < min_chars and self.buffer_manager.insert_text(
+            self._normalize_line_endings(text)
+        ):
+            if self._display_callback:
+                await self._display_callback(force_render=True)
+            return
+        paste_id = self.start_new_paste(text, current_time)
+        await self.create_paste_placeholder(paste_id)
 
     async def update_paste_placeholder(self) -> None:
         """Update existing placeholder when paste grows - GENIUS VERSION.
