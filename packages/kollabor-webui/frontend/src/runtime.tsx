@@ -17,7 +17,7 @@ import type {
   PermissionPrompt,
   Session,
 } from "./api";
-import { isToolOutputBatch } from "./api";
+import { isToolOutputBatch, stripAgentHud } from "./api";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
   newTurnClock,
@@ -76,6 +76,17 @@ function historyContentToThreadContent(content: unknown): ThreadMessageLike["con
     }
   }
   return parts.length ? parts : "";
+}
+
+function withoutAgentHud(
+  content: ThreadMessageLike["content"],
+): ThreadMessageLike["content"] {
+  if (typeof content === "string") return stripAgentHud(content);
+  return content
+    .map((part) =>
+      part.type === "text" ? { ...part, text: stripAgentHud(part.text) } : part,
+    )
+    .filter((part) => part.type !== "text" || part.text);
 }
 
 function historyToMessages(
@@ -224,10 +235,15 @@ function historyToMessages(
     if (isToolOutputBatch(message)) return;
 
     if (message.role === "user") {
+      const content = withoutAgentHud(
+        historyContentToThreadContent(message.content),
+      );
+      // A turn that was only agent status stays in the Trajectory tab.
+      if (!content.length) return;
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
-        content: historyContentToThreadContent(message.content),
+        content,
       });
       return;
     }

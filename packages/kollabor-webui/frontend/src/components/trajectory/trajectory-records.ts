@@ -1,5 +1,5 @@
 import type { HistoryMessage } from "@/api";
-import { historyContentToText, isToolOutputBatch } from "@/api";
+import { historyContentToText, isToolOutputBatch, stripAgentHud } from "@/api";
 import { formatContent } from "@/utils/format-content";
 import { humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
 
@@ -63,11 +63,11 @@ function firstLine(value: string): string {
   return line || "No text";
 }
 
+// A turn carrying agent status is summarized by what the user typed after it.
 function userSummary(value: string): string {
-  if (/^<agent_hud(?:\s|>)/i.test(value.trim())) {
-    return "Agent status update";
-  }
-  return firstLine(value);
+  const typed = stripAgentHud(value);
+  if (typed !== value && !typed.trim()) return "Agent status update";
+  return firstLine(typed);
 }
 
 function compactionSummary(metadata: JsonObject): string {

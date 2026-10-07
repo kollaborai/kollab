@@ -58,6 +58,15 @@ export function isToolOutputBatch(
   return value === true || value === "true";
 }
 
+/**
+ * The daemon prepends pending agent status (vault, hub) to a user turn as an
+ * `<agent_hud>` block (kollabor/llm/agent_hud.py). That is model context, not
+ * what the user typed; this returns the text after it.
+ */
+export function stripAgentHud(text: string): string {
+  return text.replace(/^\s*<agent_hud>[\s\S]*?<\/agent_hud>\s*/, "");
+}
+
 export type PermissionPrompt = {
   type?: "permission_request";
   tool_id: string;
