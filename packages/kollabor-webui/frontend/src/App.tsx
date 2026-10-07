@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuiState } from "@assistant-ui/react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { useThreadActivity } from "@/components/gems/activity";
@@ -53,6 +54,7 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 
 const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
+const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
 /** True when the restored state still carries an unanswered permission prompt. */
 function hasPendingPermission(state: EngineState): boolean {
@@ -76,6 +78,8 @@ function RuntimeShell({
   onHistoryCleared,
   onActivity,
   refreshSignal,
+  view,
+  onViewChange: setView,
 }: {
   session: Session;
   profiles: Profile[];
@@ -87,13 +91,33 @@ function RuntimeShell({
   /** Reports what this session's gem should act out in the sidebar. */
   onActivity: (activity: Activity | null) => void;
   refreshSignal: number;
+  /** Held by App so a runtime remount (Clear history) keeps the open view. */
+  view: SessionView;
+  onViewChange: (view: SessionView) => void;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
   const sessionLabel = formatSessionName(session.name, session.session_id);
-  const [view, setView] = useState<SessionView>("chat");
+  // A typed /restart (/new, /clear) empties the daemon's conversation; once that
+  // run ends, reset the thread the way the toolbar's Clear does. Only a run
+  // seen in this mount counts, so the reloaded thread cannot loop.
+  const running = useAuiState((s) => s.thread.isRunning);
+  const lastPrompt = useAuiState((s) => {
+    const part = s.thread.messages
+      .filter((message) => message.role === "user")
+      .at(-1)
+      ?.parts.find((item) => item.type === "text");
+    return part?.type === "text" ? part.text.trim() : "";
+  });
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && !running && RESTART_COMMAND.test(lastPrompt)) {
+      void onHistoryCleared();
+    }
+    wasRunning.current = running;
+  }, [running, lastPrompt, onHistoryCleared]);
   const [commands, setCommands] = useState<SlashCommand[]>(
     DEFAULT_SLASH_COMMANDS,
   );
@@ -197,6 +221,7 @@ function RuntimeShell({
             attachmentsEnabled={
               session.supports_vision ?? profile?.supports_vision ?? true
             }
+            identity={session.identity}
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -233,6 +258,7 @@ export default function App() {
   const [refreshSignal, setRefreshSignal] = useState(0);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
+  const [sessionView, setSessionView] = useState<SessionView>("chat");
   const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
@@ -625,6 +651,8 @@ export default function App() {
               onOpenSettings={openSettings}
               onHistoryCleared={() => resetThread(activeSession.session_id)}
               onActivity={setActiveActivity}
+              view={sessionView}
+              onViewChange={setSessionView}
             />
           </EngineRuntimeProvider>
         ) : (

@@ -2,6 +2,16 @@ import { useEffect, useState } from "react";
 import { Pencil, Plus, Trash2, Zap } from "lucide-react";
 
 import type { Profile } from "@/api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -177,6 +187,8 @@ export function ProfilesDialog({
     }
   };
 
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+
   const test = async (name: string) => {
     setTestResult(`Testing ${name}…`);
     try {
@@ -239,7 +251,7 @@ export function ProfilesDialog({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => void remove(p.name)}
+                onClick={() => setPendingDelete(p.name)}
                 disabled={busy}
                 title="Delete"
                 aria-label={`Delete ${p.name}`}
@@ -405,6 +417,32 @@ export function ProfilesDialog({
           )}
         </DialogFooter>
       </DialogContent>
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(next) => !next && setPendingDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this profile?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete} will be removed from ~/.kollab/config.json.
+              Sessions already running on it keep going.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const name = pendingDelete;
+                setPendingDelete(null);
+                if (name) void remove(name);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
