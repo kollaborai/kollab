@@ -1161,6 +1161,15 @@ class ToolExecutor:
                 # Format MCP output for display
                 output = self._format_mcp_output(mcp_result)
 
+                # MCP reports a tool-level failure inside a normal result.
+                if mcp_result.get("isError") is True:
+                    return ToolExecutionResult(
+                        tool_id=tool_id,
+                        tool_type="mcp_tool",
+                        success=False,
+                        error=output or "MCP tool reported an error",
+                    )
+
                 return ToolExecutionResult(
                     tool_id=tool_id, tool_type="mcp_tool", success=True, output=output
                 )

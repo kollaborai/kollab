@@ -1671,6 +1671,9 @@ class QueueProcessor:
                                     "tool_execution_time": round(
                                         float(result.execution_time or 0), 3
                                     ),
+                                    # A failed call stays failed after a reload;
+                                    # the web history reads this flag.
+                                    **({} if result.success else {"is_error": True}),
                                     **{
                                         key: value
                                         for key, value in (

@@ -189,6 +189,19 @@ class FakeNativeToolsHandler:
         ]
 
 
+class FailingNativeToolsHandler(FakeNativeToolsHandler):
+    async def execute_tool_calls(self, tool_executor):
+        return [
+            ToolExecutionResult(
+                tool_id="call_native",
+                tool_type="state_update",
+                success=False,
+                error="Command exited with code 1",
+                execution_time=0.01,
+            )
+        ]
+
+
 class FakeToolExecutor:
     def format_result_for_conversation(self, result):
         output = result.output if result.success else f"ERROR: {result.error}"
@@ -206,67 +219,68 @@ class FakeToolExecutor:
         )
 
 
+async def _run_mixed_turn(native_tools_handler):
+    conversation_history: list[ConversationMessage] = []
+    added_messages: list[ConversationMessage] = []
+    api_service = FakeApiService()
+    response_parser = ResponseParser()
+    conversation_logger = AsyncMock()
+    conversation_logger.log_assistant_message.return_value = "assistant-parent"
+
+    def add_message(message, parent_uuid=None):
+        conversation_history.append(message)
+        added_messages.append(message)
+
+    processor = QueueProcessor(
+        conversation_history=conversation_history,
+        session_stats={
+            "messages": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+        },
+        stats={"total_thinking_time": 0},
+        queue_metrics={},
+        task_config=SimpleNamespace(
+            queue=SimpleNamespace(
+                overflow_strategy="drop_oldest",
+                log_queue_events=False,
+                enable_queue_metrics=False,
+                block_timeout=None,
+            )
+        ),
+        api_service=api_service,
+        tool_executor=FakeToolExecutor(),
+        response_parser=response_parser,
+        message_display_service=MagicMock(),
+        renderer=MagicMock(),
+        config=SimpleNamespace(get=lambda key, default=None: 0),
+        event_bus=SimpleNamespace(
+            get_service=lambda name: None,
+            emit_with_hooks=AsyncMock(return_value={}),
+        ),
+        conversation_logger=conversation_logger,
+        streaming_handler=SimpleNamespace(
+            call_llm=AsyncMock(
+                return_value=("doing both\n" "<read><file>README.md</file></read>")
+            )
+        ),
+        native_tools_handler=native_tools_handler,
+        add_message_fn=add_message,
+        max_queue_size=10,
+    )
+
+    await processor._execute_llm_turn(
+        user_message_provided=False,
+        current_parent_uuid="root",
+    )
+
+    return conversation_history
+
+
 def test_mixed_native_and_xml_tool_history_shape_is_stable():
-    async def run_turn():
-        conversation_history: list[ConversationMessage] = []
-        added_messages: list[ConversationMessage] = []
-        api_service = FakeApiService()
-        response_parser = ResponseParser()
-        conversation_logger = AsyncMock()
-        conversation_logger.log_assistant_message.return_value = "assistant-parent"
-
-        def add_message(message, parent_uuid=None):
-            conversation_history.append(message)
-            added_messages.append(message)
-
-        processor = QueueProcessor(
-            conversation_history=conversation_history,
-            session_stats={
-                "messages": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-            },
-            stats={"total_thinking_time": 0},
-            queue_metrics={},
-            task_config=SimpleNamespace(
-                queue=SimpleNamespace(
-                    overflow_strategy="drop_oldest",
-                    log_queue_events=False,
-                    enable_queue_metrics=False,
-                    block_timeout=None,
-                )
-            ),
-            api_service=api_service,
-            tool_executor=FakeToolExecutor(),
-            response_parser=response_parser,
-            message_display_service=MagicMock(),
-            renderer=MagicMock(),
-            config=SimpleNamespace(get=lambda key, default=None: 0),
-            event_bus=SimpleNamespace(
-                get_service=lambda name: None,
-                emit_with_hooks=AsyncMock(return_value={}),
-            ),
-            conversation_logger=conversation_logger,
-            streaming_handler=SimpleNamespace(
-                call_llm=AsyncMock(
-                    return_value=("doing both\n" "<read><file>README.md</file></read>")
-                )
-            ),
-            native_tools_handler=FakeNativeToolsHandler(),
-            add_message_fn=add_message,
-            max_queue_size=10,
-        )
-
-        await processor._execute_llm_turn(
-            user_message_provided=False,
-            current_parent_uuid="root",
-        )
-
-        return conversation_history
-
-    history = asyncio.run(run_turn())
+    history = asyncio.run(_run_mixed_turn(FakeNativeToolsHandler()))
 
     assistant = history[0]
     assert assistant.role == "assistant"
@@ -292,6 +306,17 @@ def test_mixed_native_and_xml_tool_history_shape_is_stable():
     xml_result = history[2]
     assert xml_result.role == "user"
     assert xml_result.content == "Tool result: [file_read] xml saved"
+
+
+def test_failed_native_tool_result_is_flagged_in_history():
+    """The web history reads `is_error`; only a failed call carries it."""
+    history = asyncio.run(_run_mixed_turn(FailingNativeToolsHandler()))
+
+    assert history[1].metadata == {
+        "tool_call_id": "call_native",
+        "tool_execution_time": 0.01,
+        "is_error": True,
+    }
 
 
 def test_native_arguments_holding_xml_attributes_are_split():

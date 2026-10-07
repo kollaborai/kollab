@@ -230,6 +230,21 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error, "Tool not found")
 
+    async def test_execute_mcp_tool_is_error_result_is_a_failure(self):
+        """MCP flags a tool-level failure with isError inside a normal result."""
+        tool_data = {"type": "mcp_tool", "id": "mcp_tool_0", "name": "read_file"}
+        self.mcp_integration.call_mcp_tool = AsyncMock(
+            return_value={
+                "content": [{"type": "text", "text": "403 Path not in workspace"}],
+                "isError": True,
+            }
+        )
+
+        result = await self.executor._execute_mcp_tool(tool_data)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "403 Path not in workspace")
+
     async def test_execute_all_tools_mixed(self):
         """Test executing mixed terminal and MCP tools."""
         tools = [
