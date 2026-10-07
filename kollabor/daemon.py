@@ -119,18 +119,21 @@ def _is_bare_launch(argv: list[str]) -> bool:
 
 
 def find_workspace_daemon(argv: list[str]) -> tuple[int, str] | None:
-    """The live daemon already serving this workspace, as (pid, socket_path).
+    """The window-less daemon serving this workspace, as (pid, socket_path).
 
     A bare relaunch attaches to it. Forking another one doubles the agent: the
     new daemon takes a second designation while the first keeps running with no
-    window, and whatever is sent to the first is never seen.
+    window, and whatever is sent to the first is never seen. A daemon that
+    already has a window is in use: a second terminal gets its own agent.
     """
     if not _is_bare_launch(argv):
         return None
 
+    import asyncio
     import json
 
-    from plugins.hub.presence import PresenceManager, get_presence_dir
+    from plugins.hub.messenger import AgentMessenger
+    from plugins.hub.presence import get_presence_dir
     from plugins.hub.project_scope import is_project_scoped
 
     try:
@@ -145,9 +148,14 @@ def find_workspace_daemon(argv: list[str]) -> tuple[int, str] | None:
             started = float(data.get("started_at") or 0)
             # A daemon is its own session leader (fork_daemon and --detached
             # both setsid); an interactive window never is. Raises for a dead pid.
-            if os.getsid(pid) != pid or not PresenceManager._socket_responds(sock):
+            if os.getsid(pid) != pid:
                 continue
             if not is_project_scoped() and data.get("project") != os.getcwd():
+                continue
+            # Unreachable, or a window already streams it (an older daemon
+            # that does not report windows counts as in use).
+            status = asyncio.run(AgentMessenger.request_status(sock, timeout=1.0))
+            if status.get("attached") != 0:
                 continue
         except (OSError, ValueError, KeyError, TypeError):
             continue

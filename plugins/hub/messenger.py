@@ -1481,6 +1481,13 @@ class AgentSocketServer:
                         "pid": os.getpid(),
                         "uptime": int(time.time() - self._started_at),
                         "current_task": "",
+                        # Windows streaming this agent; a bare relaunch only
+                        # reattaches to a daemon with none.
+                        "attached": (
+                            self._display_tap.subscriber_count
+                            if self._display_tap
+                            else 0
+                        ),
                     }
                     if self._identity:
                         status_data["identity"] = self._identity.get(

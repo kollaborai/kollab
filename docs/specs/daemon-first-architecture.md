@@ -136,6 +136,12 @@ works the same whether you started with `kollab` or `kollab --attach`:
 unchanged from current behavior. resolves presence file,
 connects to socket, starts TUI client.
 
+a bare `kollab` (no --agent/--as/--project, no first message)
+reattaches to a window-less daemon of the workspace, coordinator
+first (kollabor/daemon.py:find_workspace_daemon). a daemon that
+already has a window (get_status `attached` > 0) is in use, so a
+second terminal forks its own daemon and gets the next agent.
+
 ### daemon lifecycle
 
   started by: kollab (auto-fork) or kollab --detached

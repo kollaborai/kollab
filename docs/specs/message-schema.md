@@ -164,7 +164,8 @@ get_output:
 
 get_status:
   request:  { action: "get_status" }
-  response: { type: "status", identity: str, state: str, pid: int, uptime: float, current_task: str }
+  response: { type: "status", identity: str, state: str, pid: int, uptime: float, current_task: str, attached: int }
+            # attached: windows streaming this agent; a bare relaunch only reattaches at 0
   triggers_llm: false
 
 subscribe / attach:

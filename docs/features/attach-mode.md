@@ -155,6 +155,8 @@ kollab --attach koordinator
 
 State persists across attach cycles: conversation history, active profile, loaded skills, hub identity, work queue.
 
+A bare `kollab` in the same workspace reattaches too, to a daemon with no window open (the coordinator first). A daemon that already has a window is in use: a second terminal starts its own daemon and gets the next agent (koordinator, then lapis, ...).
+
 ## Known Gaps
 
 The original phase-4.6 migration audit remains useful historical context, but the
