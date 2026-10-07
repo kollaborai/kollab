@@ -1364,13 +1364,9 @@ async def _handle_cli_hub(hub_args: list) -> None:
         return candidates[0] if candidates else None
 
     def _pid_alive(pid: int) -> bool:
-        if not pid:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
+        from plugins.hub.presence import pid_alive
+
+        return pid_alive(pid)  # a zombie is not alive: the window may not have reaped it
 
     async def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
         import time as _time

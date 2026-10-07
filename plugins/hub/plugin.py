@@ -64,7 +64,7 @@ from .models import (
 )
 from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
-from .presence import PresenceManager, get_messages_dir
+from .presence import PresenceManager, get_messages_dir, pid_alive
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
@@ -11367,28 +11367,8 @@ class HubPlugin(BasePlugin):
 
     @staticmethod
     def _agent_pid_alive(pid: int) -> bool:
-        """Return True when pid exists and can be signaled.
-
-        The default launch forks the agent daemon from the attached window, so
-        that window is the daemon's parent: an exited daemon stays a zombie
-        until reaped, and os.kill(pid, 0) succeeds on zombies. Reap our own
-        exited child first so `/hub stop` typed in that window sees the exit.
-        """
-        if not pid:
-            return False
-        # ponytail: a zombie whose parent is another live process still reads
-        # alive until that parent reaps or exits; add a /proc or ps state check
-        # if that ever shows up.
-        try:
-            if os.waitpid(pid, os.WNOHANG)[0]:
-                return False
-        except ChildProcessError:
-            pass  # not our child
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
+        """Return True while pid runs; a zombie does not (``presence.pid_alive``)."""
+        return pid_alive(pid)
 
     def _force_kill_agent(self, agent) -> bool:
         """Send SIGTERM to an agent process as last resort.

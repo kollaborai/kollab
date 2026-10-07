@@ -11,6 +11,15 @@ from types import SimpleNamespace
 from plugins.hub.plugin import HubPlugin
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
+# a child that exits at once and is never reaped by its parent
+FORK_ONE_AND_KEEP_IT = (
+    "import os, time\n"
+    "pid = os.fork()\n"
+    "if pid == 0:\n"
+    "    os._exit(0)\n"
+    "print(pid, flush=True)\n"
+    "time.sleep(60)\n"
+)
 
 
 class FakePresence:
@@ -153,6 +162,26 @@ def test_agent_pid_alive_reads_an_exited_unreaped_child_as_dead():
         assert not HubPlugin._agent_pid_alive(child.pid)
     finally:
         child.wait()
+
+
+def test_agent_pid_alive_reads_another_parents_zombie_as_dead():
+    """`kollab --hub stop` from another shell: the daemon exited, but its parent,
+    the attached window, has not reaped it yet."""
+    parent = subprocess.Popen(
+        [sys.executable, "-c", FORK_ONE_AND_KEEP_IT],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        zombie = int(parent.stdout.readline())
+        deadline = time.monotonic() + 5
+        while HubPlugin._agent_pid_alive(zombie) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        os.kill(zombie, 0)  # still in the process table
+        assert not HubPlugin._agent_pid_alive(zombie)
+    finally:
+        parent.kill()
+        parent.wait()
 
 
 def test_agent_pid_alive_is_true_for_pids_that_really_survive():

@@ -95,6 +95,36 @@ def get_socket_dir() -> Path:
     return secure_socket_dir(SOCKET_DIR_ROOT)
 
 
+def pid_alive(pid: int) -> bool:
+    """True while ``pid`` runs.
+
+    An exited process stays a zombie until its parent reaps it, and
+    os.kill(pid, 0) succeeds on a zombie. The default launch forks the agent
+    daemon from the attached window, so a stop sent from another shell finds
+    the window's unreaped daemon. Reap our own child first, then ask the
+    process table about anyone else's.
+    """
+    if not pid:
+        return False
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0]:
+            return False  # our own child, reaped now
+    except ChildProcessError:
+        pass  # not our child
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    import psutil
+
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True
+
+
 def _atomic_write(path: Path, data: dict) -> None:
     """Write JSON atomically via a unique temp file and rename."""
     tmp_name = ""
