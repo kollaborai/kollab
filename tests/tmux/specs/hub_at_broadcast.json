@@ -1,8 +1,8 @@
 {
   "name": "hub-at-broadcast",
-  "description": "The @ menu leads with @local-broadcast and @global-broadcast; each sends, and off a network the global one says other computers were not reached.",
+  "description": "The @ menu leads with @broadcast (this project), @local-broadcast (this computer) and @global-broadcast (the network). @local-broadcast reaches an agent in another folder; @broadcast does not; off a network the global one says no other computer was reached.",
   "config": {
-    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; cd \"$H/ws\"; HOME=\"$H\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; cd \"$H/ws\"; HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "app_init_sleep": 10,
     "show_captures": false,
     "term_width": 120,
@@ -11,8 +11,8 @@
   "setup": [
     {
       "action": "shell",
-      "description": "throwaway HOME, hub on, no network",
-      "command": "H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; touch \"$H/.kollab/connect-guide-seen\""
+      "description": "throwaway HOME: app folder ws/, an agent running in other/",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; [ -d \"$H/other\" ] && (cd \"$H/other\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all); true >/dev/null 2>&1; R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\" \"$H/other\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; touch \"$H/.kollab/connect-guide-seen\"; (cd \"$H/other\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --detached >/dev/null 2>&1)"
     }
   ],
   "steps": [
@@ -27,7 +27,7 @@
     },
     {
       "action": "section",
-      "title": "@ lists both broadcasts first"
+      "title": "@ lists the three broadcasts first"
     },
     {
       "action": "type",
@@ -44,17 +44,22 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "local-broadcast.*every agent in this folder",
-      "description": "local broadcast says where it goes"
+      "pattern": "@broadcast\\s.*every agent in this project",
+      "description": "@broadcast: this project"
     },
     {
       "action": "assert_contains",
-      "pattern": "global-broadcast.*every agent in this folder and on your network",
-      "description": "global broadcast says where it goes"
+      "pattern": "@local-broadcast\\s.*every agent on this computer",
+      "description": "@local-broadcast: this computer"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "@global-broadcast\\s.*every agent on every computer in your network",
+      "description": "@global-broadcast: the network"
     },
     {
       "action": "section",
-      "title": "@local-broadcast sends"
+      "title": "@local-broadcast reaches the other folder"
     },
     {
       "action": "type",
@@ -71,7 +76,7 @@
     },
     {
       "action": "type",
-      "text": "hello team",
+      "text": "hello other folder",
       "delay": 0.1
     },
     {
@@ -79,9 +84,19 @@
     },
     {
       "action": "wait_for",
-      "pattern": "broadcast to [0-9]+ agent",
+      "pattern": "broadcast to [0-9]+ agent\\(s\\); 1 in other folders",
       "timeout": 10,
-      "description": "the hub answers with how many agents it reached"
+      "description": "the agent in other/ took it"
+    },
+    {
+      "action": "shell",
+      "description": "the other folder's agent has the message",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; cd \"$H/other\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub capture koordinator 5"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hello other folder",
+      "description": "other/ koordinator received @local-broadcast"
     },
     {
       "action": "section",
@@ -120,13 +135,13 @@
     },
     {
       "action": "wait_for",
-      "pattern": "no other computers on your network yet",
+      "pattern": "1 in other folders; no other computers on your network yet",
       "timeout": 10,
-      "description": "the reply says other computers were not reached"
+      "description": "reaches other/ and says no other computer was reached"
     },
     {
       "action": "section",
-      "title": "a bare @broadcast is the local one"
+      "title": "@broadcast stays in this project"
     },
     {
       "action": "type",
@@ -144,20 +159,34 @@
     },
     {
       "action": "wait_for",
-      "pattern": "(?s)no other computers on your network yet.*broadcast to [0-9]+ agent",
+      "pattern": "(?s)no other computers on your network yet.*broadcast to [0-9]+ agent\\(s\\)(?!; )",
       "timeout": 10,
-      "description": "the hub answers @broadcast like @local-broadcast"
+      "description": "@broadcast answers without other folders"
     },
     {
-      "action": "capture"
+      "action": "shell",
+      "description": "other/ never got the project broadcast",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; cd \"$H/other\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub capture koordinator 10"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "hi all",
+      "description": "the same capture shows @global-broadcast reached other/"
     },
     {
       "action": "assert_not_contains",
-      "pattern": "agent 'broadcast' is not online",
-      "description": "@broadcast is not treated as an agent name"
+      "pattern": "hi there",
+      "description": "other/ koordinator did not receive @broadcast"
     },
     {
       "action": "escape"
+    }
+  ],
+  "teardown": [
+    {
+      "action": "shell",
+      "description": "stop the agent in other/",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; [ -d \"$H/other\" ] && (cd \"$H/other\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all); true"
     }
   ]
 }

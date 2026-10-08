@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.plugin import HubPlugin
@@ -101,7 +101,7 @@ def test_target_catalog_merges_online_custom_identity_with_offline_pool():
     asyncio.run(scenario())
 
 
-def test_target_catalog_leads_with_both_broadcasts_and_lists_remote_agents():
+def test_target_catalog_leads_with_the_three_broadcasts_and_lists_remote_agents():
     async def scenario():
         hub = _hub(agents=[])
         hub.network_agent_rows = AsyncMock(
@@ -118,8 +118,11 @@ def test_target_catalog_leads_with_both_broadcasts_and_lists_remote_agents():
 
         targets = await hub.list_agent_targets()
 
-        assert [t["identity"] for t in targets[:2]] == ["local-broadcast", "global-broadcast"]
-        assert targets[1]["description"] == "every agent in this folder and on your network"
+        assert [(t["identity"], t["description"]) for t in targets[:3]] == [
+            ("broadcast", "every agent in this project"),
+            ("local-broadcast", "every agent on this computer"),
+            ("global-broadcast", "every agent on every computer in your network"),
+        ]
         remote = {t["identity"]: t for t in targets if t.get("kind") == "remote"}
         assert list(remote) == ["lapis@devbox"]  # an offline row is left out
         assert remote["lapis@devbox"]["description"] == "on devbox"
@@ -134,7 +137,7 @@ def test_off_a_network_the_menu_still_offers_global_broadcast_without_remote_row
 
         targets = await hub.list_agent_targets()
 
-        assert targets[1]["identity"] == "global-broadcast"  # its reply says who was missed
+        assert targets[2]["identity"] == "global-broadcast"  # its reply says who was missed
         assert not [t for t in targets if t.get("kind") == "remote"]
 
     asyncio.run(scenario())
@@ -146,10 +149,10 @@ def test_broadcast_names_wake_everyone_with_their_scope():
         hub._handle_broadcast_command = AsyncMock(return_value="broadcast to 3 agent(s)")
 
         assert await hub.send_user_message("local-broadcast", "stand up") == "broadcast to 3 agent(s)"
-        hub._handle_broadcast_command.assert_awaited_with("stand up", force=True, scope="")
+        hub._handle_broadcast_command.assert_awaited_with("stand up", force=True, scope="machine")
         await hub.send_user_message("Global-Broadcast", "ship it")
         hub._handle_broadcast_command.assert_awaited_with("ship it", force=True, scope="network")
-        await hub.send_user_message("broadcast", "hi")  # the old name stays the local one
+        await hub.send_user_message("broadcast", "hi")  # this project only
         hub._handle_broadcast_command.assert_awaited_with("hi", force=True, scope="")
 
     asyncio.run(scenario())
@@ -160,6 +163,7 @@ def test_network_broadcast_says_which_computers_it_could_not_reach():
         hub = _hub(agents=[])
         hub._route_message = AsyncMock(return_value=[])
         hub._presence.get_cached_agents = lambda: []
+        hub._broadcast_other_folders = AsyncMock(return_value=0)
 
         hub._relay_agent = None
         result = await hub._handle_broadcast_command("hi", force=True, scope="network")
@@ -170,6 +174,31 @@ def test_network_broadcast_says_which_computers_it_could_not_reach():
         assert "other computers skipped: trust is manual" in result
 
         result = await hub._handle_broadcast_command("hi", force=True)
-        assert "other computers" not in result  # a local broadcast never mentions them
+        assert result == "broadcast to 0 agent(s)"  # @broadcast: this project only
+
+    asyncio.run(scenario())
+
+
+def test_local_broadcast_also_reaches_live_agents_in_other_folders(tmp_path):
+    async def scenario():
+        hub = _hub(agents=[])
+        hub._route_message = AsyncMock(return_value=[])
+        hub._presence.get_cached_agents = lambda: []
+        here, other = tmp_path / "here" / "hub", tmp_path / "other" / "hub"
+        records = [
+            (here, {"socket_path": "/s/self"}),
+            (other, {"socket_path": "/s/lapis"}),
+            (other, {"socket_path": "/s/ruby"}),
+        ]
+        send = AsyncMock(side_effect=[True, False])
+        with (
+            patch("plugins.hub.presence.get_hub_dir", return_value=here),
+            patch("plugins.hub.presence.live_agents_on_machine", return_value=records),
+            patch("plugins.hub.plugin.AgentMessenger.send_to_agent", send),
+        ):
+            result = await hub._handle_broadcast_command("hi", force=True, scope="machine")
+
+        assert result == "broadcast to 0 agent(s); 1 in other folders"  # ruby never acked
+        assert [call.args[0] for call in send.await_args_list] == ["/s/lapis", "/s/ruby"]
 
     asyncio.run(scenario())

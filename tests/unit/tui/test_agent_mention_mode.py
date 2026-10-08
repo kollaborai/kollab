@@ -227,10 +227,12 @@ def test_broadcasts_lead_the_at_menu_and_remote_agents_name_their_computer():
                     {"identity": "lapis@devbox", "status": "online", "state": "idle",
                      "description": "on devbox", "kind": "remote"},
                     {"identity": "zicron", "status": "online", "state": "waiting"},
+                    {"identity": "broadcast", "status": "online",
+                     "description": "every agent in this project", "kind": "broadcast"},
                     {"identity": "local-broadcast", "status": "online",
-                     "description": "every agent in this folder", "kind": "broadcast"},
+                     "description": "every agent on this computer", "kind": "broadcast"},
                     {"identity": "global-broadcast", "status": "online",
-                     "description": "every agent in this folder and on your network", "kind": "broadcast"},
+                     "description": "every agent on every computer in your network", "kind": "broadcast"},
                 ]
 
         bus = EventBus()
@@ -249,8 +251,8 @@ def test_broadcasts_lead_the_at_menu_and_remote_agents_name_their_computer():
         await handler.enter_agent_mention_mode()
 
         rows = [(item["name"], item["description"]) for item in menu.menu_items]
-        assert rows[0] == ("local-broadcast", "every agent in this folder")
-        assert rows[1][0] == "global-broadcast"  # the hub's order, not the alphabet
+        assert rows[0] == ("broadcast", "every agent in this project")
+        assert [name for name, _ in rows[1:3]] == ["local-broadcast", "global-broadcast"]  # the hub's order
         assert ("lapis@devbox", "online · idle · on devbox") in rows
 
     asyncio.run(scenario())

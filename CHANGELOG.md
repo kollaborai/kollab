@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The @ menu (terminal and web) has three broadcasts: `@broadcast` reaches every agent in this project, `@local-broadcast` every agent on this computer, in every project folder (it reached only this folder), and `@global-broadcast` every agent on every computer in your network. Broadcast rows in the web menu no longer show an "online" dot.
+
 ### Fixed
-- `@broadcast` in the terminal reaches every agent in this folder, as it does in the web; it answered "agent 'broadcast' is not online".
+- `@broadcast` in the terminal answered "agent 'broadcast' is not online"; it reaches every agent in this project, as in the web.
+- The web sidebar writes computer names as they are (`laptop-a-1`, not "Laptop A 1"), the way an `agent@device` address spells them.
 - `kollab --hub status` names the network (`network: <name> via <directory> (trust: ...)`) and, on its own line, this device. It printed this device's name as the network.
 - Web gem avatars no longer show a thin line at the edge of the gem: each gem is copied out of the shared renderer on whole pixels, so the copy stops blending in a sliver of another gem.
 - `scripts/relay/autoupdate.sh` waits up to 10 minutes for PyPI's index to serve a new release; right after a release it stopped with "No matching distribution" and tried again only on the next timer run.

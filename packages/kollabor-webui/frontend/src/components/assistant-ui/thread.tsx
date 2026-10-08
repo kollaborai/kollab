@@ -538,21 +538,27 @@ const Composer: FC<{
     });
     return [
       {
+        id: "broadcast",
+        label: "Broadcast",
+        description: "Every agent in this project",
+        type: "agent" as const,
+        searchText: "broadcast project all everyone",
+        icon: "broadcast" as const,
+      },
+      {
         id: "local-broadcast",
         label: "Local Broadcast",
-        description: "Every agent in this folder",
+        description: "Every agent on this computer",
         type: "agent" as const,
-        searchText: "local broadcast all everyone",
-        status: "online",
+        searchText: "local broadcast computer all everyone",
         icon: "broadcast" as const,
       },
       {
         id: "global-broadcast",
         label: "Global Broadcast",
-        description: "Every agent in this folder and on your network",
+        description: "Every agent on every computer in your network",
         type: "agent" as const,
         searchText: "global broadcast network all everyone",
-        status: "online",
         icon: "broadcast" as const,
       },
       ...onlineAgents,
@@ -580,7 +586,7 @@ const Composer: FC<{
           items={agentItems}
           title="Message an agent"
           emptyMessage="No online agents"
-          emptyHint="Try @local-broadcast to reach every agent in this folder."
+          emptyHint="Try @broadcast to reach every agent in this project."
         />
         <ComposerPrimitive.AttachmentDropzone
           asChild
