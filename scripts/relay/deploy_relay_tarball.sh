@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy an already-built relay tarball: deploy_relay_tarball.sh <tarball> <short-sha>
+# Deploy an already-built relay tarball: deploy_relay_tarball.sh <tarball> <short-sha> [version]
+# A version is recorded for autoupdate.sh once the relay is healthy.
 set -euo pipefail
 HOST=server
 OUT="$1"
@@ -11,9 +12,9 @@ echo "tag=$TAG sha256=$LOCAL_SHA"
 ssh "$HOST" "mkdir -p '$REL'"
 scp -q "$OUT" "$HOST:$REL/source.tar.gz"
 
-ssh "$HOST" bash -s "$REL" "$LOCAL_SHA" <<'EOF'
+ssh "$HOST" bash -s "$REL" "$LOCAL_SHA" "${3:-}" <<'EOF'
 set -euo pipefail
-REL=$1; WANT=$2
+REL=$1; WANT=$2; VERSION=$3
 cd "$REL"
 GOT=$(sha256sum source.tar.gz | cut -d' ' -f1)
 [ "$GOT" = "$WANT" ] || { echo "tarball sha mismatch: $GOT"; exit 2; }
@@ -43,7 +44,7 @@ sudo -n systemctl restart kollab-relay.service
 for i in $(seq 1 20); do
   sleep 1
   H=$(curl -s -m 3 "$HEALTH_URL" || true)
-  case "$H" in *'"status": "ok"'*'"degraded": false'*) echo "healthy after ${i}s"; break;; esac
+  case "$H" in *'"status": "ok"'*'"degraded": false'*) echo "healthy after ${i}s"; if [ -n "$VERSION" ]; then echo "$VERSION" > /home/me/.local/share/kollab-relay/version; fi; break;; esac
   [ "$i" = 20 ] && { echo "NOT HEALTHY: $H"; echo "rolling back to $BACKUP"; sudo -n cp "$BACKUP" "$DROPIN"; sudo -n systemctl daemon-reload; sudo -n systemctl restart kollab-relay.service; exit 3; }
 done
 echo "enrollment lookup: $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/enrollment/lookup -H 'content-type: application/json' -d '{}')"

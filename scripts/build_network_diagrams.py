@@ -527,7 +527,7 @@ def fig_selfhost():
     o.append(t(834, 312, "or --print systemd", "m dimf", 10.5))
     o.append(line(818, 270, 802, 270, "ln", f'marker-end="url(#{p}-a)"'))
     return svg(1000, 356,
-               "One-command directory: devices reach your TLS proxy on 443, which forwards five routes to "
+               "One-command directory: devices reach your TLS proxy on 443, which forwards four routes to "
                "kollab relay serve on 127.0.0.1:9078; one process runs the relay, the publisher and the key "
                "file; the state directory holds the signing key; you add a DNS TXT record, and --install "
                "keeps it running as a systemd service.",
@@ -547,10 +547,10 @@ def fig_kollaborai():
     o.append(t(230, 84, "public, ports 80 and 443", "dimf", 11))
     o.append(rect(230, 100, 200, 156, "fbg ln thick", 10))
     o.append(t(246, 122, "nginx · TLS :443", "", 12.5, None, 700))
-    for i, s in enumerate(("key file · health", "ws · enrollment/*", "contact/*")):
+    for i, s in enumerate(("key file · health", "ws · enrollment/*")):
         o.append(t(246, 146 + i * 18, s, "m", 10.5))
     o.append(t(246, 212, "never: metrics", "m warnf", 10.5, None, 700))
-    o.append(t(246, 236, "same five routes", "dimf", 11))
+    o.append(t(246, 236, "same four routes", "dimf", 11))
     o.append(line(150, 148, 228, 148, "ln thick", f'marker-end="url(#{p}-a)"'))
     o.append(t(189, 140, "wss, HTTPS", "m dimf", 10, "middle"))
     o.append(line(430, 178, 528, 178, "ln thick", f'marker-end="url(#{p}-a)"'))

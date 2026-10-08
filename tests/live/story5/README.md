@@ -10,7 +10,7 @@ the tooling.
 
 1. The Mac and the server each start their own network on kollabor.ai (`/connect`, empty code, Enter). Neither joins the other.
 2. The Mac starts a second agent (`kollab --as peridot`), so it has one agent to allow and one to leave alone.
-3. The server runs `/connect knock <the Mac's contact route> "..."`; the Mac reviews it with `/connect knocks`, presses `a`, and runs `/connect allow <server-device> <agent>`.
+3. The server runs `/connect knock <the Mac's contact route> "..."` (`knocking on ..., rings for 5:00`); while it rings, the Mac opens `/connect knocks`, presses `a` on the ringing row, and runs `/connect allow <server-device> <agent>`.
 4. Each side lists the other's agents (`kollab --hub status`): the server sees only the allowed agent, the Mac sees the server's agent that knocked.
 5. From a plain shell on the server: `kollab --hub msg <allowed>@<mac-device> "run uname -n ..."` prints the Mac's hostname and exits 0 (the Mac's shell tool ran).
 6. The same for the agent nobody allowed: `unknown agent@device`, non-zero exit, nothing ran on the Mac.
@@ -19,7 +19,7 @@ the tooling.
 
 ## Preconditions (check these first)
 
-- The commit you mean to ship is what `m1/build_wheels.sh` built and `m1/install_both.sh` installed on both hosts (fresh venvs at `~/kollab-m1/venv`). The relay on kollabor.ai is a build of the same commit; `proof.sh` probes `POST /relay/v1/contact/links` first and stops unless it answers 400 (the `deploy_relay*.sh` scripts print the same probe).
+- The commit you mean to ship is what `m1/build_wheels.sh` built and `m1/install_both.sh` installed on both hosts (fresh venvs at `~/kollab-m1/venv`). Or install a published release instead: a fresh venv at `~/kollab-m1/venv` on both hosts with `pip install kollab==X.Y.Z`, and `M1_VERSION=X.Y.Z` when you run `proof.sh`. The relay on kollabor.ai is a build of the same commit; `proof.sh` stops unless it negotiates `kollab-relay/1` on the WebSocket and answers 404 on `POST /relay/v1/contact/lookup` (the 0.13 build, where a knock is a call; the `deploy_relay*.sh` scripts print the same 404 probe).
 - ChatGPT login on both hosts (`~/.kollab/oauth/openai.json`); every agent runs `--llm openai-oauth`.
 - `uv`, `tmux`, `python3` >= 3.12 on the Mac; `ssh server` works with no password.
 - Nobody is attached to the `s5-*` tmux sessions while it runs (keys vanish). Do not run with `bash -x`.
@@ -46,7 +46,7 @@ Network identity is keyed by workspace path, and the script refuses a workspace 
 ## What a pass looks like
 
 `proof.sh` ends with a table and `PASS: N steps, transcript clean.`, exit 0. Rows:
-`pre-*` (build, the live links route, fresh workspaces, logins), `s0-launch`, `s1-two-networks`, `s1-mac-has-two-agents`, `s2-mac-contact-route`, `s3-server-knocks`, `s4-mac-accepts-knock`, `s5-mac-allows-one-agent`, `s6-link-and-visibility`, `s7-delivered-and-answered`, `s8-other-agent-unreachable`, `s9-deny-refuses`, `s10-allow-again-works`, `s11-revoke-cuts-the-link`, `z1-panes-clean`, `z2-log-mac`, `z2-log-srv`. Evidence: `story5/evidence/<step>.txt` (64-hex and `relay:` values replaced before writing), `pane-findings.txt`, `logscan-*.txt`.
+`pre-*` (build, the live 0.13 relay, fresh workspaces, logins), `s0-launch`, `s1-two-networks`, `s1-mac-has-two-agents`, `s2-mac-contact-route`, `s3-server-knocks`, `s4-mac-accepts-knock`, `s5-mac-allows-one-agent`, `s6-link-and-visibility`, `s7-delivered-and-answered`, `s8-other-agent-unreachable`, `s9-deny-refuses`, `s10-allow-again-works`, `s11-revoke-cuts-the-link`, `z1-panes-clean`, `z2-log-mac`, `z2-log-srv`. Evidence: `story5/evidence/<step>.txt` (64-hex and `relay:` values replaced before writing), `pane-findings.txt`, `logscan-*.txt`.
 
 If `s1-mac-has-two-agents` fails, the second agent did not come up as a separate agent in the Mac workspace, so "a message to a non-allowed agent" is not proven; start one by hand (`kollab --as peridot` in `~/kollab-s5-mac`) and rerun with new workspaces, or fix how the launch is done.
 

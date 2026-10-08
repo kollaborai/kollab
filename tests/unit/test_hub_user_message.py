@@ -1,6 +1,7 @@
 """Tests for operator-to-Hub direct messaging and target discovery."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from kollabor_agent.runtime import AgentRuntime
@@ -96,5 +97,77 @@ def test_target_catalog_merges_online_custom_identity_with_offline_pool():
         assert by_identity["zicron"]["status"] == "online"
         assert by_identity["zicron"]["description"] == "checks the work"
         assert by_identity["zicron"]["can_run"] is False
+
+    asyncio.run(scenario())
+
+
+def test_target_catalog_leads_with_both_broadcasts_and_lists_remote_agents():
+    async def scenario():
+        hub = _hub(agents=[])
+        hub.network_agent_rows = AsyncMock(
+            return_value=(
+                "synthyo",
+                [
+                    {"name": "lapis", "device": "devbox", "handle": "lapis@devbox",
+                     "state": "idle", "online": True},
+                    {"name": "ruby", "device": "devbox", "handle": "ruby@devbox",
+                     "state": "idle", "online": False},
+                ],
+            )
+        )
+
+        targets = await hub.list_agent_targets()
+
+        assert [t["identity"] for t in targets[:2]] == ["local-broadcast", "global-broadcast"]
+        assert targets[1]["description"] == "every agent in this folder and on your network"
+        remote = {t["identity"]: t for t in targets if t.get("kind") == "remote"}
+        assert list(remote) == ["lapis@devbox"]  # an offline row is left out
+        assert remote["lapis@devbox"]["description"] == "on devbox"
+        assert remote["lapis@devbox"]["can_run"] is False
+
+    asyncio.run(scenario())
+
+
+def test_off_a_network_the_menu_still_offers_global_broadcast_without_remote_rows():
+    async def scenario():
+        hub = _hub(agents=[])
+
+        targets = await hub.list_agent_targets()
+
+        assert targets[1]["identity"] == "global-broadcast"  # its reply says who was missed
+        assert not [t for t in targets if t.get("kind") == "remote"]
+
+    asyncio.run(scenario())
+
+
+def test_broadcast_names_wake_everyone_with_their_scope():
+    async def scenario():
+        hub = _hub(agents=[])
+        hub._handle_broadcast_command = AsyncMock(return_value="broadcast to 3 agent(s)")
+
+        assert await hub.send_user_message("local-broadcast", "stand up") == "broadcast to 3 agent(s)"
+        hub._handle_broadcast_command.assert_awaited_with("stand up", force=True, scope="")
+        await hub.send_user_message("Global-Broadcast", "ship it")
+        hub._handle_broadcast_command.assert_awaited_with("ship it", force=True, scope="network")
+
+    asyncio.run(scenario())
+
+
+def test_network_broadcast_says_which_computers_it_could_not_reach():
+    async def scenario():
+        hub = _hub(agents=[])
+        hub._route_message = AsyncMock(return_value=[])
+        hub._presence.get_cached_agents = lambda: []
+
+        hub._relay_agent = None
+        result = await hub._handle_broadcast_command("hi", force=True, scope="network")
+        assert "no other computers on your network yet (/connect adds one)" in result
+
+        hub._relay_agent = SimpleNamespace(trust_level=lambda: "manual")
+        result = await hub._handle_broadcast_command("hi", force=True, scope="network")
+        assert "other computers skipped: trust is manual" in result
+
+        result = await hub._handle_broadcast_command("hi", force=True)
+        assert "other computers" not in result  # a local broadcast never mentions them
 
     asyncio.run(scenario())

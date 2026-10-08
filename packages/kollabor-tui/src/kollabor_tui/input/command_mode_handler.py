@@ -593,11 +593,16 @@ class CommandModeHandler:
                 continue
 
             agents = [dict(item) for item in result if isinstance(item, dict)]
+            # The broadcast targets stay on top in the hub's order (local first),
+            # then online before offline, by name.
             return sorted(
                 agents,
                 key=lambda item: (
+                    item.get("kind") != "broadcast",
                     str(item.get("status", "offline")).lower() != "online",
-                    str(item.get("identity", item.get("name", ""))).lower(),
+                    ""
+                    if item.get("kind") == "broadcast"
+                    else str(item.get("identity", item.get("name", ""))).lower(),
                 ),
             )
 
@@ -614,7 +619,10 @@ class CommandModeHandler:
 
             status = str(agent.get("status", "offline")).strip().lower()
             state = str(agent.get("state", "")).strip().lower()
-            if status == "online":
+            kind = agent.get("kind")
+            if kind == "broadcast":
+                description = str(agent.get("description", "")).strip()
+            elif status == "online":
                 state_text = state or "online"
                 description = f"online · {state_text}"
                 current_task = str(agent.get("current_task", "")).strip()
@@ -624,8 +632,8 @@ class CommandModeHandler:
                 description = "offline · select and send to run"
 
             personality = str(agent.get("description", "")).strip()
-            if personality and status != "online":
-                description += f" · {personality}"
+            if personality and (status != "online" or kind == "remote"):
+                description += f" · {personality}"  # remote: "on <device>"
 
             items.append(
                 {

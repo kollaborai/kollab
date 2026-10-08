@@ -217,3 +217,40 @@ def test_direct_at_message_uses_state_service_and_skips_user_input_event():
         )
 
     asyncio.run(scenario())
+
+
+def test_broadcasts_lead_the_at_menu_and_remote_agents_name_their_computer():
+    async def scenario():
+        class Targets(AgentStateService):
+            async def list_hub_agents(self):
+                return [
+                    {"identity": "lapis@devbox", "status": "online", "state": "idle",
+                     "description": "on devbox", "kind": "remote"},
+                    {"identity": "zicron", "status": "online", "state": "waiting"},
+                    {"identity": "local-broadcast", "status": "online",
+                     "description": "every agent in this folder", "kind": "broadcast"},
+                    {"identity": "global-broadcast", "status": "online",
+                     "description": "every agent in this folder and on your network", "kind": "broadcast"},
+                ]
+
+        bus = EventBus()
+        bus.state_service = Targets()
+        menu = MenuRenderer()
+        handler = CommandModeHandler(
+            buffer_manager=BufferManager(),
+            renderer=None,
+            event_bus=bus,
+            command_registry=None,
+            command_executor=None,
+            command_menu_renderer=menu,
+            slash_parser=None,
+        )
+
+        await handler.enter_agent_mention_mode()
+
+        rows = [(item["name"], item["description"]) for item in menu.menu_items]
+        assert rows[0] == ("local-broadcast", "every agent in this folder")
+        assert rows[1][0] == "global-broadcast"  # the hub's order, not the alphabet
+        assert ("lapis@devbox", "online · idle · on devbox") in rows
+
+    asyncio.run(scenario())

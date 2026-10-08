@@ -253,6 +253,8 @@ CONNECT_OWNED_ELSEWHERE = (
 # What an attached window says when its daemon predates knocks as calls.
 CONNECT_NO_KNOCK_DAEMON = "connect: the kollab on this computer needs an update for knocks"
 _KNOCK_USAGE = 'connect: use /connect knock <route> "text"'
+# The @ menus' broadcast targets (TUI and web), each with its broadcast scope.
+BROADCAST_TARGETS = {"local-broadcast": "", "global-broadcast": "network"}
 _KNOCKS_USAGE = "connect: use /connect knocks [everyone|contacts|nobody] [for 30m|2h|1d]"
 _KNOCK_FOR = re.compile(r"(?P<count>\d{1,4})(?P<unit>[mhd])\Z")
 
@@ -12358,7 +12360,47 @@ class HubPlugin(BasePlugin):
                 }
             )
 
-        return sorted(
+        # Agents on the other computers, addressed agent@device like /connect
+        # status lists them (network_agent_rows: none while the relay is down).
+        _device, remote_rows = await self.network_agent_rows()
+        for row in remote_rows:
+            handle = row.get("handle") or format_handle(
+                str(row.get("name", "")), str(row.get("device", ""))
+            )
+            if not row.get("online") or not parse_handle(handle):
+                continue
+            targets.append(
+                {
+                    "identity": handle,
+                    "status": "online",
+                    "state": row.get("state") or "online",
+                    "current_task": "",
+                    "description": f"on {row.get('device', '')}",
+                    "agent_type": "",
+                    "can_run": False,
+                    "is_coordinator": bool(row.get("is_coordinator")),
+                    "kind": "remote",
+                }
+            )
+
+        broadcasts = [
+            {
+                "identity": name,
+                "status": "online",
+                "state": "",
+                "current_task": "",
+                "description": description,
+                "agent_type": "",
+                "can_run": False,
+                "is_coordinator": False,
+                "kind": "broadcast",
+            }
+            for name, description in (
+                ("local-broadcast", "every agent in this folder"),
+                ("global-broadcast", "every agent in this folder and on your network"),
+            )
+        ]
+        return broadcasts + sorted(
             targets,
             key=lambda target: (
                 target["status"] != "online",
@@ -12372,6 +12414,12 @@ class HubPlugin(BasePlugin):
         content = str(content or "").strip()
         if not target or not content:
             return "usage: @agent <message>"
+        if target in BROADCAST_TARGETS:
+            # The human speaking to everyone: wake each agent, like a direct
+            # operator message does.
+            return await self._handle_broadcast_command(
+                content, force=True, scope=BROADCAST_TARGETS[target]
+            )
 
         live_agents: List[AgentRuntime] = []
         if self._presence:
@@ -12473,8 +12521,19 @@ class HubPlugin(BasePlugin):
         # scope="network": under open trust, also reach every online remote
         # agent (docs/specs/agent-network-simple-flow.md section 7). Any
         # other trust level stays local-only -- messaging a stranger's
-        # device needs an explicit allow, not a broadcast.
-        if scope == "network" and self._relay_trust_level() == "open":
+        # device needs an explicit allow, not a broadcast. Say which.
+        # Every launch puts a device on a network of its own; "alone" means no
+        # other computer has joined it yet.
+        if scope == "network" and (
+            getattr(self, "_relay_agent", None) is None or self._relay_alone()
+        ):
+            base += "; no other computers on your network yet (/connect adds one)"
+        elif scope == "network" and self._relay_trust_level() != "open":
+            base += (
+                f"; other computers skipped: trust is {self._relay_trust_level()}"
+                " (/connect trust open lets a broadcast reach them)"
+            )
+        elif scope == "network":
             relay = getattr(self, "_relay_agent", None)
             resolve = getattr(relay, "resolve_handle", None)
             send = getattr(relay, "send", None)

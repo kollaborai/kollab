@@ -97,14 +97,14 @@ Code: `plugins/hub/dns/discovery.py` (TXT and key-file checks), `discovery_store
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../diagrams/agent-network/selfhost-dark.svg">
-  <img alt="One-command directory: devices reach your TLS proxy on 443, which forwards five routes to kollab relay serve on 127.0.0.1:9078; one process runs the relay, the publisher and the key file; the state directory holds the signing key; you add a DNS TXT record, and --install keeps it running as a systemd service." src="../diagrams/agent-network/selfhost-light.svg">
+  <img alt="One-command directory: devices reach your TLS proxy on 443, which forwards four routes to kollab relay serve on 127.0.0.1:9078; one process runs the relay, the publisher and the key file; the state directory holds the signing key; you add a DNS TXT record, and --install keeps it running as a systemd service." src="../diagrams/agent-network/selfhost-light.svg">
 </picture>
 
 ```bash
 uv tool install kollab                                   # on a server whose A/AAAA record is the domain
 kollab relay serve --domain agents.example.com           # creates the key, prints what is left to do
 #   DNS:   _agent.agents.example.com  TXT  "v=aid1;u=https://agents.example.com/.well-known/agent-keys.json"
-kollab relay serve --domain agents.example.com --print nginx    # or --print caddy: the five routes behind TLS
+kollab relay serve --domain agents.example.com --print nginx    # or --print caddy: the four routes behind TLS
 kollab relay serve --domain agents.example.com --install        # systemd, at boot (stop the foreground copy first)
 /connect agents.example.com                              # on each device
 ```

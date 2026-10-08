@@ -4,7 +4,7 @@
 > [agent-network-simple-flow.md](agent-network-simple-flow.md). This document is the wire
 > contract only; a command or flow that appears here and not there is not part of the design.
 
-Status: the relay routes described here run on kollabor.ai. The enrollment routes ship with Kollab 0.11.0. Contact-route lookups, knocks and cross-room link declarations are WebSocket frames (`lookup`, `knock`, `knock_answer`, `links`) from the knocks-as-calls release on; the `/relay/v1/contact/*` HTTP routes of 0.11 are gone.
+Status: the relay routes described here run on kollabor.ai. The enrollment routes ship with Kollab 0.11.0. Contact-route lookups, knocks and cross-room link declarations are WebSocket frames (`lookup`, `knock`, `knock_answer`, `links`) from 0.13.0 on; the `/relay/v1/contact/*` HTTP routes of 0.11 are gone.
 
 ## Product boundary
 
@@ -119,6 +119,7 @@ A release must never strand the devices already out there, and the relay updates
 - **Within a version, changes are additive and read tolerantly.** Each side checks the fields it needs and ignores a field or a frame type it does not know: relay and client frames, knock tickets and sealed knock bodies, peer envelopes, application payloads, secure-session packets, peer records, links and forwarding hops, membership lists, config sync, enrollment replies and decisions, invitations, and discovery endpoints. A device answers an application method it does not know with `not_supported` at once and ignores an encrypted message kind it does not know, so a newer device never waits out a timeout.
 - **Signed fields are fixed per version.** A signature covers a fixed field set (a ticket, a locator, a link) or the payload exactly as sent (an enrollment decision). A new field is either unsigned and ignorable, or it comes with a new version.
 - **A breaking change is a new version served next to the old one.** `kollab-relay/2`, `/relay/v2/...` or `"v": 2` runs beside the old version for at least two releases or 90 days, whichever is longer, then retires. A retired HTTP route answers `410 Gone`; a 0.13+ client then says `this version of kollab is too old for that relay; run kollab --upgrade`.
+- **kollabor.ai updates itself.** `scripts/relay/autoupdate.sh`, run every 15 minutes by `kollab-relay-update.timer`, installs a newer kollab from PyPI beside the running release, switches the relay to it, and keeps it only when health is ok within 20 seconds; otherwise it puts the old release back and never retries that version. A hand deploy (`scripts/relay/deploy_relay.sh`) records its version so the two agree.
 - **Local state files stay strict.** The relay state, knock settings and enrollment recovery journals are read by the version that wrote them.
 - **Before 0.13.0** a client rejected any extra field and dropped its connection on a frame type it did not know. That is why the relay rings only clients that sent a knock frame, and why 0.12.0 and older clients cannot knock through a 0.13 relay (their `/relay/v1/contact/*` routes are gone with the mailbox, issue #123).
 

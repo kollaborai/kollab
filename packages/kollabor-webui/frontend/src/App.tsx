@@ -31,6 +31,7 @@ import {
   type AgentBundleEntry,
   type AgentNetwork,
   type AgentPoolEntry,
+  type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   type Profile,
   type SlashCommand,
@@ -80,6 +81,7 @@ function RuntimeShell({
   session,
   profiles,
   agents,
+  remoteAgents,
   onSessionUpdated,
   onOpenSettings,
   onHistoryCleared,
@@ -92,6 +94,8 @@ function RuntimeShell({
   session: Session;
   profiles: Profile[];
   agents: AgentPoolEntry[];
+  /** Agents on the network's other computers (GET /sessions `network.remote`). */
+  remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
   /** Reloads this session's conversation after the engine cleared it. */
@@ -228,6 +232,8 @@ function RuntimeShell({
             }
             identity={session.identity}
             onOpenGem={onOpenProperties}
+            remoteAgents={remoteAgents}
+            workspace={session.workspace ?? ""}
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -730,6 +736,7 @@ export default function App() {
                 session={activeSession}
                 profiles={profiles}
                 agents={agents}
+                remoteAgents={network.remote}
                 refreshSignal={refreshSignal}
                 onSessionUpdated={handleSessionUpdated}
                 onOpenSettings={openSettings}

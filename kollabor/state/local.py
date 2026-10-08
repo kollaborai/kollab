@@ -55,7 +55,16 @@ from .snapshots import (
 
 logger = logging.getLogger(__name__)
 
-_HUB_MENTION_RE = re.compile(r"^@([A-Za-z0-9][A-Za-z0-9_-]*)\s+(.+)$", re.DOTALL)
+# `@lapis hi`, or `@lapis@devbox hi` for an agent on another computer.
+_HUB_MENTION_RE = re.compile(
+    r"^@([A-Za-z0-9][A-Za-z0-9_-]*(?:@[A-Za-z0-9][A-Za-z0-9-]*)?)\s+(.+)$", re.DOTALL
+)
+# The web composer's broadcast targets; plain @broadcast stays this computer.
+_HUB_BROADCASTS = {
+    "broadcast": "local-broadcast",
+    "local-broadcast": "local-broadcast",
+    "global-broadcast": "global-broadcast",
+}
 
 
 def _json_safe_web_value(value: Any) -> Any:
@@ -2674,7 +2683,8 @@ class LocalStateService(StateService):
         """Send one chat mention through Hub and publish a web turn."""
         from kollabor_tui.display_tap import publish_semantic
 
-        is_broadcast = target.lower() == "broadcast"
+        broadcast = _HUB_BROADCASTS.get(target.lower())
+        is_broadcast = broadcast is not None
         metadata = {
             "hub_message": text,
             "hub_target": target,
@@ -2685,9 +2695,11 @@ class LocalStateService(StateService):
             add_message("user", text, metadata=metadata)
 
         try:
+            # A broadcast takes the terminal's @ path (HubPlugin.send_user_message),
+            # so both screens wake every agent and reach other computers alike.
             result = (
-                await self.hub_broadcast(content)
-                if is_broadcast
+                await self.send_hub_user_message(broadcast, content)
+                if broadcast
                 else await self.hub_send_msg(target, content)
             )
             output = str(result or "hub message completed")

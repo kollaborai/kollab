@@ -300,7 +300,7 @@ Removed. Each prints its redirect for one release instead of running:
   `/connect knocks` opens the knock screen (below). In an attached window the
   daemon places and answers knocks, so the screen shows the daemon's knocks and
   its keys act there; a daemon older than the window answers `connect: the
-  attached daemon needs an update for knocks`.
+  kollab on this computer needs an update for knocks`.
 - On the joining device the code form answers as soon as the relay has the
   request: `request sent to kollabor.ai; waiting for approval on another
   device`. It then watches, and shows `joined <network> as <device>. trust:

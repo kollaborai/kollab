@@ -9,7 +9,7 @@
 # network of their own on kollabor.ai (nobody joins anybody). The server knocks the
 # Mac's contact route, the Mac accepts and allows ONE of its two agents, and the
 # server talks to it with `kollab --hub msg agent@device` from a plain shell. The
-# relay on kollabor.ai must already serve POST /relay/v1/contact/links.
+# relay on kollabor.ai must be the 0.13 build: a knock is a call that rings for 5 minutes.
 #
 # Reuses ../m1/env.sh, scan.py, tmuxtype.py (and the wheels/venvs that
 # m1/build_wheels.sh and m1/install_both.sh made). The tmux and evidence helpers
@@ -174,12 +174,22 @@ case "$MAC_V|$SRV_V" in
   *) abort pre-installed-build "expected $M1_VERSION on both, got mac='$MAC_V' srv='$SRV_V'" ;;
 esac
 
-# The relay must serve the link route: 400 (bad request) on an empty body means it is
-# routed and validating; 404/405/5xx means an older relay, and nothing below would mean anything.
-code=$(curl -sS -o /dev/null -m 20 -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' https://kollabor.ai/relay/v1/contact/links || echo 000)
-case "$code" in
-  400) rec pre-relay-links PASS - "POST /relay/v1/contact/links answered HTTP 400 (live)" ;;
-  *) abort pre-relay-links "POST /relay/v1/contact/links on kollabor.ai answered HTTP $code (want 400). Deploy the relay with cross-room links first." ;;
+# The relay must be the 0.13 build (knocks are calls): it answers a WebSocket
+# subprotocol offer with kollab-relay/1, and the 0.11 mailbox routes are gone (404).
+proto=$("$M1_MAC_VENV/bin/python" - 2>/dev/null <<'PY' || true
+import asyncio, aiohttp
+async def main():
+    async with aiohttp.ClientSession() as session:
+        ws = await asyncio.wait_for(session.ws_connect("wss://kollabor.ai/relay/v1/ws", protocols=("kollab-relay/1",)), 20)
+        print(ws.protocol or "none")
+        await ws.close()
+asyncio.run(main())
+PY
+)
+code=$(curl -sS -o /dev/null -m 20 -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' https://kollabor.ai/relay/v1/contact/lookup || echo 000)
+case "$proto|$code" in
+  "kollab-relay/1|404") rec pre-relay-calls PASS - "kollabor.ai negotiates kollab-relay/1 and its contact routes answer 404 (live)" ;;
+  *) abort pre-relay-calls "kollabor.ai: subprotocol '${proto:-none}', POST /relay/v1/contact/lookup HTTP $code (want kollab-relay/1 and 404). Deploy the 0.13 relay first." ;;
 esac
 
 for h in mac srv; do
@@ -276,33 +286,33 @@ if [ -z "$ROUTE" ]; then abort s2-mac-contact-route "the Mac's /connect status s
 rec s2-mac-contact-route PASS s2-01-mac-status.txt "route $ROUTE"
 
 INTRO="Ana from Acme. Can your ops agent run uname for me?"
-b=$(count_pat srv 'knock sent to')
+b=$(count_pat srv 'knocking on .*rings for')
 cmd srv "/connect knock $ROUTE \"$INTRO\""
-if wait_for srv 'knock sent to' 45 "$b"; then
+if wait_for srv 'knocking on .*rings for' 45 "$b"; then
   cap srv s3-01-srv-knock
-  rec s3-server-knocks PASS s3-01-srv-knock.txt "server printed 'knock sent to ...'"
+  rec s3-server-knocks PASS s3-01-srv-knock.txt "server printed 'knocking on ..., rings for 5:00'"
 else
   cap srv s3-01-srv-knock-failed
-  abort s3-server-knocks "no 'knock sent to' on the server after 45s" s3-01-srv-knock-failed.txt
+  abort s3-server-knocks "no 'knocking on ...' on the server after 45s" s3-01-srv-knock-failed.txt
 fi
 
 say "the Mac reviews the knock"
 got=0
 for _ in $(seq 1 12); do
   cmd mac "/connect knocks"; sleep 6
-  if screen mac | grep -Eq '[0-9]+\. +[A-Za-z0-9-]+ +fingerprint'; then got=1; break; fi
+  if screen mac | grep -Eq '[0-9]+\. +[A-Za-z0-9-]+ +device ID'; then got=1; break; fi
   key mac Escape; sleep 5
 done
 capscreen mac s4-01-mac-knock-review
 [ "$got" = 1 ] || abort s4-mac-accepts-knock "the Mac never listed the knock" s4-01-mac-knock-review.txt
-KNOCK_NAME=$(screen mac | sed -nE 's/^[ >]*[0-9]+\. +([A-Za-z0-9-]+) +fingerprint.*/\1/p' | head -1)
+KNOCK_NAME=$(screen mac | sed -nE 's/^.*[ >][0-9]+\. +([A-Za-z0-9-]+) +device ID.*/\1/p' | head -1)
 key mac a
-if wait_screen mac 'accepted .*agents trust' 45; then
+if wait_screen mac 'accepted [A-Za-z0-9-]+\. /connect allow' 45; then
   capscreen mac s4-02-mac-accepted
   rec s4-mac-accepts-knock PASS s4-02-mac-accepted.txt "accepted '$KNOCK_NAME' (the server is '$SRV_DEVICE')"
 else
   capscreen mac s4-02-mac-accept-failed
-  abort s4-mac-accepts-knock "no 'accepted ... agents trust' after pressing a" s4-02-mac-accept-failed.txt
+  abort s4-mac-accepts-knock "no 'accepted <device>. /connect allow ...' after pressing a" s4-02-mac-accept-failed.txt
 fi
 key mac Escape; sleep 3
 
