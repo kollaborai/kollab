@@ -730,6 +730,13 @@ _DESTINATION_RECOVERY_STATUSES = {
 }
 _DESTINATION_RECOVERY_ACTIVE: set[tuple[str, str]] = set()
 _DESTINATION_RECOVERY_MAX_AGE = 24 * 60 * 60
+# Join-path poll cadence, both sides (the approver's offer loop and the joiner's
+# reply poll). The relay allows 60 polls per 60 s per source IP per endpoint, and
+# every open code on that IP shares the budget: 3 s is 20/min per code, so three
+# open codes sit at the limit and four go over. A 429 costs a 60 s Retry-After.
+# New Code retires the older codes nobody has typed (create_offer), so one
+# console keeps a single unused code polling.
+ENROLLMENT_POLL_SECONDS = 3.0
 _DESTINATION_RETRY_BASE_SECONDS = 5
 _DESTINATION_RETRY_MAX_SECONDS = 300
 _DESTINATION_RETRY_MAX_ATTEMPTS = 10
@@ -1565,7 +1572,7 @@ async def _drive_destination_enrollment(
 
             reply_path = f"/relay/v1/enrollment/offers/{offer_id}/reply/poll"
             deadline = min(record["created_at"] + 600, int(time.time()) + 600)
-            poll_delay = 5.0
+            poll_delay = ENROLLMENT_POLL_SECONDS
             while int(time.time()) < deadline:
                 await asyncio.sleep(poll_delay)
                 if record["expires_at"] is not None and int(time.time()) >= record["expires_at"]:
@@ -1590,14 +1597,14 @@ async def _drive_destination_enrollment(
                 if polled.get("status") == "pending":
                     if set(polled) != {"status"}:
                         raise EnrollmentProtocolError("invalid_response")
-                    poll_delay = min(poll_delay + 5.0, 20.0)
+                    poll_delay = ENROLLMENT_POLL_SECONDS
                     continue
                 _require_shape(polled, {"status", "phase", "round_id", "envelope"})
                 if polled["status"] != "ready" or polled["round_id"] != record["round_id"]:
                     raise EnrollmentProtocolError("invalid_response")
                 if polled["phase"] == "challenge":
                     if record["status"] == "proof_stored":
-                        poll_delay = min(poll_delay + 5.0, 20.0)
+                        poll_delay = ENROLLMENT_POLL_SECONDS
                         continue
                     if record["challenge_envelope"] is not None and record["challenge_envelope"] != polled["envelope"]:
                         raise EnrollmentProtocolError("conflict")
@@ -1681,7 +1688,7 @@ async def _drive_destination_enrollment(
                             proof_envelope=proof_envelope,
                         )
                     await submit_saved_proof(challenge)
-                    poll_delay = 5.0
+                    poll_delay = ENROLLMENT_POLL_SECONDS
                     continue
                 if polled["phase"] != "decision" or record["status"] != "proof_stored":
                     raise EnrollmentProtocolError("invalid_response")
@@ -1889,6 +1896,9 @@ class _ActiveEnrollmentOffer:
     recovery_mode: bool = False
     provisioning_plan: _ProvisioningPlan | None = field(default=None, repr=False)
     credential_categories: tuple[str, ...] = ("conversation:send",)
+    # Set when a newer code replaces this one; its loop stops unless someone
+    # already typed it.
+    retired: bool = False
 
     @property
     def active_session_id(self) -> str:
@@ -3095,6 +3105,11 @@ class EnrollmentIssuer:
                 provisioning_plan=provisioning_plan,
                 credential_categories=credential_categories,
             )
+            # New Code replaces the codes nobody has typed yet: every open code
+            # polls, and the polls share the relay's per-IP budget.
+            for older in self._offers.values():
+                if not older.recovery_mode:
+                    older.retired = True
             self._offers[offer_id] = offer
             self._tasks[offer_id] = asyncio.create_task(self._serve_offer(offer), name="kollab-relay-enrollment")
             displayed_code = code.for_private_display()
@@ -3188,6 +3203,7 @@ class EnrollmentIssuer:
                 while int(time.time()) < offer.expires_at:
                     if (
                         bridge._closed
+                        or (offer.retired and not challenge_token)
                         or client._session_id != offer.active_session_id
                         or client.state.origin != offer.origin
                         or client.public_key != offer.issuer_key
@@ -3246,7 +3262,7 @@ class EnrollmentIssuer:
                     if polled.get("status") == "empty":
                         if set(polled) != {"status"}:
                             return
-                        await asyncio.sleep(15)
+                        await asyncio.sleep(ENROLLMENT_POLL_SECONDS)
                         continue
                     if polled.get("status") != "claimed" or set(polled) != {
                         "status",
@@ -3366,7 +3382,7 @@ class EnrollmentIssuer:
                         _require_shape(stored, {"status", "receipt"})
                         if stored["status"] != "stored" or stored["receipt"] != round_id:
                             return
-                        await asyncio.sleep(15)
+                        await asyncio.sleep(ENROLLMENT_POLL_SECONDS)
                         continue
 
                     if (
@@ -3707,7 +3723,7 @@ class EnrollmentIssuer:
                             if ack.get("status") == "pending":
                                 if set(ack) != {"status"}:
                                     return
-                                await asyncio.sleep(5)
+                                await asyncio.sleep(ENROLLMENT_POLL_SECONDS)
                                 continue
                             _require_shape(ack, {"status", "frame"})
                             signed_ack = ack["frame"]
