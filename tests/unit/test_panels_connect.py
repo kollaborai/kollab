@@ -113,6 +113,8 @@ async def test_no_network_offers_the_two_guide_choices_and_read_only_offers_none
     read_only = Hub({**SNAP, "read_only": True})
     panel = await CONNECT.describe(read_only, {})
     assert panel["notice"] and not panel["row_actions"] and not panel["toolbar_actions"]
+    assert panel["read_only"] is True  # the engine routes to the folder's owner on this
+    assert "read_only" not in await CONNECT.describe(Hub(SNAP), {})
     with pytest.raises(PanelError) as err:
         await CONNECT.act(read_only, "accept", {"id": "abc123"})
     assert err.value.status == 403

@@ -42,7 +42,7 @@ In the terminal nothing changes: the same commands open the same fullscreen scre
 
 ## Read-only network
 
-If another window of the same workspace already runs the network, this window's daemon cannot own it. The Network tab then shows the network and device read-only with one plain line saying so, and connect actions answer 403.
+One process per workspace runs the network. When that is another chat in the same web UI, the engine answers this chat's Network tab from that chat's daemon, Knocks and New Join Code included, so every chat in the folder shows the full tab. Only when a terminal window, or an agent left running by an earlier web UI, runs the network does the tab show the network and device read-only, with one plain line saying so; connect actions then answer 403.
 
 ## Config reloads
 

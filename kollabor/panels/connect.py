@@ -153,6 +153,7 @@ class ConnectPanel:
         ]
         if snap.get("read_only"):
             panel["notice"] = _READ_ONLY_NOTE
+            panel["read_only"] = True  # the engine asks the folder's network owner instead
             return panel
         panel["summary"].append(
             {"label": "Connection", "value": "Connected" if snap["relay_online"] else "Offline"}

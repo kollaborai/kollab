@@ -8,7 +8,8 @@ or echoed in a 502; payloads can hold secrets.
 
 import json
 import logging
-from typing import Any, Dict
+import os
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
 from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
@@ -103,11 +104,56 @@ async def _refresh_profile_mirror(session: EngineSession) -> None:
         )
 
 
+def _network_panel(name: str) -> bool:
+    """`connect` and `connect-*`: the network's screens (kollabor/panels/connect.py)."""
+    return name == "connect" or name.startswith("connect-")
+
+
+async def _network_owner(
+    session: EngineSession,
+) -> Optional[Tuple[EngineSession, Dict[str, Any]]]:
+    """The live session in this one's folder whose daemon runs the network, with
+    its Network panel.
+
+    One process per folder holds the network (the workspace lock); every other
+    chat in that folder only gets a read-only Network panel. None when none of
+    this engine's sessions runs it (a terminal window does, or an agent an
+    earlier engine left running): the chat keeps its read-only panel.
+    """
+    def folder(s: EngineSession) -> str:
+        return getattr(s, "workspace", None) or os.getcwd()  # the daemon's cwd
+
+    peers = [
+        other
+        for other in get_session_registry().values()
+        if other is not session and other.alive and folder(other) == folder(session)
+    ]
+    for candidate in (session, *peers):
+        try:
+            panel = await candidate.state.get_panel("connect", {})
+        except Exception:
+            continue
+        if panel.get("read_only"):
+            continue
+        # A peer that shows no network (still starting, no hub) does not run it.
+        if candidate is session or panel.get("summary"):
+            return candidate, panel
+    return None
+
+
 @router.get("/{session_id}/panels/{name}")
 async def describe_panel(session_id: str, name: str, request: Request):
     session = _live_session(session_id)
     try:
-        panel = await session.state.get_panel(name, _query_params(request))
+        params = _query_params(request)
+        target = session
+        if _network_panel(name):
+            owner = await _network_owner(session)
+            if owner is not None:
+                target, probe = owner
+                if name == "connect" and not params:
+                    return JSONResponse(probe, headers=_NO_STORE)
+        panel = await target.state.get_panel(name, params)
     except Exception as exc:
         return _failure(session_id, exc)
     return JSONResponse(panel, headers=_NO_STORE)
@@ -117,9 +163,13 @@ async def describe_panel(session_id: str, name: str, request: Request):
 async def panel_action(session_id: str, name: str, action: str, request: Request):
     session = _live_session(session_id)
     try:
-        outcome = await session.state.panel_action(
-            name, action, await _json_body(request)
-        )
+        payload = await _json_body(request)
+        target = session
+        if _network_panel(name):
+            owner = await _network_owner(session)
+            if owner is not None:
+                target = owner[0]
+        outcome = await target.state.panel_action(name, action, payload)
     except Exception as exc:
         return _failure(session_id, exc)
     await _refresh_profile_mirror(session)
