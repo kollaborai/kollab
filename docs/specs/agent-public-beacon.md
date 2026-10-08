@@ -111,6 +111,17 @@ An accepted stranger stays in its own room. Two devices in different rooms excha
 - Old (0.11) client, new relay: it is never rung (it sends none of the four frames), so a knock on it reads `unavailable`. Its `/relay/v1/contact/*` requests get 404.
 - Edge proxy: knocks and links ride the WebSocket; a proxy needs no contact routes.
 
+## Versioning
+
+A release must never strand the devices already out there, and the relay updates on its own schedule. From 0.13.0:
+
+- **The relay WebSocket names its version.** A client lists the versions it speaks in the `Sec-WebSocket-Protocol` header, newest first (`kollab-relay/1` today), and the relay picks one it serves. A client that names none speaks `kollab-relay/1`. A client naming only versions the relay does not serve gets `426 Upgrade Required` with `X-Kollab-Relay-Protocols` listing the ones it does; the client says `this version of kollab is too old for <domain>; run kollab --upgrade` when every served version is newer than its own, else `<domain> needs an update for this version of kollab`. `GET /relay/v1/health` lists the served versions under `protocols`.
+- **Within a version, changes are additive and read tolerantly.** Each side checks the fields it needs and ignores a field or a frame type it does not know: relay and client frames, knock tickets and sealed knock bodies, peer envelopes, application payloads, secure-session packets, peer records, links and forwarding hops, membership lists, config sync, enrollment replies and decisions, invitations, and discovery endpoints. A device answers an application method it does not know with `not_supported` at once and ignores an encrypted message kind it does not know, so a newer device never waits out a timeout.
+- **Signed fields are fixed per version.** A signature covers a fixed field set (a ticket, a locator, a link) or the payload exactly as sent (an enrollment decision). A new field is either unsigned and ignorable, or it comes with a new version.
+- **A breaking change is a new version served next to the old one.** `kollab-relay/2`, `/relay/v2/...` or `"v": 2` runs beside the old version for at least two releases or 90 days, whichever is longer, then retires. A retired HTTP route answers `410 Gone`; a 0.13+ client then says `this version of kollab is too old for that relay; run kollab --upgrade`.
+- **Local state files stay strict.** The relay state, knock settings and enrollment recovery journals are read by the version that wrote them.
+- **Before 0.13.0** a client rejected any extra field and dropped its connection on a frame type it did not know. That is why the relay rings only clients that sent a knock frame, and why 0.12.0 and older clients cannot knock through a 0.13 relay (their `/relay/v1/contact/*` routes are gone with the mailbox, issue #123).
+
 ## Shared state, quotas, and failure behavior
 
 Room membership and connection quotas use shared, expiring leases. Room records are colocated with Redis Cluster hash tags so the room mutations can be atomic. Cross-worker routing uses one sharded Pub/Sub inbox per worker. Inbox messages carry routing metadata and encrypted frames; they are ephemeral, not an offline queue.

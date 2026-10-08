@@ -88,6 +88,8 @@ _ALLOWED_ERRORS = {
     "replayed",
     "capacity",
     "backend_unavailable",
+    # A relay that retired this protocol version (410): update kollab.
+    "update_required",
 }
 # What a journal row or the status line may carry: the relay's codes plus the
 # ones this device raises itself. `internal` is a fault on this device (never
@@ -336,6 +338,10 @@ class EnrollmentHTTPClient:
                     308,
                 }:
                     raise EnrollmentProtocolError("transport")
+                if response.status == 410:
+                    # This relay retired the route this version speaks
+                    # (docs/specs/agent-public-beacon.md#versioning).
+                    raise EnrollmentProtocolError("update_required")
                 if response.status not in expected_statuses:
                     code = await self._error_code(response)
                     retry_after = (
@@ -860,7 +866,7 @@ def _validate_destination_recovery_record(record: Any, offer_id: str) -> dict[st
         "last_error_code",
         "device_name",
     }
-    if not isinstance(record, dict) or set(record) != fields:
+    if not isinstance(record, dict) or not record.keys() >= fields:
         raise EnrollmentProtocolError("invalid_response")
     if (
         type(record["version"]) is not int
@@ -1013,7 +1019,7 @@ async def _lookup_enrollment_offer(
             response = await transport.post(ENROLLMENT_LOOKUP_PATH, frame, expected_statuses={200})
     except EnrollmentProtocolError:
         return None
-    if not isinstance(response, dict) or set(response) != {"offer_id"}:
+    if not isinstance(response, dict) or "offer_id" not in response:
         return None
     offer_id = response["offer_id"]
     if not isinstance(offer_id, str) or not re.fullmatch(r"[0-9a-f]{32}", offer_id):
@@ -1595,8 +1601,6 @@ async def _drive_destination_enrollment(
                     )
                     continue
                 if polled.get("status") == "pending":
-                    if set(polled) != {"status"}:
-                        raise EnrollmentProtocolError("invalid_response")
                     poll_delay = ENROLLMENT_POLL_SECONDS
                     continue
                 _require_shape(polled, {"status", "phase", "round_id", "envelope"})
@@ -1860,7 +1864,10 @@ async def enroll_device(
 
 
 def _require_shape(value: dict[str, Any], fields: set[str]) -> None:
-    if not isinstance(value, dict) or set(value) != fields:
+    """Every field in `fields` is there. One a newer side adds is ignored
+    (docs/specs/agent-public-beacon.md#versioning); a signed payload's signature
+    still covers all of it."""
+    if not isinstance(value, dict) or not value.keys() >= fields:
         raise EnrollmentProtocolError("invalid_response")
 
 
@@ -3260,11 +3267,9 @@ class EnrollmentIssuer:
                             await asyncio.sleep(exc.retry_after_seconds or 20)
                             continue
                     if polled.get("status") == "empty":
-                        if set(polled) != {"status"}:
-                            return
                         await asyncio.sleep(ENROLLMENT_POLL_SECONDS)
                         continue
-                    if polled.get("status") != "claimed" or set(polled) != {
+                    if polled.get("status") != "claimed" or not polled.keys() >= {
                         "status",
                         "phase",
                         "round_id",
@@ -3721,8 +3726,6 @@ class EnrollmentIssuer:
                                 await asyncio.sleep(exc.retry_after_seconds or 5)
                                 continue
                             if ack.get("status") == "pending":
-                                if set(ack) != {"status"}:
-                                    return
                                 await asyncio.sleep(ENROLLMENT_POLL_SECONDS)
                                 continue
                             _require_shape(ack, {"status", "frame"})

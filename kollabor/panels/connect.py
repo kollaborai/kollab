@@ -155,7 +155,7 @@ class ConnectPanel:
             panel["notice"] = _READ_ONLY_NOTE
             return panel
         panel["summary"].append(
-            {"label": "Relay", "value": "Online" if snap["relay_online"] else "Offline"}
+            {"label": "Connection", "value": "Connected" if snap["relay_online"] else "Offline"}
         )
         if snap["config_from"]:
             panel["summary"].append({"label": "Config From", "value": snap["config_from"]})
@@ -170,7 +170,7 @@ class ConnectPanel:
             {
                 "id": row["enrollment_id"],
                 "label": row["device"] or "Unknown Device",
-                "detail": f"fingerprint {row['fingerprint']}",
+                "detail": f"device ID {row['fingerprint']}",
                 "group": "Join Requests",
                 "current": False,
                 "badges": [],
@@ -400,7 +400,7 @@ class ConnectKnocksPanel:
             panel["notice"] = "This device is offline: knocks cannot reach it."
         rows = []
         for row in snap["ringing"]:
-            rows.append(("ringing", row["id"], row["device"], f"fingerprint {row['fingerprint']}"
+            rows.append(("ringing", row["id"], row["device"], f"device ID {row['fingerprint']}"
                          f" · {_clock(row['left'])} left · \"{_quote(row['text'])}\"", "Ringing"))
         for row in snap["calls"]:
             state = (f"Ringing {_clock(row['left'])}" if row["state"] == "ringing"
@@ -408,7 +408,7 @@ class ConnectKnocksPanel:
             rows.append(("call", row["route"], row["target"], state, "Knocking"))
         for row in snap["missed"]:
             when = time.strftime("%b %d %H:%M", time.localtime(row["at"]))
-            rows.append(("missed", row["id"], row["device"], f"fingerprint {row['fingerprint']}"
+            rows.append(("missed", row["id"], row["device"], f"device ID {row['fingerprint']}"
                          f" · {when} · \"{_quote(row['text'])}\"", "Missed"))
         for row in snap["blocked"]:
             rows.append(("blocked", row["route"], row["route"], row["device"], "Blocked"))

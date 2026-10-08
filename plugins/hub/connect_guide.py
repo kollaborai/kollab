@@ -59,6 +59,7 @@ JOIN_FAILURE_REASONS = {
     "transport": "could not reach the relay; check the connection",
     "invalid_response": "the relay sent a reply this device could not verify",
     "internal": "this device hit an unexpected error; see the kollab log",
+    "update_required": "this version of kollab is too old for that relay; run kollab --upgrade",
 }
 
 

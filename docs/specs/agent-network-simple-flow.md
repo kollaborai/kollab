@@ -166,7 +166,7 @@ Server, over SSH, in kollab:
 Mac, five seconds later, same screen refreshes:
 
 ```
- requests     home-server wants to join   fingerprint abcd…ef01   [a]ccept [r]eject
+ requests     home-server wants to join   device ID abcd…ef01   [a]ccept [r]eject
 ```
 
 Marco presses `a`.
@@ -380,7 +380,7 @@ Marco:
 
 ```
  Knocks
- ringing        > 1. ana-laptop   fingerprint 1234…5678   4:51
+ ringing        > 1. ana-laptop   device ID 1234…5678   4:51
                      "Ana from Acme. Can your ops agent review a nginx config for me this week?"
                      [a]ccept [r]eject [b]lock
  missed         0 of 20
@@ -428,7 +428,7 @@ Ana's device prepares nothing for Marco until he accepts, so a knock that never
 connects leaves nothing to clean up.
 
 **Missed knocks.** A knock that rang out while Marco's device was online stays
-on his device, not on the directory: device name, fingerprint, contact route,
+on his device, not on the directory: device name, device ID, contact route,
 text and time, newest first, up to `plugins.hub.knock_missed_limit` (default
 20). With the list full, new knocks go unanswered until he clears one (`[d]`
 deletes one, `[c]` clears all). `[k]` knocks back: Marco types a line and his
@@ -756,7 +756,7 @@ How it stays secure with 40 bits:
 - The relay burns an offer after 5 failed proofs from any source. A failed
   lookup names no offer, so lookups are bounded by the per-source rate limit
   and the 2^40 tag space inside the five-minute window.
-- The issuing human sees the joining device's fingerprint on the accept line
+- The issuing human sees the joining device's ID on the accept line
   and accepts by hand. A guessed code still needs a human to press `a`.
 - The code never enters a command, chat, or a log; the private form keeps
   that guarantee. `/connect code` shows it on a private screen only. The
@@ -852,7 +852,7 @@ and the rest take its result.
 Who gets it:
 
 - A human shares it. `s` on a join request (`home-server wants to join
-  fingerprint abcd…ef01   [a]ccept [s]hare login [r]eject`) accepts the device
+  device ID abcd…ef01   [a]ccept [s]hare login [r]eject`) accepts the device
   and shares the login; `/connect share <device>` shares it with a device
   already on the network; `a` accepts without it. Never by vouch, link or
   knock, and never with a stranger accepted from one (Story 5). In a company

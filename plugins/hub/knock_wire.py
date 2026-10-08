@@ -53,7 +53,9 @@ def check_ticket(ticket: Any, origin: str, *, now: float | None = None) -> dict[
     Raises ValueError otherwise. Callers check which keys it binds.
     """
     now = time.time() if now is None else now
-    if not isinstance(ticket, dict) or set(ticket) != TICKET_FIELDS:
+    # A field a newer version adds is ignored (and not passed on): only these
+    # are signed (docs/specs/agent-public-beacon.md#versioning).
+    if not isinstance(ticket, dict) or not ticket.keys() >= TICKET_FIELDS:
         raise ValueError("invalid knock ticket")
     sender, recipient, knock_id = ticket["from"], ticket["to"], ticket["id"]
     ends, sig = ticket["ends"], ticket["sig"]
@@ -81,4 +83,4 @@ def check_ticket(ticket: Any, origin: str, *, now: float | None = None) -> dict[
         )
     except (BadSignatureError, ValueError) as exc:
         raise ValueError("invalid knock ticket signature") from exc
-    return ticket
+    return {name: ticket[name] for name in TICKET_FIELDS}

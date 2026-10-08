@@ -225,9 +225,9 @@ def verify_manifest(payload: dict, target: DiscoveryTarget, *, now: float | None
         registry = normalize_target(endpoints["registry"])
         if registry.origin != target.origin or registry.url != target.origin + WELL_KNOWN:
             raise ValueError("registry must be the canonical same-origin JSON URL")
-        # The public descriptor cannot import socket paths or raw-stream routes.
-        if set(endpoints) - {"registry", "control", "agent_card"}:
-            raise ValueError("unsupported public endpoint field")
+        # Only registry, control and agent_card are ever read, so the public
+        # descriptor cannot import socket paths or raw-stream routes. An endpoint
+        # a newer publisher adds is ignored (docs/specs/agent-public-beacon.md#versioning).
         if "agent_card" in endpoints and endpoints["agent_card"] != target.origin + "/.well-known/agent-card.json":
             raise ValueError("agent_card must be the canonical same-origin Agent Card URL")
         if "control" in endpoints:

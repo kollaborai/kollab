@@ -93,6 +93,7 @@ _ENROLLMENT_ERRORS = {
     "transport",
     "invalid_response",
     "internal",
+    "update_required",
 }
 
 
@@ -100,15 +101,15 @@ _ENROLLMENT_ERRORS = {
 def _safe_enrollment_result(value) -> dict[str, str]:
     if not isinstance(value, dict):
         return {"error": "transport"}
-    if set(value) == {"status"} and value["status"] in {"approved", "rejected"}:
+    if value.get("status") in {"approved", "rejected"}:
         return {"status": value["status"]}
-    if set(value) == {"error"} and value["error"] in _ENROLLMENT_ERRORS:
+    if value.get("error") in _ENROLLMENT_ERRORS:
         return {"error": value["error"]}
     return {"error": "transport"}
 
 
 def _safe_enrollment_offer_result(value) -> dict[str, str]:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict) or not value.keys() >= {
         "status",
         "offer_id",
         "expires_at",
@@ -896,16 +897,18 @@ class RelayAgentBridge:
         result = await local_relay_rpc(
             record["socket_path"], "relay.knocks", params, timeout=30, auth=self._auth()
         )
-        if not isinstance(result, dict) or set(result) not in ({"text"}, {"snapshot"}):
+        # The daemon may run a newer kollab than this window: only what this
+        # version reads is kept.
+        if not isinstance(result, dict) or not ("text" in result or "snapshot" in result):
             raise RelayError("knocks are unavailable")
-        return result
+        return {"snapshot": result["snapshot"]} if "snapshot" in result else {"text": result["text"]}
 
     async def _rpc_knocks(self, params):
         self._require_human_network_context("remote model turns cannot use knocks")
         if (
             self.commands is None
             or not isinstance(params, dict)
-            or set(params) != {"agent_id", "action", "args"}
+            or not params.keys() >= {"agent_id", "action", "args"}
             or params["action"] not in KNOCK_ACTIONS
             or not isinstance(params["args"], dict)
             or len(json.dumps(params["args"])) > 8192
@@ -979,7 +982,7 @@ class RelayAgentBridge:
 
     async def _rpc_enroll_device(self, params, on_submitted=None):
         self._require_human_network_context("remote model turns cannot enroll devices")
-        if self.commands is None or set(params) != {"agent_id", "domain", "code"}:
+        if self.commands is None or not isinstance(params, dict) or not params.keys() >= {"agent_id", "domain", "code"}:
             raise RelayError("invalid local enrollment request")
         from .enrollment_codes import is_short_enrollment_code
 
@@ -1007,7 +1010,7 @@ class RelayAgentBridge:
         self._require_human_network_context(
             "remote model turns cannot issue device enrollment offers"
         )
-        if self.commands is None or set(params) != {"agent_id", "domain"}:
+        if self.commands is None or not isinstance(params, dict) or not params.keys() >= {"agent_id", "domain"}:
             raise RelayError("invalid local enrollment offer")
         if (
             not isinstance(params["domain"], str)
@@ -1026,7 +1029,11 @@ class RelayAgentBridge:
         )
         if self.commands is None:
             raise RelayError("workspace relay owner changed; retry")
-        if set(params) != {"value", "agent_id"} or not isinstance(params["value"], str):
+        if (
+            not isinstance(params, dict)
+            or not params.keys() >= {"value", "agent_id"}
+            or not isinstance(params["value"], str)
+        ):
             raise RelayError("invalid local relay command")
         self._local_agent(params["agent_id"])
         return {
@@ -1626,7 +1633,7 @@ class RelayAgentBridge:
             return receipt
         if method in {"status", "cancel"}:
             if (
-                set(payload) != {"id", "to"}
+                not isinstance(payload, dict) or not payload.keys() >= {"id", "to"}
                 or not isinstance(payload["id"], str)
                 or not ID.fullmatch(payload["id"])
             ):
@@ -1684,7 +1691,7 @@ class RelayAgentBridge:
             }
 
     async def _rpc_deliver(self, params):
-        if set(params) != {"id"}:
+        if not isinstance(params, dict) or not params.keys() >= {"id"}:
             raise RelayError("invalid local delivery")
         self._state()
         record = self.store.task(params["id"])
@@ -1697,7 +1704,7 @@ class RelayAgentBridge:
         return {"id": record["id"], "state": record["state"]}
 
     async def _rpc_event(self, params):
-        if set(params) != {"id"}:
+        if not isinstance(params, dict) or not params.keys() >= {"id"}:
             raise RelayError("invalid local conversation event")
         state_store = self._state()
         state = state_store.state
@@ -2136,7 +2143,7 @@ class RelayAgentBridge:
                 continue
 
     async def _rpc_cancel(self, params):
-        if set(params) != {"id"}:
+        if not isinstance(params, dict) or not params.keys() >= {"id"}:
             raise RelayError("invalid local cancellation")
         self._state()
         record = self.store.task(params["id"])

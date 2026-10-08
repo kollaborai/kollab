@@ -116,7 +116,7 @@ async def test_status_shows_a_16_hex_contact_route_and_a_short_join_fingerprint(
     route = contact_route_hex(commands.client.public_key)
     assert len(route) == 16
     assert f"contact route kollabor.ai/c/{route}" in status
-    assert "ana-laptop wants to join   fingerprint abcd\u2026ef01" in status
+    assert "ana-laptop wants to join   device ID abcd\u2026ef01" in status
     assert short_fingerprint(fingerprint) == "abcd\u2026ef01"
     assert fingerprint not in status
     assert "a" * 32 not in status

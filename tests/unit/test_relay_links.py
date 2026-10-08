@@ -351,11 +351,9 @@ async def test_a_device_that_connects_after_the_link_is_told_at_registration(rel
 async def test_a_declaration_is_always_the_sessions_own_key(relay):
     ana = await relay.make_device()
     marco = await relay.make_device()
-    # The frame has no key: naming one, even the sender's own, is refused.
-    assert await marco.declare([ana.key], key=ana.key) == "invalid_frame"
-    assert await marco.declare([ana.key], key=marco.key) == "invalid_frame"
-    assert relay.app["relay_state"].backend.link_declarations == {}
-    assert await marco.declare([ana.key]) == "stored"
+    # The frame has no key: one it names, even another device's, is a field
+    # this version does not know. It is ignored and the session's key counts.
+    assert await marco.declare([ana.key], key=ana.key) == "stored"
     assert set(relay.app["relay_state"].backend.link_declarations) == {marco.key}
 
 
@@ -369,7 +367,8 @@ async def test_malformed_declarations_are_refused(relay):
     # Stale or future timestamps.
     assert await marco.declare([ana.key], issued_at=now - 600) == "invalid_frame"
     assert await marco.declare([ana.key], issued_at=now + 600) == "invalid_frame"
-    # Shape: self link, unsorted, duplicates, bad hex, too many, extra field.
+    # Shape: self link, unsorted, duplicates, bad hex, too many. (A field this
+    # version does not know is ignored, not refused: versioning.)
     assert await marco.declare([marco.key]) == "invalid_frame"
     low, high = sorted([ana.key, eve])
     await marco.ws.send_json({"type": "links", "peers": [high, low], "issued_at": now})
@@ -382,7 +381,6 @@ async def test_malformed_declarations_are_refused(relay):
         for _ in range(relay_backend.MAX_LINK_PEERS + 1)
     ]
     assert await marco.declare(too_many) == "invalid_frame"
-    assert await marco.declare([ana.key], surplus=1) == "invalid_frame"
     await marco.ws.send_json({"type": "links", "peers": [ana.key]})
     assert await marco.answer("links_result") == "invalid_frame"
 

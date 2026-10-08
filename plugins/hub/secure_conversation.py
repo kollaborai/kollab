@@ -407,7 +407,7 @@ class SecureConversationTransport:
         dispatch: SecureDispatch,
     ) -> dict:
         if (
-            set(value) != {"v", "method", "payload"}
+            not isinstance(value, dict) or not value.keys() >= {"v", "method", "payload"}
             or type(value["v"]) is not int
             or value["v"] != 1
             or value["method"] not in _SECURE_APP_METHODS
@@ -421,7 +421,7 @@ class SecureConversationTransport:
         response = await self._transport_request(
             peer_key, "secure_identity", {}, timeout=10
         )
-        if not isinstance(response, dict) or set(response) != {"certificate"}:
+        if not isinstance(response, dict) or not response.keys() >= {"certificate"}:
             raise RelayError("peer did not return a pinned identity certificate")
         certificate = _decode_certificate(response["certificate"])
         return _SessionState(
@@ -523,7 +523,7 @@ class SecureConversationTransport:
                             "peer returned multiple secure application responses"
                         )
                     if (
-                        set(value) != {"v", "result"}
+                        not isinstance(value, dict) or not value.keys() >= {"v", "result"}
                         or type(value["v"]) is not int
                         or value["v"] != 1
                         or not isinstance(value["result"], dict)
@@ -690,7 +690,7 @@ def _packet_to_wire(packet: TLSRecordPacket) -> dict:
 
 
 def _parse_packet(value: object) -> TLSRecordPacket:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict) or not value.keys() >= {
         "session_id",
         "sequence",
         "data",
@@ -722,7 +722,7 @@ def _parse_packet(value: object) -> TLSRecordPacket:
 
 
 def _parse_wire_packet(payload: object) -> tuple[TLSRecordPacket, str]:
-    if not isinstance(payload, dict) or set(payload) != {
+    if not isinstance(payload, dict) or not payload.keys() >= {
         "v",
         "session_id",
         "sequence",
@@ -746,7 +746,7 @@ def _parse_wire_packet(payload: object) -> tuple[TLSRecordPacket, str]:
 
 
 def _parse_packet_response(value: object) -> list[TLSRecordPacket]:
-    if not isinstance(value, dict) or set(value) != {"packets", "established"}:
+    if not isinstance(value, dict) or not value.keys() >= {"packets", "established"}:
         raise SecureSessionError("invalid secure packet response")
     packets = value["packets"]
     if (

@@ -146,7 +146,6 @@ def test_tampering_expiry_and_invalid_claims(published):
         lambda p: p.update(authority="different.example"),
         lambda p: p.update(revision=True),
         lambda p: p.update(expires_at=p["published_at"] + 301),
-        lambda p: p["endpoints"].update(socket="/private/socket"),
         lambda p: p["endpoints"].update(control="https://other.example/control"),
         lambda p: p["discovery"].update(roles=["relay"]),
         lambda p: p["discovery"].update(principal_id="ed25519:" + "0" * 64),
@@ -156,6 +155,17 @@ def test_tampering_expiry_and_invalid_claims(published):
         with pytest.raises(DiscoveryError):
             verify_manifest(resign(payload, key), target)
 
+
+
+def test_an_endpoint_a_newer_publisher_adds_is_ignored(published):
+    # Versioning (docs/specs/agent-public-beacon.md#versioning): the document
+    # still verifies, and only registry, control and agent_card are ever read,
+    # so a socket path is never imported.
+    original, key = published
+    payload = copy.deepcopy(original)
+    payload["endpoints"]["socket"] = "/private/socket"
+    verified = verify_manifest(resign(payload, key), normalize_target("example.com"))
+    assert verified.manifest["coordinator"] == original["coordinator"]
 
 def test_pins_reject_rollback_changed_keys_and_conflicts(published, tmp_path):
     payload, key = published

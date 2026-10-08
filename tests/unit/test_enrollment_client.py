@@ -315,6 +315,22 @@ async def test_http_client_reads_bounded_retry_after_header():
 
 
 @pytest.mark.asyncio
+async def test_a_retired_route_tells_the_human_to_update_kollab():
+    # Versioning: a relay that retired this version's route answers 410.
+    from plugins.hub.connect_guide import join_failure_reason
+
+    path = "/relay/v1/enrollment/offers/" + "a" * 32 + "/request"
+    client = EnrollmentHTTPClient("https://example.test")
+    client._session = _FakeSession(_FakeResponse("https://example.test" + path, b"gone", status=410))
+
+    with pytest.raises(EnrollmentProtocolError) as captured:
+        await client.post(path, {})
+
+    assert captured.value.code == "update_required"
+    assert "kollab --upgrade" in join_failure_reason("update_required")
+
+
+@pytest.mark.asyncio
 async def test_phase_retry_observes_server_retry_after(monkeypatch):
     client = EnrollmentHTTPClient("https://example.test")
     calls = 0

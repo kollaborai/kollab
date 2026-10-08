@@ -262,7 +262,7 @@ class PeerRecord:
             "roles",
             "signature",
         }
-        if not isinstance(value, dict) or set(value) != expected:
+        if not isinstance(value, dict) or not value.keys() >= expected:
             raise PeerRecordError("invalid peer record fields")
         if type(value["v"]) is not int or value["v"] != PEER_RECORD_VERSION:
             raise PeerRecordError("unsupported peer record version")

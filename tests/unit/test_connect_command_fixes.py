@@ -87,7 +87,7 @@ async def test_two_requests_with_one_name_are_told_apart_by_fingerprint_not_rece
     ambiguous = await commands._run("accept ana-laptop", source_agent="k1")
 
     assert "more than one pending request is named 'ana-laptop'" in ambiguous
-    assert "fingerprint" in ambiguous and "receipt" not in ambiguous
+    assert "device ID" in ambiguous and "receipt" not in ambiguous
     assert decided == []
 
     accepted = await commands._run("accept ana-laptop 1234", source_agent="k1")
@@ -101,10 +101,10 @@ async def test_accept_usage_names_the_device_not_a_receipt(tmp_path):
     commands = _relay_commands(tmp_path, agent_bridge=_accepting_bridge([], []))
 
     assert await commands._run("accept", source_agent="k1") == (
-        "usage: /connect accept <device> [fingerprint]"
+        "usage: /connect accept <device> [device ID]"
     )
     assert await commands._run("reject", source_agent="k1") == (
-        "usage: /connect reject <device> [fingerprint]"
+        "usage: /connect reject <device> [device ID]"
     )
 
 

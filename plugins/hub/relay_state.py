@@ -129,7 +129,7 @@ def parse_invite(token: str) -> dict:
         payload = strict_json(raw, limit=2048)
     except (ValueError, UnicodeError) as exc:
         raise RelayError("invalid relay invitation") from exc
-    if set(payload) != {"v", "origin", "room", "inviter"} or type(payload["v"]) is not int or payload["v"] != 1:
+    if not payload.keys() >= {"v", "origin", "room", "inviter"} or type(payload["v"]) is not int or payload["v"] != 1:
         raise RelayError("unsupported invitation")
     return {
         "origin": canonical_origin(payload["origin"]),

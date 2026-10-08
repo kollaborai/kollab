@@ -74,7 +74,7 @@ def open_members(
     Raises RelayError for anything else: a wrong shape, a list signed by another
     key, one meant for another device or network, a bad signature.
     """
-    if not isinstance(payload, dict) or set(payload) != _FIELDS or payload["v"] != 1:
+    if not isinstance(payload, dict) or not payload.keys() >= _FIELDS or payload["v"] != 1:
         raise RelayError("invalid membership list")
     if payload["voucher"] != peer or payload["to"] != own_key or payload["net"] != net:
         raise RelayError("invalid membership list")
@@ -91,7 +91,7 @@ def open_members(
     for item in members:
         if (
             not isinstance(item, dict)
-            or set(item) != _ENTRY
+            or not item.keys() >= _ENTRY
             or not isinstance(item["name"], str)
             or (item["name"] and not NAME_RE.fullmatch(item["name"]))
         ):

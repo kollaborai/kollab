@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from aiohttp import WSCloseCode, WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, hdrs, web
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
@@ -52,6 +52,13 @@ from .relay_backend import (
 )
 
 PROTOCOL = "kollab-relay/1"
+# The relay protocol versions this relay serves, newest first. A client names
+# the ones it speaks in the WebSocket subprotocol header; naming none means
+# kollab-relay/1. Within a version both sides ignore fields and frames they do
+# not know; a breaking change adds a version and keeps the old one for a while
+# (docs/specs/agent-public-beacon.md#versioning).
+PROTOCOLS = (PROTOCOL,)
+PROTOCOLS_HEADER = "X-Kollab-Relay-Protocols"
 HEALTH_PATH = "/relay/v1/health"
 WEBSOCKET_PATH = "/relay/v1/ws"
 MAX_FRAME_BYTES = 64 * 1024
@@ -934,6 +941,7 @@ async def health_handler(request: web.Request) -> web.Response:
         {
             "status": "ok" if healthy else "unavailable",
             "protocol": PROTOCOL,
+            "protocols": list(PROTOCOLS),
             "origin": state.config.origin,
             "node_id": state.config.node_id,
         },
@@ -985,8 +993,22 @@ async def websocket_handler(request: web.Request) -> web.StreamResponse:
     source_ip = _source_ip(request, state.config.trusted_proxies)
     if source_ip is None:
         raise web.HTTPForbidden(text="could not determine a literal source IP")
+    offered = {
+        name.strip()
+        for name in request.headers.get(hdrs.SEC_WEBSOCKET_PROTOCOL, "").split(",")
+        if name.strip()
+    }
+    if offered and not offered & set(PROTOCOLS):
+        # The client speaks only versions this relay does not serve: say which
+        # it does, so the client can tell its human which side to update.
+        raise web.HTTPUpgradeRequired(
+            text=json.dumps({"error": "unsupported_protocol", "protocols": list(PROTOCOLS)}),
+            content_type="application/json",
+            headers={PROTOCOLS_HEADER: ",".join(PROTOCOLS)},
+        )
 
     ws = web.WebSocketResponse(
+        protocols=PROTOCOLS,
         max_msg_size=MAX_FRAME_BYTES,
         heartbeat=HEARTBEAT_SECONDS,
         autoping=True,
@@ -1216,7 +1238,7 @@ async def _handle_lookup(
 ) -> None:
     """Route -> key of the one device online under it; "" for none or several."""
     route = frame.get("route")
-    if set(frame) != {"type", "route"} or not isinstance(route, str) or not _ROUTE_HEX.fullmatch(route):
+    if not frame.keys() >= {"type", "route"} or not isinstance(route, str) or not _ROUTE_HEX.fullmatch(route):
         await _send_error(client, "invalid_frame")
         return
     result, key = "unavailable", ""
@@ -1239,7 +1261,7 @@ async def _handle_knock(
 ) -> None:
     """Ring the device behind `to`, or tell the knocker it is unavailable or busy."""
     knock_id = frame.get("id")
-    if set(frame) != {"type", "to", "id", "ticket", "ciphertext"} or not (
+    if not frame.keys() >= {"type", "to", "id", "ticket", "ciphertext"} or not (
         isinstance(knock_id, str) and _HEX_32.fullmatch(knock_id)
     ):
         await _send_error(client, "invalid_frame")
@@ -1291,7 +1313,7 @@ async def _handle_knock_answer(
     hung up, so it never binds a peer that will not hear the accept.
     """
     knock_id = frame.get("id")
-    if set(frame) != {"type", "id", "ticket", "ciphertext"} or not (
+    if not frame.keys() >= {"type", "id", "ticket", "ciphertext"} or not (
         isinstance(knock_id, str) and _HEX_32.fullmatch(knock_id)
     ):
         await _send_error(client, "invalid_frame")
@@ -1340,7 +1362,7 @@ async def _handle_links(
     """
     peers, issued_at = frame.get("peers"), frame.get("issued_at")
     if (
-        set(frame) != {"type", "peers", "issued_at"}
+        not frame.keys() >= {"type", "peers", "issued_at"}
         or not isinstance(peers, list)
         or len(peers) > MAX_LINK_PEERS
         or any(not isinstance(peer, str) or not _HEX_64.fullmatch(peer) for peer in peers)
@@ -1495,7 +1517,7 @@ def _strict_json(raw: str) -> dict[str, Any]:
 
 
 def _parse_registration_shape(frame: dict[str, Any]) -> tuple[str, str, str]:
-    if set(frame) != {"type", "key", "room", "session", "signature"}:
+    if not frame.keys() >= {"type", "key", "room", "session", "signature"}:
         raise ValueError("registration has an unexpected shape")
     if frame.get("type") != "register":
         raise ValueError("first client frame must register")
@@ -1515,7 +1537,7 @@ def _parse_registration_shape(frame: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _parse_send_shape(frame: dict[str, Any]) -> tuple[str, str, str]:
-    if set(frame) != {"type", "to", "id", "ciphertext"}:
+    if not frame.keys() >= {"type", "to", "id", "ciphertext"}:
         raise ValueError("send frame has an unexpected shape")
     if frame.get("type") != "send":
         raise ValueError("only send frames are supported")

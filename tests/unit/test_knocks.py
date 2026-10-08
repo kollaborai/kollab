@@ -183,8 +183,23 @@ async def test_a_device_with_no_valid_name_is_an_unknown_device_on_the_main_pane
 
 
 @pytest.mark.asyncio
+async def test_a_field_a_newer_version_adds_does_not_stop_the_ring(tmp_path):
+    # Versioning: an unknown field in the frame or the sealed body is ignored.
+    world = _world(tmp_path)
+    frame = _knock(world)
+    frame["note"] = "hi"
+    body = {"v": 1, "kind": "knock", "from": ANA_HEX, "to": world.me, "id": frame["id"],
+            "device": "ana-laptop", "text": "hello", "sent_at": 0, "newer": True}
+    frame["ciphertext"] = seal(ANA, world.me, body)
+
+    await world.svc.on_frame(frame)
+
+    assert list(world.svc.ringing) == [frame["id"]]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("break_it", ["ticket to someone else", "sealed to someone else", "stale ticket",
-                                      "extra field", "body from someone else"])
+                                      "body from someone else"])
 async def test_a_knock_that_does_not_verify_is_dropped_without_a_word(tmp_path, break_it):
     world = _world(tmp_path)
     other = SigningKey.generate().verify_key.encode().hex()
@@ -196,8 +211,6 @@ async def test_a_knock_that_does_not_verify_is_dropped_without_a_word(tmp_path, 
         frame = _knock(world)
     if break_it == "sealed to someone else":
         frame["ciphertext"] = seal(ANA, other, {"v": 1})
-    elif break_it == "extra field":
-        frame["note"] = "hi"
     elif break_it == "body from someone else":
         body = {"v": 1, "kind": "knock", "from": BOB_HEX, "to": world.me, "id": frame["id"],
                 "device": "x", "text": "x", "sent_at": 0}

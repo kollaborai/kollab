@@ -258,7 +258,7 @@ Removed. Each prints its redirect for one release instead of running:
  network      laptop-kollab-net  via kollabor.ai   trust: open
  this device  laptop-kollab
  join code    7QK4-M2XP   one device, expires in 4:58
- requests     home-server wants to join   fingerprint abcd…ef01   [a]ccept [r]eject
+ requests     home-server wants to join   device ID abcd…ef01   [a]ccept [r]eject
  knocks       1 waiting   /connect knocks
  online       koordinator (this device)
               koordinator@home-server
@@ -317,7 +317,7 @@ human-gated model — every first message needs `/connect authorize` or
 waits for `/connect answer`; that is what the `help all` commands are for.
 
 `/connect accept` and `/connect reject` take a device name; when two pending
-requests share a name, add the start of the fingerprint the Connect screen
+requests share a name, add the start of the device ID the Connect screen
 shows (`/connect accept ana-laptop abcd`). `/connect allow`, `/connect deny`,
 and `/connect revoke` take a device name (see `/connect status`). Under `open`
 trust `allow` and `deny` have no effect and say so.
@@ -334,7 +334,7 @@ stranger's text: that shows on the knock screen only.
 
 ```text
  Knocks
- ringing        > 1. ana-laptop   fingerprint 1234…5678   4:51
+ ringing        > 1. ana-laptop   device ID 1234…5678   4:51
                      "Ana from Acme. Can your ops agent review a config?"
                      [a]ccept [r]eject [b]lock
  missed         0 of 20

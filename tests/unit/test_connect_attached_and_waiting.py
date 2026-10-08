@@ -1382,7 +1382,7 @@ async def test_attached_knocks_opens_the_screen_with_the_daemons_knocks():
     view, renderer = await _open_knocks(rig)
 
     text = renderer.text()
-    assert "ana-laptop" in text and "fingerprint ab12…ef01" in text
+    assert "ana-laptop" in text and "device ID ab12…ef01" in text
     assert "Ana from Acme." in text
     assert _SENDER not in text and _KNOCK_ID not in text and "relay:" not in text
     assert asked[0] == ("list", {}, "agent-1")

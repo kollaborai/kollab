@@ -153,7 +153,7 @@ def knock_screen_lines(
             "ringing",
             row,
             f"{number}. {display_name(row['device'])}",
-            f"fingerprint {row['fingerprint']}   {_clock(row['left'])}",
+            f"device ID {row['fingerprint']}   {_clock(row['left'])}",
             row["text"],
         )
     lines += _block("ringing", ringing or ["none"], width)
@@ -176,7 +176,7 @@ def knock_screen_lines(
             "missed",
             row,
             f"{number}. {display_name(row['device'])}",
-            f"fingerprint {row['fingerprint']}   {when}",
+            f"device ID {row['fingerprint']}   {when}",
             row["text"],
         )
     lines += _block("missed", missed, width)

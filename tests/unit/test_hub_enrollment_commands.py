@@ -197,7 +197,7 @@ async def test_local_hub_command_lists_redacted_requests_and_accepts_or_rejects(
     )
     listed = await bridge.commands.format_status()
 
-    assert "wants to join   fingerprint" in listed
+    assert "wants to join   device ID" in listed
     assert accepted_id not in listed
     assert rejected_id not in listed
     assert fingerprint not in listed

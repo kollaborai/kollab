@@ -348,7 +348,9 @@ class KnockService:
     async def _incoming(self, frame: dict[str, Any]) -> None:
         me = self.client.public_key
         try:
-            if set(frame) != {"type", "from", "session", "id", "ticket", "ciphertext"}:
+            # Frames and sealed bodies are read tolerantly: a field a newer
+            # version adds is ignored (docs/specs/agent-public-beacon.md#versioning).
+            if not frame.keys() >= {"type", "from", "session", "id", "ticket", "ciphertext"}:
                 raise ValueError("unexpected knock frame")
             sender, knock_id = frame["from"], frame["id"]
             if not (isinstance(sender, str) and KEY.fullmatch(sender)) or not (
@@ -362,7 +364,7 @@ class KnockService:
                 raise ValueError("the ticket does not bind this knock")
             body = open_sealed(self._key, sender, frame["ciphertext"])
             if (
-                set(body) != _KNOCK_BODY
+                not body.keys() >= _KNOCK_BODY
                 or type(body["v"]) is not int
                 or body["v"] != 1
                 or (body["kind"], body["from"], body["to"], body["id"])
@@ -456,7 +458,7 @@ class KnockService:
 
     def _result(self, frame: dict[str, Any]) -> None:
         knock_id, result = frame.get("id"), frame.get("result")
-        if set(frame) != {"type", "id", "result"} or not isinstance(result, str):
+        if not frame.keys() >= {"type", "id", "result"} or not isinstance(result, str):
             return
         future = self._answers.get(knock_id)
         if future is not None:
@@ -471,7 +473,7 @@ class KnockService:
         return next((c for c in self.calls.values() if c.id and c.id == knock_id), None)
 
     async def _answered(self, frame: dict[str, Any]) -> None:
-        if set(frame) != {"type", "from", "session", "id", "ciphertext"}:
+        if not frame.keys() >= {"type", "from", "session", "id", "ciphertext"}:
             return
         call = self._call(frame["id"])
         if call is None or frame["from"] != call.key:
@@ -480,7 +482,7 @@ class KnockService:
         try:
             body = open_sealed(self._key, call.key, frame["ciphertext"])
             if (
-                set(body) != _ANSWER_BODY
+                not body.keys() >= _ANSWER_BODY
                 or type(body["v"]) is not int
                 or body["v"] != 1
                 or (body["kind"], body["from"], body["to"], body["id"])

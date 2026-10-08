@@ -198,7 +198,7 @@ class PeerLink:
             "left_signature",
             "right_signature",
         }
-        if not isinstance(value, dict) or set(value) != expected:
+        if not isinstance(value, dict) or not value.keys() >= expected:
             raise PeerRouteError("invalid peer link fields")
         if type(value["v"]) is not int or value["v"] != 1:
             raise PeerRouteError("unsupported peer link version")
@@ -606,7 +606,7 @@ class ForwardEnvelope:
             "ciphertext",
             "signature",
         }
-        if not isinstance(value, dict) or set(value) != expected:
+        if not isinstance(value, dict) or not value.keys() >= expected:
             raise PeerRouteError("invalid forwarding envelope fields")
         if len(rfc8785.dumps(value)) > PEER_WIRE_FRAME_MAX_BYTES:
             raise PeerRouteError("forwarding envelope exceeds frame limit")
@@ -737,7 +737,7 @@ class HopAttestation:
             "issued_at",
             "signature",
         }
-        if not isinstance(value, dict) or set(value) != expected:
+        if not isinstance(value, dict) or not value.keys() >= expected:
             raise PeerRouteError("invalid forwarding hop fields")
         if any(not isinstance(value[field], str) for field in expected - {"issued_at"}):
             raise PeerRouteError("invalid forwarding hop value")
@@ -745,7 +745,7 @@ class HopAttestation:
             value["issued_at"], int
         ):
             raise PeerRouteError("invalid forwarding hop time")
-        return cls(**value)
+        return cls(**{field: value[field] for field in expected})
 
     def _payload(self, *, scope: str) -> dict[str, Any]:
         return {

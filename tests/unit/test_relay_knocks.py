@@ -332,7 +332,6 @@ async def test_malformed_knock_frames_are_refused(relay):
         "ciphertext": _ciphertext(),
     }
     for frame in (
-        {**good, "extra": 1},
         {**good, "id": "x"},
         {**good, "ciphertext": ""},
         {**good, "ciphertext": "not base64!"},
@@ -342,6 +341,27 @@ async def test_malformed_knock_frames_are_refused(relay):
         await ana.ws.send_json(frame)
         assert (await ana.next())["code"] == "invalid_frame"
     assert await marco.quiet()
+
+
+@pytest.mark.asyncio
+async def test_a_field_this_version_does_not_know_is_ignored(relay):
+    # Versioning: a newer client may add a field. The knock still rings, and
+    # the relay passes on only what it knows.
+    ana = await relay.make_device()
+    marco = await relay.make_device()
+    knock_id = secrets.token_hex(16)
+    await ana.ws.send_json(
+        {
+            "type": "knock",
+            "to": marco.key,
+            "id": knock_id,
+            "ticket": ana.ticket(marco.key, knock_id),
+            "ciphertext": _ciphertext(),
+            "newer": 1,
+        }
+    )
+    rung = await marco.next()
+    assert rung["type"] == "knock" and rung["id"] == knock_id and "newer" not in rung
 
 
 def test_cross_node_routes_carry_the_kind_and_the_knock_ticket():

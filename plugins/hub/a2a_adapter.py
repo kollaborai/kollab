@@ -499,7 +499,7 @@ def build_workspace_app(
             return JSONResponse({"error": "Request too large"}, status_code=413)
         try:
             payload = _decode_request(raw)
-            if not isinstance(payload, dict) or set(payload) != {"proof"}:
+            if not isinstance(payload, dict) or "proof" not in payload:
                 raise ValueError("Only a pairing proof is accepted")
             challenge = directory.get_pairing_challenge(config.pairing_challenge_id)
             proof = directory.record_pairing_proof(challenge, payload["proof"])

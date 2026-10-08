@@ -375,7 +375,7 @@ class RelayCommands:
             name = getattr(row, "device_name", "")
             lines.append(
                 f"  {name or 'unknown device'} wants to join   "
-                f"fingerprint {short_fingerprint(full)}   /connect accept {name or full[:4]}"
+                f"device ID {short_fingerprint(full)}   /connect accept {name or full[:4]}"
             )
         return lines
 
@@ -736,7 +736,7 @@ class RelayCommands:
         if head in {"accept", "reject"}:
             fields = rest.split()
             if not 1 <= len(fields) <= 2:
-                return f"usage: /connect {head} <device> [fingerprint]"
+                return f"usage: /connect {head} <device> [device ID]"
             if self.agent_bridge is None:
                 return "connect: local enrollment issuer is unavailable"
             token = fields[0]
@@ -769,7 +769,7 @@ class RelayCommands:
             if len(matches) > 1:
                 return (
                     f"connect: more than one pending request is named '{token}'; "
-                    f"add the start of its fingerprint: /connect {head} {token} abcd"
+                    f"add the start of its device ID: /connect {head} {token} abcd"
                 )
             if not matches:
                 return f"connect: no pending request matches '{token}'"
