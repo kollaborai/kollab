@@ -149,6 +149,8 @@ def test_broadcast_names_wake_everyone_with_their_scope():
         hub._handle_broadcast_command.assert_awaited_with("stand up", force=True, scope="")
         await hub.send_user_message("Global-Broadcast", "ship it")
         hub._handle_broadcast_command.assert_awaited_with("ship it", force=True, scope="network")
+        await hub.send_user_message("broadcast", "hi")  # the old name stays the local one
+        hub._handle_broadcast_command.assert_awaited_with("hi", force=True, scope="")
 
     asyncio.run(scenario())
 

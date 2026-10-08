@@ -125,6 +125,38 @@
       "description": "the reply says other computers were not reached"
     },
     {
+      "action": "section",
+      "title": "a bare @broadcast is the local one"
+    },
+    {
+      "action": "type",
+      "text": "@broadcast hi there",
+      "delay": 0.15
+    },
+    {
+      "action": "wait_for",
+      "pattern": "@broadcast hi there",
+      "timeout": 5,
+      "description": "typed as is (a space keeps what was typed)"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "(?s)no other computers on your network yet.*broadcast to [0-9]+ agent",
+      "timeout": 10,
+      "description": "the hub answers @broadcast like @local-broadcast"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "agent 'broadcast' is not online",
+      "description": "@broadcast is not treated as an agent name"
+    },
+    {
       "action": "escape"
     }
   ]

@@ -253,8 +253,9 @@ CONNECT_OWNED_ELSEWHERE = (
 # What an attached window says when its daemon predates knocks as calls.
 CONNECT_NO_KNOCK_DAEMON = "connect: the kollab on this computer needs an update for knocks"
 _KNOCK_USAGE = 'connect: use /connect knock <route> "text"'
-# The @ menus' broadcast targets (TUI and web), each with its broadcast scope.
-BROADCAST_TARGETS = {"local-broadcast": "", "global-broadcast": "network"}
+# The @ menus' broadcast targets (TUI and web), each with its broadcast scope;
+# a bare @broadcast is the local one, as it always was in the web.
+BROADCAST_TARGETS = {"broadcast": "", "local-broadcast": "", "global-broadcast": "network"}
 _KNOCKS_USAGE = "connect: use /connect knocks [everyone|contacts|nobody] [for 30m|2h|1d]"
 _KNOCK_FOR = re.compile(r"(?P<count>\d{1,4})(?P<unit>[mhd])\Z")
 
