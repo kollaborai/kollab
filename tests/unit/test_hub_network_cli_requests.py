@@ -100,13 +100,21 @@ async def test_network_status_returns_device_trust_and_remote_rows():
     relay = SimpleNamespace(
         device_name=lambda: "laptop-kollab",
         trust_level=lambda: "open",
+        network_name=lambda: "laptop-kollab-net",
+        _state=lambda: SimpleNamespace(state=SimpleNamespace(origin="https://kollabor.ai")),
         remote_agents=AsyncMock(return_value=rows),
     )
     plugin = _make_plugin(relay_agent=relay)
 
     result = await plugin._handle_network_status_request()
 
-    assert result == {"device": "laptop-kollab", "trust": "open", "agents": rows}
+    # The network's own name, apart from this device's.
+    assert result == {
+        "network": "laptop-kollab-net  via kollabor.ai",
+        "device": "laptop-kollab",
+        "trust": "open",
+        "agents": rows,
+    }
     plugin._start_relay_agent.assert_not_awaited()
 
 
@@ -116,7 +124,7 @@ async def test_network_status_without_a_relay_agent_is_empty_not_an_error():
 
     result = await plugin._handle_network_status_request()
 
-    assert result == {"device": "", "trust": "", "agents": []}
+    assert result == {"network": "", "device": "", "trust": "", "agents": []}
     plugin._start_relay_agent.assert_awaited_once()
 
 
@@ -530,6 +538,7 @@ def test_network_status_frame_round_trips_over_a_real_socket():
     async def run():
         async def on_status():
             return {
+                "network": "laptop-kollab-net  via kollabor.ai",
                 "device": "laptop-kollab",
                 "trust": "open",
                 "agents": [
@@ -551,6 +560,7 @@ def test_network_status_frame_round_trips_over_a_real_socket():
 
         assert result == {
             "type": "network_status",
+            "network": "laptop-kollab-net  via kollabor.ai",
             "device": "laptop-kollab",
             "trust": "open",
             "agents": [
@@ -575,7 +585,7 @@ def test_network_status_with_no_handler_is_not_connected():
             await server.stop()
 
     result = asyncio.run(run())
-    assert result == {"type": "network_status", "device": "", "trust": "", "agents": []}
+    assert result == {"type": "network_status", "network": "", "device": "", "trust": "", "agents": []}
 
 
 def test_network_send_streams_replies_to_the_client_then_returns_the_terminal_frame():

@@ -13066,7 +13066,7 @@ class HubPlugin(BasePlugin):
                 logger.debug("network_status: relay agent unavailable: %s", e)
             relay = getattr(self, "_relay_agent", None)
         if relay is None:
-            return {"device": "", "trust": "", "agents": []}
+            return {"network": "", "device": "", "trust": "", "agents": []}
 
         agents: List[dict] = []
         try:
@@ -13083,14 +13083,19 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.debug("network_status: remote_agents failed: %s", e)
 
-        device, trust = "", ""
+        network, device, trust = "", "", ""
         try:
+            from .relay_commands import network_label
+
             device = relay.device_name() or ""
             trust = relay.trust_level() or ""
+            domain = self._relay_network_domain()
+            if domain:
+                network = network_label(self._relay_network_name(domain), domain)
         except Exception as e:
             logger.debug("network_status: device/trust unavailable: %s", e)
 
-        return {"device": device, "trust": trust, "agents": agents}
+        return {"network": network, "device": device, "trust": trust, "agents": agents}
 
     async def _handle_network_send_request(
         self, to: str, content: str, wait_seconds: int

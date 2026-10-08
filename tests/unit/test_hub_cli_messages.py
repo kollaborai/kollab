@@ -242,11 +242,26 @@ def test_cli_msg_to_a_plain_local_target_is_unaffected_by_network_routing(
     assert capsys.readouterr().out.startswith("sent to lapis\n")
 
 
+def test_cli_status_from_an_agent_without_the_network_name(tmp_path, capsys):
+    _presence(tmp_path, "koordinator", is_coordinator=True)
+    older = AsyncMock(
+        return_value={"type": "network_status", "device": "laptop-kollab", "trust": "open", "agents": []}
+    )
+    with patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path), patch(
+        "plugins.hub.messenger.AgentMessenger.request_network_status", older
+    ):
+        asyncio.run(_handle_cli_hub(["status"]))
+    out = capsys.readouterr().out
+    assert "trust: open\nthis device: laptop-kollab" in out
+    assert "network:" not in out
+
+
 def test_cli_status_prints_network_section(tmp_path, capsys):
     _presence(tmp_path, "koordinator", is_coordinator=True)
     request_network_status = AsyncMock(
         return_value={
             "type": "network_status",
+            "network": "laptop-kollab-net  via kollabor.ai",
             "device": "laptop-kollab",
             "trust": "open",
             "agents": [
@@ -270,7 +285,9 @@ def test_cli_status_prints_network_section(tmp_path, capsys):
     request_network_status.assert_awaited_once()
     assert request_network_status.await_args.args[0].endswith("koordinator.sock")
     out = capsys.readouterr().out
-    assert "network: laptop-kollab  trust: open" in out
+    # The network's name, not this device's (it printed the device as the network).
+    assert "network: laptop-kollab-net  via kollabor.ai  (trust: open)" in out
+    assert "this device: laptop-kollab" in out
     assert "infra@home-server - idle (online)" in out
     assert "ops@home-server - working: rotating logs (online)" in out
     # Never a key or a relay: address.

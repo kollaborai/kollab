@@ -1542,6 +1542,7 @@ class AgentSocketServer:
                         json.dumps(
                             {
                                 "type": "network_status",
+                                "network": payload.get("network", ""),
                                 "device": payload.get("device", ""),
                                 "trust": payload.get("trust", ""),
                                 "agents": payload.get("agents", []),

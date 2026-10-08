@@ -1554,10 +1554,10 @@ async def _handle_cli_hub(hub_args: list) -> None:
         if not network:
             print("network: not connected")
         else:
-            print(
-                f"network: {network.get('device') or '?'}  "
-                f"trust: {network.get('trust') or '?'}"
-            )
+            name, trust = network.get("network"), network.get("trust") or "?"
+            # An older agent sends no network name.
+            print(f"network: {name}  (trust: {trust})" if name else f"trust: {trust}")
+            print(f"this device: {network.get('device') or '?'}")
             rows = network.get("agents") or []
             if not rows:
                 print("  (no remote agents)")
