@@ -35,6 +35,32 @@ logger = logging.getLogger(__name__)
 
 PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
 
+# The profile a POST /sessions builds from request credentials. No saved
+# profile has this name, so the daemon builds it from KOLLAB_APP_INLINE_* vars
+# (ProfileManager._try_create_profile_from_env).
+INLINE_PROFILE = "app-inline"
+
+
+def inline_profile_env(profile: Any) -> Dict[str, str]:
+    """The env vars that carry an inline profile to its daemon; {} for a saved one."""
+    if getattr(profile, "name", None) != INLINE_PROFILE:
+        return {}
+    fields = {
+        "PROVIDER": profile.provider,
+        "MODEL": profile.model,
+        "API_KEY": profile.api_key,
+        "BASE_URL": profile.base_url,
+        "MAX_TOKENS": profile.max_tokens,
+        "STREAMING": profile.streaming,
+        "SUPPORTS_TOOLS": profile.supports_tools,
+    }
+    prefix = "KOLLAB_" + INLINE_PROFILE.replace("-", "_").upper() + "_"
+    return {
+        prefix + key: str(value).lower() if isinstance(value, bool) else str(value)
+        for key, value in fields.items()
+        if value not in (None, "")
+    }
+
 _APPROVAL_MODE_MAP = {
     "confirm_all": ApprovalMode.CONFIRM_ALL,
     "default": ApprovalMode.DEFAULT,
@@ -165,6 +191,7 @@ class EngineSession:
             system_prompt=self.system_prompt or None,
             user_token=self.user_token,
             solo=self.solo,
+            profile_env=inline_profile_env(self.profile),
         )
 
         if self.approval_mode:

@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: the gems move between states smoothly. The thought bubble grows and fades instead of popping, the hunch, typing bounce and hands follow the turn to the laptop, and a gem thinking between two tool calls stays at its laptop instead of flipping to a thought bubble and back.
 
 ### Fixed
+- Apps that start a chat through kollab's engine with their own API key get a working agent; it used to wait 45 seconds and fail because the agent never received the key.
 - The bundled `default` agent's description said it fixes linting errors; it now describes the general assistant it is.
 - Shell commands report exit code 0 when they succeed; every success was reported as exit 1 next to `success: true`.
 - Web: New Session's Agent field shows the agent the session will run (the gem's pool agent until you pick one) and pins the one you pick; it said "default" while the hub swapped the gem to `coder`. The agent list no longer appends each bundle's unused profile ("coder · default").

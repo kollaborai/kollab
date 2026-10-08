@@ -15,7 +15,7 @@ from kollabor_ai.session_naming import generate_session_name
 
 from ..hub_bridge import HubBridge
 from ..server import get_session_registry
-from ..session import EngineSession
+from ..session import INLINE_PROFILE, EngineSession
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -235,7 +235,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
         base_url = creds.base_url or ""
 
         profile = LLMProfile(
-            name="app-inline",
+            name=INLINE_PROFILE,
             provider=creds.provider,
             model=creds.model,
             api_key=creds.api_key,

@@ -403,6 +403,7 @@ class DaemonPool:
         system_prompt: Optional[str] = None,
         user_token: Optional[str] = None,
         solo: bool = False,
+        profile_env: Optional[Dict[str, str]] = None,
     ) -> DaemonHandle:
         """Start a daemon for `session_id` and attach to it.
 
@@ -454,6 +455,8 @@ class DaemonPool:
                 env["KOLLAB_HUB_SOLO"] = "1"
             else:
                 env.pop("KOLLAB_HUB_SOLO", None)
+            # An inline profile (request credentials) exists only in these vars.
+            env.update(profile_env or {})
 
             cwd = workspace or os.getcwd()
             if not Path(cwd).is_dir():
