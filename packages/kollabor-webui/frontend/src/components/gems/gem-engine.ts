@@ -733,7 +733,9 @@ class GemEngine {
 
     const g = avatar.gemPx;
     const px = avatar.px;
-    const o = (px - g) / 2;
+    // Whole pixels: at a half-pixel offset the copy below blends in the row and
+    // column just outside the gem's square, where another gem's pixels remain.
+    const o = Math.floor((px - g) / 2);
     renderer.setViewport(0, 0, g, g);
     renderer.setScissor(0, 0, g, g);
     renderer.setScissorTest(true);

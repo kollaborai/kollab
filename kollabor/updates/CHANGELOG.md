@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Web gem avatars no longer show a thin line at the edge of the gem: each gem is copied out of the shared renderer on whole pixels, so the copy stops blending in a sliver of another gem.
 - `scripts/relay/autoupdate.sh` waits up to 10 minutes for PyPI's index to serve a new release; right after a release it stopped with "No matching distribution" and tried again only on the next timer run.
 
 ## [0.13.1] - 2026-10-08
