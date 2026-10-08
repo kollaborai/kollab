@@ -86,7 +86,7 @@ def device_key_fingerprint(public_key_hex: str) -> str:
     """Full sha256 device fingerprint of a 64-hex Ed25519 key.
 
     Shared by join requests (enrollment_client.py) and knock rows
-    (contact_requests.py); humans see it through short_fingerprint().
+    (knocks.py); humans see it through short_fingerprint().
     """
     return hashlib.sha256(
         b"kollab-relay-enrollment-device-fingerprint-v1\0" + _require_key(public_key_hex)

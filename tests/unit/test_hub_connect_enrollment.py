@@ -14,7 +14,7 @@ from plugins.altview.connect_altview import (
     ConnectSubmission,
     PrivateCode,
 )
-from plugins.altview.contact_altview import ContactReviewAltView
+from plugins.altview.knocks_altview import KnockScreenAltView
 from plugins.hub.plugin import CODE_IN_COMMAND, HubPlugin
 
 
@@ -179,42 +179,35 @@ async def test_connect_code_opens_private_view_and_uses_typed_attach_rpc(
 
 
 @pytest.mark.asyncio
-async def test_private_contact_review_always_opens_a_fresh_session():
+async def test_the_knock_screen_always_opens_a_fresh_session():
     view_stack = SimpleNamespace(push=AsyncMock())
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
+    plugin._knocks = AsyncMock(return_value={"snapshot": {"ringing": []}})
 
-    result = await plugin._open_contact_review_altview("example.test")
+    result = await plugin._open_knocks_screen()
 
     assert result == ""
-    _view, view_name = view_stack.push.await_args.args
-    assert view_name == "contact-review"
+    view, view_name = view_stack.push.await_args.args
+    assert isinstance(view, KnockScreenAltView)
+    assert view_name == "knocks"
     assert view_stack.push.await_args.kwargs == {"reuse": False}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "error, reason",
-    [
-        ("capacity", "too many approved devices or pending knocks"),
-        ("already_named", "this device is already on your network as ana-laptop"),
-        ("name_taken", "that device name is already on this network"),
-        ("transport", "try again"),
-    ],
-)
-async def test_knock_review_tells_the_human_why_an_accept_failed(error, reason):
-    from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
-
+async def test_the_knock_screen_says_why_instead_of_opening_empty():
     view_stack = SimpleNamespace(push=AsyncMock())
     plugin = HubPlugin.__new__(HubPlugin)
     plugin.event_bus = _EventBus(altview_stack_manager=view_stack)
-    plugin._relay_agent = SimpleNamespace(_peer_name=lambda _key: "ana-laptop")
-    plugin._run_connect_contact_decision = AsyncMock(return_value={"error": error})
-    await plugin._open_contact_review_altview("example.test")
-    view = view_stack.push.await_args.args[0]
-    request = PendingContactRequest("b" * 32, "c" * 64, 1_800_000_000, PrivateMessage("hi"), "ana-2")
+    old_daemon = "connect: the attached daemon needs an update for knocks"
 
-    assert await view._on_decide(request, "accept") == reason
+    for answer, said in (
+        ({"text": old_daemon}, old_daemon),
+        ({"text": "something else"}, "connect: knocks are unavailable right now"),
+    ):
+        plugin._knocks = AsyncMock(return_value=answer)
+        assert await plugin._open_knocks_screen() == said
+    view_stack.push.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -262,14 +255,10 @@ async def test_altview_discovery_then_hub_registration_keeps_connect_with_hub():
     assert registry.get_command("connect") is None
     assert registry.get_command("connect-screen") is None
     assert registry.get_command("connect-code") is None
-    assert registry.get_command("contact-review") is None
+    assert registry.get_command("knocks") is None
     assert "connect" in integrator._plugin_classes
     assert ConnectScreenAltView().metadata.category == "internal"
-    assert (
-        ContactReviewAltView("example.test", lambda: [], lambda *_args: None)
-        .metadata.category
-        == "internal"
-    )
+    assert KnockScreenAltView().metadata.category == "internal"
 
     view_stack = SimpleNamespace(push=AsyncMock())
     state = SimpleNamespace(

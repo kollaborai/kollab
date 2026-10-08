@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import inspect
 import json
@@ -36,7 +37,13 @@ from kollabor_config.managed_config import (
     read_managed_config,
 )
 
-from .device_names import NAME_RE, default_device_name, default_network_name, key_label
+from .device_names import (
+    NAME_RE,
+    contact_route_hex,
+    default_device_name,
+    default_network_name,
+    key_label,
+)
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
@@ -60,6 +67,10 @@ __all__ = ["PeerSessionEvent", "RelayClient", "RelayError", "parse_invite"]
 _LOGGER = logging.getLogger(__name__)
 
 PROTOCOL = "kollab-relay/1"
+# Frames the knock service answers (plugins/hub/knocks.py).
+KNOCK_FRAMES = frozenset({"knock", "knock_answer", "knock_result"})
+# A route lookup or a links declaration waits this long for the directory.
+CONTROL_TIMEOUT = 10.0
 MAX_FRAME = 65536
 MAX_CIPHERTEXT = 49152
 MAX_PEERS = 256
@@ -181,6 +192,12 @@ class RelayClient:
         self._ws_url = ""
         self._ca = ""
         self._private_cidrs: tuple[str, ...] = ()
+        self._knock_handler: Callable[[dict], Awaitable[None]] | None = None
+        self._knock_tasks: set[asyncio.Task] = set()
+        # One id-less request (a lookup or a links declaration) at a time:
+        # (the reply type, what it must echo, its future).
+        self._control_lock = asyncio.Lock()
+        self._control: tuple[str, tuple[str, object], asyncio.Future] | None = None
 
     def status(self) -> dict:
         return {
@@ -294,8 +311,6 @@ class RelayClient:
         self.state.links = []
         self.state.vouched_by = {}
         self.state.revoked = []
-        self.state.knocks = {}
-        self.state.knock_requests = {}
         self._store.save()
 
     async def leave(self) -> None:
@@ -326,8 +341,6 @@ class RelayClient:
             "peer_trust",
             "config_recipients",
             "links",
-            "knocks",
-            "knock_requests",
         ):
             setattr(self.state, name, getattr(disk, name))
 
@@ -634,6 +647,8 @@ class RelayClient:
             if not pending.future.done():
                 pending.future.set_exception(RelayError("relay disconnected"))
         self._application_pending.clear()
+        if self._control is not None and not self._control[2].done():
+            self._control[2].set_exception(RelayError("relay disconnected"))
         for task in tuple(self._dispatch.values()):
             task.cancel()
         for key in sorted(previous_peers):
@@ -1116,6 +1131,32 @@ class RelayClient:
                 application.future.set_exception(
                     RelayError("relay transport error: " + code)
                 )
+            control = self._control
+            if request_id is None and control is not None and not control[2].done():
+                # A directory without lookup and links answers them with an
+                # id-less invalid_frame: it needs an update.
+                if code == "invalid_frame":
+                    control[2].set_result({"type": control[0], "result": "outdated"})
+                else:
+                    control[2].set_exception(RelayError("relay transport error: " + code))
+            if request_id is not None and not pending and not application:
+                # The directory refused a knock or an answer this device sent.
+                self._dispatch_knock(
+                    {"type": "knock_result", "id": request_id, "result": "refused"}
+                )
+        elif frame.get("type") in ("lookup_result", "links_result"):
+            control = self._control
+            echo = control[1] if control else None
+            if (
+                control is not None
+                and frame["type"] == control[0]
+                and echo is not None
+                and frame.get(echo[0]) == echo[1]
+                and not control[2].done()
+            ):
+                control[2].set_result(frame)
+        elif frame.get("type") in KNOCK_FRAMES:
+            self._dispatch_knock(frame)
         elif frame.get("type") == "message":
             try:
                 await self._receive_encrypted(frame)
@@ -1123,6 +1164,89 @@ class RelayClient:
                 self._counts["rejected_messages"] += 1
         else:
             raise RelayError("unsupported relay frame")
+
+    def set_knock_handler(self, handler: Callable[[dict], Awaitable[None]] | None) -> None:
+        """Where knocks, answers and knock results go (plugins/hub/knocks.py)."""
+        self._knock_handler = handler
+
+    def _dispatch_knock(self, frame: dict) -> None:
+        """Hand a knock frame to the knock service without holding up the socket.
+
+        It runs in a fresh context, never inside a model turn, and in its own
+        task because answering waits for a reply this socket has to read.
+        """
+        handler = self._knock_handler
+        if handler is None:
+            return
+
+        def done(task: asyncio.Task) -> None:
+            self._knock_tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                _LOGGER.warning("knock handling failed: %s", type(task.exception()).__name__)
+
+        task = asyncio.create_task(handler(frame), context=contextvars.Context())
+        self._knock_tasks.add(task)
+        task.add_done_callback(done)
+
+    async def _control_request(self, frame: dict, reply: str, echo: tuple[str, object]) -> dict:
+        async with self._control_lock:
+            if self._state != "online":
+                raise RelayError("relay is not connected")
+            future = asyncio.get_running_loop().create_future()
+            self._control = (reply, echo, future)
+            try:
+                await self._send_frame(frame)
+                return await asyncio.wait_for(future, timeout=CONTROL_TIMEOUT)
+            except TimeoutError:
+                return {"type": reply, "result": "busy"}
+            finally:
+                self._control = None
+
+    async def lookup(self, route: str) -> tuple[str, str]:
+        """The key online under a contact route: (`found`, key), or (`unavailable`
+        | `busy` | `outdated`, "").
+
+        Never trusts the directory: a key that does not hash to the route reads
+        as unavailable, so a directory cannot point a knock at another device.
+        """
+        reply = await self._control_request(
+            {"type": "lookup", "route": route}, "lookup_result", ("route", route)
+        )
+        result, key = reply.get("result"), reply.get("key", "")
+        if result in ("unavailable", "busy", "outdated"):
+            return result, ""
+        if (
+            set(reply) != {"type", "route", "result", "key"}
+            or result != "found"
+            or not isinstance(key, str)
+            or not KEY.fullmatch(key)
+            or key == self.public_key
+            or contact_route_hex(key) != route
+        ):
+            _LOGGER.warning("the directory answered a route lookup with a key that does not fit")
+            return "unavailable", ""
+        return "found", key
+
+    async def declare_links(self, peers: list[str]) -> str:
+        """Replace the keys this device consents to link with; the directory's result."""
+        issued_at = int(time.time())
+        reply = await self._control_request(
+            {"type": "links", "peers": sorted(set(peers)), "issued_at": issued_at},
+            "links_result",
+            ("issued_at", issued_at),
+        )
+        result = reply.get("result")
+        return result if isinstance(result, str) else "busy"
+
+    async def send_knock(self, to: str, knock_id: str, ticket: dict, ciphertext: str) -> None:
+        await self._send_frame(
+            {"type": "knock", "to": to, "id": knock_id, "ticket": ticket, "ciphertext": ciphertext}
+        )
+
+    async def send_knock_answer(self, knock_id: str, ticket: dict, ciphertext: str) -> None:
+        await self._send_frame(
+            {"type": "knock_answer", "id": knock_id, "ticket": ticket, "ciphertext": ciphertext}
+        )
 
     async def _receive_encrypted(self, frame):
         if set(frame) != {"type", "from", "session", "id", "ciphertext"}:

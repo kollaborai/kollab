@@ -153,11 +153,6 @@ async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_pa
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
     commands.client.state.approvals = [offline_key]
 
-    async def no_knocks(_domain):
-        return []
-
-    commands.pending_contact_requests = no_knocks
-
     snapshot = await commands.connect_snapshot()
 
     assert (snapshot.network, snapshot.domain, snapshot.trust) == (
@@ -179,8 +174,8 @@ async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_connect_snapshot_counts_knocks_at_most_every_few_seconds(tmp_path):
-    from plugins.hub import relay_commands as module
+async def test_connect_snapshot_counts_ringing_and_missed_knocks_kept_on_this_device(tmp_path):
+    from plugins.hub.knocks import Ringing
 
     bridge = SimpleNamespace(
         trust_level=lambda: "open",
@@ -189,57 +184,16 @@ async def test_connect_snapshot_counts_knocks_at_most_every_few_seconds(tmp_path
         plugin=SimpleNamespace(_presence=None, _identity=None),
     )
     commands = _relay_commands(tmp_path, agent_bridge=bridge)
-    cleared = []
-    calls = []
-
-    class _Introduction:
-        def clear(self):
-            cleared.append(True)
-
-    async def pending(domain):
-        calls.append(domain)
-        row = SimpleNamespace(
-            introduction=_Introduction(),
-            receipt_id="r",
-            sender_key="d" * 64,
-            device_name="ana",
-        )
-        return [row] * 2
-
-    commands.pending_contact_requests = pending
-
-    first = await commands.connect_snapshot()
-    second = await commands.connect_snapshot()
-
-    assert (first.knocks, second.knocks) == (2, 2)
-    assert calls == ["kollabor.ai"]  # cached inside the interval
-    assert len(cleared) == 2  # introductions are wiped after counting
-    commands._knock_count_cache = (-module.KNOCK_COUNT_TTL_SECONDS * 2, 2)
-    await commands.connect_snapshot()
-    assert calls == ["kollabor.ai", "kollabor.ai"]
-
-
-@pytest.mark.asyncio
-async def test_connect_snapshot_with_the_relay_down_still_returns_and_skips_knocks(tmp_path):
-    bridge = SimpleNamespace(
-        trust_level=lambda: "open",
-        device_name=lambda: "laptop-kollab",
-        remote_agents=_async_remote_agents,
-        plugin=SimpleNamespace(_presence=None, _identity=None),
+    commands.knocks.ringing["a" * 32] = Ringing("a" * 32, "d" * 64, "ana", "hi", {}, 9e9)
+    commands.knocks.store.missed.append(
+        {"id": "b" * 32, "key": "e" * 64, "device": "bob", "text": "hi", "at": 1}
     )
-    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+
+    assert (await commands.connect_snapshot()).knocks == 2
+    # The directory keeps no knock, so a relay that is down changes nothing here.
     commands.client._state = "reconnecting"
-
-    async def hang(_domain):
-        raise AssertionError("no knock fetch while the relay is down")
-
-    commands.pending_contact_requests = hang
-
     snapshot = await commands.connect_snapshot()
-
-    assert snapshot.relay_online is False
-    assert snapshot.knocks == 0
-    assert snapshot.device == "laptop-kollab"
+    assert snapshot.relay_online is False and snapshot.knocks == 2
 
 
 @pytest.mark.asyncio

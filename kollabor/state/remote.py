@@ -228,6 +228,20 @@ class RemoteStateService(StateService):
             )
         return HubSnapshot.from_dict(result)
 
+    async def set_hub_participation(self, enabled: bool) -> dict[str, Any]:
+        """Ask the daemon to put its agent on the hub mesh or take it off."""
+        logger.debug("state rpc: set_hub_participation enabled=%r", enabled)
+        result = await self._rpc.call(
+            "state.set_hub_participation", {"enabled": enabled}, timeout=self._timeout
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"state.set_hub_participation expected dict, got {type(result).__name__}"
+            )
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        return result
+
     # === Processing ===
 
     async def get_processing_state(self) -> ProcessingSnapshot:
@@ -890,66 +904,18 @@ class RemoteStateService(StateService):
             raise ValueError("daemon connect decision failed")
         return _screen_text(result["reason"])
 
-    async def hub_contact_knock(
-        self, domain: str, route: str, introduction: str
-    ) -> str:
-        """Send a knock through the daemon that owns the relay; its answer."""
+    async def hub_knocks(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        """One knock action on the daemon; the caller validates the answer."""
         result = await self._rpc.call(
-            "state.hub_contact_knock",
-            {"domain": domain, "route": route, "introduction": introduction},
-            timeout=max(self._timeout, 90.0),
+            "state.hub_knocks",
+            {"action": action, "args": args},
+            timeout=max(self._timeout, 45.0),
         )
-        if (
-            not isinstance(result, dict)
-            or result.get("error")
-            or not isinstance(result.get("text"), str)
-        ):
-            raise ValueError("daemon knock failed")
-        return _screen_text(result["text"])
-
-    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
-        """The knocks the daemon holds for this device; the caller validates rows."""
-        result = await self._rpc.call(
-            "state.hub_contact_pending",
-            {"domain": domain},
-            timeout=max(self._timeout, 30.0),
-        )
-        rows = (
-            result.get("requests")
-            if isinstance(result, dict) and not result.get("error")
-            else None
-        )
-        if not isinstance(rows, list) or len(rows) > 32:
-            raise ValueError("daemon knock inbox failed")
-        return rows
-
-    async def hub_contact_decide(
-        self,
-        domain: str,
-        receipt_id: str,
-        decision: str,
-        sender_key: str,
-        device_name: str,
-    ) -> str:
-        """Accept or reject one knock on the daemon; "" when decided."""
-        result = await self._rpc.call(
-            "state.hub_contact_decide",
-            {
-                "domain": domain,
-                "receipt_id": receipt_id,
-                "decision": decision,
-                "sender_key": sender_key,
-                "device_name": device_name,
-            },
-            timeout=max(self._timeout, 30.0),
-        )
-        if (
-            not isinstance(result, dict)
-            or result.get("error")
-            or not isinstance(result.get("reason"), str)
-        ):
-            raise ValueError("daemon knock decision failed")
-        return _screen_text(result["reason"])
+        if isinstance(result, dict) and isinstance(result.get("text"), str):
+            return {"text": _screen_text(result["text"])}
+        if isinstance(result, dict) and isinstance(result.get("snapshot"), dict):
+            return {"snapshot": result["snapshot"]}
+        raise ValueError("daemon knock action failed")
 
     # panel_action can wait on a provider (the setup connection test is
     # bounded at 25 s), so it outlasts DEFAULT_TIMEOUT.

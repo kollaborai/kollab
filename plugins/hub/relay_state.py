@@ -164,16 +164,9 @@ class RelayState:
     # Devices revoked on this network, by this device or announced by a member:
     # a vouch for one of them counts for nothing until a member accepts it anew.
     revoked: list[str] = field(default_factory=list)
-    # Knocks this device sent that nobody answered yet: the knocked device's key
-    # -> when the knock was sent (epoch seconds). What a knock leaves behind is
-    # cleared if nothing comes of it (docs/specs/agent-network-simple-flow.md).
-    knocks: dict[str, int] = field(default_factory=dict)
-    # The request id of each knock above, so the directory can be asked how it was
-    # decided (POST /relay/v1/contact/status).
-    knock_requests: dict[str, str] = field(default_factory=dict)
-    # Ids (`join:<id>`, `knock:<receipt>`) of the join requests and knocks the
-    # human was already told about in the main pane, pruned to what is still
-    # pending, so a restart announces only what is new.
+    # Ids (`join:<id>`) of the join requests the human was already told about
+    # in the main pane, pruned to what is still pending, so a restart announces
+    # only what is new. Knocks live in plugins/hub/knocks.py.
     announced: list[str] = field(default_factory=list)
     # What the sealed-config sync last told the human in the main pane, so a
     # restart repeats nothing: a digest of the skipped MCP server names ("" for
@@ -225,6 +218,9 @@ class RelayStateStore:
             # device_name/trust/peer_devices/peer_trust is missing those
             # keys, and the dataclass defaults fill them in. Any key outside
             # the dataclass is still rejected.
+            # Knocks became calls: a knock no longer leaves state behind.
+            for gone in ("knocks", "knock_requests"):
+                payload.pop(gone, None)
             if set(payload) - set(RelayState.__dataclass_fields__):
                 raise RelayError("unsupported relay state fields")
             self.state = RelayState(**payload)
@@ -313,27 +309,6 @@ class RelayStateStore:
             for voucher in vouchers:
                 validate_public_key(voucher)
         for key in value.revoked:
-            validate_public_key(key)
-        if (
-            not isinstance(value.knocks, dict)
-            or len(value.knocks) > MAX_APPROVALS
-            or any(type(sent) is not int or sent < 0 for sent in value.knocks.values())
-        ):
-            raise RelayError("invalid knock times")
-        for key in value.knocks:
-            validate_public_key(key)
-        if (
-            not isinstance(value.knock_requests, dict)
-            or len(value.knock_requests) > MAX_APPROVALS
-            or any(
-                not isinstance(item, str)
-                or len(item) != 32
-                or not set(item) <= set("0123456789abcdef")
-                for item in value.knock_requests.values()
-            )
-        ):
-            raise RelayError("invalid knock requests")
-        for key in value.knock_requests:
             validate_public_key(key)
         if (
             not isinstance(value.announced, list)

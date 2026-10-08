@@ -589,6 +589,9 @@ async def test_connect_palette_lists_subcommands_and_each_reaches_the_owner_daem
         "trust",
         "knock",
         "knocks",
+        "expect",
+        "block",
+        "unblock",
         "allow",
         "deny",
         "revoke",
@@ -599,7 +602,7 @@ async def test_connect_palette_lists_subcommands_and_each_reaches_the_owner_daem
     state = SimpleNamespace(hub_connect=AsyncMock(side_effect=lambda value: value))
     hub._cli_args = SimpleNamespace(attach=True)
     hub.event_bus = SimpleNamespace(get_service=lambda _name: state)
-    local = {"code", "knock", "knocks", "help"}
+    local = {"code", "knock", "knocks", "expect", "block", "unblock", "help"}  # knocks: state.hub_knocks
     for name in names:
         if name in local:
             continue

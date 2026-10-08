@@ -151,6 +151,14 @@ class StateService(Protocol):
         """Return the current hub plugin identity + roster state."""
         ...
 
+    async def set_hub_participation(self, enabled: bool) -> dict[str, Any]:
+        """Put this agent on the hub mesh, or take it off (solo), live.
+
+        Returns ``{"hub": enabled}``. Raises ValueError when the daemon
+        runs no hub.
+        """
+        ...
+
     # === Processing ===
 
     async def get_processing_state(self) -> ProcessingSnapshot:
@@ -658,33 +666,12 @@ class StateService(Protocol):
         """Accept or reject one join request; "" when decided, else the reason."""
         ...
 
-    async def hub_contact_knock(
-        self, domain: str, route: str, introduction: str
-    ) -> str:
-        """Send a knock to a stranger's contact route through the relay's owner.
+    async def hub_knocks(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        """One knock action on the daemon that owns the relay (plugins/hub/knocks.py).
 
-        Returns what the human reads: ``knock sent to <domain>/c/<route>`` or
-        ``connect: <reason>``.
+        ``list`` answers ``{"snapshot": ...}`` for the knock screen; every other
+        action ``{"text": ...}``, the line the human reads.
         """
-        ...
-
-    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
-        """Knocks waiting for this device, as the relay lists them.
-
-        An empty ``domain`` means the daemon's own network. Raises when the
-        daemon cannot list them; the window validates every row.
-        """
-        ...
-
-    async def hub_contact_decide(
-        self,
-        domain: str,
-        receipt_id: str,
-        decision: str,
-        sender_key: str,
-        device_name: str,
-    ) -> str:
-        """Accept or reject one knock; "" when decided, else the reason."""
         ...
 
     async def hub_connect(self, command: str) -> str:

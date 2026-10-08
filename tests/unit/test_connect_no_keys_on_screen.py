@@ -22,7 +22,6 @@ from kollabor.cli import _handle_cli_hub
 from kollabor_config.provisioned_state import ProvisionedStateFile
 from kollabor_events.data_models import ConversationMessage
 from plugins.altview.connect_altview import ConnectScreenState, connect_screen_lines
-from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
 from plugins.hub.device_names import key_label
 from plugins.hub.dns.discovery import DiscoveryResult
 from plugins.hub.plugin import CONNECT_OWNED_ELSEWHERE, HubPlugin, format_connect_help
@@ -128,11 +127,9 @@ def _commands(tmp_path) -> RelayCommands:
         OFFLINE_NAMED,
         OFFLINE_UNNAMED,
     ]
+    from plugins.hub.knocks import Ringing
 
-    async def pending_knocks(_domain):
-        return [PendingContactRequest("c" * 32, "d" * 64, 0, PrivateMessage("hi"), "stranger")]
-
-    commands.pending_contact_requests = pending_knocks
+    commands.knocks.ringing["c" * 32] = Ringing("c" * 32, "d" * 64, "stranger", "hi", {}, 9e9)
     return commands
 
 
@@ -372,11 +369,10 @@ def _joins(commands) -> list:
 async def test_arrivals_print_one_named_line_each_and_never_again(tmp_path):
     commands = _commands(tmp_path)
     lines = await commands.new_arrivals()
-    assert len(lines) == 3
+    assert len(lines) == 2
     assert set(lines) == {
         "ana-laptop wants to join kollabor.ai. /connect to review",
         "an unknown device wants to join kollabor.ai. /connect to review",
-        "stranger knocked. /connect knocks to review",
     }
     for line in lines:
         assert not LEAK.search(line)
@@ -415,19 +411,12 @@ async def test_a_request_that_can_no_longer_be_decided_is_not_announced(tmp_path
     assert [line for line in await commands.new_arrivals() if "join" in line] == []
 
 
-@pytest.mark.asyncio
-async def test_a_knock_without_a_sealed_name_is_an_unknown_device_never_its_hex(tmp_path):
-    commands = _commands(tmp_path)
+def test_a_knock_without_a_sealed_name_is_an_unknown_device_never_its_hex():
+    from plugins.hub.knocks import _spoken
+
     key = "d" * 64
-    stand_in = key_label(key)
-
-    async def unnamed(_domain):
-        return [PendingContactRequest("c" * 32, key, 0, PrivateMessage("hi"), stand_in)]
-
-    commands.pending_contact_requests = unnamed
-    lines = await commands.new_arrivals()
-    assert "an unknown device knocked. /connect knocks to review" in lines
-    assert not any(stand_in in line for line in lines)
+    assert _spoken(key_label(key), key) == "an unknown device"
+    assert _spoken("ana-laptop", key) == "ana-laptop"
 
 
 @pytest.mark.asyncio
@@ -439,7 +428,7 @@ async def test_the_relay_agent_shows_each_arrival_once_through_the_plugin(tmp_pa
     )
     await RelayAgentBridge._announce_arrivals(agent)
     await RelayAgentBridge._announce_arrivals(agent)
-    assert len(shown) == 3
+    assert len(shown) == 2
 
 
 def test_show_network_notice_is_one_system_line_on_the_message_coordinator():
@@ -451,7 +440,7 @@ def test_show_network_notice_is_one_system_line_on_the_message_coordinator():
     hub.event_bus = SimpleNamespace(
         get_service=lambda name: renderer if name == "renderer" else None
     )
-    hub.show_network_notice("ana-laptop knocked. /connect knocks to review")
+    hub.show_network_notice("ana-laptop is knocking. /connect knocks to answer (4:58)")
     assert shown == [
-        [("system", "ana-laptop knocked. /connect knocks to review", {"display_type": "info"})]
+        [("system", "ana-laptop is knocking. /connect knocks to answer (4:58)", {"display_type": "info"})]
     ]

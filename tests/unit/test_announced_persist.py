@@ -1,7 +1,10 @@
-"""A restart must not announce again what the human was already told about."""
+"""A restart must not announce again a join request the human was already told about.
+
+Knocks are calls now: a ringing knock is said once by the knock service and
+never stored, so only join request ids are remembered here.
+"""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -9,7 +12,6 @@ from plugins.hub.relay_commands import RelayCommands
 from plugins.hub.relay_state import RelayStateStore
 
 _JOIN = "a1" * 16
-_KNOCK = "b2" * 16
 
 
 class _Bridge:
@@ -32,15 +34,12 @@ def _row(enrollment_id, name):
     )
 
 
-def _commands(tmp_path, bridge, *, knocks=(), online=True):
-    """A commands object over the shared state dir; `knocks` is what the directory lists."""
+def _commands(tmp_path, bridge, *, online=True):
+    """A commands object over the shared state dir."""
     commands = RelayCommands(
         tmp_path, state_dir=tmp_path / "state", agent_bridge=bridge
     )
     commands._domain_online = lambda: ("relay.example", online)
-    commands._knock_count = AsyncMock(return_value=len(knocks))
-    commands._knock_rows = tuple(knocks)
-    commands._knocks_fetched = online
     return commands
 
 
@@ -52,13 +51,12 @@ def _saved(tmp_path):
 async def test_a_restart_announces_only_what_is_new(tmp_path):
     bridge = _Bridge()
     bridge.rows = [_row(_JOIN, "ana-laptop")]
-    knocks = [(_KNOCK, "bo-phone")]
 
-    first = await _commands(tmp_path, bridge, knocks=knocks).new_arrivals()
-    assert len(first) == 2
+    first = await _commands(tmp_path, bridge).new_arrivals()
+    assert len(first) == 1
 
     # A daemon restart: a new commands object over the same state dir.
-    restarted = _commands(tmp_path, bridge, knocks=knocks)
+    restarted = _commands(tmp_path, bridge)
     assert await restarted.new_arrivals() == []
 
     bridge.rows.append(_row("c3" * 16, "cy-desktop"))
@@ -71,11 +69,10 @@ async def test_a_restart_announces_only_what_is_new(tmp_path):
 async def test_only_ids_that_are_still_pending_are_kept(tmp_path):
     bridge = _Bridge()
     bridge.rows = [_row(_JOIN, "ana-laptop")]
-    knocks = [(_KNOCK, "bo-phone")]
-    await _commands(tmp_path, bridge, knocks=knocks).new_arrivals()
-    assert sorted(_saved(tmp_path)) == [f"join:{_JOIN}", f"knock:{_KNOCK}"]
+    await _commands(tmp_path, bridge).new_arrivals()
+    assert _saved(tmp_path) == [f"join:{_JOIN}"]
 
-    # Both were decided meanwhile: nothing pending, nothing remembered.
+    # It was decided meanwhile: nothing pending, nothing remembered.
     bridge.rows = []
     await _commands(tmp_path, bridge).new_arrivals()
     assert _saved(tmp_path) == []
@@ -85,12 +82,11 @@ async def test_only_ids_that_are_still_pending_are_kept(tmp_path):
 async def test_what_could_not_be_read_keeps_its_ids(tmp_path):
     bridge = _Bridge()
     bridge.rows = [_row(_JOIN, "ana-laptop")]
-    knocks = [(_KNOCK, "bo-phone")]
-    await _commands(tmp_path, bridge, knocks=knocks).new_arrivals()
+    await _commands(tmp_path, bridge).new_arrivals()
 
     # Restarted while the issuer is not ready and the directory is unreachable:
     # an empty reading is not "decided", so nothing is forgotten, nothing repeats.
     bridge.unreadable = True
     cold = _commands(tmp_path, bridge, online=False)
     assert await cold.new_arrivals() == []
-    assert sorted(_saved(tmp_path)) == [f"join:{_JOIN}", f"knock:{_KNOCK}"]
+    assert _saved(tmp_path) == [f"join:{_JOIN}"]

@@ -239,6 +239,10 @@ class HubSnapshot(Snapshot):
     my_is_coordinator: bool = False
     peer_count: int = 0
     roster: list[HubPeer] = field(default_factory=list)
+    # This computer's relay name ("" off a network) and the agents on other
+    # computers (relay directory rows: name, device, handle, state).
+    device: str = ""
+    remote: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -247,6 +251,8 @@ class HubSnapshot(Snapshot):
             "my_is_coordinator": self.my_is_coordinator,
             "peer_count": self.peer_count,
             "roster": [p.to_dict() for p in self.roster],
+            "device": self.device,
+            "remote": list(self.remote),
         }
 
     @classmethod
@@ -257,6 +263,8 @@ class HubSnapshot(Snapshot):
             my_is_coordinator=data.get("my_is_coordinator", False),
             peer_count=data.get("peer_count", 0),
             roster=[HubPeer.from_dict(p) for p in data.get("roster", [])],
+            device=data.get("device", ""),
+            remote=list(data.get("remote", [])),
         )
 
 

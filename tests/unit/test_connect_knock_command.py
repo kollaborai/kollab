@@ -57,88 +57,88 @@ async def test_knock_with_a_bad_route_is_a_usage_error():
     assert await plugin._run_connect_knock('not-a-route "hello"') == USAGE
 
 
-@pytest.mark.asyncio
-async def test_knock_strips_one_pair_of_surrounding_quotes_and_sends():
+def _owner_plugin(answer: str = "knocking on kollabor.ai/c/8f3a2c1d9e4b5061, rings for 5:00"):
     plugin = HubPlugin.__new__(HubPlugin)
     plugin._cli_args = SimpleNamespace(attach=False)
     plugin._identity = SimpleNamespace(agent_id="local-agent")
     plugin._rpc_server = object()
     plugin._start_relay_agent = AsyncMock()
-    submit = AsyncMock(return_value={"status": "queued", "receipt_id": "a" * 32})
-    plugin._relay_agent = SimpleNamespace(submit_contact_request=submit)
+    plugin._relay_agent = SimpleNamespace(knocks=AsyncMock(return_value={"text": answer}))
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_knock_strips_one_pair_of_surrounding_quotes_and_sends():
+    plugin = _owner_plugin()
 
     result = await plugin._run_connect_knock(
         'kollabor.ai/c/8f3a2c1d9e4b5061 "Ana from Acme. Can you help?"'
     )
 
-    submit.assert_awaited_once_with(
-        "kollabor.ai",
-        "8f3a2c1d9e4b5061",
-        "Ana from Acme. Can you help?",
+    plugin._relay_agent.knocks.assert_awaited_once_with(
+        "knock",
+        {"domain": "kollabor.ai", "route": "8f3a2c1d9e4b5061", "text": "Ana from Acme. Can you help?"},
         source_agent="local-agent",
     )
-    assert result == "knock sent to kollabor.ai/c/8f3a2c1d9e4b5061"
+    assert result == "knocking on kollabor.ai/c/8f3a2c1d9e4b5061, rings for 5:00"
 
 
 @pytest.mark.asyncio
 async def test_knock_over_an_https_route_resolves_the_bare_domain():
-    plugin = HubPlugin.__new__(HubPlugin)
-    plugin._cli_args = SimpleNamespace(attach=False)
-    plugin._identity = SimpleNamespace(agent_id="local-agent")
-    plugin._rpc_server = object()
-    plugin._start_relay_agent = AsyncMock()
-    submit = AsyncMock(return_value={"status": "queued", "receipt_id": "a" * 32})
-    plugin._relay_agent = SimpleNamespace(submit_contact_request=submit)
+    plugin = _owner_plugin()
 
-    await plugin._run_connect_knock(
-        'https://kollabor.ai/c/8f3a2c1d9e4b5061 "hello there"'
-    )
+    await plugin._run_connect_knock('https://kollabor.ai/c/8f3a2c1d9e4b5061 "hello there"')
 
-    submit.assert_awaited_once_with(
-        "kollabor.ai", "8f3a2c1d9e4b5061", "hello there", source_agent="local-agent"
-    )
+    args = plugin._relay_agent.knocks.await_args.args
+    assert args == ("knock", {"domain": "kollabor.ai", "route": "8f3a2c1d9e4b5061", "text": "hello there"})
 
 
 @pytest.mark.asyncio
 async def test_knock_unquoted_text_is_sent_as_is():
-    plugin = HubPlugin.__new__(HubPlugin)
-    plugin._cli_args = SimpleNamespace(attach=False)
-    plugin._identity = SimpleNamespace(agent_id="local-agent")
-    plugin._rpc_server = object()
-    plugin._start_relay_agent = AsyncMock()
-    submit = AsyncMock(return_value={"status": "queued", "receipt_id": "a" * 32})
-    plugin._relay_agent = SimpleNamespace(submit_contact_request=submit)
+    plugin = _owner_plugin()
 
     await plugin._run_connect_knock("kollabor.ai/c/8f3a2c1d9e4b5061 hello there")
 
-    submit.assert_awaited_once_with(
-        "kollabor.ai", "8f3a2c1d9e4b5061", "hello there", source_agent="local-agent"
+    assert plugin._relay_agent.knocks.await_args.args[1]["text"] == "hello there"
+
+
+@pytest.mark.asyncio
+async def test_knock_text_with_control_characters_is_a_usage_error():
+    plugin = _owner_plugin()
+
+    assert await plugin._run_connect_knock('kollabor.ai/c/8f3a2c1d9e4b5061 "hi\x1b[2J"') == USAGE
+    plugin._relay_agent.knocks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_knock_line_is_what_the_owner_says():
+    plugin = _owner_plugin(
+        "kollabor.ai/c/8f3a2c1d9e4b5061 unavailable. redialing for 1h, next in 1:00. /connect knocks to stop"
     )
 
-
-@pytest.mark.asyncio
-async def test_knock_reports_an_unknown_route_without_keys_or_receipts():
-    plugin = HubPlugin.__new__(HubPlugin)
-    plugin._cli_args = SimpleNamespace(attach=False)
-    plugin._identity = SimpleNamespace(agent_id="local-agent")
-    plugin._rpc_server = object()
-    plugin._start_relay_agent = AsyncMock()
-    submit = AsyncMock(return_value={"error": "unknown_route"})
-    plugin._relay_agent = SimpleNamespace(submit_contact_request=submit)
-
     result = await plugin._run_connect_knock('kollabor.ai/c/8f3a2c1d9e4b5061 "hi"')
 
-    assert result == "connect: no one is registered at that route right now"
+    assert result.startswith("kollabor.ai/c/8f3a2c1d9e4b5061 unavailable. redialing for 1h")
 
 
 @pytest.mark.asyncio
-async def test_knock_is_refused_when_attached_to_a_remote_daemon():
+async def test_an_attached_window_asks_its_daemon_and_an_old_daemon_says_so():
+    from kollabor_rpc import RpcMethodNotFound
+
     plugin = HubPlugin.__new__(HubPlugin)
     plugin._cli_args = SimpleNamespace(attach=True)
+    state = SimpleNamespace(hub_knocks=AsyncMock(return_value={"text": "knocking on x, rings for 5:00"}))
+    plugin.event_bus = SimpleNamespace(get_service=lambda name: state if name == "state_service" else None)
 
-    result = await plugin._run_connect_knock('kollabor.ai/c/8f3a2c1d9e4b5061 "hi"')
+    assert await plugin._run_connect_knock('kollabor.ai/c/8f3a2c1d9e4b5061 "hi"') == "knocking on x, rings for 5:00"
+    state.hub_knocks.assert_awaited_once_with(
+        "knock", {"domain": "kollabor.ai", "route": "8f3a2c1d9e4b5061", "text": "hi"}
+    )
 
-    assert result == "connect: attached daemon does not support private contact requests"
+    state.hub_knocks = AsyncMock(side_effect=RpcMethodNotFound("state.hub_knocks"))
+    assert await plugin._run_connect_knock('kollabor.ai/c/8f3a2c1d9e4b5061 "hi"') == (
+        "connect: the attached daemon needs an update for knocks"
+    )
 
 
 def test_removed_contact_names_redirect_to_knock():

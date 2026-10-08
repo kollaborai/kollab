@@ -1,11 +1,11 @@
 """Story 5 end to end: a knock is accepted and the stranger's agents reach the allowed agent.
 
 Two full bridges (real clients, real endpoint crypto, real secure sessions)
-talk through the real relay app over its real WebSocket and HTTP routes. The
-only stand-ins are the socket opener and the HTTP poster, which point at the
-in-process relay instead of the network, and the model, which records what it
-was asked. Ana and Marco start in rooms of their own; the relay routes between
-them only after Ana knocked, Marco accepted, and each side declared the other.
+talk through the real relay app over its real WebSocket. The only stand-ins are
+the socket opener, which points at the in-process relay instead of the network,
+and the model, which records what it was asked. Ana and Marco start in rooms of
+their own; the relay routes between them only after Ana knocked, Marco accepted
+while it rang, and each side declared the other.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from kollabor_agent.runtime import AgentRuntime
 from kollabor_events import EventBus, EventType, Hook
 from plugins.hub import relay_client
 from plugins.hub import relay_service as service
-from plugins.hub.contact_requests import ContactProtocolError, ContactRequestManager
 from plugins.hub.device_names import contact_route_hex
 from plugins.hub.local_directory import LocalAgent
 from plugins.hub.plugin import HubPlugin
@@ -86,19 +85,6 @@ async def relay(monkeypatch):
     await test_client.start_server()
 
     monkeypatch.setattr(relay_client, "aiohttp", _Aiohttp(test_client))
-
-    async def route(self, _domain):
-        return ORIGIN, "", ()
-
-    async def post(self, _origin, path, frame, *, ca, cidrs):
-        response = await test_client.post(path, json=frame)
-        payload = await response.json(content_type=None)
-        if response.status not in {200, 201, 202}:
-            raise ContactProtocolError(payload.get("error", "transport"))
-        return payload
-
-    monkeypatch.setattr(ContactRequestManager, "_route", route)
-    monkeypatch.setattr(ContactRequestManager, "_post", post)
     try:
         yield test_client
     finally:
@@ -185,6 +171,10 @@ async def make_member(tmp_path, name: str, device: str) -> Member:
     )
     bridge.set_device_name(device)
     await client.connect(ORIGIN, ws_url=WS_URL)
+    # The bridge's first directory refresh: it declares its links (none yet),
+    # which is also how the directory learns this device can be rung.
+    await until(lambda: client.status().get("state") == "online")
+    await bridge.sync_links()
     return Member(bridge, hub, model, directory)
 
 
@@ -221,36 +211,32 @@ async def people(relay, tmp_path):
             await person.bridge.close()
 
 
-async def knock(ana: Member, marco: Member, text: str = "Ana from Acme") -> dict:
-    return await ana.bridge._rpc_contact_submit(
-        {
-            "agent_id": ana.bridge.identity.agent_id,
-            "domain": DOMAIN,
-            "route": contact_route_hex(marco.key),
-            "introduction": text,
-            "device_name": "ana-laptop",
-        }
+async def act(member: Member, action: str, args: dict) -> dict:
+    return await member.bridge._rpc_knocks(
+        {"agent_id": member.bridge.identity.agent_id, "action": action, "args": args}
     )
 
 
-async def accept(marco: Member) -> dict:
-    pending = await marco.bridge.pending_contact_requests(
-        DOMAIN, source_agent=marco.bridge.identity.agent_id
-    )
-    assert len(pending) == 1
-    return await marco.bridge.decide_contact_request(
-        DOMAIN,
-        pending[0]["receipt_id"],
-        decision="accept",
-        source_agent=marco.bridge.identity.agent_id,
-        sender_key=pending[0]["sender_key"],
-        device_name=pending[0]["device_name"],
-    )
+async def knock(ana: Member, marco: Member, text: str = "Ana from Acme") -> str:
+    """Ana knocks on Marco's route; the line she reads."""
+    args = {"domain": DOMAIN, "route": contact_route_hex(marco.key), "text": text}
+    return (await act(ana, "knock", args))["text"]
+
+
+async def ringing(marco: Member) -> list[dict]:
+    return (await act(marco, "list", {}))["snapshot"]["ringing"]
+
+
+async def accept(marco: Member) -> str:
+    """Marco accepts the one knock ringing on his device; the line he reads."""
+    await until(lambda: len(marco.bridge.commands.knocks.ringing) == 1)
+    rows = await ringing(marco)
+    return (await act(marco, "accept", {"id": rows[0]["id"]}))["text"]
 
 
 async def open_path(ana: Member, marco: Member) -> None:
-    assert (await knock(ana, marco))["status"] == "queued"
-    assert (await accept(marco))["status"] == "accepted"
+    assert (await knock(ana, marco)).startswith("knocking on relay.example/c/")
+    assert (await accept(marco)).startswith("accepted ana-laptop")
     await until(lambda: ana.sees(marco) and marco.sees(ana))
 
 
@@ -288,14 +274,21 @@ def forged_message(ana: Member, to: str, to_identity: str) -> dict:
 async def test_a_knock_alone_opens_nothing(people):
     ana, marco = people
 
-    sent = await knock(ana, marco)
-    assert sent["status"] == "queued"
+    assert (await knock(ana, marco)) == (
+        f"knocking on relay.example/c/{contact_route_hex(marco.key)}, rings for 5:00"
+    )
 
-    # Ana is ready to hear back, but Marco has not accepted: no path exists.
-    assert marco.key in ana.state.approvals
-    assert ana.state.peer_trust[marco.key] == "agents"
-    assert ana.state.links == [marco.key]
-    assert marco.state.links == []
+    # It rings on Marco's device, with Ana's device name and her text...
+    await until(lambda: len(marco.bridge.commands.knocks.ringing) == 1)
+    (row,) = await ringing(marco)
+    assert (row["device"], row["text"], row["route"]) == (
+        "ana-laptop", "Ana from Acme", contact_route_hex(ana.key)
+    )
+    assert ana.key not in row.values()  # names, fingerprints and routes, never keys
+    # ...and neither side prepared anything: a knock that never connects
+    # leaves nothing behind.
+    assert ana.state.approvals == [] and ana.state.links == [] and ana.state.peer_trust == {}
+    assert marco.state.approvals == [] and marco.state.links == []
     await asyncio.sleep(0.3)
     assert not ana.sees(marco) and not marco.sees(ana)
     with pytest.raises(RelayError):
@@ -460,17 +453,17 @@ async def test_the_path_comes_back_on_its_own_after_the_relay_forgets_it(people,
 
 
 @pytest.mark.asyncio
-async def test_an_old_relay_without_links_leaves_the_knock_working(people, monkeypatch):
+async def test_a_directory_without_links_leaves_the_accept_recorded(people, monkeypatch):
     ana, marco = people
 
-    async def missing(self, _domain, _peers):
-        raise ContactProtocolError("invalid_response")  # what a 404 page becomes
+    async def outdated(_keys):
+        raise RelayError("links not declared (outdated)")
 
-    monkeypatch.setattr(ContactRequestManager, "sync_links", missing)
-    assert (await knock(ana, marco))["status"] == "queued"
-    assert (await accept(marco))["status"] == "accepted"
+    monkeypatch.setattr(marco.bridge.commands, "sync_links", outdated)
+    await knock(ana, marco)
+    assert (await accept(marco)).startswith("accepted ana-laptop")
 
-    # Approved and named as before; the path itself is what an old relay lacks.
+    # Approved and named as before; the path itself is what the directory lacks.
     assert marco.state.peer_devices == {ana.key: "ana-laptop"}
     await asyncio.sleep(0.3)
     assert not ana.sees(marco)
@@ -489,20 +482,14 @@ async def test_a_stranger_is_not_a_mesh_member_and_cannot_forward(people):
 
 
 @pytest.mark.asyncio
-async def test_a_knock_binds_the_other_device_only_on_the_directory_it_went_to(people):
+async def test_a_knock_goes_through_this_devices_own_directory_only(people):
     ana, marco = people
 
-    sent = await ana.bridge._rpc_contact_submit(
-        {
-            "agent_id": ana.bridge.identity.agent_id,
-            "domain": "elsewhere.example",  # not the directory Ana is connected to
-            "route": contact_route_hex(marco.key),
-            "introduction": "hello from another directory",
-            "device_name": "ana-laptop",
-        }
-    )
+    args = {"domain": "elsewhere.example", "route": contact_route_hex(marco.key), "text": "hi"}
+    line = (await act(ana, "knock", args))["text"]
 
-    assert sent["status"] == "queued"
+    assert line == "connect: this device knocks through relay.example; knock a route on relay.example"
+    assert ana.bridge.commands.knocks.calls == {}
     assert ana.state.approvals == [] and ana.state.links == [] and ana.state.peer_trust == {}
 
 
@@ -512,23 +499,29 @@ async def test_knocking_a_device_that_is_already_a_peer_changes_nothing(people):
     await open_path(ana, marco)
     before = (ana.state.approvals, ana.state.links, ana.state.peer_trust)
 
-    assert (await knock(ana, marco, "one more time"))["status"] == "queued"
+    assert (await knock(ana, marco, "one more time")).startswith("knocking on")
+    assert (await accept(marco)).startswith("accepted ana-laptop")
+    await until(lambda: ana.bridge.commands.knocks.calls == {})
 
     assert (ana.state.approvals, ana.state.links, ana.state.peer_trust) == before
 
 
 @pytest.mark.asyncio
-async def test_a_failed_bind_after_a_sent_knock_leaves_no_half_state(people, monkeypatch):
+async def test_a_failed_bind_when_the_accept_arrives_leaves_no_half_state(people, monkeypatch):
     ana, marco = people
+    said = []
+    monkeypatch.setattr(ana.hub, "show_network_notice", said.append)
 
     def broken(*_args, **_kwargs):
         raise RelayError("local peer approval capacity reached", "capacity")
 
     monkeypatch.setattr(ana.bridge.store, "grant", broken)
 
-    sent = await knock(ana, marco)
+    await knock(ana, marco)
+    await accept(marco)
+    await until(lambda: said)
 
-    assert sent["status"] == "queued"  # the knock itself went out
+    assert said == ["connect: laptop-kollab accepted, but this device could not record it"]
     assert ana.state.approvals == [] and ana.state.links == []
     assert ana.state.peer_trust == {}
 
@@ -553,15 +546,15 @@ async def test_links_are_declared_once_and_again_only_on_change_or_a_new_session
 ):
     ana, marco = people
     posted = []
-    real = ContactRequestManager.sync_links
+    real = ana.bridge.commands.sync_links
 
-    async def counting(self, domain, peers):
+    async def counting(peers):
         posted.append(sorted(peers))
-        return await real(self, domain, peers)
+        return await real(peers)
 
-    monkeypatch.setattr(ContactRequestManager, "sync_links", counting)
-    await knock(ana, marco)
-    assert posted == [[marco.key]]
+    monkeypatch.setattr(ana.bridge.commands, "sync_links", counting)
+    await open_path(ana, marco)
+    assert posted == [[marco.key]]  # the accept reached Ana: she declared Marco
 
     for _ in range(3):
         await ana.bridge.sync_links()  # nothing changed: no traffic
@@ -574,23 +567,21 @@ async def test_links_are_declared_once_and_again_only_on_change_or_a_new_session
     await ana.bridge.sync_links()
     assert len(posted) == 3
 
-    # a device with no strangers says nothing at all
-    await marco.bridge.sync_links()
-    assert len(posted) == 3
-
 
 @pytest.mark.asyncio
 async def test_a_failed_declaration_backs_off_and_a_forced_one_retries(people, monkeypatch):
     ana, marco = people
     attempts = []
 
-    async def failing(self, _domain, peers):
+    async def failing(peers):
         attempts.append(peers)
-        raise ContactProtocolError("rate_limited")
+        raise RelayError("links not declared (busy)")
 
-    monkeypatch.setattr(ContactRequestManager, "sync_links", failing)
+    monkeypatch.setattr(ana.bridge.commands, "sync_links", failing)
     await knock(ana, marco)
-    assert len(attempts) == 1 and ana.bridge._links_failed is True
+    await accept(marco)
+    await until(lambda: len(attempts) == 1)
+    assert ana.bridge._links_failed is True
 
     await ana.bridge.sync_links()  # inside the back-off window
     assert len(attempts) == 1
@@ -605,10 +596,10 @@ async def test_nothing_is_declared_while_the_relay_is_unreachable(people, monkey
     await open_path(ana, marco)
     posted = []
 
-    async def counting(self, _domain, peers):
+    async def counting(peers):
         posted.append(peers)
 
-    monkeypatch.setattr(ContactRequestManager, "sync_links", counting)
+    monkeypatch.setattr(ana.bridge.commands, "sync_links", counting)
     ana.client._state = "reconnecting"
 
     await ana.bridge.sync_links(force=True)

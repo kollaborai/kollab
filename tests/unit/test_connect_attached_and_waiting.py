@@ -1264,47 +1264,36 @@ def test_used_code_line_uses_the_expired_line_style_and_fits_eighty_columns():
 
 
 # --------------------------------------------------------------------- #
-# Story 5 in the default launch: a stranger knocks, the owner reviews it,
+# Story 5 in the default launch: a stranger knocks and the owner answers,
 # both from an attached window, with the daemon holding the relay
 # --------------------------------------------------------------------- #
 
 _ROUTE = "8f3a2c1d9e4b5061"
 _INTRO = "Ana from Acme. Can your ops agent review a nginx config?"
-_RECEIPT = "b" * 32
+_KNOCK_ID = "b" * 32
 _SENDER = "c" * 64
-_NO_DAEMON_SUPPORT = (
-    "connect: attached daemon does not support private contact requests"
-)
+_NO_DAEMON_SUPPORT = "connect: the attached daemon needs an update for knocks"
+_KNOCK_SCREEN = {
+    "online": True, "domain": "agents.acme.com", "mode": "everyone", "mode_until": 0,
+    "ringing": [{"id": _KNOCK_ID, "device": "ana-laptop", "fingerprint": "ab12…ef01",
+                 "route": "0f1e2d3c4b5a6978", "text": _INTRO, "left": 290}],
+    "calls": [], "missed": [], "missed_limit": 20, "blocked": [], "contacts": [],
+}
 
 
-def _knock_row(**overrides) -> dict:
-    row = {
-        "receipt_id": _RECEIPT,
-        "sender_key": _SENDER,
-        "expires_at": 1_800_000_000,
-        "introduction": _INTRO,
-        "device_name": "ana-laptop",
-    }
-    row.update(overrides)
-    return row
+def _relay_with_knocks(rig: _Rig, answers: dict | None = None) -> list:
+    """The daemon's relay end: every knock action it was asked, by whom."""
+    asked = []
 
+    async def knocks(action, args, *, source_agent):
+        asked.append((action, args, source_agent))
+        if action == "list":
+            return {"snapshot": _KNOCK_SCREEN}
+        return {"text": (answers or {}).get(action, f"{action} done")}
 
-def _relay_with_knocks(rig: _Rig, rows=None):
-    """The relay end of the daemon: a stranger's knock in, decisions out."""
-    rig.daemon._relay_commands.client.state.origin = "https://agents.acme.com"
-    agent = rig.daemon._relay_agent
-    agent.submit_contact_request = AsyncMock(
-        return_value={"status": "queued", "receipt_id": "a" * 32}
-    )
-    agent.pending_contact_requests = AsyncMock(
-        return_value=[_knock_row()] if rows is None else rows
-    )
-    agent.decide_contact_request = AsyncMock(
-        return_value={"status": "accepted", "receipt_id": _RECEIPT}
-    )
-    agent.command = AsyncMock(return_value="allowed koordinator for ana-laptop")
-    agent._peer_name = lambda _key: "ana-laptop"
-    return agent
+    rig.daemon._relay_agent.knocks = knocks
+    rig.daemon._relay_agent.command = AsyncMock(return_value="allowed koordinator for ana-laptop")
+    return asked
 
 
 def _daemon_without_knock_rpcs(rig: _Rig) -> None:
@@ -1313,55 +1302,50 @@ def _daemon_without_knock_rpcs(rig: _Rig) -> None:
     real_call = rig.remote._rpc.call
 
     async def old_daemon(method, params=None, *, timeout=None):
-        if method.startswith("state.hub_contact_"):
+        if method == "state.hub_knocks":
             raise RpcMethodNotFound("method not found")
         return await real_call(method, params, timeout=timeout)
 
     rig.remote._rpc = SimpleNamespace(call=old_daemon)
 
 
-async def _open_knocks(rig: _Rig, command: str = "knocks"):
-    assert await rig.window._handle_connect_command(command) == ""
+async def _open_knocks(rig: _Rig):
+    assert await rig.window._handle_connect_command("knocks") == ""
     view, name = rig.pushed()
-    assert name == "contact-review"
+    assert name == "knocks"
     renderer = _FakeRenderer()
     await view.on_enter(renderer)
+    for _ in range(50):  # the screen's first load runs on its poll task
+        if view._snapshot is not None or view._error:
+            break
+        await asyncio.sleep(0.01)
     await view.render_frame(0.0)
     return view, renderer
 
 
 @pytest.mark.asyncio
-async def test_attached_knock_is_sent_by_the_daemon_and_prints_its_answer():
+async def test_attached_knock_is_placed_by_the_daemon_and_prints_its_answer():
     rig = _Rig()
-    agent = _relay_with_knocks(rig)
+    ringing = f"knocking on kollabor.ai/c/{_ROUTE}, rings for 5:00"
+    asked = _relay_with_knocks(rig, {"knock": ringing})
 
-    result = await rig.window._handle_connect_command(
-        f'knock kollabor.ai/c/{_ROUTE} "{_INTRO}"'
-    )
+    result = await rig.window._handle_connect_command(f'knock kollabor.ai/c/{_ROUTE} "{_INTRO}"')
 
-    assert result == f"knock sent to kollabor.ai/c/{_ROUTE}"
-    agent.submit_contact_request.assert_awaited_once_with(
-        "kollabor.ai", _ROUTE, _INTRO, source_agent="agent-1"
-    )
-    assert rig.wire_calls == [
-        (
-            "state.hub_contact_knock",
-            {"domain": "kollabor.ai", "route": _ROUTE, "introduction": _INTRO},
-        )
-    ]
+    assert result == ringing
+    knock = {"domain": "kollabor.ai", "route": _ROUTE, "text": _INTRO}
+    assert asked == [("knock", knock, "agent-1")]
+    assert rig.wire_calls == [("state.hub_knocks", {"action": "knock", "args": knock})]
 
 
 @pytest.mark.asyncio
 async def test_attached_knock_prints_the_daemons_refusal():
     rig = _Rig()
-    agent = _relay_with_knocks(rig)
-    agent.submit_contact_request.return_value = {"error": "unknown_route"}
+    refusal = "connect: this device knocks through agents.acme.com; knock a route on agents.acme.com"
+    _relay_with_knocks(rig, {"knock": refusal})
 
-    result = await rig.window._handle_connect_command(
-        f'knock kollabor.ai/c/{_ROUTE} "{_INTRO}"'
-    )
+    result = await rig.window._handle_connect_command(f'knock kollabor.ai/c/{_ROUTE} "{_INTRO}"')
 
-    assert result == "connect: no one is registered at that route right now"
+    assert result == refusal
 
 
 @pytest.mark.asyncio
@@ -1369,9 +1353,11 @@ async def test_attached_knock_usage_errors_never_reach_the_daemon():
     rig = _Rig()
     _relay_with_knocks(rig)
 
-    assert await rig.window._handle_connect_command("knock") == (
-        'connect: use /connect knock <route> "text"'
+    assert await rig.window._handle_connect_command("knock") == 'connect: use /connect knock <route> "text"'
+    assert await rig.window._handle_connect_command("knocks sometimes") == (
+        "connect: use /connect knocks [everyone|contacts|nobody] [for 30m|2h|1d]"
     )
+    assert await rig.window._handle_connect_command("block ana-laptop") == "connect: use /connect block <route>"
     assert rig.wire_calls == []
 
 
@@ -1380,9 +1366,7 @@ async def test_attached_knock_and_knocks_keep_a_plain_refusal_on_an_old_daemon()
     rig = _Rig()
     _daemon_without_knock_rpcs(rig)
 
-    knock = await rig.window._handle_connect_command(
-        f'knock kollabor.ai/c/{_ROUTE} "{_INTRO}"'
-    )
+    knock = await rig.window._handle_connect_command(f'knock kollabor.ai/c/{_ROUTE} "{_INTRO}"')
     knocks = await rig.window._handle_connect_command("knocks")
 
     assert knock == _NO_DAEMON_SUPPORT
@@ -1391,105 +1375,58 @@ async def test_attached_knock_and_knocks_keep_a_plain_refusal_on_an_old_daemon()
 
 
 @pytest.mark.asyncio
-async def test_attached_knocks_opens_the_review_with_the_daemons_pending_knocks():
+async def test_attached_knocks_opens_the_screen_with_the_daemons_knocks():
     rig = _Rig()
-    agent = _relay_with_knocks(rig)
+    asked = _relay_with_knocks(rig)
 
     view, renderer = await _open_knocks(rig)
 
     text = renderer.text()
-    assert "ana-laptop" in text
-    assert "fingerprint" in text
+    assert "ana-laptop" in text and "fingerprint ab12…ef01" in text
     assert "Ana from Acme." in text
-    assert _SENDER not in text and "relay:" not in text
-    # The window never guesses the network: the daemon fills in its own, once.
-    agent.pending_contact_requests.assert_awaited_once_with(
-        "agents.acme.com", source_agent="agent-1"
-    )
-    assert rig.wire_calls == [("state.hub_contact_pending", {"domain": ""})]
+    assert _SENDER not in text and _KNOCK_ID not in text and "relay:" not in text
+    assert asked[0] == ("list", {}, "agent-1")
+    assert rig.wire_calls[0] == ("state.hub_knocks", {"action": "list", "args": {}})
     await view.on_complete()
 
 
 @pytest.mark.asyncio
-async def test_attached_knocks_with_a_domain_asks_the_daemon_for_that_directory():
+@pytest.mark.parametrize("key, action", [("a", "accept"), ("r", "reject"), ("b", "block")])
+async def test_attached_knock_screen_answers_on_the_daemon(key, action):
     rig = _Rig()
-    agent = _relay_with_knocks(rig)
-
-    view, _ = await _open_knocks(rig, "knocks other.example")
-
-    agent.pending_contact_requests.assert_awaited_once_with(
-        "other.example", source_agent="agent-1"
-    )
-    await view.on_complete()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "key, decision, said",
-    [
-        ("a", "accept", "accepted ana-laptop"),
-        ("r", "reject", "rejected ana-laptop."),
-    ],
-)
-async def test_attached_knock_review_decides_on_the_daemon(key, decision, said):
-    rig = _Rig()
-    agent = _relay_with_knocks(rig)
-    if decision == "reject":
-        agent.decide_contact_request.return_value = {
-            "status": "rejected",
-            "receipt_id": _RECEIPT,
-        }
+    said = {
+        "accept": "accepted ana-laptop. /connect allow ana-laptop <agent> lets it message one of your agents",
+        "reject": "rejected ana-laptop",
+        "block": "blocked ana-laptop",
+    }
+    asked = _relay_with_knocks(rig, said)
     view, renderer = await _open_knocks(rig)
 
     await view.handle_input(_key(key))
     await view.render_frame(0.0)
 
-    agent.decide_contact_request.assert_awaited_once_with(
-        "agents.acme.com",
-        _RECEIPT,
-        decision=decision,
-        source_agent="agent-1",
-        sender_key=_SENDER,
-        device_name="ana-laptop",
-    )
-    assert said in renderer.text()
-    if decision == "accept":
-        assert "/connect allow ana-laptop <agent>" in " ".join(renderer.text().split())
+    assert (action, {"id": _KNOCK_ID}, "agent-1") in asked
+    assert said[action] in " ".join(renderer.text().split())
     await view.on_complete()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "error, reason",
+    "command, action, args",
     [
-        ("already_named", "this device is already on your network as ana-laptop"),
-        ("name_taken", "that device name is already on this network"),
-        ("capacity", "too many approved devices or pending knocks"),
-        ("transport", "try again"),
+        ("knocks contacts for 2h", "mode", {"mode": "contacts", "minutes": 120}),
+        ("knocks nobody", "mode", {"mode": "nobody", "minutes": 0}),
+        (f"expect kollabor.ai/c/{_ROUTE}", "expect", {"route": _ROUTE}),
+        (f"block {_ROUTE.upper()}", "block_route", {"route": _ROUTE}),
+        (f"unblock {_ROUTE}", "unblock", {"route": _ROUTE}),
     ],
 )
-async def test_attached_knock_review_says_why_the_daemon_could_not_accept(error, reason):
+async def test_attached_knock_settings_go_to_the_daemon(command, action, args):
     rig = _Rig()
-    agent = _relay_with_knocks(rig)
-    agent.decide_contact_request.return_value = {"error": error}
-    view, renderer = await _open_knocks(rig)
+    asked = _relay_with_knocks(rig)
 
-    await view.handle_input(_key("a"))
-    await view.render_frame(0.0)
-
-    assert f"could not accept ana-laptop: {reason}" in renderer.text()
-    await view.on_complete()
-
-
-@pytest.mark.asyncio
-async def test_attached_knock_review_drops_a_hostile_row_from_the_daemon():
-    rig = _Rig()
-    _relay_with_knocks(rig, rows=[_knock_row(sender_key="not a key")])
-
-    view, renderer = await _open_knocks(rig)
-
-    assert "knock inbox is unavailable" in renderer.text()
-    await view.on_complete()
+    assert await rig.window._handle_connect_command(command) == f"{action} done"
+    assert asked == [(action, args, "agent-1")]
 
 
 @pytest.mark.asyncio
@@ -1506,77 +1443,54 @@ async def test_attached_allow_after_an_accept_goes_to_the_daemon_by_name():
 
 
 @pytest.mark.asyncio
-async def test_contact_handlers_reject_bad_shapes_before_the_daemon():
-    state = SimpleNamespace(
-        hub_contact_knock=AsyncMock(return_value="knock sent"),
-        hub_contact_pending=AsyncMock(return_value=[]),
-        hub_contact_decide=AsyncMock(return_value=""),
-    )
+async def test_the_knock_handler_rejects_bad_shapes_before_the_daemon():
+    state = SimpleNamespace(hub_knocks=AsyncMock(return_value={"text": "knocking"}))
     server = RpcServer()
     register_state_handlers(server, state)
 
-    async def call(method, **params):
+    async def call(**params):
         reply = await server.handle_request(
-            RpcRequest(request_id="r", method=f"state.{method}", params=params)
+            RpcRequest(request_id="r", method="state.hub_knocks", params=params)
         )
         return reply.result
 
-    knock = dict(domain="kollabor.ai", route=_ROUTE, introduction=_INTRO)
+    knock = {"action": "knock", "args": {"domain": "kollabor.ai", "route": _ROUTE, "text": _INTRO}}
     for bad in (
-        {**knock, "route": "8F3A"},
-        {**knock, "domain": ""},
-        {**knock, "domain": "bad\x00domain"},
-        {**knock, "introduction": ""},
-        {**knock, "introduction": "x" * 2049},
         {**knock, "extra": 1},
+        {"action": "knock"},
+        {**knock, "action": ["knock"]},
+        {**knock, "action": ""},
+        {**knock, "action": "k" * 33},
+        {**knock, "args": "text"},
+        {**knock, "args": {"text": "x" * 9000}},
     ):
-        assert await call("hub_contact_knock", **bad) == {"error": "invalid knock request"}
-    assert await call("hub_contact_pending", domain=["x"]) == {
-        "error": "invalid knock inbox request"
-    }
-    decide = dict(
-        domain="",
-        receipt_id=_RECEIPT,
-        decision="accept",
-        sender_key=_SENDER,
-        device_name="ana-laptop",
-    )
-    for bad in (
-        {**decide, "receipt_id": "nope"},
-        {**decide, "sender_key": "c" * 63},
-        {**decide, "decision": "delete"},
-        {**decide, "decision": ["accept"]},
-        {**decide, "device_name": "x" * 257},
-        {**decide, "extra": 1},
-    ):
-        assert await call("hub_contact_decide", **bad) == {"error": "invalid knock decision"}
-    state.hub_contact_knock.assert_not_awaited()
-    state.hub_contact_pending.assert_not_awaited()
-    state.hub_contact_decide.assert_not_awaited()
+        assert await call(**bad) == {"error": "invalid knock request"}
+    state.hub_knocks.assert_not_awaited()
 
-    assert await call("hub_contact_knock", **knock) == {"text": "knock sent"}
-    assert await call("hub_contact_pending", domain="") == {"requests": []}
-    assert await call("hub_contact_decide", **decide) == {"reason": ""}
-    state.hub_contact_decide.assert_awaited_once_with(
-        "", _RECEIPT, "accept", _SENDER, "ana-laptop"
-    )
+    assert await call(**knock) == {"text": "knocking"}
+    state.hub_knocks.assert_awaited_once_with("knock", knock["args"])
+    for answer in ({"text": "x", "extra": 1}, ["text"], RuntimeError("relay down")):
+        state.hub_knocks = AsyncMock(side_effect=answer) if isinstance(answer, Exception) else AsyncMock(
+            return_value=answer
+        )
+        server = RpcServer()
+        register_state_handlers(server, state)
+        assert await call(**knock) == {"error": "knocks are unavailable"}
 
 
 @pytest.mark.asyncio
 async def test_remote_knock_answers_are_printable_bounded_and_errors_raise():
     reply = {"text": "sent\x1b[31m " + "x" * 400}
-    remote = RemoteStateService(SimpleNamespace(call=AsyncMock(return_value=reply)))
+    rpc = AsyncMock(return_value=reply)
+    remote = RemoteStateService(SimpleNamespace(call=rpc))
 
-    text = await remote.hub_contact_knock("kollabor.ai", _ROUTE, _INTRO)
+    answer = await remote.hub_knocks("knock", {"domain": "kollabor.ai", "route": _ROUTE, "text": _INTRO})
 
-    assert "\x1b" not in text
-    assert len(text) == 200
-    failing = RemoteStateService(
-        SimpleNamespace(call=AsyncMock(return_value={"error": "knock could not be sent"}))
-    )
-    with pytest.raises(ValueError):
-        await failing.hub_contact_knock("kollabor.ai", _ROUTE, _INTRO)
-    with pytest.raises(ValueError):
-        await failing.hub_contact_pending("")
-    with pytest.raises(ValueError):
-        await failing.hub_contact_decide("", _RECEIPT, "accept", _SENDER, "ana-laptop")
+    assert "\x1b" not in answer["text"] and len(answer["text"]) == 200
+    assert rpc.await_args.kwargs["timeout"] >= 45  # a knock waits on the directory
+    rpc.return_value = {"snapshot": _KNOCK_SCREEN}
+    assert await remote.hub_knocks("list", {}) == {"snapshot": _KNOCK_SCREEN}
+    for bad in ({"error": "knocks are unavailable"}, {"text": 7}, {"snapshot": []}, "text"):
+        rpc.return_value = bad
+        with pytest.raises(ValueError):
+            await remote.hub_knocks("list", {})

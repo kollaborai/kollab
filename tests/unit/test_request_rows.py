@@ -1,13 +1,13 @@
-"""Request rows (knock review, Connect screen) fit the terminal whatever a sender sends.
+"""Request rows (knock screen, Connect screen) fit the terminal whatever a sender sends.
 
 A sender picks the device name and the introduction. Rows are measured in
 terminal columns (CJK is two wide), a valid name shows whole and is cut, with
 an ellipsis, only when its row is wider than the terminal, tabs are dropped,
-and the `[a]ccept [r]eject` hint is whole or absent, never cut mid-token.
+and the `[a]ccept [r]eject` hint (`[a]ccept [r]eject [b]lock` on a ringing
+knock) is whole or absent, never cut mid-token.
 """
 
 import re
-import time
 
 import pytest
 
@@ -19,8 +19,7 @@ from plugins.altview.connect_altview import (
     ConnectScreenState,
     connect_screen_lines,
 )
-from plugins.altview.contact_altview import ContactReviewAltView
-from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
+from plugins.altview.knocks_altview import KnockScreenAltView
 from plugins.hub.device_names import (
     NAME_DISPLAY_MAX,
     NAME_RE,
@@ -33,6 +32,7 @@ from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 HINT = "[a]ccept [r]eject"
+KNOCK_HINT = "[a]ccept [r]eject [b]lock"
 WIDTHS = [60, 80, 120]
 # The longest device name NAME_RE allows: 63 characters, every one valid.
 LONGEST = "-".join(["lab"] * 16)
@@ -152,26 +152,24 @@ def test_request_row_splits_instead_of_wrapping_when_narrow():
 
 
 async def _review(width, name, intro, *, count=1):
-    requests = [
-        PendingContactRequest(
-            str(index) * 32,
-            str(index) * 64,
-            int(time.time()) + 600,
-            PrivateMessage(intro),
-            name,
-        )
-        for index in range(1, count + 1)
-    ]
+    snapshot = {
+        "online": True, "domain": "relay.example", "mode": "everyone", "mode_until": 0,
+        "missed_limit": 20, "calls": [], "missed": [], "blocked": [], "contacts": [],
+        "ringing": [
+            {"id": str(index) * 32, "device": name, "fingerprint": "ab12…ef01",
+             "route": "8f3a2c1d9e4b7a60", "text": intro, "left": 290}
+            for index in range(1, count + 1)
+        ],
+    }
     renderer = _Renderer((width, 30))
 
-    async def load():
-        return requests
+    async def act(action, _args):
+        shown = display_name(name)
+        return f"accepted {shown}. /connect allow {shown} <agent> lets it message one of your agents"
 
-    async def decide(_request, _decision):
-        return None
-
-    view = ContactReviewAltView("relay.example", load, decide)
+    view = KnockScreenAltView(lambda: snapshot, act)
     await view.on_enter(renderer)
+    await view._refresh()
     await view.render_frame(0)
     return view, renderer
 
@@ -188,8 +186,8 @@ async def test_knock_rows_fit_the_width_with_a_hostile_name_and_introduction(wid
     assert "\t" not in text and "\x1b" not in text and "‮" not in text
     if display_width(name) > NAME_DISPLAY_MAX:
         assert name not in text  # only the capped name is ever printed
-    assert HINT in text  # the selected row keeps its whole hint
-    _assert_hint_whole(text)
+    assert KNOCK_HINT in text  # the selected row keeps its whole hint
+    assert text.count("[b]lock") == text.count(KNOCK_HINT)
 
 
 @pytest.mark.asyncio
@@ -199,10 +197,10 @@ async def test_several_knock_rows_fit_and_only_the_selected_row_carries_the_hint
 
     for x, _y, line in renderer.lines:
         assert x + display_width(line) <= width
-    assert renderer.text().count(HINT) == 1
+    assert renderer.text().count(KNOCK_HINT) == 1
     await view.handle_input(KeyPress(name="ArrowDown", code=0, char=None, type=KeyType.SPECIAL))
     await view.render_frame(0)
-    assert renderer.text().count(HINT) == 1
+    assert renderer.text().count(KNOCK_HINT) == 1
     assert all(x + display_width(line) <= width for x, _y, line in renderer.lines)
 
 
@@ -440,21 +438,22 @@ async def test_the_joined_line_is_cut_by_width_with_an_ellipsis_not_mid_characte
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", [80, 120])
-async def test_a_knock_row_shows_the_longest_name_in_full_when_it_fits(width):
-    _view, renderer = await _review(width, LONGEST, "hi")
+async def test_a_knock_row_shows_the_longest_name_in_full_at_120_columns():
+    _view, renderer = await _review(120, LONGEST, "hi")
 
     assert f"1. {LONGEST}" in renderer.text()
-    assert all(x + display_width(line) <= width for x, _y, line in renderer.lines)
+    assert all(x + display_width(line) <= 120 for x, _y, line in renderer.lines)
 
 
 @pytest.mark.asyncio
-async def test_a_knock_row_cuts_the_longest_name_with_an_ellipsis_on_a_narrow_terminal():
-    _view, renderer = await _review(60, LONGEST, "hi")
+@pytest.mark.parametrize("width", [60, 80])
+async def test_a_knock_row_cuts_the_longest_name_with_an_ellipsis_on_a_narrower_terminal(width):
+    _view, renderer = await _review(width, LONGEST, "hi")
 
     assert LONGEST not in renderer.text()
-    ((x, _y, row),) = [r for r in renderer.lines if r[2].lstrip().startswith("1. ")]
-    assert row.endswith("…") and x + display_width(row) == 60
+    ((x, _y, row),) = [r for r in renderer.lines if "> 1. " in r[2]]
+    assert row.endswith("…") and x + display_width(row) == width
+    assert KNOCK_HINT in renderer.text()  # the keys stay whole on a line of their own
 
 
 @pytest.mark.asyncio

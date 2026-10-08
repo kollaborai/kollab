@@ -60,24 +60,26 @@ Trust is one setting per network, `/connect trust <level>`:
 
 ## Strangers
 
-Someone outside your network can introduce themselves. Your `/connect status` shows a contact route such as `kollabor.ai/c/8f3a2c1d9e4b7a60`. Give it to them; they run:
+Someone outside your network can knock, and a knock is a call: it rings your device for 5 minutes while it is online, and the directory keeps nothing. Your `/connect status` shows a contact route such as `kollabor.ai/c/8f3a2c1d9e4b7a60`. Give it to them; they run:
 
 ```text
 /connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Acme. Can your ops agent review a nginx config?"
 ```
 
-`/connect knocks` shows what you received, with the sender's device name and fingerprint, and `a` accepts or `r` rejects. Accepting records the device with `agents` trust and nothing allowed until you allow an agent:
+Your terminal says `ana-laptop is knocking. /connect knocks to answer`. `/connect knocks` shows the ringing knock with the sender's device name, fingerprint and text: `a` accepts, `r` rejects, `b` blocks. A knock nobody answers lands under missed (on your device, 20 at most), where `k` knocks back. Accepting records the device with `agents` trust and nothing allowed until you allow an agent:
 
 ```text
 /connect allow ana-laptop ops
 ```
 
-Now Ana's agents can message `ops@laptop-kollab` and nothing else. Ana never joins your network: her device stays in her own, and the directory passes messages between the two devices only because each side consented, she when she knocked and you when you accepted. She sees only the agents you allowed, in her roster as `ops@laptop-kollab`, and `ops` can answer the agent she knocked from. Her device needs to be on the same directory as yours (kollabor.ai here) when she knocks.
+Now Ana's agents can message `ops@laptop-kollab` and nothing else. Ana never joins your network: her device stays in her own, and the directory passes messages between the two devices only because each side consented, you when you accepted and she when your accept reached her. She sees only the agents you allowed, in her roster as `ops@laptop-kollab`, and `ops` can answer the agent she knocked from. Her device needs to be on the same directory as yours (kollabor.ai here) when she knocks.
 
 - `/connect deny ana-laptop ops` (or without the agent) stops delivery at once.
 - `/connect revoke ana-laptop` removes the device and the link at the directory.
 - `/connect status` lists her allowed agents with `trust agents` next to them.
-- If the directory is older than 0.11.0, the knock and the accept work but nothing is delivered between the two networks until the directory is upgraded.
+- Ana hears `unavailable` for anything but an accept: you were offline, nobody answered, you rejected or blocked her, or you let nobody knock. Her device redials for an hour.
+- `/connect knocks contacts for 2h` lets only your contacts knock for two hours; `nobody` is do not disturb. `/connect expect <route>` accepts that route's first knock without asking.
+- A directory that cannot carry knocks says `<domain> needs an update to carry knocks`.
 
 ## Run your own directory
 

@@ -750,16 +750,50 @@ class LocalStateService(StateService):
                     )
                 )
 
+            device, remote = "", []
+            try:
+                device, remote = await hub.network_agent_rows()
+            except Exception as e:
+                logger.debug(f"hub network rows error: {e}")
+
             return HubSnapshot(
                 my_identity=my_identity,
                 my_agent_id=my_agent_id,
                 my_is_coordinator=my_is_coordinator,
                 peer_count=len(peers),
                 roster=peers,
+                device=device,
+                remote=remote,
             )
         except Exception as e:
             logger.debug(f"get_hub_state error: {e}")
             return HubSnapshot()
+
+    async def set_hub_participation(self, enabled: bool) -> dict[str, Any]:
+        """Flip the hub plugin's solo mode, then rebuild the system prompt,
+        whose hub sections render only on the mesh."""
+        hub = None
+        if self._event_bus is not None:
+            try:
+                hub = self._event_bus.get_service("hub_plugin")
+            except Exception as e:
+                logger.debug(f"event_bus.get_service(hub_plugin) error: {e}")
+        if hub is None or not hasattr(hub, "set_solo"):
+            raise ValueError("this agent runs no hub")
+        await hub.set_solo(not enabled)
+
+        llm = self._llm_service
+        if llm is not None and hasattr(llm, "rebuild_system_prompt"):
+            try:
+                import inspect as _inspect
+
+                result = llm.rebuild_system_prompt()
+                if _inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                logger.warning(f"rebuild_system_prompt error: {e}")
+        logger.info(f"hub participation {'on' if enabled else 'off'} via state_service")
+        return {"hub": enabled}
 
     # === Processing ===
 
@@ -2311,40 +2345,13 @@ class LocalStateService(StateService):
             return "connect screen is unavailable"
         return str(await handler(enrollment_id, decision) or "")
 
-    async def hub_contact_knock(
-        self, domain: str, route: str, introduction: str
-    ) -> str:
-        """Send a knock through the Hub that owns the relay."""
+    async def hub_knocks(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        """One knock action through the Hub that owns the relay."""
         hub = self._resolve_hub_plugin()
-        handler = getattr(hub, "_send_knock", None)
+        handler = getattr(hub, "_knocks", None)
         if handler is None:
-            return "connect: knock is unavailable"
-        return str(await handler(domain, route, introduction))
-
-    async def hub_contact_pending(self, domain: str) -> list[dict[str, Any]]:
-        """The knocks the Hub that owns the relay holds for this device."""
-        hub = self._resolve_hub_plugin()
-        handler = getattr(hub, "_contact_pending", None)
-        if handler is None:
-            raise ValueError("knock review is unavailable")
-        return await handler(domain)
-
-    async def hub_contact_decide(
-        self,
-        domain: str,
-        receipt_id: str,
-        decision: str,
-        sender_key: str,
-        device_name: str,
-    ) -> str:
-        """Accept or reject one knock through the Hub that owns the relay."""
-        hub = self._resolve_hub_plugin()
-        handler = getattr(hub, "_decide_contact_request", None)
-        if handler is None:
-            return "knock review is unavailable"
-        return str(
-            await handler(domain, receipt_id, decision, sender_key, device_name) or ""
-        )
+            return {"text": "connect: knocks are unavailable"}
+        return await handler(action, args)
 
     async def hub_connect(self, command: str) -> str:
         hub = self._resolve_hub_plugin()

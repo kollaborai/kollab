@@ -27,6 +27,8 @@ def _route(route_id: str = "c" * 32) -> dict[str, str]:
         "session": "3" * 32,
         "id": "4" * 32,
         "ciphertext": "A" * 128,
+        "kind": "message",
+        "ticket": "",
     }
 
 

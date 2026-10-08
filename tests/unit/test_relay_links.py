@@ -1,8 +1,9 @@
 """Cross-room links: two keys that consented to each other reach each other.
 
 Runs the real relay app (in-memory backend) and speaks its WebSocket protocol.
-The relay must route between rooms only for two keys that each signed a
-declaration naming the other, and must keep same-room routing as it was.
+The relay must route between rooms only for two keys that each declared the
+other (a `links` frame on their own session), and must keep same-room routing
+as it was.
 """
 
 from __future__ import annotations
@@ -22,36 +23,20 @@ from plugins.hub import relay_service as service
 
 ORIGIN = "https://relay.example"
 NODE_ID = "a" * 32
-PATH = service.CONTACT_LINKS_PATH
 
 
 def _ciphertext() -> str:
     return base64.b64encode(secrets.token_bytes(24)).decode("ascii")
 
 
-def links_frame(
-    signer: SigningKey,
-    peers,
-    *,
-    key: str | None = None,
-    issued_at: int | None = None,
-    nonce: str | None = None,
-    path: str = PATH,
-    **extra,
-) -> dict:
-    """A signed declaration, built the way the client builds it."""
-    body = {
-        "v": 1,
-        "key": key or signer.verify_key.encode().hex(),
+def links_frame(peers, *, issued_at: int | None = None, **extra) -> dict:
+    """A declaration, built the way the client builds it."""
+    return {
+        "type": "links",
         "peers": sorted(peers),
         "issued_at": int(time.time()) if issued_at is None else issued_at,
-        "nonce": nonce or secrets.token_hex(16),
         **extra,
     }
-    signature = signer.sign(
-        service.contact_signature_message(ORIGIN, "POST", path, body)
-    ).signature.hex()
-    return {**body, "signature": signature}
 
 
 class Device:
@@ -67,6 +52,7 @@ class Device:
         self.peers: list[dict] = []
         self.messages: asyncio.Queue = asyncio.Queue()
         self.errors: asyncio.Queue = asyncio.Queue()
+        self.results: asyncio.Queue = asyncio.Queue()
         self._changed = asyncio.Event()
         self._reader: asyncio.Task | None = None
 
@@ -102,6 +88,9 @@ class Device:
                     self.messages.put_nowait(frame)
                 elif frame["type"] == "error":
                     self.errors.put_nowait(frame)
+                else:
+                    self.results.put_nowait(frame)
+                self._changed.set()
         except (asyncio.CancelledError, RuntimeError):
             pass
 
@@ -119,11 +108,22 @@ class Device:
         )
         return message_id
 
-    async def declare(self, peers, **kwargs) -> tuple[int, dict]:
-        response = await self.client.post(
-            PATH, json=links_frame(self.signing, peers, **kwargs)
-        )
-        return response.status, await response.json()
+    async def declare(self, peers, **kwargs) -> str:
+        """The relay's `links_result`, or the code of the error it sent instead."""
+        await self.ws.send_json(links_frame(peers, **kwargs))
+        return await self.answer("links_result")
+
+    async def answer(self, kind: str, timeout: float = 2.0) -> str:
+        async with asyncio.timeout(timeout):
+            while True:
+                if not self.errors.empty():
+                    return self.errors.get_nowait()["code"]
+                while not self.results.empty():
+                    frame = self.results.get_nowait()
+                    if frame["type"] == kind:
+                        return frame["result"]
+                self._changed.clear()
+                await self._changed.wait()
 
     def sees(self, other: "Device") -> bool:
         return any(row["key"] == other.key for row in self.peers)
@@ -167,8 +167,8 @@ async def relay(monkeypatch):
 
 async def link(a: Device, b: Device) -> None:
     """Both sides declare each other and see each other online."""
-    assert (await a.declare([b.key]))[0] == 200
-    assert (await b.declare([a.key]))[0] == 200
+    assert await a.declare([b.key]) == "stored"
+    assert await b.declare([a.key]) == "stored"
     await a.until(lambda: a.sees(b))
     await b.until(lambda: b.sees(a))
 
@@ -183,16 +183,14 @@ async def test_two_rooms_reach_each_other_only_after_both_declared(relay):
     assert (await ana.next_error())["code"] == "peer_offline"
 
     # One side alone: the relay learns a consent, not a link.
-    status, body = await ana.declare([marco.key])
-    assert (status, body) == (200, {"status": "stored"})
+    assert await ana.declare([marco.key]) == "stored"
     await ana.send(marco.key)
     assert (await ana.next_error())["code"] == "peer_offline"
     await marco.send(ana.key)
     assert (await marco.next_error())["code"] == "peer_offline"
     assert marco.messages.empty() and ana.messages.empty()
 
-    status, _ = await marco.declare([ana.key])
-    assert status == 200
+    assert await marco.declare([ana.key]) == "stored"
     await ana.until(lambda: ana.sees(marco))
     await marco.until(lambda: marco.sees(ana))
 
@@ -288,8 +286,7 @@ async def test_withdrawing_a_declaration_cuts_delivery_at_once(relay):
     marco = await relay.make_device()
     await link(ana, marco)
 
-    status, _ = await marco.declare([])
-    assert status == 200
+    assert await marco.declare([]) == "stored"
     await ana.until(lambda: not ana.sees(marco))
     await marco.until(lambda: not marco.sees(ana))
     await ana.send(marco.key)
@@ -334,9 +331,9 @@ async def test_presence_of_a_linked_device_follows_its_connection(relay):
 async def test_a_device_that_connects_after_the_link_is_told_at_registration(relay):
     ana = await relay.make_device()
     marco = await relay.make_device()
-    assert (await marco.declare([ana.key]))[0] == 200
+    assert await marco.declare([ana.key]) == "stored"
     await marco.disconnect()  # both consent; Marco is offline when Ana does
-    assert (await ana.declare([marco.key]))[0] == 200
+    assert await ana.declare([marco.key]) == "stored"
     assert not ana.sees(marco)
 
     reborn = Device(relay, room=marco.room)
@@ -351,77 +348,48 @@ async def test_a_device_that_connects_after_the_link_is_told_at_registration(rel
 
 
 @pytest.mark.asyncio
-async def test_only_a_registered_key_may_declare(relay):
+async def test_a_declaration_is_always_the_sessions_own_key(relay):
     ana = await relay.make_device()
-    stranger = Device(relay)  # a key that never registered
-
-    status, body = await stranger.declare([ana.key])
-    assert (status, body) == (403, {"error": "unauthorized"})
+    marco = await relay.make_device()
+    # The frame has no key: naming one, even the sender's own, is refused.
+    assert await marco.declare([ana.key], key=ana.key) == "invalid_frame"
+    assert await marco.declare([ana.key], key=marco.key) == "invalid_frame"
     assert relay.app["relay_state"].backend.link_declarations == {}
-
-    await stranger.connect()
-    assert (await stranger.declare([ana.key]))[0] == 200
-    await stranger.disconnect()  # gone again: it can no longer declare or withdraw
-    assert (await stranger.declare([]))[0] == 403
+    assert await marco.declare([ana.key]) == "stored"
+    assert set(relay.app["relay_state"].backend.link_declarations) == {marco.key}
 
 
 @pytest.mark.asyncio
-async def test_forged_or_malformed_declarations_are_refused(relay):
+async def test_malformed_declarations_are_refused(relay):
     ana = await relay.make_device()
     marco = await relay.make_device()
-    eve = SigningKey.generate()
+    eve = SigningKey.generate().verify_key.encode().hex()
+    now = int(time.time())
 
-    async def post(frame):
-        response = await relay.post(PATH, json=frame)
-        return response.status, await response.json()
-
-    # Eve signs a declaration in Marco's name.
-    status, body = await post(links_frame(eve, [ana.key], key=marco.key))
-    assert (status, body) == (401, {"error": "invalid_contact"})
-    # A signed declaration cannot be edited afterwards.
-    good = links_frame(marco.signing, [ana.key])
-    edited = {**good, "peers": [eve.verify_key.encode().hex()]}
-    assert (await post(edited))[0] == 401
-    # A signature for another route does not count here.
-    other = links_frame(marco.signing, [ana.key], path=service.CONTACT_DECISIONS_PATH)
-    assert (await post(other))[0] == 401
     # Stale or future timestamps.
-    assert (await post(links_frame(marco.signing, [ana.key], issued_at=int(time.time()) - 600)))[0] == 401
-    assert (await post(links_frame(marco.signing, [ana.key], issued_at=int(time.time()) + 600)))[0] == 401
-    # Replay of a valid frame.
-    fresh = links_frame(marco.signing, [ana.key])
-    assert (await post(fresh))[0] == 200
-    assert await post(fresh) == (409, {"error": "replayed"})
-    # Shape: self link, duplicates, unsorted, bad hex, too many, extra field.
-    assert (await post(links_frame(marco.signing, [marco.key])))[0] == 400
-    unsorted = links_frame(marco.signing, [])
-    low, high = sorted([ana.key, eve.verify_key.encode().hex()])
-    unsorted["peers"] = [high, low]
-    body = {k: v for k, v in unsorted.items() if k != "signature"}
-    signed = marco.signing.sign(
-        service.contact_signature_message(ORIGIN, "POST", PATH, body)
-    ).signature.hex()
-    assert (await post({**body, "signature": signed}))[0] == 400
-    duplicate = {**body, "peers": [ana.key, ana.key]}
-    duplicate["signature"] = marco.signing.sign(
-        service.contact_signature_message(ORIGIN, "POST", PATH, duplicate)
-    ).signature.hex()
-    assert (await post(duplicate))[0] == 400
-    assert (await post(links_frame(marco.signing, ["z" * 64])))[0] == 400
-    too_many = [SigningKey.generate().verify_key.encode().hex() for _ in range(relay_backend.MAX_LINK_PEERS + 1)]
-    assert (await post(links_frame(marco.signing, too_many)))[0] == 400
-    assert (await post(links_frame(marco.signing, [ana.key], surplus=1)))[0] == 400
-    missing = links_frame(marco.signing, [ana.key])
-    del missing["nonce"]
-    assert (await post(missing))[0] == 400
+    assert await marco.declare([ana.key], issued_at=now - 600) == "invalid_frame"
+    assert await marco.declare([ana.key], issued_at=now + 600) == "invalid_frame"
+    # Shape: self link, unsorted, duplicates, bad hex, too many, extra field.
+    assert await marco.declare([marco.key]) == "invalid_frame"
+    low, high = sorted([ana.key, eve])
+    await marco.ws.send_json({"type": "links", "peers": [high, low], "issued_at": now})
+    assert await marco.answer("links_result") == "invalid_frame"
+    await marco.ws.send_json({"type": "links", "peers": [ana.key, ana.key], "issued_at": now})
+    assert await marco.answer("links_result") == "invalid_frame"
+    assert await marco.declare(["z" * 64]) == "invalid_frame"
+    too_many = [
+        SigningKey.generate().verify_key.encode().hex()
+        for _ in range(relay_backend.MAX_LINK_PEERS + 1)
+    ]
+    assert await marco.declare(too_many) == "invalid_frame"
+    assert await marco.declare([ana.key], surplus=1) == "invalid_frame"
+    await marco.ws.send_json({"type": "links", "peers": [ana.key]})
+    assert await marco.answer("links_result") == "invalid_frame"
 
-    # Nothing above created a link: Ana never declared Marco.
+    # Nothing above created a link: Ana never declared Marco, and nothing was stored.
     await marco.send(ana.key)
     assert (await marco.next_error())["code"] == "peer_offline"
-    # Only the one accepted declaration is stored.
-    backend = relay.app["relay_state"].backend
-    assert set(backend.link_declarations) == {marco.key}
-    assert backend.link_declarations[marco.key][1] == frozenset({ana.key})
+    assert relay.app["relay_state"].backend.link_declarations == {}
 
 
 @pytest.mark.asyncio
@@ -429,32 +397,27 @@ async def test_a_delayed_older_declaration_cannot_undo_a_newer_one(relay):
     ana = await relay.make_device()
     marco = await relay.make_device()
     now = int(time.time())
-    assert (await marco.declare([ana.key], issued_at=now))[0] == 200
-    assert (await marco.declare([], issued_at=now + 5))[0] == 200  # the withdrawal
-    status, body = await marco.declare([ana.key], issued_at=now + 1)  # arrives late
-    assert (status, body) == (409, {"error": "conflict"})
+    assert await marco.declare([ana.key], issued_at=now) == "stored"
+    assert await marco.declare([], issued_at=now + 5) == "stored"  # the withdrawal
+    assert await marco.declare([ana.key], issued_at=now + 1) == "stale"  # arrives late
     declared = relay.app["relay_state"].backend.link_declarations
     assert declared[marco.key][1] == frozenset()  # still withdrawn
 
 
 @pytest.mark.asyncio
-async def test_declarations_are_rate_limited_and_capacity_bounded(relay, monkeypatch):
+async def test_declarations_are_capacity_bounded(relay, monkeypatch):
     marco = await relay.make_device()
     other, first, second, third = [await relay.make_device() for _ in range(4)]
-    monkeypatch.setattr(service, "ENROLLMENT_RATE_LIMIT", 2)
-    statuses = [(await other.declare([marco.key]))[0] for _ in range(3)]
-    assert statuses == [200, 200, 429]
-
-    monkeypatch.setattr(service, "ENROLLMENT_RATE_LIMIT", 1000)
+    assert await other.declare([marco.key]) == "stored"
     monkeypatch.setattr(relay_backend, "MAX_ACTIVE_LINK_DECLARATIONS", 3)
     # `other` is stored already; two more fit and the next one is refused
-    assert (await first.declare([marco.key]))[0] == 200
-    assert (await second.declare([marco.key]))[0] == 200
-    assert await third.declare([marco.key]) == (429, {"error": "capacity"})
+    assert await first.declare([marco.key]) == "stored"
+    assert await second.declare([marco.key]) == "stored"
+    assert await third.declare([marco.key]) == "capacity"
     # a stored key can still update, and withdrawing frees its slot
-    assert (await other.declare([marco.key]))[0] == 200
-    assert (await other.declare([]))[0] == 200
-    assert (await third.declare([marco.key]))[0] == 200
+    assert await other.declare([marco.key]) == "stored"
+    assert await other.declare([]) == "stored"
+    assert await third.declare([marco.key]) == "stored"
 
 
 @pytest.mark.asyncio

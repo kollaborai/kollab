@@ -171,9 +171,16 @@ CONNECT_SUBCOMMANDS = [
     SubcommandInfo("name", "<name>", "Name this device"),
     SubcommandInfo("trust", "open|agents|manual", "Trust level for this network"),
     SubcommandInfo(
-        "knock", '<route> "text"', "Introduce yourself to a stranger's contact route"
+        "knock", '<route> "text"', "Ring a stranger's contact route; redials for an hour"
     ),
-    SubcommandInfo("knocks", "[domain]", "Review introductions you received"),
+    SubcommandInfo(
+        "knocks",
+        "[everyone|contacts|nobody]",
+        "The knock screen, or set who may knock [for 30m|2h|1d]",
+    ),
+    SubcommandInfo("expect", "<route>", "Put a route on the contact list; its first knock is accepted"),
+    SubcommandInfo("block", "<route>", "Refuse a route's knocks"),
+    SubcommandInfo("unblock", "<route>", "Allow a blocked route's knocks again"),
     SubcommandInfo(
         "allow", "<device> <agent>", "Let a device's agent message a local agent"
     ),
@@ -243,11 +250,11 @@ CODE_IN_COMMAND = (
 CONNECT_OWNED_ELSEWHERE = (
     "another window in this workspace runs the network; use /connect there"
 )
-# What an attached window says when its daemon predates the knock RPCs.
-CONNECT_NO_CONTACT_DAEMON = (
-    "connect: attached daemon does not support private contact requests"
-)
+# What an attached window says when its daemon predates knocks as calls.
+CONNECT_NO_KNOCK_DAEMON = "connect: the attached daemon needs an update for knocks"
 _KNOCK_USAGE = 'connect: use /connect knock <route> "text"'
+_KNOCKS_USAGE = "connect: use /connect knocks [everyone|contacts|nobody] [for 30m|2h|1d]"
+_KNOCK_FOR = re.compile(r"(?P<count>\d{1,4})(?P<unit>[mhd])\Z")
 
 
 def format_connect_help(show_all: bool = False) -> str:
@@ -288,41 +295,27 @@ def _parse_knock_route(value: str) -> tuple[str, str]:
     return domain, match.group("route").lower()
 
 
-def _contact_requests(rows):
-    """The relay's pending-knock rows as review requests; raises on any bad row."""
-    from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
+def _route_arg(value: str) -> str:
+    """A contact route as `<domain>/c/<16 hex>` or the 16 hex alone -> the hex."""
+    value = value.strip()
+    if re.fullmatch(r"[0-9a-fA-F]{16}", value):
+        return value.lower()
+    return _parse_knock_route(value)[1]
 
-    requests = []
-    for row in rows:
-        if (
-            not isinstance(row, dict)
-            or set(row)
-            != {
-                "receipt_id",
-                "sender_key",
-                "expires_at",
-                "introduction",
-                "device_name",
-            }
-            or not isinstance(row["receipt_id"], str)
-            or not re.fullmatch(r"[0-9a-f]{32}", row["receipt_id"])
-            or not isinstance(row["sender_key"], str)
-            or not re.fullmatch(r"[0-9a-f]{64}", row["sender_key"])
-            or type(row["expires_at"]) is not int
-            or not isinstance(row["introduction"], str)
-            or not isinstance(row["device_name"], str)
-        ):
-            raise ValueError("invalid private contact request")
-        requests.append(
-            PendingContactRequest(
-                row["receipt_id"],
-                row["sender_key"],
-                row["expires_at"],
-                PrivateMessage(row["introduction"]),
-                row["device_name"],
-            )
-        )
-    return requests
+
+def _knock_mode_args(parts: list[str]) -> dict:
+    """`everyone|contacts|nobody [for 30m|2h|1d]` -> the `mode` action's args."""
+    if len(parts) not in (1, 3) or parts[0] not in ("everyone", "contacts", "nobody"):
+        raise ValueError("not a knock mode")
+    minutes = 0
+    if len(parts) == 3:
+        match = _KNOCK_FOR.fullmatch(parts[2]) if parts[1] == "for" else None
+        if match is None:
+            raise ValueError("not a duration")
+        minutes = int(match["count"]) * {"m": 1, "h": 60, "d": 24 * 60}[match["unit"]]
+        if not 0 < minutes <= 7 * 24 * 60:
+            raise ValueError("not a duration")
+    return {"mode": parts[0], "minutes": minutes}
 
 
 def _looks_like_connect_target(value: str) -> bool:
@@ -696,6 +689,11 @@ class HubPlugin(BasePlugin):
                     "peer_discovery_bind_address": "0.0.0.0",
                     "peer_discovery_multicast_group": "239.255.77.77",
                     "peer_discovery_port": 39531,
+                    # Knocks (plugins/hub/knocks.py): how long an unanswered
+                    # knock redials (0 rings once), and how many missed knocks
+                    # this device keeps before refusing new ones.
+                    "knock_redial_minutes": 60,
+                    "knock_missed_limit": 20,
                 }
             }
         }
@@ -759,6 +757,24 @@ class HubPlugin(BasePlugin):
                         "Require Ed25519 challenge-response handshake on "
                         "socket connections. Off by default; enable for production."
                     ),
+                },
+                {
+                    "type": "spinbox",
+                    "label": "Knock Redial Minutes",
+                    "config_path": "plugins.hub.knock_redial_minutes",
+                    "min_value": 0,
+                    "max_value": 1440,
+                    "step": 15,
+                    "help": "How long an unanswered knock redials; 0 rings once",
+                },
+                {
+                    "type": "spinbox",
+                    "label": "Missed Knocks Kept",
+                    "config_path": "plugins.hub.knock_missed_limit",
+                    "min_value": 1,
+                    "max_value": 100,
+                    "step": 1,
+                    "help": "Missed knocks this device keeps; when full, new knocks hear unavailable",
                 },
                 {
                     "type": "checkbox",
@@ -2857,6 +2873,15 @@ class HubPlugin(BasePlugin):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
+        if self._solo:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                output="",
+                error="This agent is off the hub, so it cannot message other agents.",
+            )
+
         target = tool_data.get("to", tool_data.get("target", ""))
         wait_attr = tool_data.get("wait", tool_data.get("wait_attr", ""))
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
@@ -3227,6 +3252,15 @@ class HubPlugin(BasePlugin):
     async def _handle_hub_broadcast_tool(self, tool_data: dict):
         """Execute a hub_broadcast tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
+
+        if self._solo:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_broadcast",
+                success=False,
+                output="",
+                error="This agent is off the hub, so it cannot message other agents.",
+            )
 
         content = tool_data.get("message", tool_data.get("content", ""))
         if not content:
@@ -9168,6 +9202,25 @@ class HubPlugin(BasePlugin):
         self._remote_rows_snapshot = [row for row in rows if isinstance(row, dict)]
         return list(self._remote_rows_snapshot)
 
+    async def network_agent_rows(self) -> tuple[str, list[dict]]:
+        """This computer's relay name and the agents on other computers, for the web UI.
+
+        The name is "" off a network; the engine then falls back to the hostname.
+        Remote rows need an online relay: a directory cached while the relay was
+        down is not current, so none are shown then.
+        """
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None or not self._relay_network_domain():
+            return "", []
+        device = self._relay_device_name()
+        try:
+            online = (await relay._owner_call("relay.status", {})).get("state") == "online"
+        except Exception:
+            online = False
+        if not online:
+            return device, []
+        return device, await self._refresh_remote_agent_rows()
+
     def _relay_network_domain(self) -> str:
         """This device's network domain for display, without the scheme."""
         commands = getattr(self, "_relay_commands", None)
@@ -9327,6 +9380,8 @@ class HubPlugin(BasePlugin):
             subcommands=[
                 SubcommandInfo("on", "", "Enable hub (persistent, requires restart)"),
                 SubcommandInfo("off", "", "Disable hub (persistent, requires restart)"),
+                SubcommandInfo("leave", "", "Take this agent off the hub now"),
+                SubcommandInfo("join", "", "Put this agent back on the hub"),
                 SubcommandInfo(
                     "user", "[name]", "Show or set your display name on the mesh"
                 ),
@@ -9436,15 +9491,22 @@ class HubPlugin(BasePlugin):
         if head == "knock":
             return await self._run_connect_knock(value.partition(" ")[2].strip())
         if head == "knocks":
-            if len(parts) > 2:
-                return "connect: use /connect knocks [relay-domain]"
-            if len(parts) == 2:
-                domain = parts[1]
-            elif self._attached():
-                domain = ""  # the daemon that owns the relay knows its network
-            else:
-                domain = self._relay_network_domain() or "kollabor.ai"
-            return await self._open_contact_review_altview(domain)
+            if len(parts) == 1:
+                return await self._open_knocks_screen()
+            try:
+                args = _knock_mode_args([part.lower() for part in parts[1:]])
+            except ValueError:
+                return _KNOCKS_USAGE
+            return await self._knock_line("mode", args)
+        if head in ("expect", "block", "unblock"):
+            try:
+                if len(parts) != 2:
+                    raise ValueError("one route")
+                route = _route_arg(parts[1])
+            except ValueError:
+                return f"connect: use /connect {head} <route>"
+            action = {"block": "block_route"}.get(head, head)
+            return await self._knock_line(action, {"route": route})
         known = {sub.name for sub in CONNECT_SUBCOMMANDS} | {
             sub.name for sub in CONNECT_ADVANCED
         }
@@ -10064,202 +10126,77 @@ class HubPlugin(BasePlugin):
         if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
             text = text[1:-1]
         try:
-            domain, route_hex = _parse_knock_route(route_token)
+            domain, route = _parse_knock_route(route_token)
+            from plugins.hub.knocks import validate_text
+
+            text = validate_text(text)
         except ValueError:
             return _KNOCK_USAGE
-        from plugins.hub.contact_requests import ContactProtocolError, validate_introduction
+        return await self._knock_line(
+            "knock", {"domain": domain, "route": route, "text": text}
+        )
 
-        try:
-            introduction = validate_introduction(text)
-        except ContactProtocolError:
-            return _KNOCK_USAGE
-        if self._attached():
-            return await self._attached_knock(domain, route_hex, introduction)
-        return await self._send_knock(domain, route_hex, introduction)
+    async def _knocks(self, action: str, args: dict) -> dict:
+        """One knock action, run by the process that owns the relay.
 
-    async def _attached_knock(self, domain: str, route_hex: str, introduction: str) -> str:
-        """The daemon owns the relay: it sends the knock and says how it went."""
-        from kollabor_rpc import RpcMethodNotFound
-
-        bus = getattr(self, "event_bus", None)
-        state = bus.get_service("state_service") if bus else None
-        handler = getattr(state, "hub_contact_knock", None)
-        if handler is None:
-            return CONNECT_NO_CONTACT_DAEMON
-        try:
-            return await handler(domain, route_hex, introduction)
-        except RpcMethodNotFound:
-            return CONNECT_NO_CONTACT_DAEMON
-        except Exception:
-            return "connect: knock could not be sent"
-
-    async def _send_knock(self, domain: str, route_hex: str, introduction: str) -> str:
-        """Send one knock from the process that owns the relay.
-
-        Runs here in a single-process window and in the daemon for an attached
-        one; the text is what the human reads either way.
+        An attached window asks its daemon; any other window asks the relay
+        bridge, which reaches the workspace's owner. `list` answers
+        {"snapshot": ...}, every other action {"text": ...}.
         """
-        from plugins.hub.contact_requests import ContactProtocolError, validate_introduction
+        if self._attached():
+            from kollabor_rpc import RpcMethodNotFound
 
-        try:
-            introduction = validate_introduction(introduction)
-        except ContactProtocolError:
-            return _KNOCK_USAGE
-        if self._identity is None or self._rpc_server is None:
-            return "connect: knock is unavailable"
-        try:
-            await self._start_relay_agent()
-            submit = getattr(self._relay_agent, "submit_contact_request", None)
-            if submit is None:
-                return "connect: knock is unavailable"
-            result = await submit(
-                domain, route_hex, introduction, source_agent=self._identity.agent_id
-            )
-        except Exception:
-            return "connect: knock could not be sent"
-        if isinstance(result, dict) and result.get("status") == "queued":
-            return f"knock sent to {domain}/c/{route_hex}"
-        error = result.get("error") if isinstance(result, dict) else None
-        reason = {
-            "unknown_route": "no one is registered at that route right now",
-            "ambiguous_route": "that route is ambiguous; ask for a fresh one",
-            "capacity": "too many pending knocks right now; try again later",
-            "rate_limited": "too many knocks; wait a moment and try again",
-            "conflict": "that introduction was already sent",
-            "invalid_request": "that route or text is not valid",
-        }.get(error, "could not reach that contact route")
-        return f"connect: {reason}"
-
-    async def _open_contact_review_altview(self, domain: str) -> str:
-        """Open the local-only review view for requests addressed to this key."""
-        if not self.event_bus:
-            return "connect: private contact review is unavailable"
-        try:
-            from plugins.altview.contact_altview import ContactReviewAltView
-
-            attached = self._attached()
-            state = self.event_bus.get_service("state_service") if attached else None
-            # An attached window reads and decides through the daemon that owns
-            # the relay. Asking once here tells a daemon that predates the knock
-            # RPCs apart, and the screen shows what was asked.
-            fetched = None
-            if attached:
-                from kollabor_rpc import RpcMethodNotFound
-
-                try:
-                    fetched = await state.hub_contact_pending(domain)
-                except RpcMethodNotFound:
-                    return CONNECT_NO_CONTACT_DAEMON
-                except Exception:
-                    fetched = None  # the screen says the inbox is unavailable
-
-            async def load():
-                nonlocal fetched
-                rows, fetched = fetched, None
-                if rows is None:
-                    rows = await (
-                        state.hub_contact_pending(domain)
-                        if attached
-                        else self._run_connect_contact_pending(domain)
-                    )
-                return _contact_requests(rows)
-
-            async def decide(request, decision: str):
-                """None when decided; otherwise the reason it was not."""
-                args = (
-                    domain,
-                    request.receipt_id,
-                    decision,
-                    request.sender_key,
-                    request.device_name,
-                )
-                reason = await (
-                    state.hub_contact_decide(*args)
-                    if attached
-                    else self._decide_contact_request(*args)
-                )
-                return reason or None
-
-            stack_mgr = self._altview_stack()
-            await stack_mgr.push(
-                ContactReviewAltView(domain, load, decide),
-                "contact-review",
-                reuse=False,
-            )
-            return ""
-        except Exception:
-            return "connect: private contact review is unavailable"
-
-    async def _run_connect_contact_pending(self, domain: str):
-        if self._identity is None or self._rpc_server is None:
-            raise ValueError("contact review unavailable")
-        await self._start_relay_agent()
-        pending = getattr(self._relay_agent, "pending_contact_requests", None)
-        if pending is None:
-            raise ValueError("contact review unavailable")
-        return await pending(domain, source_agent=self._identity.agent_id)
-
-    async def _run_connect_contact_decision(
-        self,
-        domain: str,
-        receipt_id: str,
-        decision: str,
-        *,
-        sender_key: str,
-        device_name: str,
-    ):
-        if self._identity is None or self._rpc_server is None:
-            raise ValueError("contact review unavailable")
-        await self._start_relay_agent()
-        decide = getattr(self._relay_agent, "decide_contact_request", None)
-        if decide is None:
-            raise ValueError("contact review unavailable")
-        return await decide(
-            domain,
-            receipt_id,
-            decision=decision,
-            source_agent=self._identity.agent_id,
-            sender_key=sender_key,
-            device_name=device_name,
-        )
-
-    async def _contact_pending(self, domain: str):
-        """The knocks waiting for this device; an empty domain means its own network."""
-        return await self._run_connect_contact_pending(
-            domain or self._relay_network_domain() or "kollabor.ai"
-        )
-
-    async def _decide_contact_request(
-        self,
-        domain: str,
-        receipt_id: str,
-        decision: str,
-        sender_key: str,
-        device_name: str,
-    ) -> str:
-        """Accept or reject one knock; "" when decided, else the reason it was not."""
-        result = await self._run_connect_contact_decision(
-            domain or self._relay_network_domain() or "kollabor.ai",
-            receipt_id,
-            decision,
-            sender_key=sender_key,
-            device_name=device_name,
-        )
-        if isinstance(result, dict) and "status" in result:
-            return ""
-        error = result.get("error") if isinstance(result, dict) else None
-        if error == "already_named":
+            bus = getattr(self, "event_bus", None)
+            state = bus.get_service("state_service") if bus else None
+            handler = getattr(state, "hub_knocks", None)
+            if handler is None:
+                return {"text": CONNECT_NO_KNOCK_DAEMON}
             try:
-                old = self._relay_agent._peer_name(sender_key)
-            except Exception:
-                old = "another name"
-            return f"this device is already on your network as {old}"
-        return {
-            "name_taken": "that device name is already on this network",
-            "capacity": "too many approved devices or pending knocks",
-            "conflict": "that knock was already decided",
-            "unavailable": "that knock is no longer available",
-        }.get(error, "try again")
+                return await handler(action, args)
+            except RpcMethodNotFound:
+                return {"text": CONNECT_NO_KNOCK_DAEMON}
+        if self._identity is None or self._rpc_server is None:
+            return {"text": "connect: wait for the local Hub session to finish starting"}
+        await self._start_relay_agent()
+        return await self._relay_agent.knocks(
+            action, args, source_agent=self._identity.agent_id
+        )
+
+    async def _knock_line(self, action: str, args: dict) -> str:
+        """A knock action as the one line the human reads."""
+        try:
+            result = await self._knocks(action, args)
+        except Exception:
+            logger.warning("knock action failed")
+            return "connect: knocks are unavailable right now"
+        text = result.get("text") if isinstance(result, dict) else None
+        return text if isinstance(text, str) else "connect: knocks are unavailable right now"
+
+    async def _open_knocks_screen(self) -> str:
+        """The knock screen: ringing, missed, calls, blocked, contacts, who may knock."""
+        if not self.event_bus:
+            return "connect: the knock screen is unavailable"
+        try:
+            from plugins.altview.knocks_altview import KnockScreenAltView
+
+            async def load() -> dict:
+                result = await self._knocks("list", {})
+                snapshot = result.get("snapshot") if isinstance(result, dict) else None
+                if not isinstance(snapshot, dict):
+                    raise ValueError(result.get("text", "") if isinstance(result, dict) else "")
+                return snapshot
+
+            try:  # a daemon or owner that cannot list knocks says why, instead of an empty screen
+                await load()
+            except ValueError as exc:
+                said = str(exc)
+                return said if said.startswith("connect:") else "connect: knocks are unavailable right now"
+            await self._altview_stack().push(
+                KnockScreenAltView(load, self._knock_line), "knocks", reuse=False
+            )
+            return ""
+        except Exception:
+            return "connect: the knock screen is unavailable"
 
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device enrollment offer in the owning relay daemon."""
@@ -10382,6 +10319,27 @@ class HubPlugin(BasePlugin):
             if self.config:
                 self.config.save_key("plugins.hub.enabled", False)
             return "hub disabled (takes effect next session)"
+        elif subcmd in ("leave", "join"):
+            # This agent, now (on/off is the whole hub, next session).
+            # Through the state service, so an attached window flips the
+            # daemon's hub and the prompt is rebuilt with it.
+            enabled = subcmd == "join"
+            state_service = None
+            if self.event_bus and hasattr(self.event_bus, "get_service"):
+                try:
+                    state_service = self.event_bus.get_service("state_service")
+                except Exception:
+                    state_service = None
+            try:
+                if hasattr(state_service, "set_hub_participation"):
+                    await state_service.set_hub_participation(enabled)
+                else:
+                    await self.set_solo(not enabled)
+            except ValueError as e:
+                return f"hub: {e}"
+            if enabled:
+                return "this agent is on the hub"
+            return "this agent is off the hub: peers no longer see it (/hub join to come back)"
         elif subcmd == "user":
             name = rest.strip()
             if not name:
@@ -12883,6 +12841,63 @@ class HubPlugin(BasePlugin):
     def _solo(self) -> bool:
         """Serving a host (the engine) only: never on the mesh or network."""
         return getattr(getattr(self, "_identity", None), "solo", False) is True
+
+    # What _register_mesh_hooks adds; set_solo takes these off again.
+    _MESH_HOOKS = (
+        "hub_relay_human",
+        "hub_relay_model",
+        "hub_relay_tool",
+        "hub_roster_inject",
+        "hub_msg_parser",
+        "hub_user_broadcast",
+        "hub_crystal_nudge",
+        "hub_connect_guide",
+    )
+
+    async def set_solo(self, solo: bool) -> None:
+        """Take this agent off the mesh (solo) or back on, without a restart.
+
+        Solo is how a bundle with ``"hub": false`` starts: the socket and
+        presence stay so its host can attach, but peers stop seeing it, what
+        they send is dropped, and it neither leads the mesh nor holds the
+        network. The caller rebuilds the system prompt, whose hub sections
+        render only on the mesh.
+        """
+        if self._identity is None or solo == self._solo:
+            return
+        self._identity.solo = solo
+        if solo:
+            for name in self._MESH_HOOKS:
+                await self.event_bus.unregister_hook(self.name, name)
+            if self._identity.is_coordinator and self._election is not None:
+                self._election.release()
+                self._identity.is_coordinator = False
+            # As shutdown does: stop a relay start in flight, then the relay.
+            starting, self._relay_startup_task = self._relay_startup_task, None
+            if starting:
+                starting.cancel()
+                try:
+                    await starting
+                except asyncio.CancelledError:
+                    pass
+            relay, self._relay_agent = self._relay_agent, None
+            if relay:
+                await relay.close()
+        else:
+            await self._register_mesh_hooks()
+            if self._election is not None:
+                self._identity.is_coordinator = (
+                    self._election.try_become_coordinator(self._identity)
+                )
+            self._relay_startup_task = asyncio.create_task(self._resume_relay())
+        if self._presence is not None:
+            # Peers read solo from presence; publish it now, not next beat.
+            self._presence.heartbeat()
+        logger.info(
+            "hub: %s %s the mesh",
+            self._identity.identity,
+            "left" if solo else "rejoined",
+        )
 
     def _is_enabled(self) -> bool:
         if hub_disabled_by_env():
