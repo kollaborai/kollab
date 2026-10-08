@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `kollab --web-ui` no longer reuses an engine of another version that is still running on port 7433 (a 0.12 web UI was served by a 0.10 engine left over from an older install). It leaves that engine running for whoever uses it and starts its own on the next free port.
 - Web: a turn that fails says why. With a broken provider the reply stayed blank; the error now shows in full under your message (it was cut to two lines) and stays after a reload (`GET /sessions/{id}/history` returns `last_turn_error`).
 - Web: a send the agent refuses because a turn is already running no longer cancels that turn.
+- An agent past the 24th on one computer (lapis-2, sapphire-2 and on) runs `coder` like every other gem; it ran `default`.
 
 ## [0.12.0] - 2026-10-07
 
