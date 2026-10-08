@@ -610,9 +610,22 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     # The daemon owns the conversation; pull a fresh copy rather than trusting
     # the local mirror, which only refreshes on turn_complete.
     history = await session.refresh_history()
+    turn_error = session.last_turn_error
     if limit:
+        if turn_error:
+            # Keep the error's place relative to the slice that is returned.
+            turn_error = {
+                **turn_error,
+                "history_length": max(
+                    0, turn_error["history_length"] - max(0, len(history) - limit)
+                ),
+            }
         history = history[-limit:]
-    return {"session_id": session_id, "history": history}
+    return {
+        "session_id": session_id,
+        "history": history,
+        "last_turn_error": turn_error,
+    }
 
 
 @router.delete("/{session_id}/history")
@@ -626,6 +639,7 @@ async def clear_history(session_id: str):
     # prompt, which is what "clear history but keep the prompt" means here.
     await session.state.restart_session()
     await session.refresh_history()
+    session.last_turn_error = None
     return {"ok": True, "session_id": session_id}
 
 

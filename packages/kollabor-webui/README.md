@@ -32,6 +32,11 @@ if Node/npm is unavailable.
   agent is doing (thinking, typing, searching, messaging, error).
 - **Chat**: pill composer with attachments, a `/voicemode` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
+  Messages from other agents show as messages from their gems ("Aquamarine →
+  Lapis"), the way the terminal draws its hub boxes; one the agent only
+  overheard is dimmed. Turns the page did not run (a hub message that woke the
+  agent, a turn typed in the terminal) appear without a reload. A failed turn
+  shows its error under your message, also after a reload.
 - **Trajectory**: every turn, request and tool call as a Table, or as a
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
@@ -119,7 +124,7 @@ upgrade. `src/dev/gem-lab.html` previews every gem, activity, hat and season.
 - `POST /sessions/{session_id}/permission`
 - `GET /sessions/{session_id}/permissions`
 - `POST /sessions/{session_id}/permissions/mode`
-- `GET/DELETE /sessions/{session_id}/history`
+- `GET/DELETE /sessions/{session_id}/history` (with `last_turn_error`, why the last turn failed)
 - `GET/POST/PUT/DELETE /profiles...`
 - `GET/POST/PUT/DELETE /mcp/servers...`
 - `GET/POST /sessions/{session_id}/mcp...`

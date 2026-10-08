@@ -991,3 +991,92 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
         "y",
     ]
     assert final[1]["content"][1]["result"]["output"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_ends_a_failed_turn_with_its_error(monkeypatch):
+    """The daemon's error becomes the reply's error status, which the page shows
+    in its error box, instead of a turn that ends blank."""
+    session = _FakeSession(
+        [
+            {"type": "error", "message": "LLM provider not available"},
+            {"type": "turn_complete", "stop_reason": "end_turn"},
+        ]
+    )
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    controller = captured["controller"]
+    assert controller.errors == []
+    user, reply = controller.state["messages"]
+    assert user["content"] == "hello"
+    assert reply["status"] == {
+        "type": "incomplete",
+        "reason": "error",
+        "error": "LLM provider not available",
+    }
+    assert controller.state["usage"]["stopReason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_fails_the_run_when_no_state_carries_the_error(
+    monkeypatch,
+):
+    session = _FakeSession(
+        [{"type": "error", "message": "boom"}, {"type": "turn_complete"}]
+    )
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}]
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    assert captured["controller"].errors == ["boom"]
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_says_how_much_history_the_messages_show(
+    monkeypatch,
+):
+    """The page appends later history past this point instead of swapping in
+    reloaded copies of the turn it just ran (assistant-ui would keep both)."""
+    session = _FakeSession([*_tokens("hi"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(return_value=[{}, {}, {}, {}])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state={"messages": [{"id": "history-1", "role": "user", "content": "a"}]},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    state = captured["controller"].state
+    assert len(state["messages"]) == 3
+    assert state["synced"] == {"history": 4, "messages": 3}

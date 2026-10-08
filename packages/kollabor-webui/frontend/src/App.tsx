@@ -347,6 +347,7 @@ export default function App() {
         nextSessions,
         history.history || [],
         permissions.pending_prompts || [],
+        history.last_turn_error ?? null,
       );
     },
     [],
@@ -369,12 +370,20 @@ export default function App() {
       }
     };
     const followEvents = async () => {
+      // A turn is streaming; its history is still growing.
+      let midTurn = false;
       while (!controller.signal.aborted && activeId) {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
-            if (event.type === "turn_complete" || event.type === "error") {
+            const type = event.type ?? "";
+            if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
+            // hub_message: another agent's message just landed in the
+            // history, ahead of the reply it wakes. One that lands mid-turn
+            // waits for turn_complete, which reloads the whole turn.
+            if (type === "hub_message" ? !midTurn : ["turn_complete", "error"].includes(type)) {
               void refreshActiveState(activeId);
             }
+            if (type === "turn_complete") midTurn = false;
           });
         } catch {
           if (controller.signal.aborted) break;

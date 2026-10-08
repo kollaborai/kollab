@@ -129,6 +129,10 @@ class EngineSession:
         self.total_turns = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        # Why the last turn failed, if it did: the terminal prints it once,
+        # but the conversation keeps no trace, so a reloaded page asks here.
+        # ``history_length`` places it after that turn's messages.
+        self.last_turn_error: Optional[Dict[str, Any]] = None
 
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
@@ -333,16 +337,26 @@ class EngineSession:
         which permission prompts are outstanding.
         """
         queue = self.subscribe()
+        turn_error = ""
         try:
             while True:
                 event = await queue.get()
                 etype = event.get("type")
 
-                if etype == "turn_complete":
+                if etype == "error":
+                    turn_error = str(event.get("message") or "") or "engine error"
+
+                elif etype == "turn_complete":
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
                     await self.refresh_history()
+                    self.last_turn_error = (
+                        {"message": turn_error, "history_length": len(self.history)}
+                        if turn_error
+                        else None
+                    )
+                    turn_error = ""
 
                 elif etype == "permission_request":
                     # Store the whole normalized event, not just the raw

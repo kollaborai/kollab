@@ -43,6 +43,9 @@ export type HistoryMessage = {
   thinking?: string | null;
 };
 
+/** Why the session's last turn failed; it goes after `history_length` messages. */
+export type TurnError = { message: string; history_length: number };
+
 export function historyContentToText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -659,7 +662,7 @@ export class EngineApi {
 
   getHistory(sessionId: string, limit?: number) {
     const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-    return this.json<{ history: HistoryMessage[] }>(
+    return this.json<{ history: HistoryMessage[]; last_turn_error?: TurnError | null }>(
       `/sessions/${encodeURIComponent(sessionId)}/history${query}`,
     );
   }

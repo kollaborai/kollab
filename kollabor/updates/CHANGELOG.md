@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web UI: the Kollabor K logo heads the sidebar and is the browser tab icon.
 - Web UI: `KOLLAB_WEBUI_HOSTS` (comma-separated) serves the web UI on more addresses than 127.0.0.1, such as a VPN address, so a phone on the VPN can open it. A page opened from another machine reaches the engine through the web UI's own `/engine` proxy, since the engine stays on 127.0.0.1; an address that cannot bind is skipped. Anyone who can open the page gets the engine token, so list private addresses only.
 - Web: agents are born with a random look that sticks. The first time the engine sees a gem alive it rolls its eyes and hat and keeps them for good (a seasonal costume covers the hat while the season lasts; the gem keeps its own color). Gem Studio (sidebar footer) dresses any gem over that look (eyes, hat, color) and sets the season for all (Auto, None, Halloween, Christmas) on a live stage; Random Look rolls a new outfit and Reset goes back to the born look. The engine keeps the looks (`GET`/`PUT /agents/appearance`, stored in `~/.kollab/hub/appearance.json`), so every browser shows the same gems.
+- Web: messages between agents show in the chat, as in the terminal. Another agent's hub message appears as a message from that gem ("Aquamarine → Lapis") before the reply it wakes; one the agent only overheard is dimmed. A turn the page did not run (a hub message that woke the agent, a turn typed in the terminal) appears in the open thread without a reload, and the composer keeps what you are typing.
 
 ### Changed
 - Web UI: the session header is one slim row on desktop (two on phones) with borderless controls: the model, the approval mode (an amber open shield for Trust All), MCP and online counts, and Settings and Clear as icons with tooltips. The sidebar header is one row (the logo, then New Session and its options as icon buttons), rows show bigger gems with smaller text and drop the message count, and the session count sits beside "Sessions".
@@ -30,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: opening the sidebar on a phone no longer pops the New Session tooltip; the first Escape closed that tooltip instead of the sidebar.
 - Web: a reply's time ("14.0s" under it) stays after a reload. The live clock lives in the tab, so a reloaded turn is timed by the history's own timestamps, from your message to the final reply.
 - `kollab --web-ui` no longer reuses an engine of another version that is still running on port 7433 (a 0.12 web UI was served by a 0.10 engine left over from an older install). It leaves that engine running for whoever uses it and starts its own on the next free port.
+- Web: a turn that fails says why. With a broken provider the reply stayed blank; the error now shows in full under your message (it was cut to two lines) and stays after a reload (`GET /sessions/{id}/history` returns `last_turn_error`).
+- Web: a send the agent refuses because a turn is already running no longer cancels that turn.
 
 ## [0.12.0] - 2026-10-07
 

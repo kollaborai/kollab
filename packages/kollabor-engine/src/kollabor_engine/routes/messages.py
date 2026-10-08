@@ -411,6 +411,23 @@ def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> 
         state["messages"] = messages
 
 
+async def _assistant_set_synced(
+    controller: Any, session: Any, message_count: int
+) -> None:
+    """Say how much of the daemon's history the message state now shows.
+
+    The page reloads the history after turns it did not run (a hub message that
+    woke the agent, a turn typed in the terminal) and appends only what lies
+    past this point, so the turns it already shows keep their ids.
+    """
+    try:
+        history = await session.refresh_history()
+    except Exception as exc:  # the page then waits for its next full load
+        logger.debug("history refresh for %s failed: %s", session.session_id, exc)
+        return
+    controller.state["synced"] = {"history": len(history), "messages": message_count}
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -671,6 +688,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         last_publish = float("-inf")
         # Streamed text the throttle has not published yet.
         stream_held = False
+        # Why the daemon says the turn failed; the turn still ends normally.
+        turn_error = ""
 
         def publish_progress() -> None:
             """Publish the in-flight turn so its parts reach the browser.
@@ -951,24 +970,36 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         )
                     publish_progress()
                 elif event_type == "error":
-                    controller.add_error(str(event.get("message") or "engine error"))
+                    turn_error = str(event.get("message") or "") or "engine error"
+                    if not persist_message_state:
+                        # No message state to carry it: fail the run instead.
+                        controller.add_error(turn_error)
                 elif event_type == "turn_complete":
                     completion["usage"] = {
                         "inputTokens": int(event.get("input_tokens", 0) or 0),
                         "outputTokens": int(event.get("output_tokens", 0) or 0),
                         "toolCalls": int(event.get("tool_calls", 0) or 0),
-                        "stopReason": event.get("stop_reason", "end_turn"),
+                        "stopReason": "error"
+                        if turn_error
+                        else event.get("stop_reason", "end_turn"),
                     }
                     completion["completed"] = True
+                    # The page shows a message's error status in its error box,
+                    # so a failed turn says why instead of ending blank.
                     _assistant_update_message_state(
                         state_messages,
                         session_id,
                         submitted_contents,
                         assistant_parts,
-                        {"type": "complete", "reason": "stop"},
+                        {"type": "incomplete", "reason": "error", "error": turn_error}
+                        if turn_error
+                        else {"type": "complete", "reason": "stop"},
                     )
                     if persist_message_state:
                         _assistant_set_messages(controller, state_messages)
+                        await _assistant_set_synced(
+                            controller, session, len(state_messages)
+                        )
                     _assistant_set_usage(controller, completion["usage"])
                     return
                 elif event_type == "daemon_closed":
