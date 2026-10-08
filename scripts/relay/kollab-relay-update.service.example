@@ -1,0 +1,12 @@
+[Unit]
+Description=Update the Kollab relay to the newest kollab release on PyPI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The user the relay runs as; it owns ~/.local/share/kollab-relay and has
+# passwordless sudo for cp, tee and systemctl (see scripts/relay/autoupdate.sh).
+User=kollab
+ExecStart=/bin/bash -lc '$HOME/.local/share/kollab-relay/autoupdate.sh'
+TimeoutStartSec=15min

@@ -3,6 +3,8 @@
 # Layout on the server (see memory): ~/.local/share/kollab-relay/releases/<tag>/{source.tar.gz,extracted tree,.venv}
 # systemd: /etc/systemd/system/kollab-relay.service + drop-in source-v2.conf (WorkingDirectory/ExecStart -> release dir)
 # Rollback: restore the drop-in backup, daemon-reload, restart.
+# On success it records the deployed version in ~/.local/share/kollab-relay/version,
+# which autoupdate.sh compares with PyPI.
 set -euo pipefail
 REPO=/Users/me/dev/kollab
 HOST=server
@@ -14,14 +16,15 @@ cd "$REPO"
 git diff --quiet || { echo "dirty tree; commit first"; exit 1; }
 .venv/bin/python scripts/relay/build_service.py "$OUT"
 LOCAL_SHA=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
-echo "tag=$TAG sha256=$LOCAL_SHA"
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+echo "tag=$TAG version=$VERSION sha256=$LOCAL_SHA"
 
 ssh "$HOST" "mkdir -p '$REL'"
 scp -q "$OUT" "$HOST:$REL/source.tar.gz"
 
-ssh "$HOST" bash -s "$REL" "$LOCAL_SHA" <<'EOF'
+ssh "$HOST" bash -s "$REL" "$LOCAL_SHA" "$VERSION" <<'EOF'
 set -euo pipefail
-REL=$1; WANT=$2
+REL=$1; WANT=$2; VERSION=$3
 cd "$REL"
 GOT=$(sha256sum source.tar.gz | cut -d' ' -f1)
 [ "$GOT" = "$WANT" ] || { echo "tarball sha mismatch: $GOT"; exit 2; }
@@ -51,7 +54,7 @@ sudo -n systemctl restart kollab-relay.service
 for i in $(seq 1 20); do
   sleep 1
   H=$(curl -s -m 3 "$HEALTH_URL" || true)
-  case "$H" in *'"status": "ok"'*'"degraded": false'*) echo "healthy after ${i}s"; break;; esac
+  case "$H" in *'"status": "ok"'*'"degraded": false'*) echo "healthy after ${i}s"; echo "$VERSION" > /home/me/.local/share/kollab-relay/version; break;; esac
   [ "$i" = 20 ] && { echo "NOT HEALTHY: $H"; echo "rolling back to $BACKUP"; sudo -n cp "$BACKUP" "$DROPIN"; sudo -n systemctl daemon-reload; sudo -n systemctl restart kollab-relay.service; exit 3; }
 done
 echo "enrollment lookup: $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/enrollment/lookup -H 'content-type: application/json' -d '{}')"
