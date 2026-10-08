@@ -38,6 +38,12 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    def test_a_sender_on_another_computer_keeps_its_reply_address(self):
+        hud = format_agent_hud(
+            [AgentHudEntry(section="hub", label="koordinator@devbox->zircon", content="pong")]
+        )
+        self.assertIn("[hub:koordinator@devbox->zircon]", hud)
+
     def test_merge_agent_hud_with_user_message_keeps_one_payload(self):
         self.assertEqual(
             merge_agent_hud_with_user_message(

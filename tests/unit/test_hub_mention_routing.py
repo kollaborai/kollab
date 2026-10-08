@@ -51,3 +51,40 @@ def test_send_message_routes_mentions_without_invoking_llm() -> None:
         assert llm.messages[-1][1] == "sent to lapis"
 
     asyncio.run(scenario())
+
+
+def test_parse_hub_mention_takes_an_agent_on_another_computer() -> None:
+    assert parse_hub_mention("@lapis@devbox ship it") == ("lapis@devbox", "ship it")
+    assert parse_hub_mention("@lapis@ ship it") is None
+
+
+def test_web_broadcasts_take_the_terminal_path() -> None:
+    async def scenario() -> None:
+        class Llm:
+            is_processing = False
+            task = None
+
+            def create_background_task(self, coro, *, name: str):
+                self.task = asyncio.create_task(coro, name=name)
+                return self.task
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = Llm()
+        service = LocalStateService(llm, object())
+        service.send_hub_user_message = AsyncMock(return_value="broadcast to 2 agent(s)")
+        service.hub_send_msg = AsyncMock()
+
+        for text in ("@global-broadcast ship it", "@broadcast hi", "@local-broadcast yo"):
+            assert await service.send_message(text) == {"accepted": True, "reason": "hub message"}
+            await llm.task
+
+        assert [call.args for call in service.send_hub_user_message.await_args_list] == [
+            ("global-broadcast", "ship it"),
+            ("local-broadcast", "hi"),
+            ("local-broadcast", "yo"),
+        ]
+        service.hub_send_msg.assert_not_awaited()
+
+    asyncio.run(scenario())

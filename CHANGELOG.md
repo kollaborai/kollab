@@ -8,9 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The @ menu, in the terminal and the web, opens with @local-broadcast (every agent in this folder) and @global-broadcast (those plus every agent on your network), and lists agents on your other computers as agent@device. A broadcast's reply says when no other computer was reached, and why.
 - A relay run with `kollab relay run` can keep itself on the newest release: `scripts/relay/autoupdate.sh` (with `kollab-relay-update.timer`) installs a newer kollab from PyPI beside the running one, switches to it and rolls back if health fails. kollabor.ai runs it, so a release reaches the directory within about 20 minutes.
 
 ### Fixed
+- The web @ menu offers only the live agents in the chat's project folder; an agent in another folder never heard a message sent from it. A message from another computer keeps its agent@device address in the model's context, so a reply reaches it, and the web shows the sender as "Koordinator on devbox".
 - A self-hosted or kollabor.ai relay's public `/relay/v1/health` lists the protocol versions it serves under `protocols`; only each worker's own health did.
 
 ## [0.13.0] - 2026-10-08

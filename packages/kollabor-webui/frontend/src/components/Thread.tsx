@@ -7,12 +7,13 @@ import {
 } from "@assistant-ui/react";
 import {
   ComposerPlaceholderContext,
+  ComposerHubContext,
   Thread as AssistantThread,
 } from "@/components/assistant-ui/thread";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback, toolErrorLine } from "@/components/assistant-ui/tool-fallback";
 import { ToolGroup } from "@/components/assistant-ui/tool-group";
-import type { AgentPoolEntry, SlashCommand } from "@/api";
+import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { HubNote } from "@/hub-notes";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
@@ -58,6 +59,12 @@ const Welcome: FC = () => {
   );
 };
 
+// "lapis@devbox" is lapis on another computer.
+const agentLabel = (id: string) => {
+  const [name, device] = id.split("@");
+  return device ? `${titleCase(name)} on ${device}` : titleCase(id);
+};
+
 // A hub message, sent or received: the sender's gem, "From → To" and the
 // words, the way the terminal draws its hub box.
 const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: ReactNode }> = ({
@@ -70,7 +77,7 @@ const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: 
   return (
     <div className="flex gap-3">
       <GemAvatar
-        gem={from}
+        gem={from.split("@")[0]}
         caste={sender?.caste}
         color={sender?.color}
         state={sender?.active ? sender.state : "idle"}
@@ -79,7 +86,7 @@ const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: 
       />
       <div className="min-w-0 flex-1">
         <div className="text-muted-foreground mb-1 text-xs font-medium">
-          {titleCase(from)} → {to ? titleCase(to) : "All"}
+          {agentLabel(from)} → {to ? agentLabel(to) : "All"}
         </div>
         <div className="text-foreground wrap-break-word">{children}</div>
         {footer}
@@ -156,8 +163,13 @@ export const Thread: FC<{
   identity?: string;
   /** Opens the session's Properties (double-click on the greeting gem). */
   onOpenGem?: () => void;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem }) => (
+  /** Agents on the network's other computers, for the @ picker. */
+  remoteAgents?: readonly NetworkAgent[];
+  /** The session's project folder: @ offers only the live agents in it. */
+  workspace?: string;
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem, remoteAgents = [], workspace = "" }) => (
   <PoolContext.Provider value={agents}>
+  <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
     <WelcomeContext.Provider
       value={
         identity
@@ -180,5 +192,6 @@ export const Thread: FC<{
         />
       </ComposerPlaceholderContext.Provider>
     </WelcomeContext.Provider>
+  </ComposerHubContext.Provider>
   </PoolContext.Provider>
 );

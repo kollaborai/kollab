@@ -29,7 +29,7 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useVoiceMode, type VoiceMode } from "@/voice-mode";
-import type { AgentPoolEntry, SlashCommand } from "@/api";
+import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
   type PanelOpenRequest,
@@ -114,6 +114,12 @@ const ThreadComponentsContext =
 
 /** The composer's placeholder; the app names the session's gem ("Message Lapis…"). */
 export const ComposerPlaceholderContext = createContext("Send a message...");
+
+/** The chat's project folder and the agents on the network's other computers (agent@device), for @. */
+export const ComposerHubContext = createContext<{ workspace: string; remote: readonly NetworkAgent[] }>({
+  workspace: "",
+  remote: [],
+});
 
 // Startup exposes a loading placeholder thread; treat it as a new chat so
 // the composer mounts centered. Loads after startup keep the docked layout.
@@ -296,6 +302,7 @@ const Composer: FC<{
   const aui = useAui();
   const voice = useVoiceMode();
   const placeholder = useContext(ComposerPlaceholderContext);
+  const { workspace, remote: remoteAgents } = useContext(ComposerHubContext);
   // The mic only exists where the session's live command list has /voicemode.
   const voiceAvailable = commands.some(
     (command) => command.name === "voicemode" && command.enabled !== false,
@@ -486,8 +493,15 @@ const Composer: FC<{
   };
 
   const agentItems = useMemo<readonly ComposerPaletteItem[]>(() => {
+    // A hub mesh is one project folder: a live agent in another folder never hears this chat.
+    const folder = (path: string) => path.replace(/\/+$/, "");
     const onlineAgents = agents
-      .filter((agent) => agent.name && agent.active)
+      .filter(
+        (agent) =>
+          agent.name &&
+          agent.active &&
+          (!workspace || !agent.project || folder(agent.project) === folder(workspace)),
+      )
       .map((agent) => ({
         id: agent.name,
         label: agent.name,
@@ -509,19 +523,42 @@ const Composer: FC<{
         status: agent.state || "online",
         icon: "agent" as const,
       }));
+    // agent@device is the address the hub routes across computers.
+    const networkAgents = remoteAgents.map((agent) => {
+      const handle = agent.handle || `${agent.name}@${agent.device}`;
+      return {
+        id: handle,
+        label: handle,
+        description: `On ${agent.device}`,
+        type: "agent" as const,
+        searchText: [handle, agent.name, agent.device].join(" "),
+        status: agent.state || "online",
+        icon: "agent" as const,
+      };
+    });
     return [
       {
-        id: "broadcast",
-        label: "Broadcast",
-        description: "Send a message to every online agent",
+        id: "local-broadcast",
+        label: "Local Broadcast",
+        description: "Every agent in this folder",
         type: "agent" as const,
-        searchText: "broadcast all everyone",
+        searchText: "local broadcast all everyone",
+        status: "online",
+        icon: "broadcast" as const,
+      },
+      {
+        id: "global-broadcast",
+        label: "Global Broadcast",
+        description: "Every agent in this folder and on your network",
+        type: "agent" as const,
+        searchText: "global broadcast network all everyone",
         status: "online",
         icon: "broadcast" as const,
       },
       ...onlineAgents,
+      ...networkAgents,
     ];
-  }, [agents]);
+  }, [agents, remoteAgents, workspace]);
 
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
@@ -543,7 +580,7 @@ const Composer: FC<{
           items={agentItems}
           title="Message an agent"
           emptyMessage="No online agents"
-          emptyHint="Try @broadcast to reach every online agent."
+          emptyHint="Try @local-broadcast to reach every agent in this folder."
         />
         <ComposerPrimitive.AttachmentDropzone
           asChild

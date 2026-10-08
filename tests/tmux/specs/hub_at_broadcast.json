@@ -1,0 +1,131 @@
+{
+  "name": "hub-at-broadcast",
+  "description": "The @ menu leads with @local-broadcast and @global-broadcast; each sends, and off a network the global one says other computers were not reached.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; cd \"$H/ws\"; HOME=\"$H\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 34
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "throwaway HOME, hub on, no network",
+      "command": "H=\"${TMPDIR:-/tmp}/kollab-spec-hub-at-broadcast\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; touch \"$H/.kollab/connect-guide-seen\""
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "❯",
+      "timeout": 30,
+      "description": "the prompt is up"
+    },
+    {
+      "action": "section",
+      "title": "@ lists both broadcasts first"
+    },
+    {
+      "action": "type",
+      "text": "@",
+      "delay": 0.2
+    },
+    {
+      "action": "wait_for",
+      "pattern": "local-broadcast",
+      "timeout": 10
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "local-broadcast.*every agent in this folder",
+      "description": "local broadcast says where it goes"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "global-broadcast.*every agent in this folder and on your network",
+      "description": "global broadcast says where it goes"
+    },
+    {
+      "action": "section",
+      "title": "@local-broadcast sends"
+    },
+    {
+      "action": "type",
+      "text": "local",
+      "delay": 0.15
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "@local-broadcast",
+      "timeout": 5
+    },
+    {
+      "action": "type",
+      "text": "hello team",
+      "delay": 0.1
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "broadcast to [0-9]+ agent",
+      "timeout": 10,
+      "description": "the hub answers with how many agents it reached"
+    },
+    {
+      "action": "section",
+      "title": "@global-broadcast off a network says so"
+    },
+    {
+      "action": "type",
+      "text": "@",
+      "delay": 0.2
+    },
+    {
+      "action": "wait_for",
+      "pattern": "global-broadcast",
+      "timeout": 10
+    },
+    {
+      "action": "type",
+      "text": "global",
+      "delay": 0.15
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "@global-broadcast",
+      "timeout": 5
+    },
+    {
+      "action": "type",
+      "text": "hi all",
+      "delay": 0.1
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "no other computers on your network yet",
+      "timeout": 10,
+      "description": "the reply says other computers were not reached"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

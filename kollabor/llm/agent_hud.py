@@ -28,7 +28,8 @@ def normalize_hud_label(value: str, fallback: str = "info") -> str:
     """Return a compact label safe to put inside a HUD block header."""
     cleaned = []
     for char in (value or fallback).strip():
-        if char.isalnum() or char in {"_", "-", ".", ":", ">", "/"}:
+        # "@" keeps agent@device, the address a reply to another computer goes to.
+        if char.isalnum() or char in {"_", "-", ".", ":", ">", "/", "@"}:
             cleaned.append(char)
         elif cleaned and cleaned[-1] != "_":
             cleaned.append("_")
