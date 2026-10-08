@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=oneshot
 # The user the relay runs as; it owns ~/.local/share/kollab-relay and has
 # passwordless sudo for cp, tee and systemctl (see scripts/relay/autoupdate.sh).
+# Set both lines: systemd expands $HOME itself, so the path is spelled out.
 User=kollab
-ExecStart=/bin/bash -lc '$HOME/.local/share/kollab-relay/autoupdate.sh'
+ExecStart=/home/kollab/.local/share/kollab-relay/autoupdate.sh
 TimeoutStartSec=15min
