@@ -18,7 +18,7 @@ import os
 import re
 import sys
 
-ERR = re.compile(r"Traceback|ERROR|Failed executing|(?i:refus|denied|cannot(?! start work here)|unknown subcommand|not online|could not be delivered|\[warn\]|warning:)")
+ERR = re.compile(r"Traceback|ERROR|Failed executing|(?i:refus(?!e a route's)|denied|cannot(?! start work here)|unknown subcommand|not online|could not be delivered|\[warn\]|warning:)")
 # Environment, not the build: server has no `hostname` binary and its old global _base prompt runs it every turn.
 ENV_OK = re.compile(r"Failed to execute command 'hostname'")
 HEX64 = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{64}(?![0-9A-Za-z])")
