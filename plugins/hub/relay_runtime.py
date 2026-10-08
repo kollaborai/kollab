@@ -485,9 +485,12 @@ class RelayRuntime:
         healthy = sum(worker.ready for worker in self.workers)
         fresh = bool(self._last_probe and time.monotonic() - self._last_probe <= 15)
         ready = self.backend_ready and healthy > 0 and fresh
+        from .relay_service import PROTOCOL, PROTOCOLS
+
         return {
             "status": "ok" if ready else "unavailable",
-            "protocol": "kollab-relay/1",
+            "protocol": PROTOCOL,
+            "protocols": list(PROTOCOLS),
             "origin": self.config.origin,
             "backend_ready": self.backend_ready,
             "ready_workers": healthy,

@@ -67,3 +67,22 @@ def test_a_client_older_than_every_version_served_is_told_to_update_itself():
 async def test_health_names_the_versions_served(relay):
     response = await relay.get(service.HEALTH_PATH)
     assert (await response.json())["protocols"] == ["kollab-relay/1"]
+
+
+def test_the_public_health_behind_the_supervisor_names_them_too(tmp_path):
+    # kollabor.ai's /relay/v1/health is the supervisor's, not a worker's.
+    from plugins.hub.relay_runtime import RelayRuntime, RuntimeConfig
+
+    config = RuntimeConfig(
+        origin=ORIGIN,
+        bind_host="127.0.0.1",
+        base_port=19078,
+        workers=1,
+        health_port=19080,
+        node_prefix="relay-test",
+        state_dir=tmp_path,
+        trusted_proxies=(),
+        backend={"mode": "external", "cluster": False},
+        limits={},
+    )
+    assert RelayRuntime(config).snapshot()["protocols"] == ["kollab-relay/1"]

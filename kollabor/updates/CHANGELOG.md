@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A self-hosted or kollabor.ai relay's public `/relay/v1/health` lists the protocol versions it serves under `protocols`; only each worker's own health did.
+
 ## [0.13.0] - 2026-10-08
 
 ### Added
