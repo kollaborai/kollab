@@ -108,6 +108,8 @@ type Avatar = {
   stretch: number;
   /** 0..1: turned side-on to the laptop. */
   desk: number;
+  /** 0..1: how far the thought bubble is open. */
+  bubble: number;
   blinkAt: number;
   blink: number;
   look: { x: number; y: number };
@@ -351,6 +353,7 @@ class GemEngine {
       spin: 0,
       stretch: 0,
       desk: 0,
+      bubble: 0,
       blinkAt: now + 1 + Math.random() * 3,
       blink: 1,
       look: { x: 0, y: 0 },
@@ -379,7 +382,9 @@ class GemEngine {
       }
       avatar.prev = avatar.activity;
       avatar.activity = activity;
-      avatar.activitySince = now;
+      // Thinking between two tool calls stays at the laptop: the thought
+      // bubble opens a turn, else the gem flips away and back on every call.
+      avatar.activitySince = activity === "thinking" && avatar.desk > 0.5 ? now - 4 : now;
     }
     avatar.mood = mood;
     avatar.props = props;
@@ -444,7 +449,10 @@ class GemEngine {
       const activity = this.shownActivity(avatar, t);
       this.advance(avatar, activity, t, dt);
       // Transitions (a poof, a summon, the turn to the laptop) get full frames.
-      const recent = t - avatar.activitySince < 1.4 || (avatar.desk > 0 && avatar.desk < 1);
+      const recent =
+        t - avatar.activitySince < 1.4 ||
+        (avatar.desk > 0 && avatar.desk < 1) ||
+        (avatar.bubble > 0 && avatar.bubble < 1);
       const busy =
         activity !== "idle" && activity !== "offline" && activity !== "dreaming" && activity !== "waiting";
       const lively = busy || recent || avatar.burst > 0.01 || avatar.glints.length > 0;
@@ -496,10 +504,14 @@ class GemEngine {
     avatar.burst *= Math.exp(-dt * 3.2);
     if (avatar.burst < 0.01) avatar.burst = 0;
 
-    // Turning side-on to the laptop, and back.
-    const desk = workPhase(activity, t - avatar.activitySince).laptop ? 1 : 0;
+    // Turning side-on to the laptop and back, and the thought bubble, ease.
+    const work = workPhase(activity, t - avatar.activitySince);
+    const desk = work.laptop ? 1 : 0;
     avatar.desk = this.still ? desk : avatar.desk + (desk - avatar.desk) * (1 - Math.exp(-dt * 6));
     if (Math.abs(avatar.desk - desk) < 0.005) avatar.desk = desk;
+    const bubble = work.bubble ? 1 : 0;
+    avatar.bubble = this.still ? bubble : avatar.bubble + (bubble - avatar.bubble) * (1 - Math.exp(-dt * 6));
+    if (Math.abs(avatar.bubble - bubble) < 0.005) avatar.bubble = bubble;
 
     // Blinks.
     if (t > avatar.blinkAt + 0.16) {
@@ -769,6 +781,7 @@ class GemEngine {
       dark: base.r * 0.2126 + base.g * 0.7152 + base.b * 0.0722 < 0.05,
       talk: avatar.talk,
       desk: avatar.desk,
+      bubble: avatar.bubble,
       seed: avatar.seed,
       still: this.still,
     };
@@ -823,12 +836,12 @@ class GemEngine {
       yaw = 0.24 * Math.sin(t * 0.55 * speed + s) + look.x * 0.25;
       pitch = 0.09 * Math.sin(t * 0.41 * speed + s * 1.7) + look.y * 0.14;
       bob = 0.045 * Math.sin(t * 1.15 * speed + s * 2.3);
+      // Hunched over the keys, bouncing with the typing, as far as the gem
+      // has turned to the laptop (a snap here read as a jump cut).
       const work = workPhase(activity, t - avatar.activitySince);
-      if (work.laptop) {
-        // Hunched over the keys, bouncing with the typing.
-        pitch += 0.12;
-        bob = (work.furious ? 0.03 : 0.018) * Math.sin(t * (work.furious ? 26 : 13));
-      }
+      const typingBob = (work.furious ? 0.03 : 0.018) * Math.sin(t * (work.furious ? 26 : 13));
+      pitch += 0.12 * avatar.desk;
+      bob += (typingBob - bob) * avatar.desk;
       if (activity === "dance") {
         // A hop with a squash on every beat and a lean; twist for two beats,
         // then a full spin over the next two (both ends meet at zero).

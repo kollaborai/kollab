@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Who Is Online shows each agent's gem and its name in Title Case; model lists read like the header (the profile dimmed, cut with an ellipsis instead of mid-word); MCP Servers drops its "No description" filler; every confirmation (delete session, delete profile, delete MCP server, clear history) has a Title Case question and a red action button; Settings' status lines are cased ("Engine connected", "Hub Sapphire · Idle").
 - Web: the agents' terminal checklists ("[x] done", "[ ] next", also "todo: [x] item" on one line) render as checklists, and a turn with a single tool call shows just that call's row (no "1 tool call" header above it).
 - Web: the page sets `writingsuggestions="false"`, the switch browsers give pages to turn off system typing suggestions in its inputs (macOS 27 floats a Siri button at the cursor that covered the composer's attach button).
+- Web: the gems move between states smoothly. The thought bubble grows and fades instead of popping, the hunch, typing bounce and hands follow the turn to the laptop, and a gem thinking between two tool calls stays at its laptop instead of flipping to a thought bubble and back.
 
 ### Fixed
 - The bundled `default` agent's description said it fixes linting errors; it now describes the general assistant it is.
